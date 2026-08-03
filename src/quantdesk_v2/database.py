@@ -6,35 +6,31 @@ from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from .config import Settings, get_settings
 
 
 def build_engine(settings: Settings, poolclass: type | None = None) -> Engine:
     url = settings.database_url_value
-    kwargs: dict[str, Any] = {"pool_pre_ping": True}
-    connect_args: dict[str, Any] = {}
-
-    if url.startswith("sqlite"):
-        connect_args["check_same_thread"] = False
-        if ":memory:" in url:
-            kwargs["poolclass"] = StaticPool
-    else:
-        connect_args.update(
-            connect_timeout=8,
-            read_timeout=20,
-            write_timeout=20,
-            charset="utf8mb4",
-        )
-        if settings.db_ssl_required:
-            ssl_options: dict[str, Any] = {
-                "check_hostname": settings.db_ssl_verify_identity,
-            }
-            if settings.db_ssl_ca:
-                ssl_options["ca"] = settings.db_ssl_ca
-            connect_args["ssl"] = ssl_options
-        kwargs.update(pool_recycle=300, pool_size=10, max_overflow=20)
+    kwargs: dict[str, Any] = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_size": 10,
+        "max_overflow": 20,
+    }
+    connect_args: dict[str, Any] = {
+        "connect_timeout": 8,
+        "read_timeout": 20,
+        "write_timeout": 20,
+        "charset": "utf8mb4",
+    }
+    if settings.db_ssl_required:
+        ssl_options: dict[str, Any] = {
+            "check_hostname": settings.db_ssl_verify_identity,
+        }
+        if settings.db_ssl_ca:
+            ssl_options["ca"] = settings.db_ssl_ca
+        connect_args["ssl"] = ssl_options
 
     if poolclass is not None:
         kwargs["poolclass"] = poolclass

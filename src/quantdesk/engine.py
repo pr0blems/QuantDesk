@@ -1,7 +1,7 @@
 """调度引擎：行情轮询 / K线更新 / 评分计算 / 提醒触发 / 持仓同步"""
 import json, threading, time, traceback
 from . import store, signals, binance_client as bc
-from .config_loader import settings, api_keys, tradfi_symbols
+from .config_loader import settings, tradfi_symbols
 
 TF_MS = {"15m": 15 * 60 * 1000, "1h": 60 * 60 * 1000, "4h": 4 * 60 * 60 * 1000}
 
@@ -54,7 +54,7 @@ def ingest_tickers(rows, full=True):
                             f"⚡ {s} 5分钟{'急涨' if chg>0 else '急跌'} {chg:+.2f}%（{old[1]:.6g} → {price:.6g}）",
                             dedup_key=f"spike:{s}", dedup_sec=300)
     if out:
-        store.executemany("INSERT OR REPLACE INTO ticker(symbol,price,pct_24h,quote_volume,ts) VALUES(?,?,?,?,?)", out)
+        store.executemany("REPLACE INTO ticker(symbol,price,pct_24h,quote_volume,ts) VALUES(?,?,?,?,?)", out)
     if lite:
         store.executemany("UPDATE ticker SET price=?, ts=? WHERE symbol=?", lite)
     if out or lite:
@@ -134,59 +134,66 @@ def score_all(tf, open_time):
         score, factors = signals.score_klines(kl)
         if score is None:
             continue
-        store.execute("INSERT OR REPLACE INTO scores(symbol,tf,open_time,score,detail) VALUES(?,?,?,?,?)",
+        store.execute("REPLACE INTO scores(symbol,tf,open_time,score,detail) VALUES(?,?,?,?,?)",
                       (s, tf, kl[-1]["open_time"], score, json.dumps(factors, ensure_ascii=False)))
         check_score_alert(s, tf, score, factors)
 
 def check_score_alert(symbol, tf, score, factors):
-    held = {p["symbol"] for p in _state["positions"]}
-    if not held:  # 引擎刚启动 positions 尚未同步时，从数据库兜底
-        held = {r["symbol"] for r in store.query("SELECT symbol FROM positions")}
-    is_held = symbol in held
-    th = settings.get("score_alert_position", 40) if is_held else None
-    long_th = th if th else settings.get("score_alert_long", 60)
-    short_th = -th if th else settings.get("score_alert_short", -60)
-    # 持仓+综合阈值的判定在 combined 里做；这里做各周期独立判定
-    if score >= long_th:
-        maybe_alert(symbol, "score", "long", score,
-                    f"📈 {symbol} {tf} 评分 {score:+d} 触发偏多阈值(+{long_th})" + ("（持仓）" if is_held else ""),
-                    detail=factors, dedup_key=f"score:{symbol}:{tf}:long", dedup_sec=TF_MS[tf] // 1000)
-    elif score <= short_th:
-        maybe_alert(symbol, "score", "short", score,
-                    f"📉 {symbol} {tf} 评分 {score:+d} 触发偏空阈值({short_th})" + ("（持仓）" if is_held else ""),
-                    detail=factors, dedup_key=f"score:{symbol}:{tf}:short", dedup_sec=TF_MS[tf] // 1000)
+    users = store.query(
+        "SELECT u.id,CASE WHEN p.symbol IS NULL THEN 0 ELSE 1 END AS is_held "
+        "FROM users u LEFT JOIN positions p ON p.user_id=u.id AND p.symbol=? "
+        "WHERE u.is_active=1",
+        (symbol,),
+    )
+    for user in users:
+        user_id = int(user["id"])
+        is_held = bool(user["is_held"])
+        held_threshold = settings.get("score_alert_position", 40)
+        long_th = held_threshold if is_held else settings.get("score_alert_long", 60)
+        short_th = -held_threshold if is_held else settings.get("score_alert_short", -60)
+        if score >= long_th:
+            maybe_alert(
+                symbol, "score", "long", score,
+                f"📈 {symbol} {tf} 评分 {score:+d} 触发偏多阈值(+{long_th})"
+                + ("（你的实盘持仓）" if is_held else ""),
+                detail=factors, dedup_key=f"score:{symbol}:{tf}:long",
+                dedup_sec=TF_MS[tf] // 1000, user_id=user_id,
+            )
+        elif score <= short_th:
+            maybe_alert(
+                symbol, "score", "short", score,
+                f"📉 {symbol} {tf} 评分 {score:+d} 触发偏空阈值({short_th})"
+                + ("（你的实盘持仓）" if is_held else ""),
+                detail=factors, dedup_key=f"score:{symbol}:{tf}:short",
+                dedup_sec=TF_MS[tf] // 1000, user_id=user_id,
+            )
 
-def maybe_alert(symbol, kind, direction, score, message, detail=None, dedup_key=None, dedup_sec=900):
+def maybe_alert(
+    symbol, kind, direction, score, message, detail=None, dedup_key=None,
+    dedup_sec=900, user_id=None,
+):
     if dedup_key:
-        last = store.kv_get(f"alert:{dedup_key}", 0)
+        state_key = f"alert:{dedup_key}"
+        last = (
+            store.user_state_get(user_id, state_key, 0)
+            if user_id is not None
+            else store.system_state_get(state_key, 0)
+        )
         if time.time() - last < dedup_sec:
             return
-        store.kv_set(f"alert:{dedup_key}", time.time())
-    store.add_alert(symbol, kind, direction, score, message, detail)
+        if user_id is not None:
+            store.user_state_set(user_id, state_key, time.time())
+        else:
+            store.system_state_set(state_key, time.time())
+    store.add_alert(symbol, kind, direction, score, message, detail, user_id=user_id)
     print("[ALERT]", message)
+    if user_id is not None:
+        return
     try:
         from . import notify
         notify.windows_toast("量化工作台信号", message)
     except Exception as e:
         log_err("toast", e)
-
-# ---------- positions ----------
-def positions_loop():
-    while True:
-        try:
-            bk = api_keys.get("binance", {})
-            if bk.get("verified") and bk.get("futures_enabled"):
-                pos = bc.fetch_positions(bk["api_key"], bk["api_secret"])
-                with _lock:
-                    _state["positions"] = pos
-                now = int(time.time())
-                store.execute("DELETE FROM positions")
-                store.executemany(
-                    "INSERT INTO positions(symbol,amt,side,entry_price,mark_price,upnl,leverage,ts) VALUES(?,?,?,?,?,?,?,?)",
-                    [(p["symbol"], p["amt"], p["side"], p["entry"], p["mark"], p["upnl"], p["leverage"], now) for p in pos])
-        except Exception as e:
-            log_err("positions", e)
-        time.sleep(settings.get("positions_poll_seconds", 60))
 
 # ---------- start ----------
 def start():
@@ -196,10 +203,9 @@ def start():
     threading.Thread(target=price_loop, daemon=True, name="price").start()
     threading.Thread(target=ticker_loop, daemon=True, name="ticker").start()
     threading.Thread(target=kline_loop, daemon=True, name="kline").start()
-    threading.Thread(target=positions_loop, daemon=True, name="positions").start()
     if settings.get("paper_trading", True):
         from . import paper
         threading.Thread(target=paper.paper_loop, daemon=True, name="paper").start()
-        print("[engine] 五个后台循环已启动: price(2s) / ticker(60s统计) / kline / positions(30s) / paper(5s)")
+        print("[engine] 四个后台循环已启动: price(2s) / ticker(60s统计) / kline / paper(5s)")
     else:
-        print("[engine] 四个后台循环已启动: price / ticker / kline / positions")
+        print("[engine] 三个后台循环已启动: price / ticker / kline")

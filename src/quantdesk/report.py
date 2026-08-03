@@ -151,7 +151,7 @@ def build_report(symbol):
                 diff = s["ape_rank_24h"] - s["ape_rank"]
                 trend = f"，热度榜第{s['ape_rank']}名（较昨日{'↑' if diff>0 else '↓' if diff<0 else '='}{abs(diff)}位）"
             social["reddit"] = f"Reddit/4chan 24h 提及 {s['ape_mentions']} 次、获赞 {s['ape_upvotes']}{trend}"
-    tr = store.kv_get("st_trending", {})
+    tr = store.system_state_get("st_trending", {})
     if base in (tr.get("symbols") or []):
         social["trending"] = "🔥 Stocktwits 热议榜在列"
 

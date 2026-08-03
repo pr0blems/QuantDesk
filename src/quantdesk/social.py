@@ -75,7 +75,7 @@ def social_once(priority_bases):
     else:
         try:
             trending = st_trending()
-            store.kv_set("st_trending", {"ts": now, "symbols": trending})
+            store.system_state_set("st_trending", {"ts": now, "symbols": trending})
         except RateLimited:
             _cooldown_until = time.time() + 45 * 60
             print("[social] Stocktwits 触发限流，冷却 45 分钟")
@@ -104,14 +104,14 @@ def social_once(priority_bases):
         if st["bull"] is None and not ape:
             continue
         store.execute(
-            "INSERT OR REPLACE INTO social(symbol, st_bull, st_bear, st_msgs, ape_mentions, ape_upvotes, ape_rank, ape_rank_24h, ts) VALUES(?,?,?,?,?,?,?,?,?)",
+            "REPLACE INTO social(symbol, st_bull, st_bear, st_msgs, ape_mentions, ape_upvotes, ape_rank, ape_rank_24h, ts) VALUES(?,?,?,?,?,?,?,?,?)",
             (base, st["bull"], st["bear"], st["msgs"],
              ape.get("mentions"), ape.get("upvotes"), ape.get("rank"), ape.get("rank_24h_ago"), now))
 
 def priority_symbols():
     from . import engine
     held = [p["symbol"] for p in engine.state_snapshot()["positions"]]
-    watch = store.kv_get("watchlist", settings.get("watchlist", []))
+    watch = settings.get("watchlist", [])
     return list(dict.fromkeys([base_of(s) for s in held + watch]))
 
 def social_loop():

@@ -1,0 +1,423 @@
+from __future__ import annotations
+
+import json
+import math
+import threading
+import time
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+
+class MonitorUnavailable(RuntimeError):
+    pass
+
+
+def _bind_params(sql: str, params: tuple[Any, ...]):
+    parts = sql.split("?")
+    if len(parts) - 1 != len(params):
+        raise MonitorUnavailable("invalid monitor query parameters")
+    statement = "".join(
+        part + (f":p{index}" if index < len(params) else "")
+        for index, part in enumerate(parts)
+    )
+    return text(statement), {f"p{index}": value for index, value in enumerate(params)}
+
+
+_REPORT_LOCK = threading.Lock()
+
+
+class MonitorRepository:
+    def __init__(self, engine: Engine, symbols_config: Path):
+        if engine.dialect.name not in {"mysql", "mariadb"}:
+            raise MonitorUnavailable("contract monitor data requires MySQL")
+        self.engine = engine
+        self.symbols_config = symbols_config.expanduser().resolve()
+        if not self.symbols_config.is_file():
+            raise MonitorUnavailable("contract monitor symbols config is unavailable")
+        try:
+            config = json.loads(self.symbols_config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise MonitorUnavailable("contract monitor symbols config is invalid") from exc
+        self.symbols_meta = config.get("symbols", [])
+        self.symbols = [item["symbol"] for item in self.symbols_meta if item.get("symbol")]
+        self.symbol_set = set(self.symbols)
+
+    def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        try:
+            statement, values = _bind_params(sql, params)
+            with self.engine.connect() as connection:
+                return [dict(row) for row in connection.execute(statement, values).mappings()]
+        except SQLAlchemyError as exc:
+            raise MonitorUnavailable("contract monitor data query failed") from exc
+
+    def _validate_symbol(self, symbol: str) -> str:
+        normalized = symbol.strip().upper()
+        if normalized not in self.symbol_set:
+            raise MonitorUnavailable("unknown contract monitor symbol")
+        return normalized
+
+    def _configure_legacy_store(self) -> None:
+        """Point the in-process legacy modules at the shared MySQL engine."""
+        from quantdesk import store as legacy_store
+
+        legacy_store.configure_engine(self.engine)
+
+    def overview(self, watchlist: list[str]) -> dict[str, Any]:
+        tickers = {row["symbol"]: row for row in self._query("SELECT * FROM ticker")}
+        score_rows = self._query(
+            """
+            SELECT s.symbol, s.tf, s.score FROM scores s
+            JOIN (SELECT symbol, tf, MAX(open_time) mo FROM scores GROUP BY symbol, tf) m
+            ON s.symbol=m.symbol AND s.tf=m.tf AND s.open_time=m.mo
+            """
+        )
+        scores: dict[str, dict[str, float]] = {}
+        for row in score_rows:
+            scores.setdefault(row["symbol"], {})[row["tf"]] = row["score"]
+
+        trending_rows = self._query("SELECT v FROM system_state WHERE k='st_trending'")
+        try:
+            trending = (
+                set(json.loads(trending_rows[0]["v"]).get("symbols", []))
+                if trending_rows
+                else set()
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            trending = set()
+
+        metadata = {item["symbol"]: item for item in self.symbols_meta}
+        selected = set(watchlist)
+        weights = {"15m": 0.3, "1h": 0.4, "4h": 0.3}
+        items = []
+        latest = 0
+        for symbol in self.symbols:
+            ticker = tickers.get(symbol, {})
+            latest = max(latest, int(ticker.get("ts") or 0))
+            tf_scores = scores.get(symbol, {})
+            numerator = sum(
+                tf_scores.get(tf, 0) * weight for tf, weight in weights.items() if tf in tf_scores
+            )
+            denominator = sum(weight for tf, weight in weights.items() if tf in tf_scores)
+            base = symbol.replace("USDT", "").replace("USD1", "")
+            items.append(
+                {
+                    "symbol": symbol,
+                    "underlying": metadata.get(symbol, {}).get("underlyingType", ""),
+                    "price": ticker.get("price"),
+                    "pct_24h": ticker.get("pct_24h"),
+                    "score": round(numerator / denominator) if denominator else None,
+                    "tf_scores": tf_scores,
+                    "watch": symbol in selected,
+                    "position": None,
+                    "trending": base in trending,
+                }
+            )
+        return {
+            "items": items,
+            "updated_at": latest,
+            "stale": not latest or time.time() - latest > 30,
+        }
+
+    def breadth(self) -> dict[str, Any]:
+        rows = self._query(
+            """
+            SELECT s.symbol, s.score FROM scores s
+            JOIN (SELECT symbol, MAX(open_time) mo FROM scores WHERE tf='1h' GROUP BY symbol) m
+            ON s.symbol=m.symbol AND s.open_time=m.mo WHERE s.tf='1h'
+            """
+        )
+        bull = sum(1 for row in rows if row["score"] >= 40)
+        bear = sum(1 for row in rows if row["score"] <= -40)
+        neutral = len(rows) - bull - bear
+        if not rows:
+            return {
+                "bull": 0,
+                "bear": 0,
+                "neutral": 0,
+                "total": 0,
+                "conclusion": "数据收集中…",
+                "color": "#77808f",
+            }
+        if bull > bear * 2 and bull >= 5:
+            conclusion = f"市场整体偏多（{bull}多 / {bear}空 / {neutral}中性）"
+            color = "#2ebd85"
+        elif bear > bull * 2 and bear >= 5:
+            conclusion = f"市场整体偏空（{bull}多 / {bear}空 / {neutral}中性）"
+            color = "#f6465d"
+        else:
+            conclusion = f"市场多空分歧（{bull}多 / {bear}空 / {neutral}中性）"
+            color = "#f0b90b"
+        return {
+            "bull": bull,
+            "bear": bear,
+            "neutral": neutral,
+            "total": len(rows),
+            "conclusion": conclusion,
+            "color": color,
+        }
+
+    def alerts(self, user_id: int, limit: int) -> list[dict[str, Any]]:
+        return self._query(
+            "SELECT * FROM alerts WHERE user_id=? ORDER BY ts DESC LIMIT ?",
+            (user_id, limit),
+        )
+
+    def latest_alert_id(self, user_id: int) -> int:
+        rows = self._query(
+            "SELECT COALESCE(MAX(id), 0) AS id FROM alerts WHERE user_id=?", (user_id,)
+        )
+        return int(rows[0]["id"]) if rows else 0
+
+    def mark_alerts_read(self, user_id: int) -> None:
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text("UPDATE alerts SET `read`=1 WHERE user_id=:user_id"),
+                    {"user_id": user_id},
+                )
+        except SQLAlchemyError as exc:
+            raise MonitorUnavailable("contract monitor alert update failed") from exc
+
+    def news(self, limit: int) -> list[dict[str, Any]]:
+        return self._query("SELECT * FROM news ORDER BY ts DESC LIMIT ?", (limit,))
+
+    def klines(self, symbol: str, timeframe: str, limit: int) -> list[dict[str, Any]]:
+        normalized = self._validate_symbol(symbol)
+        rows = self._query(
+            """
+            SELECT open_time, open, high, low, close, volume FROM klines
+            WHERE symbol=? AND tf=? ORDER BY open_time DESC LIMIT ?
+            """,
+            (normalized, timeframe, limit),
+        )
+        return list(reversed(rows))
+
+    def score_detail(self, symbol: str) -> dict[str, Any]:
+        normalized = self._validate_symbol(symbol)
+        rows = self._query(
+            """
+            SELECT s.tf, s.score, s.detail, s.open_time FROM scores s
+            JOIN (SELECT tf, MAX(open_time) mo FROM scores WHERE symbol=? GROUP BY tf) m
+            ON s.tf=m.tf AND s.open_time=m.mo WHERE s.symbol=?
+            """,
+            (normalized, normalized),
+        )
+        return {
+            row["tf"]: {
+                "score": row["score"],
+                "open_time": row["open_time"],
+                "factors": json.loads(row["detail"] or "[]"),
+            }
+            for row in rows
+        }
+
+    def report(self, symbol: str) -> dict[str, Any]:
+        normalized = self._validate_symbol(symbol)
+        with _REPORT_LOCK:
+            from quantdesk import report as legacy_report
+
+            self._configure_legacy_store()
+            return legacy_report.build_report(normalized)
+
+    def paper(self, user_id: int, account_id: int) -> dict[str, Any]:
+        with _REPORT_LOCK:
+            from quantdesk import paper as legacy_paper
+
+            self._configure_legacy_store()
+            return legacy_paper.api_data(user_id, account_id)
+
+    def paper_performance(
+        self, user_id: int, account_id: int, month: str, timezone_offset_minutes: int
+    ) -> dict[str, Any]:
+        """Build a dashboard-safe performance summary for one tenant-owned paper account."""
+        snapshot = self.paper(user_id, account_id)
+        account = snapshot.get("account", {})
+        start_balance = _finite_number(account.get("start"))
+        try:
+            year, month_number = (int(part) for part in month.split("-", maxsplit=1))
+            local_start = datetime(year, month_number, 1, tzinfo=UTC)
+        except (TypeError, ValueError) as exc:
+            raise MonitorUnavailable("invalid performance calendar month") from exc
+        if not 2000 <= year <= 2100:
+            raise MonitorUnavailable("invalid performance calendar month")
+        if month_number == 12:
+            local_end = datetime(year + 1, 1, 1, tzinfo=UTC)
+        else:
+            local_end = datetime(year, month_number + 1, 1, tzinfo=UTC)
+        offset = timedelta(minutes=timezone_offset_minutes)
+        start_ts = int((local_start - offset).timestamp())
+        end_ts = int((local_end - offset).timestamp())
+
+        aggregate_rows = self._query(
+            """
+            SELECT COUNT(*) AS trades,
+                   SUM(CASE WHEN COALESCE(pnl, 0) - COALESCE(fee, 0) > 0 THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN COALESCE(pnl, 0) - COALESCE(fee, 0) < 0 THEN 1 ELSE 0 END) AS losses,
+                   SUM(CASE WHEN COALESCE(pnl, 0) - COALESCE(fee, 0) = 0 THEN 1 ELSE 0 END) AS breakeven,
+                   SUM(CASE WHEN COALESCE(pnl, 0) - COALESCE(fee, 0) > 0
+                            THEN COALESCE(pnl, 0) - COALESCE(fee, 0) ELSE 0 END) AS gross_profit,
+                   ABS(SUM(CASE WHEN COALESCE(pnl, 0) - COALESCE(fee, 0) < 0
+                                THEN COALESCE(pnl, 0) - COALESCE(fee, 0) ELSE 0 END)) AS gross_loss,
+                   SUM(COALESCE(pnl, 0) - COALESCE(fee, 0)) AS realized_pnl
+            FROM paper_trades
+            WHERE paper_account_id=? AND user_id=?
+            """,
+            (account_id, user_id),
+        )
+        aggregate = aggregate_rows[0] if aggregate_rows else {}
+        trades = int(aggregate.get("trades") or 0)
+        wins = int(aggregate.get("wins") or 0)
+        losses = int(aggregate.get("losses") or 0)
+        breakeven = int(aggregate.get("breakeven") or 0)
+        gross_profit = _finite_number(aggregate.get("gross_profit"))
+        gross_loss = _finite_number(aggregate.get("gross_loss"))
+        realized_pnl = _finite_number(aggregate.get("realized_pnl"))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+        if not trades:
+            profit_factor_status = "no_trades"
+        elif not gross_loss:
+            profit_factor_status = "no_losses"
+        else:
+            profit_factor_status = "available"
+
+        equity_rows = self._query(
+            """
+            WITH seeded(ts, equity) AS (
+                SELECT -1 AS ts, ? AS equity
+                UNION ALL
+                SELECT ts, equity FROM paper_equity
+                WHERE paper_account_id=? AND user_id=? AND equity IS NOT NULL
+            ), running AS (
+                SELECT ts, equity,
+                       MAX(equity) OVER (
+                           ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                       ) AS peak
+                FROM seeded
+            )
+            SELECT COALESCE(MAX(CASE WHEN peak > 0 THEN (peak - equity) / peak * 100 ELSE 0 END), 0)
+                       AS max_drawdown,
+                   MAX(CASE WHEN ts >= 0 THEN ts END) AS data_as_of,
+                   SUM(CASE WHEN ts >= 0 THEN 1 ELSE 0 END) AS samples
+            FROM running
+            """,
+            (start_balance, account_id, user_id),
+        )
+        equity_stats = equity_rows[0] if equity_rows else {}
+        max_drawdown = _finite_number(equity_stats.get("max_drawdown"))
+        data_as_of_ts = int(equity_stats.get("data_as_of") or 0)
+        generated_at = datetime.now(UTC)
+        data_as_of = datetime.fromtimestamp(data_as_of_ts, UTC) if data_as_of_ts else None
+        stale = data_as_of is None or (generated_at - data_as_of).total_seconds() > 180
+        started_ts = int(account.get("started_ts") or 0)
+        period_start = datetime.fromtimestamp(started_ts, UTC) if started_ts else None
+
+        month_rows = self._query(
+            """
+            SELECT closed_ts, COALESCE(pnl, 0) - COALESCE(fee, 0) AS net_pnl
+            FROM paper_trades
+            WHERE paper_account_id=? AND user_id=? AND closed_ts >= ? AND closed_ts < ?
+            ORDER BY closed_ts
+            """,
+            (account_id, user_id, start_ts, end_ts),
+        )
+        calendar_days: dict[str, dict[str, Any]] = {}
+        for row in month_rows:
+            try:
+                closed_at = datetime.fromtimestamp(int(row["closed_ts"]), UTC) + offset
+            except (OSError, OverflowError, TypeError, ValueError):
+                continue
+            pnl = _finite_number(row.get("net_pnl"))
+            date_key = closed_at.date().isoformat()
+            day = calendar_days.setdefault(
+                date_key,
+                {
+                    "date": date_key,
+                    "pnl": 0.0,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "breakeven": 0,
+                },
+            )
+            day["pnl"] += pnl
+            day["trades"] += 1
+            if pnl > 0:
+                day["wins"] += 1
+            elif pnl < 0:
+                day["losses"] += 1
+            else:
+                day["breakeven"] += 1
+        days = []
+        for day in calendar_days.values():
+            day["pnl"] = round(day["pnl"], 2)
+            days.append(day)
+
+        equity = _finite_number(account.get("equity"))
+        unrealized_pnl = _finite_number(account.get("upnl"))
+        total_pnl = equity - start_balance
+        return {
+            "source": "paper_account",
+            "scope": "user_account",
+            "currency": "USDT",
+            "generated_at": generated_at,
+            "data_as_of": data_as_of,
+            "period_start": period_start,
+            "stale": stale,
+            "metrics": {
+                "total_pnl": round(total_pnl, 2),
+                "total_return_pct": round(
+                    total_pnl / start_balance * 100 if start_balance else 0, 2
+                ),
+                "realized_pnl": round(realized_pnl, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "win_rate": round(wins / (wins + losses) * 100 if wins + losses else 0, 1),
+                "win_rate_basis": "decisive_trades",
+                "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
+                "profit_factor_status": profit_factor_status,
+                "max_drawdown": round(max_drawdown, 2),
+                "max_drawdown_basis": "since_reset_full_equity",
+                "average_profit": round(realized_pnl / trades, 2) if trades else 0,
+                "average_win": round(gross_profit / wins, 2) if wins else 0,
+                "trades": trades,
+                "wins": wins,
+                "losses": losses,
+                "breakeven": breakeven,
+                "equity_samples": int(equity_stats.get("samples") or 0),
+            },
+            "calendar": {
+                "month": month,
+                "timezone_offset_minutes": timezone_offset_minutes,
+                "timezone_label": _timezone_label(timezone_offset_minutes),
+                "basis": "closed_trade_net_pnl",
+                "total_pnl": round(sum(day["pnl"] for day in days), 2),
+                "active_days": len(days),
+                "days": days,
+            },
+        }
+
+    def reset_paper(self, user_id: int, account_id: int) -> dict[str, Any]:
+        with _REPORT_LOCK:
+            from quantdesk import paper as legacy_paper
+
+            self._configure_legacy_store()
+            legacy_paper.reset(user_id, account_id)
+            return legacy_paper.api_data(user_id, account_id)
+
+
+def _finite_number(value: Any) -> float:
+    try:
+        numeric = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return numeric if math.isfinite(numeric) else 0.0
+
+
+def _timezone_label(offset_minutes: int) -> str:
+    sign = "+" if offset_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(offset_minutes), 60)
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"

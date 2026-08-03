@@ -1,8 +1,8 @@
 # QuantDesk · 币安 TradFi 量化工作台 — 使用说明
 
 ## 日常使用
-- **启动**：双击 `start.bat`（带崩溃自动重启）；或开机自动启动（已安装启动项 `QuantDesk.vbs`）
-- **打开界面**：浏览器访问 http://127.0.0.1:8100
+- **启动**：双击 `start.bat`（只启动 MySQL 版 V2，并带崩溃自动重启）；或运行 `quantdesk-v2 serve`
+- **打开界面**：浏览器访问 http://127.0.0.1:8200
 - **停止**：关闭 start.bat 的黑色窗口，或在任务管理器结束 python 进程
 - **取消开机自启**：删除 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\QuantDesk.vbs`
 
@@ -17,9 +17,17 @@
 | 深度舆情摘要 | 每 2 小时由 Kimi 定时任务生成，出现在舆情流顶部（Kimi深度摘要），全文在 `reports/` |
 
 ## 配置（改完重启 start.bat 生效）
+- `.env`：MySQL/MariaDB 连接、应用密钥和服务端配置；应用不会再读取本地数据库文件
 - `config/settings.json`：评分阈值（默认 ±60 / 持仓 ±40）、异动阈值（5分钟 2%）、刷新频率、新闻源
-- `config/api_keys.json`：币安 API（统一账户 papi 接口）
+- 币安 API：每个用户登录后在“凭据”页面独立配置；密钥加密保存到 MySQL，不使用共享配置文件
 - 自选列表：在界面弹窗里点 ☆/★ 切换，自动保存
+
+## 多用户数据隔离
+
+- 实盘 Binance 凭据和持仓快照按 `user_id` 隔离，一个用户无法读取或覆盖其他用户数据。
+- 提醒按用户分别保存和标记已读。
+- 用户状态写入 `user_states`；只有行情采集进度、全市场舆情等真正的系统状态使用 `system_state`。
+- 一个用户可创建多个模拟盘并绑定不同策略；每个模拟盘的资金、持仓、成交、权益和信号去重状态完全独立。
 
 ## 提醒通道
 - 系统通知开启 → Windows Toast

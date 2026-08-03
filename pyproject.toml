@@ -34,7 +34,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["quantdesk_v2*"]
+include = ["quantdesk_v2*", "quantdesk*"]
 
 [tool.setuptools.package-data]
 quantdesk_v2 = ["static/*"]
@@ -54,5 +54,6 @@ select = ["B", "E4", "E7", "E9", "F", "I", "S", "UP"]
 [tool.ruff.lint.per-file-ignores]
 "src/quantdesk_v2/api.py" = ["B008"]
 "src/quantdesk_v2/dependencies.py" = ["B008"]
+"src/quantdesk_v2/strategy_routes.py" = ["B008"]
 "src/quantdesk_v2/schemas.py" = ["S105"]
 "tests/*" = ["S101", "S105"]

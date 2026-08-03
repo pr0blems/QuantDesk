@@ -12,7 +12,7 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
         ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
 
 def _watchlist():
-    return set(store.kv_get("watchlist", settings.get("watchlist", [])))
+    return set(settings.get("watchlist", []))
 
 def api_overview():
     tickers = {r["symbol"]: dict(r) for r in store.query("SELECT * FROM ticker")}
@@ -29,7 +29,7 @@ def api_overview():
     w = settings.get("timeframe_weights", {"15m": .3, "1h": .4, "4h": .3})
     out = []
     meta = {s["symbol"]: s for s in symbols_meta.get("symbols", [])}
-    trending = set((store.kv_get("st_trending", {}) or {}).get("symbols") or [])
+    trending = set((store.system_state_get("st_trending", {}) or {}).get("symbols") or [])
     for sym in tradfi_symbols():
         t = tickers.get(sym, {})
         tf_scores = per.get(sym, {})
@@ -123,15 +123,11 @@ class Handler(BaseHTTPRequestHandler):
             ln = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(ln) or b"{}")
             if u.path == "/api/watchlist":
-                store.kv_set("watchlist", body.get("symbols", []))
-                return self._json({"ok": True})
+                return self._json({"error": "legacy watchlists are read-only"}, 410)
             if u.path == "/api/alerts/read":
-                store.execute("UPDATE alerts SET read=1")
-                return self._json({"ok": True})
+                return self._json({"error": "use the authenticated V2 alerts API"}, 410)
             if u.path == "/api/paper/reset":
-                from . import paper
-                paper.reset()
-                return self._json({"ok": True})
+                return self._json({"error": "use the authenticated V2 paper API"}, 410)
             return self._json({"error": "unknown"}, 404)
         except Exception as e:
             self._json({"error": str(e)}, 500)

@@ -1,9 +1,54 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+import math
+import re
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
+
+BacktestTimeframe = Literal[
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+]
+BacktestRunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+BacktestTradeSide = Literal["long", "short"]
+
+
+def _bounded_numeric_map(value: dict[str, int | float], field_name: str) -> dict[str, int | float]:
+    normalized: dict[str, int | float] = {}
+    for raw_key, raw_value in value.items():
+        key = raw_key.strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key):
+            raise ValueError(f"invalid {field_name} name: {raw_key!r}")
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise ValueError(f"{field_name} {key!r} must be numeric")
+        numeric = float(raw_value)
+        if not math.isfinite(numeric) or abs(numeric) > 1_000_000:
+            raise ValueError(f"{field_name} {key!r} must be finite and bounded")
+        normalized[key] = raw_value
+    return normalized
 
 
 class RegisterRequest(BaseModel):
@@ -59,11 +104,424 @@ class BinanceCredentialUpdate(BaseModel):
         default_factory=lambda: ["READ", "TRADE"], min_length=1, max_length=2
     )
 
+    @field_validator("api_key", "api_secret")
+    @classmethod
+    def validate_credential_characters(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value().strip()
+        if (
+            not raw.isascii()
+            or not raw.isprintable()
+            or any(character.isspace() for character in raw)
+        ):
+            raise ValueError("Binance credentials must contain printable ASCII without spaces")
+        return SecretStr(raw)
+
 
 class BinanceCredentialStatus(BaseModel):
     configured: bool
     fingerprint: str | None
     updated_at: datetime | None
+
+
+class BinanceAccountSummary(BaseModel):
+    configured: bool
+    connected: bool
+    can_trade: bool | None = None
+    account_type: Literal["UM_FUTURE", "PORTFOLIO_MARGIN"] | None = None
+    wallet_balance: float | None = None
+    available_balance: float | None = None
+    unrealized_pnl: float | None = None
+    currency: Literal["USD"] = "USD"
+    updated_at: datetime
+    positions: list[dict[str, Any]] = Field(default_factory=list)
+    error_category: (
+        Literal[
+            "not_configured",
+            "credential_error",
+            "authentication",
+            "timestamp",
+            "rate_limit",
+            "timeout",
+            "network",
+            "upstream",
+            "rejected",
+            "invalid_response",
+        ]
+        | None
+    ) = None
+
+
+class BinancePerformanceAccount(BaseModel):
+    account_type: Literal["UM_FUTURE", "PORTFOLIO_MARGIN"]
+    wallet_balance: float
+    available_balance: float
+    unrealized_pnl: float
+    currency: Literal["USD"]
+    updated_at: datetime
+
+
+class BinancePerformanceDay(BaseModel):
+    date: date
+    net_income: float
+    realized_pnl: float
+    funding_fee: float
+    commission: float
+    realized_records: int = Field(ge=0)
+    wins: int = Field(ge=0)
+    losses: int = Field(ge=0)
+    breakeven: int = Field(ge=0)
+
+
+class BinanceAssetPerformance(BaseModel):
+    asset: str = Field(min_length=1, max_length=32, pattern=r"^[A-Z0-9_.:/-]+$")
+    net_income: float
+    realized_pnl: float
+    funding_fee: float
+    commission: float
+    current_unrealized_pnl: float | None
+    realized_records: int = Field(ge=0)
+    wins: int = Field(ge=0)
+    losses: int = Field(ge=0)
+    breakeven: int = Field(ge=0)
+    win_rate_pct: float | None = Field(default=None, ge=0, le=100)
+    profit_factor: float | None = Field(default=None, ge=0)
+    profit_factor_status: Literal["available", "no_losses", "no_trades"]
+    gross_profit: float = Field(ge=0)
+    gross_loss_abs: float = Field(ge=0)
+    days: list[BinancePerformanceDay]
+
+
+class BinancePerformanceOut(BaseModel):
+    source: Literal["binance_income"]
+    scope: Literal["current_user"]
+    configured: bool
+    connected: bool
+    generated_at: datetime
+    month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    timezone_offset_minutes: int = Field(ge=-720, le=840)
+    timezone_label: str
+    history_status: Literal[
+        "available",
+        "history_limited",
+        "history_unavailable",
+        "future_month",
+        "not_configured",
+        "request_failed",
+    ]
+    history_complete: bool
+    month_complete: bool
+    data_as_of: datetime | None
+    account: BinancePerformanceAccount | None
+    income_basis: Literal["realized_pnl_plus_funding_fee_plus_commission"]
+    aggregation_policy: Literal["per_asset_no_conversion"]
+    included_income_types: list[Literal["REALIZED_PNL", "FUNDING_FEE", "COMMISSION"]]
+    excluded_income_types: list[str]
+    records_received: int = Field(ge=0)
+    records_included: int = Field(ge=0)
+    pages_fetched: int = Field(ge=0)
+    assets: list[BinanceAssetPerformance]
+    error_category: (
+        Literal[
+            "not_configured",
+            "credential_error",
+            "authentication",
+            "timestamp",
+            "rate_limit",
+            "timeout",
+            "network",
+            "upstream",
+            "rejected",
+            "invalid_response",
+        ]
+        | None
+    ) = None
+
+
+class DashboardPerformanceMetrics(BaseModel):
+    total_pnl: float
+    total_return_pct: float
+    realized_pnl: float
+    unrealized_pnl: float
+    win_rate: float
+    win_rate_basis: Literal["decisive_trades"]
+    profit_factor: float | None
+    profit_factor_status: Literal["available", "no_losses", "no_trades"]
+    max_drawdown: float
+    max_drawdown_basis: Literal["since_reset_full_equity"]
+    average_profit: float
+    average_win: float
+    trades: int
+    wins: int
+    losses: int
+    breakeven: int
+    equity_samples: int
+
+
+class DashboardPerformanceDay(BaseModel):
+    date: date
+    pnl: float
+    trades: int
+    wins: int
+    losses: int
+    breakeven: int
+
+
+class DashboardPerformanceCalendar(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    timezone_offset_minutes: int = Field(ge=-720, le=840)
+    timezone_label: str
+    basis: Literal["closed_trade_net_pnl"]
+    total_pnl: float
+    active_days: int
+    days: list[DashboardPerformanceDay]
+
+
+class DashboardPerformanceOut(BaseModel):
+    source: Literal["paper_account"]
+    scope: Literal["user_account"]
+    currency: Literal["USDT"]
+    generated_at: datetime
+    data_as_of: datetime | None
+    period_start: datetime | None
+    stale: bool
+    metrics: DashboardPerformanceMetrics
+    calendar: DashboardPerformanceCalendar
+
+
+class MonitorWatchlistUpdate(BaseModel):
+    symbols: list[str] = Field(default_factory=list, max_length=250)
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize_symbols(cls, value: list[str]) -> list[str]:
+        return sorted({symbol.strip().upper() for symbol in value if symbol.strip()})
+
+
+class PaperAccountCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    strategy_id: str = Field(min_length=36, max_length=36)
+    initial_balance: float = Field(default=10_000, gt=0, le=1_000_000_000)
+    leverage: int | None = Field(default=None, ge=1, le=50)
+    max_positions: int | None = Field(default=None, ge=1, le=50)
+    position_size_pct: float | None = Field(default=None, gt=0, le=100)
+    margin_cap: float | None = Field(default=None, gt=0, le=0.95)
+
+
+class PaperAccountStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["active", "paused", "archived"]
+
+
+class StrategyCreateRequest(BaseModel):
+    """Create one user-owned strategy from an approved system template."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=600)
+    category: str = Field(default="自定义", min_length=1, max_length=32)
+    template_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]{0,63}$",
+    )
+    parameters: dict[str, int | float] | None = Field(default=None, max_length=32)
+    risk_defaults: dict[str, int | float] | None = Field(default=None, max_length=16)
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameters(
+        cls, value: dict[str, int | float] | None
+    ) -> dict[str, int | float] | None:
+        return _bounded_numeric_map(value, "strategy parameter") if value is not None else None
+
+    @field_validator("risk_defaults")
+    @classmethod
+    def validate_risk_defaults(
+        cls, value: dict[str, int | float] | None
+    ) -> dict[str, int | float] | None:
+        return _bounded_numeric_map(value, "risk default") if value is not None else None
+
+
+class StrategyUpdateRequest(BaseModel):
+    """Replace editable strategy fields using optimistic concurrency control."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    version: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=600)
+    category: str = Field(min_length=1, max_length=32)
+    parameters: dict[str, int | float] = Field(max_length=32)
+    risk_defaults: dict[str, int | float] = Field(max_length=16)
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameters(cls, value: dict[str, int | float]) -> dict[str, int | float]:
+        return _bounded_numeric_map(value, "strategy parameter")
+
+    @field_validator("risk_defaults")
+    @classmethod
+    def validate_risk_defaults(cls, value: dict[str, int | float]) -> dict[str, int | float]:
+        return _bounded_numeric_map(value, "risk default")
+
+
+class StrategyAiPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    prompt: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("prompt")
+    @classmethod
+    def reject_control_characters(cls, value: str) -> str:
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", value):
+            raise ValueError("prompt contains control characters")
+        return value
+
+
+class StrategyAiProposed(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=600)
+    category: str = Field(min_length=1, max_length=32)
+    parameters: dict[str, int | float] = Field(max_length=32)
+    risk_defaults: dict[str, int | float] = Field(max_length=16)
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameters(cls, value: dict[str, int | float]) -> dict[str, int | float]:
+        return _bounded_numeric_map(value, "strategy parameter")
+
+    @field_validator("risk_defaults")
+    @classmethod
+    def validate_risk_defaults(cls, value: dict[str, int | float]) -> dict[str, int | float]:
+        return _bounded_numeric_map(value, "risk default")
+
+
+class StrategyAiApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_version: int = Field(ge=1)
+    proposed: StrategyAiProposed
+
+
+class BacktestRunRequest(BaseModel):
+    """创建单策略、单品种回测所需的可信输入。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    strategy_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    symbol: str = Field(min_length=2, max_length=32, pattern=r"^[A-Z0-9][A-Z0-9._:/-]*$")
+    timeframe: BacktestTimeframe
+    start_date: date
+    end_date: date
+    initial_capital: Decimal = Field(ge=1, le=Decimal("1000000000000"), max_digits=30)
+    position_size_pct: Decimal = Field(ge=Decimal("0.01"), le=100, max_digits=10, decimal_places=6)
+    leverage: int = Field(ge=1, le=20)
+    fee_bps: Decimal = Field(ge=0, le=1000, max_digits=10, decimal_places=6)
+    slippage_bps: Decimal = Field(ge=0, le=1000, max_digits=10, decimal_places=6)
+    stop_loss_pct: Decimal = Field(ge=0, le=Decimal("99.9"), max_digits=10, decimal_places=6)
+    take_profit_pct: Decimal = Field(ge=0, le=Decimal("99.9"), max_digits=10, decimal_places=6)
+    max_holding_bars: int = Field(ge=0, le=50_000)
+    params: dict[str, float] = Field(default_factory=dict, max_length=64)
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("params")
+    @classmethod
+    def validate_params(cls, value: dict[str, float]) -> dict[str, float]:
+        normalized: dict[str, float] = {}
+        for raw_key, raw_value in value.items():
+            key = raw_key.strip()
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", key):
+                raise ValueError(f"invalid strategy parameter name: {raw_key!r}")
+            if not math.isfinite(raw_value) or abs(raw_value) > 1_000_000_000:
+                raise ValueError(f"strategy parameter {key!r} must be finite and bounded")
+            normalized[key] = raw_value
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> Self:
+        if self.start_date > self.end_date:
+            raise ValueError("start_date must be earlier than or equal to end_date")
+        if (self.end_date - self.start_date).days > 366:
+            raise ValueError("backtest date range cannot exceed 366 days")
+        return self
+
+
+class BacktestTradeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    run_id: int
+    user_id: int
+    side: BacktestTradeSide
+    entry_at: datetime
+    exit_at: datetime
+    entry_price: Decimal
+    exit_price: Decimal
+    quantity: Decimal
+    gross_pnl: Decimal
+    fees: Decimal
+    net_pnl: Decimal
+    return_pct: Decimal
+    holding_bars: int
+    exit_reason: str | None
+    metadata_json: dict[str, JsonValue] | None
+
+
+class BacktestRunSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    strategy_id: str
+    strategy_name: str
+    symbol: str
+    timeframe: BacktestTimeframe
+    status: BacktestRunStatus
+    start_at: datetime
+    end_at: datetime
+    initial_capital: Decimal
+    final_equity: Decimal | None
+    net_profit: Decimal | None
+    total_return_pct: Decimal | None
+    max_drawdown_pct: Decimal | None
+    sharpe_ratio: Decimal | None
+    win_rate_pct: Decimal | None
+    profit_factor: Decimal | None
+    trade_count: int
+    error: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class BacktestRunOut(BacktestRunSummaryOut):
+    config_json: dict[str, JsonValue]
+    metrics_json: dict[str, JsonValue] | None
+    equity_curve_json: list[dict[str, JsonValue]] | None
+    data_quality_json: dict[str, JsonValue] | None
+    metadata_json: dict[str, JsonValue] | None
+    trades: list[BacktestTradeOut] = Field(default_factory=list)
+
+
+class BacktestRunListOut(BaseModel):
+    items: list[BacktestRunSummaryOut]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
 
 
 class MessageOut(BaseModel):

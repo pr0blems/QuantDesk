@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,10 +42,27 @@ class Settings(BaseSettings):
     refresh_cookie_name: str = "quantdesk_refresh"
     allow_public_registration: bool = True
 
+    binance_futures_base_url: str = "https://fapi.binance.com"
+    binance_portfolio_base_url: str = "https://papi.binance.com"
+    binance_futures_timeout_seconds: float = 4.0
+    binance_futures_recv_window_ms: int = 5_000
+
+    # Strategy edits are requested server-side only. The browser never receives
+    # this credential and the client uses a fixed OpenAI HTTPS origin.
+    openai_api_key: SecretStr = SecretStr("")
+    openai_strategy_model: str = "gpt-5.6-luna"
+    openai_strategy_timeout_seconds: float = 20.0
+
+    monitor_symbols_config: Path = Path("config/tradfi_symbols.json")
+
     @property
     def database_url_value(self) -> str:
         if self.database_url:
-            return self.database_url
+            url = self.database_url
+            scheme = urlparse(url).scheme.lower()
+            if scheme not in {"mysql+pymysql", "mariadb+pymysql"}:
+                raise RuntimeError("DATABASE_URL must use the MySQL PyMySQL driver")
+            return url
         password = quote_plus(self.db_password.get_secret_value())
         user = quote_plus(self.db_user)
         return f"mysql+pymysql://{user}:{password}@{self.db_host}:{self.db_port}/{self.db_name}?charset=utf8mb4"
@@ -59,6 +76,8 @@ class Settings(BaseSettings):
         return [item.strip() for item in self.app_allowed_origins.split(",") if item.strip()]
 
     def validate_runtime(self) -> None:
+        # Resolve the URL up front so unsupported database backends fail before startup.
+        _ = self.database_url_value
         if not self.database_url and not self.db_password.get_secret_value():
             raise RuntimeError("DB_PASSWORD is required")
         if len(self.jwt_secret.get_secret_value()) < 32:
@@ -66,6 +85,8 @@ class Settings(BaseSettings):
         self._validate_fernet_key()
         if "*" in self.allowed_origins:
             raise RuntimeError("Wildcard CORS origins are forbidden")
+        self._validate_binance_futures_settings()
+        self._validate_openai_settings()
         if self.app_env.lower() == "production":
             if not self.db_ssl_required:
                 raise RuntimeError("Production database connections must require TLS")
@@ -82,6 +103,51 @@ class Settings(BaseSettings):
             raise RuntimeError("CREDENTIAL_MASTER_KEY is not valid URL-safe base64") from exc
         if len(decoded) != 32:
             raise RuntimeError("CREDENTIAL_MASTER_KEY must decode to 32 bytes")
+
+    def _validate_binance_futures_settings(self) -> None:
+        self._validate_binance_origin(
+            "BINANCE_FUTURES_BASE_URL",
+            self.binance_futures_base_url,
+            {"fapi.binance.com", "demo-fapi.binance.com"},
+        )
+        self._validate_binance_origin(
+            "BINANCE_PORTFOLIO_BASE_URL",
+            self.binance_portfolio_base_url,
+            {"papi.binance.com"},
+        )
+        if not 1 <= self.binance_futures_timeout_seconds <= 10:
+            raise RuntimeError("BINANCE_FUTURES_TIMEOUT_SECONDS must be between 1 and 10")
+        if not 1_000 <= self.binance_futures_recv_window_ms <= 5_000:
+            raise RuntimeError("BINANCE_FUTURES_RECV_WINDOW_MS must be between 1000 and 5000")
+
+    def _validate_openai_settings(self) -> None:
+        if self.openai_strategy_model not in {
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        }:
+            raise RuntimeError("OPENAI_STRATEGY_MODEL must be an approved GPT-5.6 model")
+        if not 2 <= self.openai_strategy_timeout_seconds <= 30:
+            raise RuntimeError("OPENAI_STRATEGY_TIMEOUT_SECONDS must be between 2 and 30")
+
+    @staticmethod
+    def _validate_binance_origin(name: str, value: str, allowed_hosts: set[str]) -> None:
+        parsed = urlparse(value)
+        try:
+            port = parsed.port
+        except ValueError:
+            port = -1
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.hostname not in allowed_hosts
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise RuntimeError(f"{name} must be an approved Binance HTTPS origin")
 
     @property
     def static_dir(self) -> Path:

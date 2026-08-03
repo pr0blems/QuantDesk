@@ -172,7 +172,7 @@ def news_once(batch=None):
                 time.sleep(0.3)  # 翻译接口限速
             senti = sentiment_of(title)
             store.execute(
-                "INSERT OR IGNORE INTO news(id,ts,source,lang,title,title_zh,link,sentiment) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT IGNORE INTO news(id,ts,source,lang,title,title_zh,link,sentiment) VALUES(?,?,?,?,?,?,?,?)",
                 (nid, ts, src["name"], lang, title, title_zh, link, senti))
             added += 1
     # 每轮顺带补译最多4条历史未翻译的英文条目

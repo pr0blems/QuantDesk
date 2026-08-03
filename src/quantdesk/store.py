@@ -1,93 +1,194 @@
-"""SQLite 存储层：K线 / 实时快照 / 持仓 / 信号 / 舆情 / 社交情绪"""
-import sqlite3, json, os, threading, time
-from .paths import DATA_DIR
+"""MySQL storage layer for market data, signals, news, and paper trading."""
 
-DB_PATH = os.path.join(DATA_DIR, "quantdesk.db")
+from __future__ import annotations
+
+import json
+import threading
+import time
+from collections.abc import Generator, Iterable, Mapping, Sequence
+from contextlib import contextmanager
+from typing import Any
+
+from sqlalchemy.engine import Connection, Engine
 
 _lock = threading.Lock()
-_conn = None
+_engine: Engine | None = None
 
-def get_conn():
-    global _conn
-    if _conn is None:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        init_schema(_conn)
-    return _conn
 
-def init_schema(c):
-    c.executescript("""
-    CREATE TABLE IF NOT EXISTS klines(
-        symbol TEXT, tf TEXT, open_time INTEGER,
-        open REAL, high REAL, low REAL, close REAL, volume REAL,
-        PRIMARY KEY(symbol, tf, open_time));
-    CREATE TABLE IF NOT EXISTS ticker(
-        symbol TEXT PRIMARY KEY, price REAL, pct_24h REAL,
-        quote_volume REAL, ts INTEGER);
-    CREATE TABLE IF NOT EXISTS positions(
-        symbol TEXT PRIMARY KEY, amt REAL, side TEXT, entry_price REAL,
-        mark_price REAL, upnl REAL, leverage INTEGER, ts INTEGER);
-    CREATE TABLE IF NOT EXISTS scores(
-        symbol TEXT, tf TEXT, open_time INTEGER, score REAL,
-        detail TEXT, PRIMARY KEY(symbol, tf, open_time));
-    CREATE TABLE IF NOT EXISTS alerts(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts INTEGER, symbol TEXT, kind TEXT, direction TEXT,
-        score REAL, message TEXT, detail TEXT, read INTEGER DEFAULT 0);
-    CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts DESC);
-    CREATE TABLE IF NOT EXISTS news(
-        id TEXT PRIMARY KEY, ts INTEGER, source TEXT, lang TEXT,
-        title TEXT, title_zh TEXT, link TEXT, sentiment TEXT, summary TEXT);
-    CREATE INDEX IF NOT EXISTS idx_news_ts ON news(ts DESC);
-    CREATE TABLE IF NOT EXISTS social(
-        symbol TEXT PRIMARY KEY, st_bull INTEGER, st_bear INTEGER, st_msgs INTEGER,
-        ape_mentions INTEGER, ape_upvotes INTEGER, ape_rank INTEGER, ape_rank_24h INTEGER, ts INTEGER);
-    CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
-    """)
+class Transaction:
+    """Small placeholder-aware wrapper around one SQLAlchemy transaction."""
 
-def execute(sql, params=()):
-    with _lock:
-        c = get_conn()
-        cur = c.execute(sql, params)
-        c.commit()
-        return cur
+    def __init__(self, connection: Connection):
+        self.connection = connection
 
-def executemany(sql, seq):
-    with _lock:
-        c = get_conn()
-        c.executemany(sql, seq)
-        c.commit()
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> int:
+        statement, values = _driver_sql(sql, params)
+        return self.connection.exec_driver_sql(statement, values).rowcount
 
-def query(sql, params=()):
-    with _lock:
-        return get_conn().execute(sql, params).fetchall()
+    def query(self, sql: str, params: Sequence[Any] = ()) -> list[Mapping[str, Any]]:
+        statement, values = _driver_sql(sql, params)
+        result = self.connection.exec_driver_sql(statement, values)
+        return list(result.mappings().all())
 
-def kv_get(k, default=None):
-    rows = query("SELECT v FROM kv WHERE k=?", (k,))
+
+def configure_engine(engine: Engine) -> None:
+    """Use the application's shared MySQL engine for all legacy modules."""
+    if engine.dialect.name not in {"mysql", "mariadb"}:
+        raise RuntimeError("QuantDesk storage requires MySQL")
+    global _engine
+    _engine = engine
+
+
+def get_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        from quantdesk_v2.database import engine as application_engine
+
+        configure_engine(application_engine)
+    if _engine is None:
+        raise RuntimeError("MySQL engine is not configured")
+    return _engine
+
+
+def _driver_sql(sql: str, params: Sequence[Any]) -> tuple[str, tuple[Any, ...]]:
+    if sql.count("?") != len(params):
+        raise ValueError("SQL placeholder count does not match parameter count")
+    return sql.replace("?", "%s"), tuple(params)
+
+
+def execute(sql: str, params: Sequence[Any] = ()) -> int:
+    statement, values = _driver_sql(sql, params)
+    with _lock, get_engine().begin() as connection:
+        result = connection.exec_driver_sql(statement, values)
+        return result.rowcount
+
+
+def executemany(sql: str, seq: Iterable[Sequence[Any]]) -> int:
+    rows = [tuple(row) for row in seq]
+    if not rows:
+        return 0
+    statement, _ = _driver_sql(sql, rows[0])
+    if any(len(row) != len(rows[0]) for row in rows):
+        raise ValueError("bulk SQL parameter rows must have equal lengths")
+    with _lock, get_engine().begin() as connection:
+        result = connection.exec_driver_sql(statement, rows)
+        return result.rowcount
+
+
+def query(sql: str, params: Sequence[Any] = ()) -> list[Mapping[str, Any]]:
+    statement, values = _driver_sql(sql, params)
+    with get_engine().connect() as connection:
+        result = connection.exec_driver_sql(statement, values)
+        return list(result.mappings().all())
+
+
+@contextmanager
+def transaction() -> Generator[Transaction, None, None]:
+    """Run related writes atomically on one connection."""
+
+    with _lock, get_engine().begin() as connection:
+        yield Transaction(connection)
+
+
+@contextmanager
+def advisory_lock(name: str, timeout_seconds: int = 0) -> Generator[bool, None, None]:
+    """Hold a MySQL named lock for the lifetime of the yielded context."""
+
+    if not name or len(name) > 64:
+        raise ValueError("advisory lock name must contain 1 to 64 characters")
+    connection = get_engine().connect()
+    acquired = False
+    try:
+        value = connection.exec_driver_sql(
+            "SELECT GET_LOCK(%s, %s)", (name, int(timeout_seconds))
+        ).scalar_one()
+        acquired = value == 1
+        yield acquired
+    finally:
+        if acquired:
+            connection.exec_driver_sql("SELECT RELEASE_LOCK(%s)", (name,))
+        connection.close()
+
+
+def system_state_get(key: str, default: Any = None) -> Any:
+    rows = query("SELECT v FROM system_state WHERE k=?", (key,))
     return json.loads(rows[0]["v"]) if rows else default
 
-def kv_set(k, v):
-    execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", (k, json.dumps(v, ensure_ascii=False)))
 
-def upsert_klines(symbol, tf, rows):
-    """rows: list of (open_time, o, h, l, c, v)"""
+def system_state_set(key: str, value: Any) -> None:
+    execute(
+        "REPLACE INTO system_state(k,v) VALUES(?,?)",
+        (key, json.dumps(value, ensure_ascii=False)),
+    )
+
+
+def user_state_get(user_id: int, key: str, default: Any = None) -> Any:
+    rows = query("SELECT v FROM user_states WHERE user_id=? AND k=?", (user_id, key))
+    return json.loads(rows[0]["v"]) if rows else default
+
+
+def user_state_set(user_id: int, key: str, value: Any) -> None:
+    execute(
+        "REPLACE INTO user_states(user_id,k,v,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP)",
+        (user_id, key, json.dumps(value, ensure_ascii=False)),
+    )
+
+
+def upsert_klines(symbol: str, timeframe: str, rows: Iterable[Sequence[Any]]) -> None:
     executemany(
-        "INSERT OR REPLACE INTO klines(symbol,tf,open_time,open,high,low,close,volume) VALUES(?,?,?,?,?,?,?,?)",
-        [(symbol, tf, r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows])
+        "REPLACE INTO klines(symbol,tf,open_time,open,high,low,close,volume) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        [
+            (symbol, timeframe, row[0], row[1], row[2], row[3], row[4], row[5])
+            for row in rows
+        ],
+    )
 
-def get_klines(symbol, tf, limit=300):
+
+def get_klines(symbol: str, timeframe: str, limit: int = 300) -> list[dict[str, Any]]:
     rows = query(
-        "SELECT open_time,open,high,low,close,volume FROM klines WHERE symbol=? AND tf=? ORDER BY open_time DESC LIMIT ?",
-        (symbol, tf, limit))
-    return [dict(r) for r in reversed(rows)]
+        "SELECT open_time,open,high,low,close,volume FROM klines "
+        "WHERE symbol=? AND tf=? ORDER BY open_time DESC LIMIT ?",
+        (symbol, timeframe, limit),
+    )
+    return [dict(row) for row in reversed(rows)]
 
-def latest_closed_time(symbol, tf):
-    rows = query("SELECT MAX(open_time) AS m FROM klines WHERE symbol=? AND tf=?", (symbol, tf))
-    return rows[0]["m"] if rows and rows[0]["m"] else 0
 
-def add_alert(symbol, kind, direction, score, message, detail=None):
-    execute("INSERT INTO alerts(ts,symbol,kind,direction,score,message,detail) VALUES(?,?,?,?,?,?,?)",
-            (int(time.time()), symbol, kind, direction, score, message,
-             json.dumps(detail, ensure_ascii=False) if detail else None))
+def latest_closed_time(symbol: str, timeframe: str) -> int:
+    rows = query(
+        "SELECT MAX(open_time) AS m FROM klines WHERE symbol=? AND tf=?",
+        (symbol, timeframe),
+    )
+    return int(rows[0]["m"]) if rows and rows[0]["m"] else 0
+
+
+def add_alert(
+    symbol: str,
+    kind: str,
+    direction: str,
+    score: float | None,
+    message: str,
+    detail: Any = None,
+    user_id: int | None = None,
+) -> None:
+    values = (
+        int(time.time()),
+        symbol,
+        kind,
+        direction,
+        score,
+        message,
+        json.dumps(detail, ensure_ascii=False) if detail else None,
+    )
+    if user_id is not None:
+        execute(
+            "INSERT INTO alerts(user_id,ts,symbol,kind,direction,score,message,detail) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (user_id, *values),
+        )
+        return
+    execute(
+        "INSERT INTO alerts(user_id,ts,symbol,kind,direction,score,message,detail) "
+        "SELECT id,?,?,?,?,?,?,? FROM users WHERE is_active=1",
+        values,
+    )

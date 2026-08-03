@@ -1,26 +1,19 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+
 echo ==========================================
-echo  QuantDesk - 币安 TradFi 量化工作台
+echo  QuantDesk V2 - MySQL
 echo ==========================================
 
-if exist "QuantDesk.exe" (
-    echo 启动 QuantDesk.exe ...
-    :restart_exe
-    "QuantDesk.exe"
-    echo.
-    echo [警告] 程序意外退出，10 秒后自动重启...
-    timeout /t 10 /nobreak >nul
-    goto restart_exe
-)
+set "PYTHON_BIN=python"
+if exist ".venv\Scripts\python.exe" set "PYTHON_BIN=.venv\Scripts\python.exe"
+set "PYTHONPATH=%CD%\src"
 
-echo 未找到 QuantDesk.exe，尝试源码运行...
-set "PY=python"
-if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
-:restart_py
-"%PY%" "src\run.py"
+:restart
+echo Starting QuantDesk V2 on port 8200...
+"%PYTHON_BIN%" -m quantdesk_v2.cli serve
 echo.
-echo [警告] 程序意外退出，10 秒后自动重启...
+echo [Warning] Service exited unexpectedly. Restarting in 10 seconds...
 timeout /t 10 /nobreak >nul
-goto restart_py
+goto restart

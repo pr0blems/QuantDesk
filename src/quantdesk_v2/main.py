@@ -12,6 +12,21 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import __version__
 from .api import router
 from .config import Settings, get_settings
+from .database import build_engine, engine
+from .strategy_routes import router as strategy_router
+
+FRONTEND_ROUTES = (
+    "/login",
+    "/monitor",
+    "/paper",
+    "/overview",
+    "/credentials",
+    "/strategies",
+    "/backtest",
+    "/orders",
+    "/risk",
+    "/audit",
+)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -37,10 +52,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     runtime_settings = settings or get_settings()
+    database_engine = build_engine(runtime_settings) if settings is not None else engine
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         runtime_settings.validate_runtime()
+        if settings is None:
+            # The production ASGI app owns the market collectors and the
+            # multi-account paper executor. Explicitly constructed apps are
+            # used by tests/tools and must not start perpetual worker threads.
+            from quantdesk import engine as market_engine
+            from quantdesk import store as legacy_store
+
+            legacy_store.configure_engine(database_engine)
+            market_engine.start()
         yield
 
     app = FastAPI(
@@ -51,6 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = runtime_settings
+    app.state.database_engine = database_engine
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=runtime_settings.allowed_hosts,
@@ -59,7 +85,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=runtime_settings.allowed_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
     )
     app.add_middleware(
@@ -67,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_request_bytes=runtime_settings.max_request_bytes,
     )
     app.include_router(router)
+    app.include_router(strategy_router)
 
     if runtime_settings.static_dir.is_dir():
         app.mount(
@@ -75,9 +102,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name="assets",
         )
 
-        @app.get("/", include_in_schema=False)
         def index() -> FileResponse:
             return FileResponse(runtime_settings.static_dir / "index.html")
+
+        app.add_api_route(
+            "/",
+            index,
+            methods=["GET"],
+            include_in_schema=False,
+            name="frontend_index",
+        )
+        for frontend_route in FRONTEND_ROUTES:
+            app.add_api_route(
+                frontend_route,
+                index,
+                methods=["GET"],
+                include_in_schema=False,
+                name=f"frontend_{frontend_route.removeprefix('/')}",
+            )
 
     return app
 
