@@ -1,0 +1,197 @@
+{
+  "timeframes": [
+    "15m",
+    "1h",
+    "4h"
+  ],
+  "timeframe_weights": {
+    "15m": 0.3,
+    "1h": 0.4,
+    "4h": 0.3
+  },
+  "kline_limit": 300,
+  "ticker_poll_seconds": 5,
+  "positions_poll_seconds": 30,
+  "news_poll_seconds": 5,
+  "news_batch_per_tick": 3,
+  "score_alert_long": 60,
+  "score_alert_short": -60,
+  "score_alert_position": 40,
+  "spike_alert_pct_5m": 2.0,
+  "http_port": 8100,
+  "notify": {
+    "browser": true,
+    "sound": true,
+    "windows_toast": true
+  },
+  "news_sources": [
+    {
+      "name": "CoinDesk",
+      "lang": "en",
+      "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    },
+    {
+      "name": "Cointelegraph",
+      "lang": "en",
+      "url": "https://cointelegraph.com/rss"
+    },
+    {
+      "name": "TheBlock",
+      "lang": "en",
+      "url": "https://www.theblock.co/rss.xml"
+    },
+    {
+      "name": "BitcoinMagazine",
+      "lang": "en",
+      "url": "https://bitcoinmagazine.com/.rss/full/"
+    },
+    {
+      "name": "Decrypt",
+      "lang": "en",
+      "url": "https://decrypt.co/feed"
+    },
+    {
+      "name": "Blockworks",
+      "lang": "en",
+      "url": "https://blockworks.co/feed"
+    },
+    {
+      "name": "TheDefiant",
+      "lang": "en",
+      "url": "https://thedefiant.io/feed"
+    },
+    {
+      "name": "NewsBTC",
+      "lang": "en",
+      "url": "https://www.newsbtc.com/feed/"
+    },
+    {
+      "name": "UToday",
+      "lang": "en",
+      "url": "https://u.today/rss"
+    },
+    {
+      "name": "DailyHodl",
+      "lang": "en",
+      "url": "https://dailyhodl.com/feed/"
+    },
+    {
+      "name": "CNBC头条",
+      "lang": "en",
+      "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+    },
+    {
+      "name": "CNBC美股",
+      "lang": "en",
+      "url": "https://www.cnbc.com/id/15839069/device/rss/rss.html"
+    },
+    {
+      "name": "MarketWatch",
+      "lang": "en",
+      "url": "https://feeds.marketwatch.com/marketwatch/topstories/"
+    },
+    {
+      "name": "Yahoo财经",
+      "lang": "en",
+      "url": "https://finance.yahoo.com/news/rssindex"
+    },
+    {
+      "name": "FT",
+      "lang": "en",
+      "url": "https://www.ft.com/rss/home"
+    },
+    {
+      "name": "CryptoPotato",
+      "lang": "en",
+      "url": "https://cryptopotato.com/feed",
+      "slow": true
+    },
+    {
+      "name": "Bitcoinist",
+      "lang": "en",
+      "url": "https://bitcoinist.com/feed/"
+    },
+    {
+      "name": "CryptoNews",
+      "lang": "en",
+      "url": "https://cryptonews.com/feed/"
+    },
+    {
+      "name": "BeInCrypto",
+      "lang": "en",
+      "url": "https://beincrypto.com/feed/"
+    },
+    {
+      "name": "CryptoNews2",
+      "lang": "en",
+      "url": "https://crypto.news/feed/"
+    },
+    {
+      "name": "AMBCrypto",
+      "lang": "en",
+      "url": "https://ambcrypto.com/feed/"
+    },
+    {
+      "name": "CryptoBriefing",
+      "lang": "en",
+      "url": "https://cryptobriefing.com/feed/"
+    },
+    {
+      "name": "CoinJournal",
+      "lang": "en",
+      "url": "https://coinjournal.net/feed/"
+    },
+    {
+      "name": "CoinGape",
+      "lang": "en",
+      "url": "https://coingape.com/feed/"
+    },
+    {
+      "name": "Benzinga",
+      "lang": "en",
+      "url": "https://www.benzinga.com/feed"
+    },
+    {
+      "name": "Investing",
+      "lang": "en",
+      "url": "https://www.investing.com/rss/news.rss"
+    },
+    {
+      "name": "ForexLive",
+      "lang": "en",
+      "url": "https://www.forexlive.com/feed/"
+    },
+    {
+      "name": "FXStreet",
+      "lang": "en",
+      "url": "https://www.fxstreet.com/rss/news"
+    },
+    {
+      "name": "MarketBeat",
+      "lang": "en",
+      "url": "https://www.marketbeat.com/rss.ashx"
+    },
+    {
+      "name": "OilPrice",
+      "lang": "en",
+      "url": "https://oilprice.com/rss/main"
+    },
+    {
+      "name": "ZeroHedge",
+      "lang": "en",
+      "url": "https://feeds.feedburner.com/zerohedge/feed"
+    }
+  ],
+  "translate_engine": "mymemory",
+  "watchlist": [
+    "NVDAUSDT",
+    "TSLAUSDT",
+    "AAPLUSDT",
+    "QQQUSDT",
+    "TQQQUSDT",
+    "SOXLUSDT",
+    "XAUUSDT"
+  ],
+  "ticker_rest_seconds": 60,
+  "price_poll_seconds": 2
+}

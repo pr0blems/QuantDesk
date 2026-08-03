@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07101d">
+  <title>QuantDesk V2 · 多用户量化交易平台</title>
+  <link rel="manifest" href="/assets/manifest.json">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <section id="login-page" class="login-page">
+    <div class="login-visual">
+      <div class="brand-mark"><span>Q</span> QuantDesk</div>
+      <div class="login-copy">
+        <span class="eyebrow">BINANCE STOCKS API</span>
+        <h1>让每个交易账户，<br>都有清晰的边界。</h1>
+        <p>面向多用户的股票量化交易控制台。账户、策略、订单与风险数据相互隔离，实盘交易默认关闭。</p>
+      </div>
+      <div class="trust-row">
+        <span><i></i>密钥加密存储</span>
+        <span><i></i>多用户数据隔离</span>
+        <span><i></i>全链路操作审计</span>
+      </div>
+    </div>
+
+    <div class="login-panel">
+      <article class="auth-card">
+        <div class="mobile-brand"><span>Q</span> QuantDesk</div>
+        <div class="auth-heading">
+          <span class="eyebrow">欢迎回来</span>
+          <h2>登录交易工作台</h2>
+          <p>使用您的平台账户继续</p>
+        </div>
+        <div class="tabs" role="tablist" aria-label="账户操作">
+          <button id="tab-login" class="active" type="button" role="tab" aria-selected="true">登录</button>
+          <button id="tab-register" type="button" role="tab" aria-selected="false">注册</button>
+        </div>
+        <form id="login-form">
+          <label>用户名<input name="username" autocomplete="username" placeholder="请输入用户名" required></label>
+          <label>密码<input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
+          <button class="primary wide" type="submit">登录</button>
+        </form>
+        <form id="register-form" class="hidden">
+          <label>用户名<input name="username" minlength="3" autocomplete="username" placeholder="3–64 位字符" required></label>
+          <label>邮箱（可选）<input name="email" type="email" autocomplete="email" placeholder="name@example.com"></label>
+          <label>密码<input name="password" type="password" minlength="12" autocomplete="new-password" placeholder="至少 12 位" required></label>
+          <button class="primary wide" type="submit">创建账户</button>
+        </form>
+        <p id="auth-message" class="message" aria-live="polite"></p>
+        <p class="security-note">登录即表示您了解：实盘执行需要单独启用并通过风控检查。</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="app-shell" class="app-shell hidden">
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+    <aside id="sidebar" class="sidebar" aria-label="主导航">
+      <div class="sidebar-brand"><span>Q</span><div><strong>QuantDesk</strong><small>V2 · STOCKS</small></div></div>
+      <nav class="side-nav">
+        <p>交易工作区</p>
+        <button class="nav-item active" type="button" data-panel-target="overview" aria-current="page"><span>概</span>工作台</button>
+        <button class="nav-item" type="button" data-panel-target="credentials"><span>钥</span>API 凭据</button>
+        <button class="nav-item" type="button" data-panel-target="strategies"><span>策</span>策略中心<i>规划中</i></button>
+        <button class="nav-item" type="button" data-panel-target="orders"><span>单</span>订单与持仓<i>规划中</i></button>
+        <p>安全与管理</p>
+        <button class="nav-item" type="button" data-panel-target="risk"><span>风</span>风险控制<i>规划中</i></button>
+        <button class="nav-item" type="button" data-panel-target="audit"><span>审</span>审计日志<i>规划中</i></button>
+      </nav>
+      <div class="sidebar-account">
+        <div class="avatar" id="user-avatar">--</div>
+        <div><strong id="sidebar-username">--</strong><small>当前账户</small></div>
+        <button id="logout" type="button" title="退出登录" aria-label="退出登录">退出</button>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="mobile-bar">
+        <button id="menu-toggle" class="menu-toggle" type="button" aria-label="打开功能菜单" aria-expanded="false">菜单</button>
+        <strong id="mobile-title">工作台</strong>
+        <span class="status-dot" title="服务状态"></span>
+      </header>
+
+      <main class="workspace-content">
+        <section class="workspace-panel" data-panel="overview">
+          <div class="page-heading">
+            <div><span class="eyebrow">CONTROL CENTER</span><h1>交易工作台</h1><p>账户状态、系统连接与关键操作概览</p></div>
+            <span class="live-lock"><i></i>实盘默认关闭</span>
+          </div>
+
+          <div class="summary-grid">
+            <article class="metric-card"><span>当前用户</span><strong id="username">--</strong><small>多用户隔离已启用</small></article>
+            <article class="metric-card"><span>数据库连接</span><strong id="db-status">检查中</strong><small>业务事实数据源</small></article>
+            <article class="metric-card"><span>Binance 凭据</span><strong data-credential-status>尚未配置</strong><small>只显示状态，不回显密钥</small></article>
+          </div>
+
+          <div class="content-grid">
+            <article class="card welcome-card">
+              <span class="eyebrow">下一步</span>
+              <h2>完成账户连接</h2>
+              <p>配置仅包含读取和交易权限的 Binance API 凭据，之后才能进入策略验证和模拟交易阶段。</p>
+              <button class="secondary" type="button" data-open-panel="credentials">配置 API 凭据</button>
+            </article>
+            <article class="card readiness-card">
+              <div class="card-title"><div><span class="eyebrow">上线门禁</span><h2>系统就绪度</h2></div><strong>1 / 4</strong></div>
+              <ol class="check-list">
+                <li class="done"><span>1</span>用户与权限基础</li>
+                <li><span>2</span>Binance 账户连接</li>
+                <li><span>3</span>策略与风险参数</li>
+                <li><span>4</span>Paper / Shadow 验证</li>
+              </ol>
+            </article>
+          </div>
+        </section>
+
+        <section class="workspace-panel hidden" data-panel="credentials">
+          <div class="page-heading">
+            <div><span class="eyebrow">ACCOUNT SECURITY</span><h1>API 凭据</h1><p>管理当前用户独立的 Binance API 连接</p></div>
+          </div>
+          <article class="card credentials-card">
+            <div class="credential-copy">
+              <span class="section-number">01</span>
+              <h2>Binance API Key</h2>
+              <p>凭据将加密后保存至当前用户记录，保存后不会再次回显。请关闭提现权限，并绑定生产服务器出口 IP。</p>
+              <div class="credential-state"><span>当前状态</span><strong data-credential-status>尚未配置</strong></div>
+            </div>
+            <form id="credential-form">
+              <label>API Key<input name="api_key" type="password" autocomplete="off" minlength="16" placeholder="输入 Binance API Key" required></label>
+              <label>API Secret<input name="api_secret" type="password" autocomplete="off" minlength="16" placeholder="输入 Binance API Secret" required></label>
+              <div class="permission-box"><span>申请权限</span><strong>READ · TRADE</strong><small>系统不接受 WITHDRAW 权限</small></div>
+              <div class="button-row">
+                <button class="primary" type="submit">加密保存</button>
+                <button id="delete-credentials" class="danger" type="button">删除凭据</button>
+              </div>
+            </form>
+          </article>
+          <p id="dashboard-message" class="message" aria-live="polite"></p>
+        </section>
+
+        <section class="workspace-panel hidden" data-panel="strategies">
+          <div class="page-heading"><div><span class="eyebrow">STRATEGY CENTER</span><h1>策略中心</h1><p>策略版本、参数与部署状态</p></div></div>
+          <article class="card empty-state"><span>策</span><h2>策略中心正在建设</h2><p>下一阶段将加入策略版本管理、回测结果、部署审批及 Paper / Shadow 运行模式。</p></article>
+        </section>
+
+        <section class="workspace-panel hidden" data-panel="orders">
+          <div class="page-heading"><div><span class="eyebrow">EXECUTION</span><h1>订单与持仓</h1><p>订单生命周期、成交与账户持仓</p></div></div>
+          <article class="card empty-state"><span>单</span><h2>订单执行模块尚未启用</h2><p>实盘执行保持关闭。后续将实现订单状态机、成交回报、持仓对账和幂等下单。</p></article>
+        </section>
+
+        <section class="workspace-panel hidden" data-panel="risk">
+          <div class="page-heading"><div><span class="eyebrow">RISK CONTROL</span><h1>风险控制</h1><p>用户、策略和标的三级风险边界</p></div></div>
+          <article class="card empty-state"><span>风</span><h2>风控规则正在规划</h2><p>将覆盖仓位上限、每日亏损、最大回撤、行情过期和全局 Kill Switch。</p></article>
+        </section>
+
+        <section class="workspace-panel hidden" data-panel="audit">
+          <div class="page-heading"><div><span class="eyebrow">AUDIT TRAIL</span><h1>审计日志</h1><p>敏感操作和安全事件追踪</p></div></div>
+          <article class="card empty-state"><span>审</span><h2>审计查询界面正在建设</h2><p>注册、登录及凭据变更已经在服务端记录，后续将提供分级查询和导出功能。</p></article>
+        </section>
+      </main>
+    </div>
+  </section>
+
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
