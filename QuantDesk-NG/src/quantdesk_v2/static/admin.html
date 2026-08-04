@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>QuantDesk 管理中心</title>
+  <link rel="stylesheet" href="/assets/admin.css?v=20260804-3">
+</head>
+<body>
+  <main id="admin-boot" class="boot-screen" aria-live="polite">
+    <div class="boot-mark">QD</div>
+    <p>正在验证管理权限…</p>
+  </main>
+
+  <main id="admin-login" class="login-screen hidden">
+    <section class="login-copy">
+      <a class="brand" href="/admin" aria-label="QuantDesk 管理中心">
+        <span class="brand-mark">QD</span>
+        <span><strong>QuantDesk</strong><small>ADMIN OPERATIONS</small></span>
+      </a>
+      <div>
+        <p class="eyebrow">独立管理控制面</p>
+        <h1>让每一条信号<br>都有迹可循。</h1>
+        <p class="login-lead">管理采集链路、提醒规则、舆情来源、合约数据、账号权限与数据生命周期。</p>
+      </div>
+      <p class="security-note">管理端与用户行情终端完全分离。所有敏感操作均写入审计日志。</p>
+    </section>
+    <section class="login-panel">
+      <form id="admin-login-form" class="login-card">
+        <div>
+          <span class="login-index">ADMIN / 01</span>
+          <h2>管理员登录</h2>
+          <p>仅允许已授予管理员角色的账号进入。</p>
+        </div>
+        <label>账号<input name="username" autocomplete="username" maxlength="64" required></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <p id="admin-login-error" class="form-error hidden" role="alert"></p>
+        <button class="primary wide" type="submit">验证并进入</button>
+      </form>
+    </section>
+  </main>
+
+  <main id="admin-shell" class="admin-shell hidden">
+    <aside class="sidebar">
+      <a class="brand sidebar-brand" href="/admin">
+        <span class="brand-mark">QD</span>
+        <span><strong>QuantDesk</strong><small>ADMIN OPERATIONS</small></span>
+      </a>
+      <nav aria-label="管理模块">
+        <p>运行控制</p>
+        <button class="nav-item active" data-view-target="overview"><span>01</span>运行总览</button>
+        <button class="nav-item" data-view-target="collectors"><span>02</span>采集器</button>
+        <p>内容与信号</p>
+        <button class="nav-item" data-view-target="alerts"><span>03</span>提醒事件</button>
+        <button class="nav-item" data-view-target="rules"><span>04</span>信号规则</button>
+        <button class="nav-item" data-view-target="sources"><span>05</span>舆情来源</button>
+        <button class="nav-item" data-view-target="symbols"><span>06</span>合约数据</button>
+        <p>平台治理</p>
+        <button class="nav-item" data-view-target="users"><span>07</span>用户权限</button>
+        <button class="nav-item" data-view-target="storage"><span>08</span>存储维护</button>
+        <button class="nav-item" data-view-target="audit"><span>09</span>审计日志</button>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="live-dot"></span><span>控制面在线</span>
+        <small id="sidebar-clock">--:--:--</small>
+      </div>
+    </aside>
+
+    <section class="main-area">
+      <header class="topbar">
+        <div>
+          <p id="view-kicker">OPERATIONS / 01</p>
+          <h1 id="view-title">运行总览</h1>
+        </div>
+        <div class="top-actions">
+          <span id="global-status" class="status-chip">准备就绪</span>
+          <button id="refresh-view" class="icon-button" type="button" aria-label="刷新当前页面">↻</button>
+          <div class="account-menu">
+            <span class="avatar" id="admin-avatar">A</span>
+            <span><strong id="admin-name">Administrator</strong><small>平台管理员</small></span>
+          </div>
+          <button id="admin-logout" class="text-button" type="button">退出</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section class="view" data-view="overview">
+          <div class="hero-row">
+            <div><p class="eyebrow">SYSTEM PULSE</p><h2>平台运行状态</h2><p>关键链路、数据新鲜度与最近 24 小时活动。</p></div>
+            <span id="overview-health" class="health-badge">检查中</span>
+          </div>
+          <div id="overview-metrics" class="metric-grid"></div>
+          <div class="split-grid">
+            <article class="panel"><div class="panel-head"><div><span>COLLECTOR STATUS</span><h3>采集链路</h3></div><button data-jump="collectors">查看全部</button></div><div id="overview-collectors" class="compact-list"></div></article>
+            <article class="panel"><div class="panel-head"><div><span>ACTIVITY / 24H</span><h3>信号与舆情分布</h3></div></div><div id="overview-activity" class="activity-grid"></div></article>
+          </div>
+        </section>
+
+        <section class="view hidden" data-view="collectors">
+          <div class="section-intro"><div><p class="eyebrow">INGESTION CONTROL</p><h2>采集器管理</h2><p>查看心跳、累计处理量、运行上下文与最近错误，并可逐项暂停或恢复。</p></div></div>
+          <article class="panel"><div class="table-wrap"><table><thead><tr><th>采集器</th><th>运行状态</th><th>心跳</th><th>累计周期</th><th>累计条目</th><th>运行详情</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="collectors-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view hidden" data-view="alerts">
+          <div class="section-intro"><div><p class="eyebrow">SIGNAL EVENTS</p><h2>提醒事件</h2><p>跨用户追踪评分、异动与持仓提醒，定位规则噪音和漏报。</p></div><span id="alerts-total" class="counter">0 条</span></div>
+          <form id="alerts-filter" class="filter-bar">
+            <label>合约<input name="symbol" placeholder="如 NVDAUSDT"></label>
+            <label>类型<select name="kind"><option value="">全部类型</option><option value="score">评分</option><option value="spike">异动</option><option value="position">持仓</option></select></label>
+            <label>方向<select name="direction"><option value="">全部方向</option><option value="long">偏多</option><option value="short">偏空</option></select></label>
+            <label>状态<select name="unread"><option value="">全部状态</option><option value="true">未读</option><option value="false">已读</option></select></label>
+            <button class="primary" type="submit">筛选</button>
+          </form>
+          <article class="panel"><div class="table-wrap"><table><thead><tr><th>发生时间</th><th>用户</th><th>合约</th><th>类型</th><th>方向</th><th>评分</th><th>提醒内容</th><th>状态</th></tr></thead><tbody id="alerts-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view hidden" data-view="rules">
+          <div class="section-intro"><div><p class="eyebrow">SIGNAL POLICY</p><h2>信号规则</h2><p>集中发布提醒阈值。新版本将在采集进程下一轮配置刷新时生效。</p></div><span id="rules-version" class="counter">VERSION 0</span></div>
+          <form id="rules-form" class="panel form-panel">
+            <div class="form-section"><div><span>01</span><h3>评分阈值</h3><p>控制多空信号与持仓相关提醒的触发强度。</p></div><div class="field-grid"><label>偏多阈值<input name="score_alert_long" type="number" min="40" max="100" required></label><label>偏空阈值<input name="score_alert_short" type="number" min="-100" max="-40" required></label><label>持仓阈值<input name="score_alert_position" type="number" min="20" max="100" required></label><label>5 分钟异动 (%)<input name="spike_alert_pct_5m" type="number" min="0.1" max="20" step="0.1" required></label></div></div>
+            <div class="form-section"><div><span>02</span><h3>提醒范围</h3><p>限制目标合约和参与计算的评分周期。</p></div><div class="toggle-stack"><label class="switch-row"><span><strong>仅提醒自选与持仓</strong><small>降低无关合约造成的提醒噪音</small></span><input name="watchlist_only" type="checkbox"></label><fieldset><legend>启用周期</legend><label><input name="tf" type="checkbox" value="15m">15 分钟</label><label><input name="tf" type="checkbox" value="1h">1 小时</label><label><input name="tf" type="checkbox" value="4h">4 小时</label></fieldset></div></div>
+            <div class="form-actions"><span id="rules-message">修改后需发布才会生效</span><button class="primary" type="submit">发布新版本</button></div>
+          </form>
+        </section>
+
+        <section class="view hidden" data-view="sources">
+          <div class="section-intro"><div><p class="eyebrow">INTELLIGENCE SOURCES</p><h2>舆情来源</h2><p>新增、编辑和维护 RSS 来源的地址、语言、启停、轮询策略、权重、限频与抓取健康。</p></div><div class="intro-actions"><span id="sources-total" class="counter">0 个来源</span><button id="source-create" class="primary" type="button">＋ 新增来源</button></div></div>
+          <form id="news-filter" class="filter-bar"><label>检索舆情<input name="query" placeholder="标题、摘要关键词"></label><label>情绪<select name="sentiment"><option value="">全部情绪</option><option value="positive">正面</option><option value="neutral">中性</option><option value="negative">负面</option></select></label><button class="primary" type="submit">检索</button></form>
+          <div class="source-layout"><article class="panel"><div class="table-wrap tall"><table><thead><tr><th>来源</th><th>状态</th><th>策略</th><th>抓取 / 入库</th><th>最近成功</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="sources-table"></tbody></table></div></article><article class="panel news-panel"><div class="panel-head"><div><span>LATEST INTELLIGENCE</span><h3>最新舆情流</h3></div><span id="news-total">0 条</span></div><div id="news-list" class="news-list"></div></article></div>
+        </section>
+
+        <section class="view hidden" data-view="symbols">
+          <div class="section-intro"><div><p class="eyebrow">MARKET DATA COVERAGE</p><h2>合约数据</h2><p>核对每个合约的行情新鲜度、多周期评分、K 线覆盖与社交数据。</p></div><span id="symbols-total" class="counter">0 个合约</span></div>
+          <form id="symbols-filter" class="filter-bar compact"><label>搜索合约<input name="query" placeholder="输入代码"></label><button class="primary" type="submit">搜索</button></form>
+          <article class="panel"><div class="table-wrap"><table><thead><tr><th>合约</th><th>类别</th><th>最新价格</th><th>24H</th><th>行情新鲜度</th><th>评分 15m / 1h / 4h</th><th>K 线覆盖</th><th>社交快照</th></tr></thead><tbody id="symbols-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view hidden" data-view="users">
+          <div class="section-intro"><div><p class="eyebrow">IDENTITY & ACCESS</p><h2>用户权限</h2><p>管理账号状态、管理员角色、活跃会话和 API 凭据配置状态。</p></div><span id="users-total" class="counter">0 个用户</span></div>
+          <form id="users-filter" class="filter-bar"><label>搜索用户<input name="query" placeholder="用户名或邮箱"></label><label>账号状态<select name="status"><option value="">全部用户</option><option value="active">已启用</option><option value="disabled">已停用</option><option value="admin">管理员</option></select></label><button class="primary" type="submit">筛选</button></form>
+          <article class="panel"><div class="table-wrap"><table><thead><tr><th>用户</th><th>状态 / 角色</th><th>最近登录</th><th>活跃会话</th><th>提醒 / 未读</th><th>Binance 凭据</th><th>操作</th></tr></thead><tbody id="users-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view hidden" data-view="storage">
+          <div class="section-intro"><div><p class="eyebrow">DATA LIFECYCLE</p><h2>存储维护</h2><p>查看核心表规模，并通过预览与二次确认执行历史数据清理。</p></div></div>
+          <div id="storage-cards" class="storage-grid"></div>
+          <form id="cleanup-form" class="panel cleanup-panel">
+            <div><span class="step-number">01</span><h3>设置保留周期</h3><p>清理只覆盖提醒、新闻和评分，不影响用户、订单与审计记录。</p></div>
+            <div class="field-grid"><label>提醒保留天数<input name="alerts_days" type="number" value="30" min="1" max="3650"></label><label>新闻保留天数<input name="news_days" type="number" value="90" min="1" max="3650"></label><label>评分保留天数<input name="scores_days" type="number" value="180" min="1" max="3650"></label></div>
+            <div id="cleanup-preview-result" class="preview-box">请先生成清理预览</div>
+            <div class="form-actions"><button id="cleanup-preview" type="button">生成预览</button><button id="cleanup-run" class="danger" type="button" disabled>确认执行清理</button></div>
+          </form>
+        </section>
+
+        <section class="view hidden" data-view="audit">
+          <div class="section-intro"><div><p class="eyebrow">SECURITY AUDIT</p><h2>审计日志</h2><p>检索敏感操作的执行人、来源地址、资源对象与变更元数据。</p></div><span id="audit-total" class="counter">0 条记录</span></div>
+          <form id="audit-filter" class="filter-bar"><label>动作<input name="action" placeholder="如 admin.user"></label><label>资源类型<input name="resource_type" placeholder="user / collector"></label><label>检索<input name="query" placeholder="用户、资源或 IP"></label><button class="primary" type="submit">筛选</button></form>
+          <article class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>资源</th><th>来源 IP</th><th>变更内容</th></tr></thead><tbody id="audit-table"></tbody></table></div></article>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <dialog id="source-dialog" class="editor-dialog">
+    <form id="source-form">
+      <div class="editor-head"><div><span>INTELLIGENCE SOURCE</span><h2 id="source-dialog-title">新增舆情来源</h2><p>来源名称创建后作为稳定标识，不支持直接改名。</p></div><button id="source-dialog-close" type="button" aria-label="关闭">×</button></div>
+      <input name="mode" type="hidden" value="create">
+      <div class="editor-fields">
+        <label>来源名称<input name="name" maxlength="80" placeholder="例如 ReutersMarkets" required></label>
+        <label>语言代码<input name="lang" maxlength="16" pattern="[A-Za-z0-9-]+" value="en" placeholder="en / zh-CN" required></label>
+        <label class="full">RSS 地址<input name="url" type="url" maxlength="2048" placeholder="https://example.com/feed.xml" required></label>
+        <label>展示权重<input name="weight" type="number" min="1" max="1000" value="100" required></label>
+        <label>每小时入库上限<input name="hourly_limit" type="number" min="1" max="10000" value="600" required></label>
+      </div>
+      <div class="editor-switches">
+        <label class="switch-row"><span><strong>启用来源</strong><small>启用后进入新闻采集任务</small></span><input name="enabled" type="checkbox" checked></label>
+        <label class="switch-row"><span><strong>慢速轮询</strong><small>降低访问频率，适合限流严格的站点</small></span><input name="slow" type="checkbox"></label>
+      </div>
+      <p id="source-form-error" class="form-error hidden" role="alert"></p>
+      <div class="editor-actions"><button id="source-delete" class="danger hidden" type="button">删除来源</button><span></span><button id="source-cancel" type="button">取消</button><button class="primary" type="submit">保存来源</button></div>
+    </form>
+  </dialog>
+  <dialog id="confirm-dialog"><form method="dialog"><span class="dialog-mark">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p><div><button value="cancel">取消</button><button id="confirm-accept" class="danger" value="confirm">确认执行</button></div></form></dialog>
+  <script src="/assets/admin.js?v=20260804-3" defer></script>
+</body>
+</html>
