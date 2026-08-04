@@ -28,7 +28,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-10">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-13">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -316,32 +316,47 @@ class ContractMonitor extends HTMLElement {
       const tags = `${item.watch ? "★" : ""}${item.trending ? "🔥" : ""}`;
       const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
       const moveMark = item.priceMove === "up" ? '<i class="price-move" aria-hidden="true">↑</i>' : item.priceMove === "down" ? '<i class="price-move" aria-hidden="true">↓</i>' : "";
-      const battle = item.battle?.["15m"] || item.battle?.["5m"];
-      const battleBlock = battle ? `<div class="battle-compact ${this.battleTone(battle.result, battle.state)}" title="启发式多空博弈估算，尚未校准为真实胜率">
-        <div><strong>${this.battleLabel(battle.result, battle.state)}</strong><em>15m · ${battle.confidence || "低"}置信</em></div>
-        <div class="battle-bar"><i class="long" style="width:${Number(battle.long) || 0}%"></i><i class="neutral" style="width:${Number(battle.neutral) || 0}%"></i><i class="short" style="width:${Number(battle.short) || 0}%"></i></div>
-        <div class="battle-values"><span>多 ${Number(battle.long).toFixed(0)}</span><span>中 ${Number(battle.neutral).toFixed(0)}</span><span>空 ${Number(battle.short).toFixed(0)}</span></div>
-      </div>` : '<div class="battle-compact pending"><div><strong>博弈数据采集中</strong><em>--</em></div></div>';
+      const longForce = Math.max(0, Number(item.green_flashes_30m) || 0);
+      const shortForce = Math.max(0, Number(item.red_flashes_30m) || 0);
+      const totalForce = longForce + shortForce;
+      const longForceWidth = totalForce ? longForce / totalForce * 100 : 0;
+      const shortForceWidth = totalForce ? 100 - longForceWidth : 0;
+      const forceNet = longForce - shortForce;
+      const forceTone = forceNet > 0 ? "long" : forceNet < 0 ? "short" : "neutral";
+      const forceLabel = forceNet > 0
+        ? `净多 +${forceNet}`
+        : forceNet < 0
+          ? `净空 -${Math.abs(forceNet)}`
+          : totalForce ? "多空均衡" : "暂无波动";
+      const battle = item.battle?.["15m"];
+      const battleReady = battle && battle.state !== "data_insufficient";
+      const battleTone = battleReady ? this.battleTone(battle.result, battle.state) : "pending";
+      const battleValue = battleReady
+        ? battle.result === "long"
+          ? `多${Number(battle.long).toFixed(0)}`
+          : battle.result === "short"
+            ? `空${Number(battle.short).toFixed(0)}`
+            : `中${Number(battle.neutral).toFixed(0)}`
+        : "待采集";
+      const battleConfidence = battleReady ? this.escape(battle.confidence || "低") : "--";
       return `<article class="contract-card ${alertClass} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
-        <div class="symbol">${this.escape(item.symbol.replace("USDT", ""))}<span class="tags">${tags}</span></div>
-        <div class="signal ${opportunity ? this.opportunityTone(direction) : this.signalTone(score)}">${opportunity ? `${this.opportunityLabel(direction)} ${Number(opportunity.quality_score).toFixed(0)}` : this.signalLabel(score)}</div>
-        <div class="price">${this.formatPrice(item.price)}${moveMark}</div>
-        <div class="pct ${pctClass}">${this.formatPercent(item.pct_24h)} ${score == null ? "" : `<span class="score ${this.signalTone(score)}">(${score > 0 ? "+" : ""}${score})</span>`}</div>
-        ${battleBlock}
-        <div class="flash-stats" title="最近 30 分钟价格方向高亮次数"><em>近 30 分钟</em><span class="green-flashes">多头力量 <b>${Number(item.green_flashes_30m) || 0}</b></span><span class="red-flashes">空头力量 <b>${Number(item.red_flashes_30m) || 0}</b></span></div>
-        <div class="scorebar"><i data-score="${score ?? ""}"></i></div>
+        <header class="band-card-head">
+          <div class="symbol">${this.escape(item.symbol.replace("USDT", ""))}<span class="tags">${tags}</span></div>
+          <div class="price">${this.formatPrice(item.price)}${moveMark}</div>
+          <div class="pct ${pctClass}">${this.formatPercent(item.pct_24h)}</div>
+        </header>
+        <div class="force-band ${forceTone}" title="最近 30 分钟价格方向高亮次数" aria-label="多头力量 ${longForce}，空头力量 ${shortForce}，${forceLabel}">
+          <svg class="force-bar" viewBox="0 0 100 9" preserveAspectRatio="none" aria-hidden="true"><rect class="long" x="0" y="0" width="${longForceWidth}" height="9"></rect><rect class="short" x="${longForceWidth}" y="0" width="${shortForceWidth}" height="9"></rect></svg>
+          <div class="force-labels"><span>多头 ${longForce}</span><strong>${forceLabel}</strong><span>空头 ${shortForce}</span></div>
+        </div>
+        <footer class="band-meta" title="15m 为启发式多空博弈估算，尚未校准为真实胜率">
+          <span><em>评分</em><b class="score ${this.signalTone(score)}">${score == null ? "--" : `${score > 0 ? "+" : ""}${score}`}</b></span>
+          <span><em>15m</em><b class="${battleTone}">${battleValue}</b></span>
+          <span><em>置信</em><b>${battleConfidence}</b></span>
+        </footer>
       </article>`;
     }).join("") || '<div class="empty">没有符合条件的合约</div>';
     this.qa(".contract-card").forEach((card) => card.addEventListener("click", () => this.openModal(card.dataset.symbol)));
-    this.qa(".scorebar i").forEach((bar) => {
-      const score = Number(bar.dataset.score);
-      if (!bar.dataset.score) return;
-      const width = Math.min(Math.abs(score), 100) / 2;
-      bar.style.width = `${width}%`;
-      bar.style.background = score >= 0 ? "#2ebd85" : "#f6465d";
-      if (score >= 0) bar.style.left = "50%";
-      else bar.style.right = "50%";
-    });
     items.forEach((item) => { item.priceMove = null; });
   }
 
@@ -564,7 +579,7 @@ class ContractMonitor extends HTMLElement {
       return `<article class="battle-horizon ${this.battleTone(battle.result, battle.state)}">
         <div class="battle-horizon-head"><strong>${horizon}</strong><b>${this.battleLabel(battle.result, battle.state)}</b><em>${battle.state === "heuristic" ? "启发式未校准" : "数据不足"}</em></div>
         <div class="battle-probabilities"><span class="long">多 ${Number(battle.long).toFixed(1)}%</span><span>震荡 ${Number(battle.neutral).toFixed(1)}%</span><span class="short">空 ${Number(battle.short).toFixed(1)}%</span></div>
-        <div class="battle-bar large"><i class="long" style="width:${Number(battle.long) || 0}%"></i><i class="neutral" style="width:${Number(battle.neutral) || 0}%"></i><i class="short" style="width:${Number(battle.short) || 0}%"></i></div>
+        <svg class="battle-bar large" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="long" x="0" y="0" width="${Number(battle.long) || 0}" height="6"></rect><rect class="neutral" x="${Number(battle.long) || 0}" y="0" width="${Number(battle.neutral) || 0}" height="6"></rect><rect class="short" x="${(Number(battle.long) || 0) + (Number(battle.neutral) || 0)}" y="0" width="${Number(battle.short) || 0}" height="6"></rect></svg>
         <div class="battle-meta"><span>置信度 ${this.escape(battle.confidence || "低")}</span><span>${this.escape(costText)}</span><span>${freshness}</span></div>
         <div class="battle-reasons">${reasons}</div>
       </article>`;
