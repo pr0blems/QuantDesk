@@ -1,114 +1,247 @@
-"""WebSocket 全市场行情推送（1 秒级）：纯 stdlib 实现
+"""Minimal stdlib WebSocket client for Binance's all-market mini ticker stream."""
 
-- 订阅 fstream !miniTicker@arr：每秒推送全部合约的最新价/24h开盘/最高最低/成交额
-- 支持系统 HTTP 代理（CONNECT 隧道），无代理直连
-- 断线指数退避重连；REST 轮询作为兜底同时运行
-"""
-import base64, json, os, socket, ssl, struct, time, urllib.request
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import socket
+import ssl
+import struct
+import time
+import urllib.parse
+import urllib.request
+from collections.abc import Callable
+from typing import Any
 
 WS_HOST = "fstream.binance.com"
 WS_PATH = "/ws/!miniTicker@arr"
+_WS_ALLOWED_HOSTS = frozenset({"fstream.binance.com"})
+_WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+_MAX_HEADER_BYTES = 64 * 1024
+_MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 
 
-def _connect():
+def _proxy_address() -> tuple[str, int] | None:
     proxies = urllib.request.getproxies()
     proxy = proxies.get("https") or proxies.get("http")
-    if proxy:
-        from urllib.parse import urlparse
-        pu = urlparse(proxy if "://" in proxy else "http://" + proxy)
-        sock = socket.create_connection((pu.hostname, pu.port or 8080), timeout=15)
-        sock.sendall(f"CONNECT {WS_HOST}:443 HTTP/1.1\r\nHost: {WS_HOST}:443\r\n\r\n".encode())
-        resp = b""
-        while b"\r\n\r\n" not in resp:
-            chunk = sock.recv(4096)
-            if not chunk:
-                raise RuntimeError("代理 CONNECT 中断")
-            resp += chunk
-        line = resp.split(b"\r\n")[0]
-        if b" 200" not in line:
-            raise RuntimeError("代理拒绝 CONNECT: " + line.decode(errors="ignore"))
-    else:
-        sock = socket.create_connection((WS_HOST, 443), timeout=15)
-    ctx = ssl.create_default_context()
-    ssock = ctx.wrap_socket(sock, server_hostname=WS_HOST)
-    key = base64.b64encode(os.urandom(16)).decode()
-    req = (f"GET {WS_PATH} HTTP/1.1\r\nHost: {WS_HOST}\r\nUpgrade: websocket\r\n"
-           f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
-    ssock.sendall(req.encode())
-    resp = b""
-    while b"\r\n\r\n" not in resp:
-        chunk = ssock.recv(4096)
+    if not proxy:
+        return None
+    parsed = urllib.parse.urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("system proxy contains an invalid port") from exc
+    if (
+        parsed.scheme.lower() != "http"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("system proxy must be a plain HTTP CONNECT endpoint")
+    return parsed.hostname, port or 8080
+
+
+def _read_http_headers(sock: socket.socket) -> bytes:
+    response = bytearray()
+    while b"\r\n\r\n" not in response:
+        chunk = sock.recv(4_096)
         if not chunk:
-            raise RuntimeError("WS 握手中断")
-        resp += chunk
-    line = resp.split(b"\r\n")[0]
-    if b"101" not in line:
-        raise RuntimeError("WS 握手被拒: " + line.decode(errors="ignore"))
-    return ssock
+            raise ConnectionError("HTTP handshake ended before headers completed")
+        response.extend(chunk)
+        if len(response) > _MAX_HEADER_BYTES:
+            raise ConnectionError("HTTP handshake headers exceed the safety limit")
+    return bytes(response)
 
 
-def _recv_exact(sock, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
+def _status_code(response: bytes) -> int:
+    status_line = response.split(b"\r\n", maxsplit=1)[0]
+    parts = status_line.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        raise ConnectionError("HTTP handshake returned an invalid status line")
+    return int(parts[1])
+
+
+def _response_headers(response: bytes) -> dict[str, str]:
+    output = {}
+    for line in response.split(b"\r\n")[1:]:
+        if not line:
+            break
+        name, separator, value = line.partition(b":")
+        if not separator:
+            raise ConnectionError("WebSocket handshake returned a malformed header")
+        output[name.decode("ascii", errors="strict").lower()] = value.decode(
+            "ascii", errors="strict"
+        ).strip()
+    return output
+
+
+def _connect() -> ssl.SSLSocket:
+    if WS_HOST not in _WS_ALLOWED_HOSTS or not WS_PATH.startswith("/"):
+        raise RuntimeError("WebSocket target is outside the Binance allowlist")
+
+    proxy = _proxy_address()
+    raw_socket = socket.create_connection(proxy or (WS_HOST, 443), timeout=15)
+    active_socket: socket.socket = raw_socket
+    try:
+        if proxy:
+            connect_request = (
+                f"CONNECT {WS_HOST}:443 HTTP/1.1\r\n"
+                f"Host: {WS_HOST}:443\r\n"
+                "Proxy-Connection: Keep-Alive\r\n\r\n"
+            )
+            active_socket.sendall(connect_request.encode("ascii"))
+            proxy_response = _read_http_headers(active_socket)
+            if _status_code(proxy_response) != 200:
+                raise ConnectionError("proxy rejected the Binance CONNECT tunnel")
+
+        context = ssl.create_default_context()
+        secure_socket = context.wrap_socket(active_socket, server_hostname=WS_HOST)
+        active_socket = secure_socket
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            f"GET {WS_PATH} HTTP/1.1\r\n"
+            f"Host: {WS_HOST}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        secure_socket.sendall(request.encode("ascii"))
+        response = _read_http_headers(secure_socket)
+        if _status_code(response) != 101:
+            raise ConnectionError("Binance rejected the WebSocket handshake")
+        headers = _response_headers(response)
+        expected_accept = base64.b64encode(
+            hashlib.sha1(  # noqa: S324 - SHA-1 is mandated by RFC 6455, not used for security
+                f"{key}{_WEBSOCKET_GUID}".encode("ascii"),
+                usedforsecurity=False,
+            ).digest()
+        ).decode("ascii")
+        if (
+            headers.get("upgrade", "").lower() != "websocket"
+            or "upgrade" not in headers.get("connection", "").lower()
+            or headers.get("sec-websocket-accept") != expected_accept
+        ):
+            raise ConnectionError("Binance WebSocket handshake validation failed")
+        return secure_socket
+    except BaseException:
+        active_socket.close()
+        raise
+
+
+def _recv_exact(sock: socket.socket, length: int) -> bytes:
+    buffer = bytearray()
+    while len(buffer) < length:
+        chunk = sock.recv(length - len(buffer))
         if not chunk:
-            raise ConnectionError("连接断开")
-        buf += chunk
-    return buf
+            raise ConnectionError("WebSocket connection closed")
+        buffer.extend(chunk)
+    return bytes(buffer)
 
 
-def _read_frame(sock):
-    hdr = _recv_exact(sock, 2)
-    fin = hdr[0] & 0x80
-    op = hdr[0] & 0x0F
-    ln = hdr[1] & 0x7F
-    if ln == 126:
-        ln = struct.unpack(">H", _recv_exact(sock, 2))[0]
-    elif ln == 127:
-        ln = struct.unpack(">Q", _recv_exact(sock, 8))[0]
-    payload = _recv_exact(sock, ln) if ln else b""
-    return fin, op, payload
+def _read_frame(sock: socket.socket) -> tuple[bool, int, bytes]:
+    header = _recv_exact(sock, 2)
+    final = bool(header[0] & 0x80)
+    if header[0] & 0x70:
+        raise ConnectionError("unsupported WebSocket extension bits")
+    opcode = header[0] & 0x0F
+    if header[1] & 0x80:
+        raise ConnectionError("server WebSocket frames must not be masked")
+    length = header[1] & 0x7F
+    if length == 126:
+        length = struct.unpack(">H", _recv_exact(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack(">Q", _recv_exact(sock, 8))[0]
+    if length > _MAX_MESSAGE_BYTES:
+        raise ConnectionError("WebSocket frame exceeds the safety limit")
+    if opcode >= 0x8 and (not final or length > 125):
+        raise ConnectionError("invalid WebSocket control frame")
+    payload = _recv_exact(sock, length) if length else b""
+    return final, opcode, payload
 
 
-def _pong(sock):
+def _pong(sock: socket.socket, payload: bytes = b"") -> None:
+    if len(payload) > 125:
+        raise ValueError("pong payload exceeds the WebSocket control-frame limit")
     mask = os.urandom(4)
-    sock.sendall(b"\x8a\x80" + mask)  # FIN+pong，掩码空负载
+    masked_payload = bytes(
+        value ^ mask[index % len(mask)] for index, value in enumerate(payload)
+    )
+    sock.sendall(bytes((0x8A, 0x80 | len(payload))) + mask + masked_payload)
 
 
-def ws_loop(on_rows):
-    """on_rows: 回调 [(symbol, price, pct_24h, quote_volume, ts)]"""
+def _ticker_rows(data: Any, timestamp: int) -> tuple[list[tuple], int]:
+    if not isinstance(data, list):
+        raise ValueError("Binance mini-ticker payload must be a list")
+    rows = []
+    invalid_rows = 0
+    for item in data:
+        try:
+            if not isinstance(item, dict):
+                raise TypeError("ticker row must be an object")
+            close = float(item["c"])
+            open_price = float(item["o"])
+            percent = (close - open_price) / open_price * 100 if open_price else 0.0
+            rows.append(
+                (
+                    item["s"],
+                    close,
+                    percent,
+                    float(item.get("q", 0)),
+                    timestamp,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            invalid_rows += 1
+    return rows, invalid_rows
+
+
+def ws_loop(on_rows: Callable[[list[tuple]], None]) -> None:
+    """Continuously pass ``(symbol, price, pct_24h, quote_volume, ts)`` rows to a callback."""
+
     backoff = 5
     while True:
+        sock: ssl.SSLSocket | None = None
         try:
             sock = _connect()
-            sock.settimeout(90)  # 推送流持续有数据；90s 无帧判死
-            print("[ws] 行情推送已连接（1秒级实时流）")
+            sock.settimeout(90)
+            print("[ws] Binance mini-ticker stream connected")
             backoff = 5
-            frag = b""
+            fragments = bytearray()
             while True:
-                fin, op, payload = _read_frame(sock)
-                if op == 0x9:      # ping → pong
-                    _pong(sock)
+                final, opcode, payload = _read_frame(sock)
+                if opcode == 0x9:
+                    _pong(sock, payload)
                     continue
-                if op == 0x8:
-                    raise ConnectionError("服务端主动关闭")
-                if op not in (0x1, 0x0):
+                if opcode == 0xA:
                     continue
-                frag += payload
-                if not fin:
+                if opcode == 0x8:
+                    raise ConnectionError("Binance closed the WebSocket stream")
+                if opcode not in (0x1, 0x0):
                     continue
-                data, frag = json.loads(frag), b""
-                now = int(time.time())
-                rows = []
-                for t in data:
-                    try:
-                        c, o = float(t["c"]), float(t["o"])
-                        pct = (c - o) / o * 100 if o else 0.0
-                        rows.append((t["s"], c, pct, float(t.get("q", 0)), now))
-                    except Exception:
-                        continue
+                fragments.extend(payload)
+                if len(fragments) > _MAX_MESSAGE_BYTES:
+                    raise ConnectionError("WebSocket message exceeds the safety limit")
+                if not final:
+                    continue
+                data = json.loads(bytes(fragments))
+                fragments.clear()
+                rows, invalid_rows = _ticker_rows(data, int(time.time()))
+                if invalid_rows:
+                    print(f"[ws] ignored {invalid_rows} invalid mini-ticker rows")
                 on_rows(rows)
-        except Exception as e:
-            print(f"[ws] 推送断开（{str(e)[:60]}），{backoff}s 后重连（REST 兜底运行中）")
+        except Exception as exc:
+            print(
+                f"[ws] stream disconnected ({str(exc)[:80]}); retrying in {backoff}s "
+                "while REST fallback remains active"
+            )
             time.sleep(backoff)
             backoff = min(backoff * 2, 120)
+        finally:
+            if sock is not None:
+                sock.close()

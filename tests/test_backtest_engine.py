@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 
 import pytest
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 
 import quantdesk_v2.backtest as backtest_module
 from quantdesk_v2.backtest import BacktestRepository, BacktestUnavailable
@@ -13,8 +14,9 @@ BASE_TS = 1_700_000_000
 HOUR = 3_600
 
 
-def _build_repository(tmp_path, closes: list[float], *, milliseconds: bool = True):
-    database = tmp_path / "backtest.db"
+def _build_repository(
+    engine: Engine, tmp_path, closes: list[float], *, milliseconds: bool = True
+):
     symbols = tmp_path / "symbols.json"
     symbols.write_text(
         json.dumps(
@@ -30,15 +32,6 @@ def _build_repository(tmp_path, closes: list[float], *, milliseconds: bool = Tru
             }
         ),
         encoding="utf-8",
-    )
-    connection = sqlite3.connect(database)
-    connection.execute(
-        """
-        CREATE TABLE klines(
-            symbol TEXT, tf TEXT, open_time INTEGER,
-            open REAL, high REAL, low REAL, close REAL, volume REAL
-        )
-        """
     )
     rows = []
     for index, close in enumerate(closes):
@@ -57,10 +50,70 @@ def _build_repository(tmp_path, closes: list[float], *, milliseconds: bool = Tru
                 100,
             )
         )
-    connection.executemany("INSERT INTO klines VALUES(?, ?, ?, ?, ?, ?, ?, ?)", rows)
-    connection.commit()
-    connection.close()
-    return BacktestRepository(database, symbols), database
+    with engine.begin() as connection:
+        statement = text(
+            """
+            INSERT INTO klines(symbol,tf,open_time,open,high,low,close,volume)
+            VALUES(:symbol,:tf,:open_time,:open,:high,:low,:close,:volume)
+            """
+        )
+        payload = [
+            {
+                "symbol": row[0],
+                "tf": row[1],
+                "open_time": row[2],
+                "open": row[3],
+                "high": row[4],
+                "low": row[5],
+                "close": row[6],
+                "volume": row[7],
+            }
+            for row in rows
+        ]
+        for start in range(0, len(payload), 5_000):
+            connection.execute(statement, payload[start : start + 5_000])
+    return BacktestRepository(engine, symbols), engine
+
+
+@pytest.fixture
+def repository_factory(mysql_test_engine: Engine, tmp_path):
+    def build(closes: list[float], *, milliseconds: bool = True):
+        return _build_repository(
+            mysql_test_engine,
+            tmp_path,
+            closes,
+            milliseconds=milliseconds,
+        )
+
+    return build
+
+
+def _update_candle(
+    engine: Engine,
+    timestamp: int,
+    *,
+    open_price: float,
+    high: float,
+    low: float,
+    close: float,
+) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE klines
+                SET open=:open_price, high=:high, low=:low, close=:close
+                WHERE open_time=:open_time
+                """
+            ),
+            {
+                "open_price": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "open_time": timestamp,
+            },
+        )
 
 
 def _config(length: int, **overrides):
@@ -95,8 +148,8 @@ def _assert_json_safe(value) -> None:
         assert math.isfinite(value)
 
 
-def test_catalog_lists_templates_symbols_and_unix_second_bounds(tmp_path) -> None:
-    repository, _ = _build_repository(tmp_path, [100, 101, 102, 103])
+def test_catalog_lists_templates_symbols_and_unix_second_bounds(repository_factory) -> None:
+    repository, _ = repository_factory([100, 101, 102, 103])
 
     catalog = repository.catalog()
 
@@ -121,9 +174,11 @@ def test_catalog_lists_templates_symbols_and_unix_second_bounds(tmp_path) -> Non
     assert catalog["limits"]["timestamp_unit"] == "seconds"
 
 
-def test_signal_is_filled_at_next_open_and_costs_are_charged_both_sides(tmp_path) -> None:
+def test_signal_is_filled_at_next_open_and_costs_are_charged_both_sides(
+    repository_factory,
+) -> None:
     closes = [10, 10, 10, 12, 13, 14]
-    repository, _ = _build_repository(tmp_path, closes)
+    repository, _ = repository_factory(closes)
 
     result = repository.run(_config(len(closes)))
 
@@ -138,19 +193,17 @@ def test_signal_is_filled_at_next_open_and_costs_are_charged_both_sides(tmp_path
     _assert_json_safe(result)
 
 
-def test_same_bar_stop_and_take_uses_conservative_stop(tmp_path) -> None:
+def test_same_bar_stop_and_take_uses_conservative_stop(repository_factory) -> None:
     closes = [10, 10, 10, 12, 100, 100]
-    repository, database = _build_repository(tmp_path, closes)
-    connection = sqlite3.connect(database)
-    connection.execute(
-        """
-        UPDATE klines SET open=100, high=110, low=90, close=100
-        WHERE open_time=?
-        """,
-        ((BASE_TS + 4 * HOUR) * 1_000,),
+    repository, database = repository_factory(closes)
+    _update_candle(
+        database,
+        (BASE_TS + 4 * HOUR) * 1_000,
+        open_price=100,
+        high=110,
+        low=90,
+        close=100,
     )
-    connection.commit()
-    connection.close()
 
     result = repository.run(
         _config(
@@ -168,19 +221,19 @@ def test_same_bar_stop_and_take_uses_conservative_stop(tmp_path) -> None:
     assert trade["net_pnl"] < 0
 
 
-def test_liquidation_uses_fixed_mmr_and_adverse_exit_precedes_take_profit(tmp_path) -> None:
+def test_liquidation_uses_fixed_mmr_and_adverse_exit_precedes_take_profit(
+    repository_factory,
+) -> None:
     closes = [100, 100, 100, 110, 100, 100]
-    repository, database = _build_repository(tmp_path, closes)
-    connection = sqlite3.connect(database)
-    connection.execute(
-        """
-        UPDATE klines SET open=110, high=111, low=90, close=110
-        WHERE open_time=?
-        """,
-        ((BASE_TS + 4 * HOUR) * 1_000,),
+    repository, database = repository_factory(closes)
+    _update_candle(
+        database,
+        (BASE_TS + 4 * HOUR) * 1_000,
+        open_price=110,
+        high=111,
+        low=90,
+        close=110,
     )
-    connection.commit()
-    connection.close()
 
     result = repository.run(
         _config(
@@ -204,19 +257,17 @@ def test_liquidation_uses_fixed_mmr_and_adverse_exit_precedes_take_profit(tmp_pa
     assert any("0.5%" in item for item in result["data_quality"]["assumptions"])
 
 
-def test_stop_above_liquidation_is_executed_first(tmp_path) -> None:
+def test_stop_above_liquidation_is_executed_first(repository_factory) -> None:
     closes = [100, 100, 100, 110, 100, 100]
-    repository, database = _build_repository(tmp_path, closes)
-    connection = sqlite3.connect(database)
-    connection.execute(
-        """
-        UPDATE klines SET open=110, high=111, low=90, close=110
-        WHERE open_time=?
-        """,
-        ((BASE_TS + 4 * HOUR) * 1_000,),
+    repository, database = repository_factory(closes)
+    _update_candle(
+        database,
+        (BASE_TS + 4 * HOUR) * 1_000,
+        open_price=110,
+        high=111,
+        low=90,
+        close=110,
     )
-    connection.commit()
-    connection.close()
 
     result = repository.run(
         _config(
@@ -233,19 +284,19 @@ def test_stop_above_liquidation_is_executed_first(tmp_path) -> None:
     assert result["metrics"]["liquidation_count"] == 0
 
 
-def test_gap_through_liquidation_uses_worse_open_before_strategy_exit(tmp_path) -> None:
+def test_gap_through_liquidation_uses_worse_open_before_strategy_exit(
+    repository_factory,
+) -> None:
     closes = [100, 100, 100, 110, 100, 100]
-    repository, database = _build_repository(tmp_path, closes)
-    connection = sqlite3.connect(database)
-    connection.execute(
-        """
-        UPDATE klines SET open=110, high=111, low=109, close=110
-        WHERE open_time=?
-        """,
-        ((BASE_TS + 4 * HOUR) * 1_000,),
+    repository, database = repository_factory(closes)
+    _update_candle(
+        database,
+        (BASE_TS + 4 * HOUR) * 1_000,
+        open_price=110,
+        high=111,
+        low=109,
+        close=110,
     )
-    connection.commit()
-    connection.close()
 
     result = repository.run(_config(len(closes), fee_bps=0, slippage_bps=0, leverage=20))
 
@@ -256,9 +307,9 @@ def test_gap_through_liquidation_uses_worse_open_before_strategy_exit(tmp_path) 
     assert trade["exit_price"] < trade["liquidation_price"]
 
 
-def test_short_position_profits_when_price_falls(tmp_path) -> None:
+def test_short_position_profits_when_price_falls(repository_factory) -> None:
     closes = [12, 12, 12, 10, 9, 8]
-    repository, _ = _build_repository(tmp_path, closes)
+    repository, _ = repository_factory(closes)
 
     result = repository.run(_config(len(closes), fee_bps=0, slippage_bps=0, leverage=2))
 
@@ -268,9 +319,9 @@ def test_short_position_profits_when_price_falls(tmp_path) -> None:
     assert trade["leverage"] == 2
 
 
-def test_small_valid_trade_values_are_not_rounded_to_zero(tmp_path) -> None:
+def test_small_valid_trade_values_are_not_rounded_to_zero(repository_factory) -> None:
     closes = [100_000_000, 100_000_000, 100_000_000, 120_000_000, 130_000_000, 140_000_000]
-    repository, _ = _build_repository(tmp_path, closes)
+    repository, _ = repository_factory(closes)
 
     result = repository.run(
         _config(
@@ -291,26 +342,19 @@ def test_small_valid_trade_values_are_not_rounded_to_zero(tmp_path) -> None:
     assert result["metrics"]["net_profit"] > 0
 
 
-def test_sub_cent_prices_remain_nonzero_in_trade_output(tmp_path) -> None:
+def test_sub_cent_prices_remain_nonzero_in_trade_output(repository_factory) -> None:
     closes = [1.2e-9, 1.1e-9, 1e-9, 1.4e-9, 1.5e-9, 1.6e-9]
-    repository, database = _build_repository(tmp_path, closes)
-    connection = sqlite3.connect(database)
+    repository, database = repository_factory(closes)
     for index, close in enumerate(closes):
         open_price = closes[index - 1] if index else close
-        connection.execute(
-            """
-            UPDATE klines SET open=?, high=?, low=?, close=? WHERE open_time=?
-            """,
-            (
-                open_price,
-                max(open_price, close) * 1.01,
-                min(open_price, close) * 0.99,
-                close,
-                (BASE_TS + index * HOUR) * 1_000,
-            ),
+        _update_candle(
+            database,
+            (BASE_TS + index * HOUR) * 1_000,
+            open_price=open_price,
+            high=max(open_price, close) * 1.01,
+            low=min(open_price, close) * 0.99,
+            close=close,
         )
-    connection.commit()
-    connection.close()
 
     result = repository.run(
         _config(
@@ -328,22 +372,32 @@ def test_sub_cent_prices_remain_nonzero_in_trade_output(tmp_path) -> None:
     assert trade["net_pnl"] > 0
 
 
-def test_integral_float_strategy_periods_are_accepted(tmp_path) -> None:
-    repository, _ = _build_repository(tmp_path, [10, 10, 10, 12, 13, 14])
+def test_integral_float_strategy_periods_are_accepted(repository_factory) -> None:
+    repository, _ = repository_factory([10, 10, 10, 12, 13, 14])
 
     result = repository.run(_config(6, params={"fast_period": 2.0, "slow_period": 3.0}))
 
     assert result["metrics"]["trade_count"] == 1
 
 
-def test_repository_connection_is_enforced_read_only(tmp_path) -> None:
-    repository, _ = _build_repository(tmp_path, [100, 101, 102])
-    connection = repository._connect()
+def test_repository_executes_read_only_market_queries(repository_factory) -> None:
+    repository, database = repository_factory([100, 101, 102])
+    statements: list[str] = []
+
+    def record_statement(
+        _connection, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        statements.append(statement.strip())
+
+    event.listen(database, "before_cursor_execute", record_statement)
     try:
-        with pytest.raises(sqlite3.OperationalError, match="readonly"):
-            connection.execute("CREATE TABLE should_not_exist(value INTEGER)")
+        repository.catalog()
+        repository.run(_config(3))
     finally:
-        connection.close()
+        event.remove(database, "before_cursor_execute", record_statement)
+
+    assert statements
+    assert all(statement.upper().startswith("SELECT") for statement in statements)
 
 
 @pytest.mark.parametrize(
@@ -362,9 +416,11 @@ def test_repository_connection_is_enforced_read_only(tmp_path) -> None:
         ("bollinger_reversion", {"period": 10, "stddev": 1.5}),
     ],
 )
-def test_all_strategies_return_json_safe_results(tmp_path, strategy_id, params) -> None:
+def test_all_strategies_return_json_safe_results(
+    repository_factory, strategy_id, params
+) -> None:
     closes = [100 + math.sin(index / 3) * 8 + index * 0.03 for index in range(180)]
-    repository, _ = _build_repository(tmp_path, closes)
+    repository, _ = repository_factory(closes)
 
     result = repository.run(_config(len(closes), strategy_id=strategy_id, params=params))
 
@@ -373,9 +429,9 @@ def test_all_strategies_return_json_safe_results(tmp_path, strategy_id, params) 
     json.dumps(result, allow_nan=False)
 
 
-def test_curve_is_evenly_sampled_and_preserves_first_and_last(tmp_path) -> None:
+def test_curve_is_evenly_sampled_and_preserves_first_and_last(repository_factory) -> None:
     closes = [100 + index * 0.01 for index in range(1_601)]
-    repository, _ = _build_repository(tmp_path, closes)
+    repository, _ = repository_factory(closes)
 
     result = repository.run(_config(len(closes)))
 
@@ -385,9 +441,11 @@ def test_curve_is_evenly_sampled_and_preserves_first_and_last(tmp_path) -> None:
     assert result["data_quality"]["equity_curve_truncated"] is True
 
 
-def test_equity_drawdown_uses_constant_time_running_peak(tmp_path, monkeypatch) -> None:
+def test_equity_drawdown_uses_constant_time_running_peak(
+    repository_factory, monkeypatch
+) -> None:
     closes = [100 + index * 0.01 for index in range(2_000)]
-    repository, _ = _build_repository(tmp_path, closes)
+    repository, _ = repository_factory(closes)
     original_max = max
 
     def reject_long_list_scan(*values, **kwargs):
@@ -403,9 +461,9 @@ def test_equity_drawdown_uses_constant_time_running_peak(tmp_path, monkeypatch) 
     assert len(result["equity_curve"]) == 1_500
 
 
-def test_annualization_ends_at_last_candle_close(tmp_path, monkeypatch) -> None:
+def test_annualization_ends_at_last_candle_close(repository_factory, monkeypatch) -> None:
     closes = [10, 10, 10, 12, 13, 14]
-    repository, _ = _build_repository(tmp_path, closes)
+    repository, _ = repository_factory(closes)
     durations: list[int] = []
     original_annualized_return = backtest_module._annualized_return
 
@@ -420,9 +478,11 @@ def test_annualization_ends_at_last_candle_close(tmp_path, monkeypatch) -> None:
     assert durations == [len(closes) * HOUR]
 
 
-def test_trade_response_is_bounded_but_keeps_json_safe_server_payload(tmp_path) -> None:
+def test_trade_response_is_bounded_but_keeps_json_safe_server_payload(
+    repository_factory,
+) -> None:
     closes = [95 if index % 2 == 0 else 105 for index in range(6_010)]
-    repository, _ = _build_repository(tmp_path, closes)
+    repository, _ = repository_factory(closes)
 
     result = repository.run(_config(len(closes), fee_bps=0, slippage_bps=0, position_size_pct=0.01))
 
@@ -447,16 +507,16 @@ def test_trade_response_is_bounded_but_keeps_json_safe_server_payload(tmp_path) 
         ),
     ],
 )
-def test_strict_config_validation(tmp_path, changes, message) -> None:
-    repository, _ = _build_repository(tmp_path, [100, 101, 102, 103])
+def test_strict_config_validation(repository_factory, changes, message) -> None:
+    repository, _ = repository_factory([100, 101, 102, 103])
 
     with pytest.raises(BacktestUnavailable, match=message):
         repository.run(_config(4, **changes))
 
 
-def test_more_than_fifty_thousand_bars_is_rejected(tmp_path) -> None:
+def test_more_than_fifty_thousand_bars_is_rejected(repository_factory) -> None:
     closes = [100 + index * 0.0001 for index in range(50_001)]
-    repository, _ = _build_repository(tmp_path, closes, milliseconds=False)
+    repository, _ = repository_factory(closes, milliseconds=False)
 
     with pytest.raises(BacktestUnavailable, match="50000 bar limit"):
         repository.run(_config(len(closes)))

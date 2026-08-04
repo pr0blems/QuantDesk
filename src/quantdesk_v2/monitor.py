@@ -61,11 +61,11 @@ class MonitorRepository:
             raise MonitorUnavailable("unknown contract monitor symbol")
         return normalized
 
-    def _configure_legacy_store(self) -> None:
-        """Point the in-process legacy modules at the shared MySQL engine."""
-        from quantdesk import store as legacy_store
+    def _configure_market_store(self) -> None:
+        """Point the in-process market modules at the shared MySQL engine."""
+        from quantdesk import store as market_store
 
-        legacy_store.configure_engine(self.engine)
+        market_store.configure_engine(self.engine)
 
     def overview(self, watchlist: list[str]) -> dict[str, Any]:
         tickers = {row["symbol"]: row for row in self._query("SELECT * FROM ticker")}
@@ -162,10 +162,13 @@ class MonitorRepository:
         }
 
     def alerts(self, user_id: int, limit: int) -> list[dict[str, Any]]:
-        return self._query(
+        rows = self._query(
             "SELECT * FROM alerts WHERE user_id=? ORDER BY ts DESC LIMIT ?",
             (user_id, limit),
         )
+        for row in rows:
+            row["read"] = bool(row.get("read"))
+        return rows
 
     def latest_alert_id(self, user_id: int) -> int:
         rows = self._query(
@@ -219,17 +222,19 @@ class MonitorRepository:
     def report(self, symbol: str) -> dict[str, Any]:
         normalized = self._validate_symbol(symbol)
         with _REPORT_LOCK:
-            from quantdesk import report as legacy_report
+            from quantdesk import report as market_report
 
-            self._configure_legacy_store()
-            return legacy_report.build_report(normalized)
+            self._configure_market_store()
+            return market_report.build_report(normalized)
 
-    def paper(self, user_id: int, account_id: int) -> dict[str, Any]:
+    def paper(
+        self, user_id: int, account_id: int, timezone_offset_minutes: int = 0
+    ) -> dict[str, Any]:
         with _REPORT_LOCK:
-            from quantdesk import paper as legacy_paper
+            from quantdesk import paper as paper_engine
 
-            self._configure_legacy_store()
-            return legacy_paper.api_data(user_id, account_id)
+            self._configure_market_store()
+            return paper_engine.api_data(user_id, account_id, timezone_offset_minutes)
 
     def paper_performance(
         self, user_id: int, account_id: int, month: str, timezone_offset_minutes: int
@@ -402,11 +407,11 @@ class MonitorRepository:
 
     def reset_paper(self, user_id: int, account_id: int) -> dict[str, Any]:
         with _REPORT_LOCK:
-            from quantdesk import paper as legacy_paper
+            from quantdesk import paper as paper_engine
 
-            self._configure_legacy_store()
-            legacy_paper.reset(user_id, account_id)
-            return legacy_paper.api_data(user_id, account_id)
+            self._configure_market_store()
+            paper_engine.reset(user_id, account_id)
+            return paper_engine.api_data(user_id, account_id)
 
 
 def _finite_number(value: Any) -> float:

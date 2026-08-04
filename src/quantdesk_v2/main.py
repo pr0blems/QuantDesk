@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
+from .admin import initialize_admin_runtime
+from .admin import router as admin_router
 from .api import router
 from .config import Settings, get_settings
 from .database import build_engine, engine
@@ -20,13 +25,74 @@ FRONTEND_ROUTES = (
     "/monitor",
     "/paper",
     "/overview",
-    "/credentials",
+    "/settings",
     "/strategies",
     "/backtest",
     "/orders",
     "/risk",
     "/audit",
 )
+
+_SENSITIVE_VALIDATION_MARKERS = (
+    "api_key",
+    "apikey",
+    "api_secret",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "authorization",
+    "cookie",
+    "credential",
+)
+
+
+def _is_sensitive_validation_field(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    return any(marker in normalized for marker in _SENSITIVE_VALIDATION_MARKERS)
+
+
+def _redact_sensitive_validation_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if _is_sensitive_validation_field(key)
+                else _redact_sensitive_validation_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_sensitive_validation_value(item) for item in value]
+    return value
+
+
+async def _safe_request_validation_error(
+    _: Request, exc: RequestValidationError
+) -> JSONResponse:
+    errors: list[dict[str, Any]] = []
+    for raw_error in exc.errors():
+        error = dict(raw_error)
+        location = error.get("loc")
+        sensitive_location = isinstance(location, (list, tuple)) and any(
+            _is_sensitive_validation_field(item) for item in location
+        )
+        if "input" in error:
+            error["input"] = (
+                "[REDACTED]"
+                if sensitive_location or error.get("type") == "json_invalid"
+                else _redact_sensitive_validation_value(error["input"])
+            )
+        if "ctx" in error:
+            error["ctx"] = _redact_sensitive_validation_value(error["ctx"])
+        errors.append(error)
+    return JSONResponse(
+        status_code=422,
+        content=jsonable_encoder({"detail": errors}),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -62,9 +128,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # multi-account paper executor. Explicitly constructed apps are
             # used by tests/tools and must not start perpetual worker threads.
             from quantdesk import engine as market_engine
-            from quantdesk import store as legacy_store
+            from quantdesk import store as market_store
 
-            legacy_store.configure_engine(database_engine)
+            market_store.configure_engine(database_engine)
+            initialize_admin_runtime(database_engine)
             market_engine.start()
         yield
 
@@ -77,6 +144,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = runtime_settings
     app.state.database_engine = database_engine
+    app.add_exception_handler(RequestValidationError, _safe_request_validation_error)
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=runtime_settings.allowed_hosts,
@@ -86,13 +154,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=runtime_settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "X-QuantDesk-User-ID"],
     )
     app.add_middleware(
         SecurityHeadersMiddleware,
         max_request_bytes=runtime_settings.max_request_bytes,
     )
     app.include_router(router)
+    app.include_router(admin_router)
     app.include_router(strategy_router)
 
     if runtime_settings.static_dir.is_dir():
@@ -104,6 +173,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         def index() -> FileResponse:
             return FileResponse(runtime_settings.static_dir / "index.html")
+
+        def admin_index() -> FileResponse:
+            return FileResponse(runtime_settings.static_dir / "admin.html")
 
         app.add_api_route(
             "/",
@@ -120,6 +192,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 include_in_schema=False,
                 name=f"frontend_{frontend_route.removeprefix('/')}",
             )
+
+        for admin_route in ("/admin", "/admin/login"):
+            app.add_api_route(
+                admin_route,
+                admin_index,
+                methods=["GET"],
+                include_in_schema=False,
+                name=f"admin_{admin_route.removeprefix('/').replace('/', '_')}",
+            )
+
+        def legacy_credentials_redirect() -> RedirectResponse:
+            return RedirectResponse(url="/settings", status_code=308)
+
+        app.add_api_route(
+            "/credentials",
+            legacy_credentials_redirect,
+            methods=["GET"],
+            include_in_schema=False,
+            name="frontend_credentials_redirect",
+        )
 
     return app
 

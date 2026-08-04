@@ -13,6 +13,8 @@ from sqlalchemy.engine import Connection, Engine
 
 _lock = threading.Lock()
 _engine: Engine | None = None
+_admin_cache_lock = threading.Lock()
+_admin_cache: dict[str, Any] = {"expires": 0.0, "alert_rules": {}}
 
 
 class Transaction:
@@ -32,7 +34,7 @@ class Transaction:
 
 
 def configure_engine(engine: Engine) -> None:
-    """Use the application's shared MySQL engine for all legacy modules."""
+    """Use the application's shared MySQL engine for market worker modules."""
     if engine.dialect.name not in {"mysql", "mariadb"}:
         raise RuntimeError("QuantDesk storage requires MySQL")
     global _engine
@@ -132,6 +134,125 @@ def user_state_set(user_id: int, key: str, value: Any) -> None:
         "REPLACE INTO user_states(user_id,k,v,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP)",
         (user_id, key, json.dumps(value, ensure_ascii=False)),
     )
+
+
+def admin_alert_rules() -> dict[str, Any]:
+    """Return the published alert rules with a short worker-side cache."""
+
+    now = time.monotonic()
+    with _admin_cache_lock:
+        if now < float(_admin_cache["expires"]):
+            return dict(_admin_cache["alert_rules"])
+    rules: dict[str, Any] = {}
+    try:
+        rows = query("SELECT value_json FROM admin_settings WHERE `key`='alert_rules'")
+        if rows:
+            value = rows[0]["value_json"]
+            if isinstance(value, str):
+                value = json.loads(value)
+            if isinstance(value, dict):
+                rules = value
+    except Exception:
+        rules = {}
+    with _admin_cache_lock:
+        _admin_cache["alert_rules"] = dict(rules)
+        _admin_cache["expires"] = now + 10.0
+    return rules
+
+
+def collector_paused(name: str) -> bool:
+    try:
+        rows = query("SELECT value_json FROM admin_settings WHERE `key`=?", (f"collector_pause:{name}",))
+        if not rows:
+            return False
+        value = rows[0]["value_json"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        return bool(value.get("paused")) if isinstance(value, dict) else False
+    except Exception:
+        return False
+
+
+def collector_report(
+    name: str,
+    *,
+    success: bool,
+    items: int = 0,
+    error: str | None = None,
+    details: Mapping[str, Any] | None = None,
+) -> None:
+    """Best-effort collector heartbeat; monitoring must never stop collection."""
+
+    now = int(time.time())
+    success_at = now if success else None
+    error_at = now if error else None
+    try:
+        execute(
+            "INSERT INTO collector_status(name,heartbeat_at,last_success_at,last_error_at,last_error,cycles,items,details_json) "
+            "VALUES(?,?,?,?,?,1,?,?) ON DUPLICATE KEY UPDATE "
+            "heartbeat_at=VALUES(heartbeat_at),last_success_at=COALESCE(VALUES(last_success_at),last_success_at),"
+            "last_error_at=COALESCE(VALUES(last_error_at),last_error_at),"
+            "last_error=CASE WHEN VALUES(last_success_at) IS NOT NULL THEN NULL ELSE VALUES(last_error) END,"
+            "cycles=cycles+1,items=items+VALUES(items),details_json=VALUES(details_json)",
+            (
+                name,
+                now,
+                success_at,
+                error_at,
+                (error or "")[:1000] or None,
+                max(0, int(items)),
+                json.dumps(dict(details or {}), ensure_ascii=False),
+            ),
+        )
+    except Exception:
+        return
+
+
+def admin_news_sources(default_sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Load enabled database-managed news sources, falling back before migration."""
+
+    try:
+        rows = query(
+            "SELECT name,url,lang,slow,weight,hourly_limit,enabled FROM news_source_settings "
+            "ORDER BY weight DESC,name"
+        )
+    except Exception:
+        return default_sources
+    if not rows:
+        return default_sources
+    return [
+        {
+            **{key: value for key, value in dict(row).items() if key != "enabled"},
+            "_admin_managed": True,
+        }
+        for row in rows
+        if bool(row["enabled"])
+    ]
+
+
+def news_source_result(
+    name: str,
+    *,
+    success: bool,
+    fetched: int = 0,
+    inserted: int = 0,
+    error: str | None = None,
+) -> None:
+    now = int(time.time())
+    try:
+        if success:
+            execute(
+                "UPDATE news_source_settings SET last_success_at=?,last_error=NULL,"
+                "fetched_items=fetched_items+?,inserted_items=inserted_items+? WHERE name=?",
+                (now, max(0, fetched), max(0, inserted), name),
+            )
+        else:
+            execute(
+                "UPDATE news_source_settings SET last_error_at=?,last_error=? WHERE name=?",
+                (now, (error or "unknown error")[:1000], name),
+            )
+    except Exception:
+        return
 
 
 def upsert_klines(symbol: str, timeframe: str, rows: Iterable[Sequence[Any]]) -> None:

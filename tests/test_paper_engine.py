@@ -7,6 +7,7 @@ import pytest
 
 from quantdesk import paper
 from quantdesk_v2.strategy_catalog import SYSTEM_STRATEGY_DEFINITIONS
+from quantdesk_v2.strategy_runtime import StrategyDecision, build_trend_pullback_spec
 
 
 def _account() -> dict:
@@ -68,6 +69,98 @@ def test_exit_levels_fall_back_to_configured_percentages_without_atr() -> None:
 
     assert stop == pytest.approx(97)
     assert target == pytest.approx(105)
+
+
+def test_full_strategy_signal_reads_declared_timeframes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["strategy_snapshot_json"] = {
+        "name": "多周期趋势回踩延续",
+        "strategy_kind": "full_strategy",
+        "spec": build_trend_pullback_spec(),
+    }
+    requested: list[tuple[str, str, int]] = []
+
+    def get_klines(symbol: str, timeframe: str, limit: int) -> list[dict]:
+        requested.append((symbol, timeframe, limit))
+        return [{"open_time": 100}]
+
+    monkeypatch.setattr(paper.store, "get_klines", get_klines)
+    recorded: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        paper,
+        "_record_full_strategy_decision",
+        lambda account, symbol, spec, decision: recorded.append(
+            (symbol, decision.decision)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        paper,
+        "evaluate_strategy",
+        lambda spec, market: StrategyDecision(
+            decision="LONG_ENTRY",
+            signal_time=100,
+            valid_until=200,
+            confidence=0.75,
+            reason_codes=("REGIME_UP", "BREAKOUT_UP"),
+            evidence={"setup": {"atr": 2.5}},
+            risk_proposal={},
+        ),
+    )
+
+    direction, atr, basis, signal_time = paper._strategy_signal(account, "TESTUSDT")
+
+    assert set(requested) == {
+        ("TESTUSDT", "4h", 600),
+        ("TESTUSDT", "1h", 600),
+        ("TESTUSDT", "15m", 600),
+    }
+    assert direction == 1
+    assert atr == pytest.approx(2.5)
+    assert signal_time == 100
+    assert "类型：完整策略" in basis
+    assert "依据：REGIME_UP / BREAKOUT_UP" in basis
+    assert recorded == [("TESTUSDT", "LONG_ENTRY")]
+
+
+def test_full_strategy_signal_persistence_is_tenant_scoped_and_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    writes: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(
+        paper.store,
+        "query",
+        lambda sql, params=(): [{"id": 51, "strategy_revision_id": 61}],
+    )
+    monkeypatch.setattr(
+        paper.store,
+        "execute",
+        lambda sql, params=(): writes.append((sql, tuple(params))) or 1,
+    )
+    decision = StrategyDecision(
+        decision="LONG_ENTRY",
+        signal_time=1_700_000_000_000,
+        valid_until=1_700_001_800_000,
+        confidence=0.8,
+        reason_codes=("REGIME_UP",),
+        evidence={"setup": {"atr": 2.0}},
+        risk_proposal={"stop_distance": 3.0},
+    )
+
+    persisted = paper._record_full_strategy_decision(
+        account, "TESTUSDT", build_trend_pullback_spec(), decision
+    )
+
+    assert persisted is True
+    insert_sql, insert_params = writes[0]
+    assert "INSERT IGNORE INTO strategy_signals" in insert_sql
+    assert insert_params[1:4] == (account["user_id"], 51, 61)
+    assert insert_params[9] == 1_700_001_800
+    assert insert_params[-1].startswith("paper:51:61:TESTUSDT:15m:")
+    assert writes[1][1] == (decision.signal_time, 51, account["user_id"])
 
 
 def test_short_exit_levels_never_return_a_nonpositive_target() -> None:
@@ -319,3 +412,71 @@ def test_api_rules_publish_atr_take_profit(monkeypatch: pytest.MonkeyPatch) -> N
     data = paper.api_data(account["user_id"], account["id"])
 
     assert "2.5×ATR 止盈" in data["rules"]["exits"]
+
+
+def test_today_pnl_uses_tenant_account_equity_before_local_midnight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    now = int(datetime(2026, 8, 4, 12, 0, tzinfo=UTC).timestamp())
+    expected_day_start = int(datetime(2026, 8, 3, 16, 0, tzinfo=UTC).timestamp())
+    captured: list[tuple[str, tuple]] = []
+
+    def query(sql: str, params=()):
+        captured.append((sql, tuple(params)))
+        return [{"equity": 10_300.25}]
+
+    monkeypatch.setattr(paper.store, "query", query)
+
+    result = paper._today_pnl(account, 10_425.75, now, 480)
+
+    assert result == pytest.approx(125.5)
+    assert captured[0][1] == (
+        account["id"],
+        account["user_id"],
+        expected_day_start,
+    )
+    assert "paper_account_id=? AND user_id=?" in captured[0][0]
+    assert "ts<?" in captured[0][0]
+
+
+def test_today_pnl_uses_initial_balance_when_account_has_no_prior_day_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    monkeypatch.setattr(paper.store, "query", lambda sql, params=(): [])
+
+    result = paper._today_pnl(account, 9_875.5, 1_722_772_800, 0)
+
+    assert result == pytest.approx(-124.5)
+
+
+def test_paused_accounts_keep_recording_equity_without_running_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = {**_account(), "id": 11, "status": "active"}
+    paused = {**_account(), "id": 12, "status": "paused"}
+    ticked: list[int] = []
+    recorded: list[int] = []
+
+    @contextmanager
+    def advisory_lock(*args, **kwargs):
+        yield True
+
+    monkeypatch.setattr(paper.store, "advisory_lock", advisory_lock)
+    monkeypatch.setattr(paper, "_prices", lambda: {"TESTUSDT": 100.0})
+    monkeypatch.setattr(paper, "_tracked_accounts", lambda account_id=None: [active, paused])
+    monkeypatch.setattr(paper, "_positions", lambda account: [])
+    monkeypatch.setattr(
+        paper, "_tick_account", lambda account, prices, now: ticked.append(account["id"])
+    )
+    monkeypatch.setattr(
+        paper,
+        "_record_equity",
+        lambda account, prices, positions, now: recorded.append(account["id"]),
+    )
+
+    paper.tick()
+
+    assert ticked == [11]
+    assert recorded == [12]

@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     binance_futures_base_url: str = "https://fapi.binance.com"
     binance_portfolio_base_url: str = "https://papi.binance.com"
-    binance_futures_timeout_seconds: float = 4.0
+    binance_futures_timeout_seconds: float = 10.0
     binance_futures_recv_window_ms: int = 5_000
 
     # Strategy edits are requested server-side only. The browser never receives

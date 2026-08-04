@@ -15,6 +15,7 @@ __pycache__/
 *.egg-info/
 
 # Test and coverage output
+.codex-test-temp/
 .coverage
 .coverage.*
 coverage.xml
@@ -26,13 +27,15 @@ build/
 *.exe
 
 # Runtime data and local credentials
-/config/
+/config/*
+!/config/settings.json
+!/config/tradfi_symbols.json
 /data/*.db*
 /src/data/
 reports/
 *.log
 *.tmp
-src/config/api_keys.json
+/config/api_keys.json
 
 # Machine-specific launchers and editor/OS metadata
 /autostart.vbs

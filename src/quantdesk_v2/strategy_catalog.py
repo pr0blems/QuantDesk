@@ -13,6 +13,12 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import Session
 
 from .models import StrategyRevision, StrategyTemplate, UserStrategy, utcnow
+from .strategy_runtime import (
+    TREND_PULLBACK_SPEC_V1,
+    build_trend_pullback_spec,
+    full_strategy_parameter_schema,
+    strategy_spec_hash,
+)
 
 
 class StrategyParameterError(ValueError):
@@ -142,6 +148,7 @@ ENGINE_PARAMETER_SCHEMAS: dict[str, list[dict[str, Any]]] = {
             "max": 5,
         },
     ],
+    "strategy_dsl": full_strategy_parameter_schema(),
 }
 
 DEFAULT_RISK: dict[str, int | float] = {
@@ -165,6 +172,9 @@ def _template(
     risk_defaults: dict[str, int | float] | None = None,
     parameter_schema: list[dict[str, Any]] | None = None,
     version: int = 1,
+    template_kind: str = "legacy_signal",
+    spec: dict[str, Any] | None = None,
+    implementation_version: str = "legacy_v1",
 ) -> dict[str, Any]:
     return {
         "template_key": template_key,
@@ -177,12 +187,42 @@ def _template(
         ),
         "parameters_json": parameters,
         "risk_defaults_json": copy.deepcopy(risk_defaults or DEFAULT_RISK),
+        "template_kind": template_kind,
+        "spec_schema_version": int(spec["schema_version"]) if spec else None,
+        "spec_json": copy.deepcopy(spec),
+        "implementation_version": implementation_version,
+        "deprecated_at": None,
         "version": version,
         "is_active": True,
     }
 
 
 SYSTEM_STRATEGY_DEFINITIONS: tuple[dict[str, Any], ...] = (
+    _template(
+        "trend_pullback_continuation_v1",
+        "多周期趋势回踩延续",
+        "完整策略",
+        (
+            "4h EMA 与 ADX 识别趋势，1h 等待 EMA/ATR 回踩，15m 通过结构突破和成交量确认入场；"
+            "包含 ATR 止损、R 倍数止盈、持仓期限和组合风险边界。"
+        ),
+        "strategy_dsl",
+        copy.deepcopy(TREND_PULLBACK_SPEC_V1["parameters"]),
+        {
+            "position_size_pct": 10,
+            "leverage": 5,
+            "fee_bps": 5,
+            "slippage_bps": 3,
+            "stop_loss_pct": 3,
+            "take_profit_pct": 7.5,
+            "max_holding_bars": 48,
+        },
+        parameter_schema=full_strategy_parameter_schema(),
+        version=1,
+        template_kind="strategy",
+        spec=build_trend_pullback_spec(),
+        implementation_version="strategy_runtime_v1",
+    ),
     _template(
         "trend_breakout",
         "趋势突破",
@@ -401,6 +441,9 @@ def validate_strategy_parameters(
     if engine_key in {"multi_factor", "ma_cross", "macd_momentum"}:
         if normalized["fast_period"] >= normalized["slow_period"]:
             raise StrategyParameterError("快线周期必须小于慢线周期")
+    if engine_key == "strategy_dsl":
+        if normalized["regime_fast_ema"] >= normalized["regime_slow_ema"]:
+            raise StrategyParameterError("4h 快速 EMA 必须小于慢速 EMA")
     if engine_key == "rsi_reversal":
         if normalized["oversold"] >= normalized["overbought"]:
             raise StrategyParameterError("超卖线必须小于超买线")
@@ -469,6 +512,12 @@ def strategy_snapshot(strategy: UserStrategy) -> dict[str, Any]:
         "status": strategy.status,
         "version": strategy.version,
         "engine_key": strategy.engine_key,
+        "strategy_kind": strategy.strategy_kind,
+        "lifecycle_status": strategy.lifecycle_status,
+        "spec_schema_version": strategy.spec_schema_version,
+        "spec": copy.deepcopy(strategy.spec_json),
+        "spec_hash": strategy.spec_hash,
+        "risk_level": strategy.risk_level,
         "parameter_schema": copy.deepcopy(strategy.parameter_schema_json),
         "parameters": copy.deepcopy(strategy.parameters_json),
         "risk_defaults": copy.deepcopy(strategy.risk_defaults_json),
@@ -522,6 +571,16 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
                 "status": "active",
                 "version": 1,
                 "engine_key": template.engine_key,
+                "strategy_kind": (
+                    "full_strategy" if template.template_kind == "strategy" else "legacy_signal"
+                ),
+                "lifecycle_status": "published",
+                "spec_schema_version": template.spec_schema_version,
+                "spec_json": copy.deepcopy(template.spec_json),
+                "spec_hash": (
+                    strategy_spec_hash(template.spec_json) if template.spec_json else None
+                ),
+                "risk_level": "medium",
                 "parameter_schema_json": copy.deepcopy(template.parameter_schema_json),
                 "parameters_json": copy.deepcopy(template.parameters_json),
                 "risk_defaults_json": copy.deepcopy(template.risk_defaults_json),
@@ -555,6 +614,15 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
             "change_source": "system_default",
             "change_summary": "首次登录时从系统默认策略复制",
             "snapshot_json": strategy_snapshot(strategy),
+            "spec_schema_version": strategy.spec_schema_version,
+            "spec_json": copy.deepcopy(strategy.spec_json),
+            "spec_hash": strategy.spec_hash,
+            "validation_json": (
+                {"valid": True, "engine": "strategy_runtime_v1"}
+                if strategy.strategy_kind == "full_strategy"
+                else {"valid": True, "legacy": True}
+            ),
+            "published_at": now,
             "created_at": now,
         }
         for strategy in strategies
@@ -580,6 +648,12 @@ def serialize_user_strategy(strategy: UserStrategy) -> dict[str, Any]:
         "status": strategy.status,
         "version": strategy.version,
         "engine_key": strategy.engine_key,
+        "strategy_kind": strategy.strategy_kind,
+        "lifecycle_status": strategy.lifecycle_status,
+        "spec_schema_version": strategy.spec_schema_version,
+        "spec": copy.deepcopy(strategy.spec_json),
+        "spec_hash": strategy.spec_hash,
+        "risk_level": strategy.risk_level,
         "parameter_schema": copy.deepcopy(strategy.parameter_schema_json),
         "parameters": copy.deepcopy(strategy.parameters_json),
         "risk_defaults": copy.deepcopy(strategy.risk_defaults_json),
@@ -605,6 +679,11 @@ def strategy_to_catalog_item(strategy: UserStrategy) -> dict[str, Any]:
         "category": strategy.category,
         "description": strategy.description,
         "engine_key": strategy.engine_key,
+        "strategy_kind": strategy.strategy_kind,
+        "lifecycle_status": strategy.lifecycle_status,
+        "spec_schema_version": strategy.spec_schema_version,
+        "spec": copy.deepcopy(strategy.spec_json),
+        "risk_level": strategy.risk_level,
         "version": strategy.version,
         "params": params,
         "risk_defaults": copy.deepcopy(strategy.risk_defaults_json),

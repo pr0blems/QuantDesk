@@ -1,56 +1,103 @@
-"""Windows 桌面提醒（双通道）：
-- 系统通知开启 → Toast（assets/toast.ps1）
-- 系统通知关闭（ToastEnabled=0）→ 自动降级为 WScript 弹窗（assets/popup.ps1）
-失败一律静默降级，绝不影响主流程。"""
-import os, shutil, subprocess, sys
+"""Best-effort Windows desktop notifications through fixed PowerShell scripts."""
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
-_TOAST_PS1 = os.path.join(_DIR, "assets", "toast.ps1")
-_POPUP_PS1 = os.path.join(_DIR, "assets", "popup.ps1")
-_toast_enabled_cache = {"v": None, "ts": 0}
+from __future__ import annotations
 
-def _find_shell():
-    for name in ("powershell.exe", "powershell", "pwsh.exe", "pwsh"):
-        p = shutil.which(name)
-        if p:
-            return p
-    cand = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-    return cand if os.path.exists(cand) else None
+import logging
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-def _toast_system_enabled():
-    """读注册表缓存 5 分钟"""
-    import time
+_LOGGER = logging.getLogger(__name__)
+_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_TOAST_PS1 = _ASSETS_DIR / "toast.ps1"
+_POPUP_PS1 = _ASSETS_DIR / "popup.ps1"
+_POWERSHELL_CANDIDATES = (
+    Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+    Path(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+)
+_toast_enabled_cache: dict[str, bool | float | None] = {"v": None, "ts": 0.0}
+
+
+def _find_shell() -> Path | None:
+    """Select only a known absolute PowerShell executable path."""
+
+    return next((path for path in _POWERSHELL_CANDIDATES if path.is_file()), None)
+
+
+def _toast_system_enabled() -> bool:
+    """Read the Windows toast preference and cache it for five minutes."""
+
     now = time.time()
-    if now - _toast_enabled_cache["ts"] < 300:
-        return _toast_enabled_cache["v"]
-    v = True
+    cached_at = float(_toast_enabled_cache["ts"] or 0)
+    cached_value = _toast_enabled_cache["v"]
+    if now - cached_at < 300 and isinstance(cached_value, bool):
+        return cached_value
+
+    enabled = True
     try:
         import winreg
-        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                           r"SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications")
-        val, _ = winreg.QueryValueEx(k, "ToastEnabled")
-        v = bool(val)
-        winreg.CloseKey(k)
-    except Exception:
-        v = True  # 读不到就当开
-    _toast_enabled_cache.update(v=v, ts=now)
-    return v
 
-def windows_toast(title, body):
-    """统一入口：自动选择 Toast 或弹窗"""
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "ToastEnabled")
+        enabled = bool(value)
+    except (ImportError, OSError) as exc:
+        # Notification delivery is non-critical, but the fallback must remain observable.
+        _LOGGER.warning("unable to read Windows toast preference; using toast: %s", exc)
+
+    _toast_enabled_cache.update(v=enabled, ts=now)
+    return enabled
+
+
+def windows_toast(title: str, body: str) -> None:
+    """Show a toast or popup without allowing notification failure to stop trading."""
+
     if sys.platform != "win32":
         return
     shell = _find_shell()
-    if not shell:
+    if shell is None:
+        _LOGGER.warning("PowerShell notification executable is unavailable")
         return
-    ps1 = _TOAST_PS1 if _toast_system_enabled() else _POPUP_PS1
-    if not os.path.exists(ps1):
+    script = _TOAST_PS1 if _toast_system_enabled() else _POPUP_PS1
+    if not script.is_file():
+        _LOGGER.warning("notification script is unavailable: %s", script.name)
         return
+
+    # The executable, script and switches come exclusively from fixed allowlists.
+    # Title/body are passed as separate argv values, never interpreted by a shell.
+    command = [
+        str(shell),
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-Title",
+        str(title),
+        "-Body",
+        str(body),
+    ]
     try:
-        subprocess.run(
-            [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-             "-File", ps1, "-Title", title, "-Body", body],
-            capture_output=True, timeout=25,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except Exception:
-        pass
+        result = subprocess.run(  # noqa: S603 - fixed executable/script; shell is disabled
+            command,
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+            shell=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _LOGGER.warning("desktop notification failed: %s", exc)
+        return
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "no output").strip()[:200]
+        _LOGGER.warning(
+            "desktop notification script exited with code %s: %s",
+            result.returncode,
+            detail,
+        )

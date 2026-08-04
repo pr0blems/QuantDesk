@@ -224,7 +224,11 @@ class PaperDashboard extends HTMLElement {
         this.q("#paper-reset").disabled = true;
         return;
       }
-      const data = await this.api(`?account_id=${encodeURIComponent(accountId)}`);
+      const query = new URLSearchParams({
+        account_id: accountId,
+        timezone_offset_minutes: String(-new Date().getTimezoneOffset()),
+      });
+      const data = await this.api(`?${query.toString()}`);
       if (requestId !== this.loadSequence || accountId !== this.selectedAccountId) return;
       this.data = data;
       this.renderData(data);

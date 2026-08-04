@@ -1,21 +1,43 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => document.querySelectorAll(selector);
+const TAB_USER_ID_KEY = "quantdesk.tab-user-id";
+const TAB_USERNAME_KEY = "quantdesk.tab-username";
+const AUTH_IDENTITY_CHANGED_MESSAGE = "检测到登录身份已变化。为防止数据写入其他用户，本次请求已中止，请重新登录。";
 let accessToken = "";
 let isAuthenticated = false;
 let authBootResolved = false;
 let authSessionVersion = 0;
+let authenticatedUserId = readTabIdentity(TAB_USER_ID_KEY);
+let authenticatedUsername = readTabIdentity(TAB_USERNAME_KEY);
+let refreshAccessPromise = null;
 let dashboardPerformance = null;
 let binanceDashboardPerformance = null;
 let currentUserHasBinanceCredentials = false;
 let binancePerformanceAsset = "";
 let performanceViewMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 let performanceRequestVersion = 0;
+let binanceAccountRequestVersion = 0;
+let aiModelProviders = [];
+let aiModelConfigs = [];
+let aiModelSettingsLoaded = false;
+let aiModelSettingsLoading = false;
+let aiModelSettingsRequestVersion = 0;
+
+const AI_PROVIDER_FALLBACKS = Object.freeze([
+  { code: "deepseek", name: "DeepSeek", base_url: "", default_model: "deepseek-v4-flash", models: ["deepseek-v4-flash", "deepseek-v4-pro"] },
+  { code: "doubao", name: "豆包", base_url: "", default_model: "doubao-seed-2-0-lite-260215", models: ["doubao-seed-2-0-lite-260215"] },
+  { code: "qwen", name: "千问", base_url: "", default_model: "qwen3.7-plus", models: ["qwen3.7-plus", "qwen-plus"] },
+  { code: "kimi", name: "Kimi", base_url: "", default_model: "kimi-k3", models: ["kimi-k3"] },
+  { code: "minimax", name: "MiniMax", base_url: "", default_model: "MiniMax-M2.7", models: ["MiniMax-M2.7"] },
+  { code: "openai", name: "OpenAI", base_url: "", default_model: "", models: [] },
+]);
+let binanceOrdersRequestVersion = 0;
 
 const panelNames = {
   overview: "工作台",
   monitor: "合约监控",
   paper: "模拟盘",
-  credentials: "API 凭据",
+  settings: "系统设置",
   strategies: "策略中心",
   backtest: "数据回测",
   orders: "订单与持仓",
@@ -29,7 +51,7 @@ const panelPaths = Object.freeze({
   monitor: "/monitor",
   paper: "/paper",
   overview: "/overview",
-  credentials: "/credentials",
+  settings: "/settings",
   strategies: "/strategies",
   backtest: "/backtest",
   orders: "/orders",
@@ -37,13 +59,16 @@ const panelPaths = Object.freeze({
   audit: "/audit",
 });
 const panelByPath = new Map(Object.entries(panelPaths).map(([panel, path]) => [path, panel]));
+panelByPath.set("/credentials", "settings");
 
 function panelFromPath(pathname = window.location.pathname) {
   return panelByPath.get(pathname) || "";
 }
 
 function safeNextPath(value) {
-  return typeof value === "string" && panelByPath.has(value) ? value : "";
+  if (typeof value !== "string") return "";
+  const panel = panelByPath.get(value);
+  return panel ? panelPaths[panel] : "";
 }
 
 function nextPathFromLoginUrl() {
@@ -126,10 +151,61 @@ function apiErrorMessage(detail) {
   return "请求失败";
 }
 
+function readTabIdentity(key) {
+  try {
+    return window.sessionStorage.getItem(key) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function writeTabIdentity(key, value) {
+  try {
+    if (value) window.sessionStorage.setItem(key, value);
+    else window.sessionStorage.removeItem(key);
+  } catch (_) {
+    // Browsers can disable session storage. The in-memory identity check remains active.
+  }
+}
+
+function rememberAuthenticatedUser(user) {
+  const userId = String(user?.id || "").trim();
+  if (!/^\d+$/.test(userId)) throw new Error("服务器返回了无效的用户身份");
+  authenticatedUserId = userId;
+  authenticatedUsername = String(user?.username || "").trim();
+  writeTabIdentity(TAB_USER_ID_KEY, authenticatedUserId);
+  writeTabIdentity(TAB_USERNAME_KEY, authenticatedUsername);
+}
+
+function clearAuthenticatedUser() {
+  authenticatedUserId = "";
+  authenticatedUsername = "";
+  writeTabIdentity(TAB_USER_ID_KEY, "");
+  writeTabIdentity(TAB_USERNAME_KEY, "");
+}
+
+function rejectChangedIdentity(actualUser) {
+  accessToken = "";
+  const expected = authenticatedUsername || (authenticatedUserId ? `用户 ${authenticatedUserId}` : "当前用户");
+  const actual = String(actualUser?.username || "").trim();
+  const message = actual
+    ? `${AUTH_IDENTITY_CHANGED_MESSAGE}（标签页：${expected}，刷新身份：${actual}）`
+    : AUTH_IDENTITY_CHANGED_MESSAGE;
+  showLoginRoute({ preserveNext: true });
+  finishAuthBoot();
+  showMessage($("#auth-message"), message, "error");
+  const error = new Error(message);
+  error.code = "AUTH_IDENTITY_CHANGED";
+  throw error;
+}
+
 async function api(path, options = {}, retry = true) {
   const headers = new Headers(options.headers || {});
   if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  if (accessToken) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
+    if (authenticatedUserId) headers.set("X-QuantDesk-User-ID", authenticatedUserId);
+  }
   const response = await fetch(path, { ...options, headers, credentials: "include" });
   if (response.status === 401 && retry && !path.includes("/auth/")) {
     const refreshed = await refreshAccess();
@@ -142,20 +218,52 @@ async function api(path, options = {}, retry = true) {
 
 window.quantdeskApi = api;
 
-async function refreshAccess() {
+async function performRefreshAccess() {
+  let response;
   try {
-    const response = await fetch("/api/v2/auth/refresh", {
+    response = await fetch("/api/v2/auth/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
       credentials: "include",
     });
-    if (!response.ok) return false;
-    const data = await response.json();
-    accessToken = data.access_token;
-    return true;
   } catch (_) {
     return false;
+  }
+  if (!response.ok) return false;
+  const data = await response.json().catch(() => ({}));
+  const candidateToken = String(data.access_token || "");
+  if (!candidateToken) return false;
+
+  if (authenticatedUserId) {
+    let identityResponse;
+    try {
+      identityResponse = await fetch("/api/v2/me", {
+        headers: { Authorization: `Bearer ${candidateToken}` },
+        credentials: "include",
+      });
+    } catch (_) {
+      return false;
+    }
+    if (!identityResponse.ok) return false;
+    const actualUser = await identityResponse.json().catch(() => null);
+    if (!actualUser || String(actualUser.id) !== authenticatedUserId) {
+      rejectChangedIdentity(actualUser);
+    }
+  }
+
+  accessToken = candidateToken;
+  return true;
+}
+
+async function refreshAccess() {
+  if (refreshAccessPromise) return refreshAccessPromise;
+  const pending = performRefreshAccess();
+  refreshAccessPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (refreshAccessPromise === pending) refreshAccessPromise = null;
   }
 }
 
@@ -169,7 +277,7 @@ function openPanel(name, { historyMode = "push" } = {}) {
   const selected = panelNames[name] ? name : DEFAULT_PANEL;
   syncPanelRoute(selected, historyMode);
   document.title = `${panelNames[selected]} · QuantDesk`;
-  if (selected !== "credentials") $("#credential-form").reset();
+  if (selected !== "settings") $("#credential-form").reset();
   $$("[data-panel]").forEach((panel) => panel.classList.toggle("hidden", panel.dataset.panel !== selected));
   $$("[data-panel-target]").forEach((item) => {
     const active = item.dataset.panelTarget === selected;
@@ -191,6 +299,15 @@ function openPanel(name, { historyMode = "push" } = {}) {
   if (strategies && selected !== "strategies" && typeof strategies.pause === "function") strategies.pause();
   if (backtest && selected === "backtest" && typeof backtest.start === "function") backtest.start();
   if (backtest && selected !== "backtest" && typeof backtest.pause === "function") backtest.pause();
+  if (selected === "overview" && isAuthenticated && authBootResolved) {
+    refreshBinanceAccount(currentUserHasBinanceCredentials);
+  }
+  if (selected === "settings" && isAuthenticated) {
+    void loadAiModelSettings();
+  }
+  if (selected === "orders" && isAuthenticated) {
+    refreshBinanceOrders();
+  }
   closeSidebar();
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   window.scrollTo({ top: 0, behavior: reducedMotion ? "auto" : "smooth" });
@@ -202,8 +319,10 @@ function setAuthenticated(authenticated) {
   $("#login-page").classList.toggle("hidden", authenticated);
   $("#app-shell").classList.toggle("hidden", !authenticated);
   if (!authenticated) {
+    resetAiModelSettings();
     $("#credential-form").reset();
     resetBinanceAccount();
+    resetBinanceOrders();
     resetPerformancePanel();
     const monitor = $("#contract-monitor");
     const paper = $("#paper-dashboard");
@@ -222,6 +341,330 @@ function setAuthenticated(authenticated) {
 function updateCredentialStatus(configured, fingerprint = "") {
   const text = configured ? `已配置 · ${fingerprint}` : "尚未配置";
   $$('[data-credential-status]').forEach((target) => { target.textContent = text; });
+}
+
+function aiModelElement(tagName, className = "", text = "") {
+  const element = document.createElement(tagName);
+  if (className) element.className = className;
+  if (text !== "") element.textContent = text;
+  return element;
+}
+
+function normalizeAiModelProvider(item) {
+  const code = String(item?.code || "").trim().toLowerCase();
+  if (!code) return null;
+  const rawModels = Array.isArray(item?.models) ? item.models : [];
+  const models = [...new Set(rawModels.map((model) => String(model || "").trim()).filter(Boolean))];
+  const defaultModel = String(item?.default_model || "").trim();
+  if (defaultModel && !models.includes(defaultModel)) models.unshift(defaultModel);
+  return {
+    code,
+    name: String(item?.name || code).trim(),
+    baseUrl: String(item?.base_url || "").trim(),
+    defaultModel,
+    models,
+  };
+}
+
+function aiModelProviderList(payload) {
+  const source = Array.isArray(payload) ? payload : (Array.isArray(payload?.items) ? payload.items : []);
+  return source.map(normalizeAiModelProvider).filter(Boolean);
+}
+
+function fallbackAiModelProviders() {
+  return AI_PROVIDER_FALLBACKS.map(normalizeAiModelProvider).filter(Boolean);
+}
+
+function aiModelProvider(code) {
+  const normalizedCode = String(code || "").trim().toLowerCase();
+  return aiModelProviders.find((provider) => provider.code === normalizedCode)
+    || fallbackAiModelProviders().find((provider) => provider.code === normalizedCode)
+    || null;
+}
+
+function normalizeAiModelConfig(item) {
+  return {
+    id: String(item?.id || ""),
+    providerCode: String(item?.provider_code || "").trim().toLowerCase(),
+    providerName: String(item?.provider_name || "").trim(),
+    displayName: String(item?.display_name || "").trim(),
+    baseUrl: String(item?.base_url || "").trim(),
+    modelName: String(item?.model_name || "").trim(),
+    apiKeyConfigured: Boolean(item?.api_key_configured),
+    apiKeyFingerprint: String(item?.api_key_fingerprint || "").trim(),
+    isEnabled: Boolean(item?.is_enabled),
+    isDefault: Boolean(item?.is_default),
+    createdAt: String(item?.created_at || ""),
+    updatedAt: String(item?.updated_at || ""),
+  };
+}
+
+function setAiModelListStatus(message, kind = "") {
+  const status = $("#ai-model-list-status");
+  status.textContent = message;
+  status.className = `ai-model-list-status ${kind}`.trim();
+  status.classList.toggle("hidden", !message);
+}
+
+function aiModelProviderMark(code) {
+  return {
+    deepseek: "DS",
+    doubao: "豆",
+    qwen: "千",
+    kimi: "KM",
+    minimax: "MM",
+    openai: "OA",
+  }[code] || String(code || "AI").slice(0, 2).toUpperCase();
+}
+
+function createAiModelBadge(text, kind = "") {
+  return aiModelElement("span", `ai-model-badge ${kind}`.trim(), text);
+}
+
+function createAiModelAction(label, action, configId) {
+  const button = aiModelElement("button", "", label);
+  button.type = "button";
+  button.dataset.aiAction = action;
+  button.dataset.aiConfigId = configId;
+  return button;
+}
+
+function renderAiModelConfigs() {
+  const list = $("#ai-model-config-list");
+  list.replaceChildren();
+  list.setAttribute("aria-busy", "false");
+  if (!aiModelConfigs.length) {
+    setAiModelListStatus("尚未配置 AI 模型。新增后可作为策略语义编辑的模型来源。", "empty");
+    return;
+  }
+  setAiModelListStatus("");
+
+  aiModelConfigs.forEach((config) => {
+    const provider = aiModelProvider(config.providerCode);
+    const providerName = config.providerName || provider?.name || config.providerCode || "AI 服务";
+    const card = aiModelElement("article", "ai-model-config-card");
+    card.classList.toggle("is-default", config.isDefault);
+    card.classList.toggle("is-disabled", !config.isEnabled);
+    card.dataset.aiConfigId = config.id;
+
+    card.append(aiModelElement("span", "ai-model-provider-mark", aiModelProviderMark(config.providerCode)));
+
+    const main = aiModelElement("div", "ai-model-config-main");
+    const title = aiModelElement("div", "ai-model-config-title");
+    title.append(aiModelElement("strong", "", config.displayName || `${providerName} 配置`));
+    if (config.isDefault) title.append(createAiModelBadge("默认", "default"));
+    title.append(createAiModelBadge(config.isEnabled ? "已启用" : "已停用", config.isEnabled ? "enabled" : "disabled"));
+    main.append(title);
+    main.append(aiModelElement("span", "", `${providerName} · ${config.modelName || "未指定模型"}`));
+    const endpoint = config.baseUrl || provider?.baseUrl || "系统托管服务地址";
+    const keyState = config.apiKeyConfigured
+      ? `密钥 ${config.apiKeyFingerprint || "已加密"}`
+      : "尚未配置 API Key";
+    main.append(aiModelElement("small", "", `${endpoint} · ${keyState}`));
+    card.append(main);
+
+    const actions = aiModelElement("div", "ai-model-config-actions");
+    actions.append(createAiModelAction("编辑", "edit", config.id));
+    actions.append(createAiModelAction(config.isEnabled ? "停用" : "启用", "toggle", config.id));
+    if (!config.isDefault) actions.append(createAiModelAction("设为默认", "default", config.id));
+    actions.append(createAiModelAction("删除", "delete", config.id));
+    card.append(actions);
+    list.append(card);
+  });
+}
+
+function renderAiModelProviderOptions(selectedCode = "") {
+  const select = $("#ai-model-provider");
+  const current = selectedCode || select.value;
+  select.replaceChildren();
+  const providers = aiModelProviders.length ? aiModelProviders : fallbackAiModelProviders();
+  providers.forEach((provider) => {
+    const option = aiModelElement("option", "", provider.name);
+    option.value = provider.code;
+    select.append(option);
+  });
+  if (current && providers.some((provider) => provider.code === current)) select.value = current;
+  else if (providers.length) select.value = providers[0].code;
+  updateAiModelProviderDetails(false);
+}
+
+function updateAiModelProviderDetails(useDefaultModel = true) {
+  const provider = aiModelProvider($("#ai-model-provider").value);
+  const endpoint = $("#ai-provider-endpoint strong");
+  endpoint.textContent = provider?.baseUrl || "由系统配置并安全托管";
+  endpoint.title = provider?.baseUrl || "";
+
+  const datalist = $("#ai-model-name-options");
+  datalist.replaceChildren();
+  (provider?.models || []).forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model;
+    datalist.append(option);
+  });
+  if (useDefaultModel && !$("#ai-model-name").value.trim() && provider?.defaultModel) {
+    $("#ai-model-name").value = provider.defaultModel;
+  }
+}
+
+function closeAiModelDialog() {
+  const dialog = $("#ai-model-dialog");
+  if (dialog.open) dialog.close();
+  $("#ai-model-form").reset();
+  $("#ai-model-form-message").textContent = "";
+}
+
+function openAiModelDialog(config = null) {
+  const form = $("#ai-model-form");
+  form.reset();
+  form.dataset.originalProviderCode = config?.providerCode || "";
+  $("#ai-model-config-id").value = config?.id || "";
+  $("#ai-model-dialog-title").textContent = config ? "编辑 AI 模型" : "新增 AI 模型";
+  $("#ai-model-dialog-subtitle").textContent = config
+    ? "API Key 留空会保留现有密钥，其他字段保存后立即生效。"
+    : "API Key 将加密保存，提交后不再回显。";
+  $("#ai-model-form-message").textContent = "";
+  renderAiModelProviderOptions(config?.providerCode || "");
+  $("#ai-model-display-name").value = config?.displayName || "";
+  $("#ai-model-name").value = config?.modelName || "";
+  $("#ai-model-enabled").checked = config ? config.isEnabled : true;
+  $("#ai-model-default").checked = config ? config.isDefault : false;
+  const apiKey = $("#ai-model-api-key");
+  apiKey.value = "";
+  apiKey.required = !config;
+  apiKey.placeholder = config ? "留空则保留当前已加密密钥" : "输入服务商 API Key";
+  $("#ai-model-api-key-hint").textContent = config
+    ? `当前${config.apiKeyConfigured ? `已配置 ${config.apiKeyFingerprint || "加密密钥"}` : "尚未配置密钥"}；留空不会替换。`
+    : "保存后不会再次显示完整密钥。";
+  updateAiModelProviderDetails(!config);
+  const dialog = $("#ai-model-dialog");
+  if (!dialog.open) dialog.showModal();
+  window.setTimeout(() => $("#ai-model-provider").focus(), 0);
+}
+
+function resetAiModelSettings() {
+  aiModelSettingsRequestVersion += 1;
+  aiModelProviders = [];
+  aiModelConfigs = [];
+  aiModelSettingsLoaded = false;
+  aiModelSettingsLoading = false;
+  const list = $("#ai-model-config-list");
+  if (list) {
+    list.replaceChildren();
+    list.setAttribute("aria-busy", "false");
+  }
+  const status = $("#ai-model-list-status");
+  if (status) setAiModelListStatus("进入系统设置后加载模型配置。");
+  const dialog = $("#ai-model-dialog");
+  if (dialog?.open) dialog.close();
+}
+
+async function loadAiModelSettings(force = false) {
+  if (!isAuthenticated || aiModelSettingsLoading || (aiModelSettingsLoaded && !force)) return;
+  aiModelSettingsLoading = true;
+  const requestVersion = ++aiModelSettingsRequestVersion;
+  const sessionVersion = authSessionVersion;
+  $("#ai-model-config-list").setAttribute("aria-busy", "true");
+  setAiModelListStatus("正在读取当前用户的 AI 模型配置…", "loading");
+  try {
+    const [providerPayload, configPayload] = await Promise.all([
+      api("/api/v2/me/ai-model-providers"),
+      api("/api/v2/me/ai-model-configs"),
+    ]);
+    if (!isAuthenticated || sessionVersion !== authSessionVersion || requestVersion !== aiModelSettingsRequestVersion) return;
+    aiModelProviders = aiModelProviderList(providerPayload);
+    if (!aiModelProviders.length) aiModelProviders = fallbackAiModelProviders();
+    const configSource = Array.isArray(configPayload)
+      ? configPayload
+      : (Array.isArray(configPayload?.items) ? configPayload.items : []);
+    aiModelConfigs = configSource.map(normalizeAiModelConfig).filter((config) => config.id);
+    aiModelSettingsLoaded = true;
+    renderAiModelConfigs();
+  } catch (error) {
+    if (!isAuthenticated || sessionVersion !== authSessionVersion || requestVersion !== aiModelSettingsRequestVersion) return;
+    aiModelSettingsLoaded = false;
+    $("#ai-model-config-list").setAttribute("aria-busy", "false");
+    setAiModelListStatus(`模型配置加载失败：${error.message}`, "error");
+  } finally {
+    if (requestVersion === aiModelSettingsRequestVersion) aiModelSettingsLoading = false;
+  }
+}
+
+async function saveAiModelConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const configId = $("#ai-model-config-id").value;
+  const providerCode = $("#ai-model-provider").value;
+  const apiKey = $("#ai-model-api-key").value.trim();
+  if (configId && providerCode !== form.dataset.originalProviderCode && !apiKey) {
+    showMessage($("#ai-model-form-message"), "更换服务商时必须输入对应的新 API Key。", "error");
+    $("#ai-model-api-key").focus();
+    return;
+  }
+  const payload = {
+    provider_code: providerCode,
+    display_name: $("#ai-model-display-name").value.trim(),
+    model_name: $("#ai-model-name").value.trim(),
+    is_enabled: $("#ai-model-enabled").checked,
+    is_default: $("#ai-model-default").checked,
+  };
+  if (apiKey) payload.api_key = apiKey;
+
+  const saveButton = $("#ai-model-save");
+  const previousLabel = saveButton.textContent;
+  saveButton.disabled = true;
+  saveButton.textContent = "保存中…";
+  showMessage($("#ai-model-form-message"), "");
+  try {
+    await api(configId ? `/api/v2/me/ai-model-configs/${configId}` : "/api/v2/me/ai-model-configs", {
+      method: configId ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    closeAiModelDialog();
+    aiModelSettingsLoaded = false;
+    await loadAiModelSettings(true);
+    if (aiModelSettingsLoaded) setAiModelListStatus(configId ? "模型配置已更新。" : "模型配置已创建。", "success");
+  } catch (error) {
+    showMessage($("#ai-model-form-message"), error.message, "error");
+  } finally {
+    saveButton.disabled = false;
+    saveButton.textContent = previousLabel;
+  }
+}
+
+async function runAiModelConfigAction(button) {
+  const config = aiModelConfigs.find((item) => item.id === button.dataset.aiConfigId);
+  if (!config) return;
+  const action = button.dataset.aiAction;
+  if (action === "edit") {
+    openAiModelDialog(config);
+    return;
+  }
+  if (action === "delete" && !window.confirm(`确定删除“${config.displayName || config.providerName}”模型配置？`)) return;
+
+  button.disabled = true;
+  try {
+    if (action === "delete") {
+      await api(`/api/v2/me/ai-model-configs/${config.id}`, { method: "DELETE" });
+    } else if (action === "toggle") {
+      const enabled = !config.isEnabled;
+      await api(`/api/v2/me/ai-model-configs/${config.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ is_enabled: enabled, ...(enabled ? {} : { is_default: false }) }),
+      });
+    } else if (action === "default") {
+      await api(`/api/v2/me/ai-model-configs/${config.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ is_enabled: true, is_default: true }),
+      });
+    } else {
+      return;
+    }
+    aiModelSettingsLoaded = false;
+    await loadAiModelSettings(true);
+  } catch (error) {
+    setAiModelListStatus(error.message, "error");
+    button.disabled = false;
+  }
 }
 
 function accountTypeLabel(value) {
@@ -255,6 +698,7 @@ function resetBinanceAccount() {
   $("#binance-account-detail").textContent = "正在读取当前用户的账户状态";
   $("#binance-account-detail").removeAttribute("title");
   $("#binance-account-action").classList.add("hidden");
+  $("#binance-account-action").dataset.accountAction = "settings";
 }
 
 function firstFinite(...values) {
@@ -529,9 +973,9 @@ function normalizeBinanceDashboardPerformance(payload) {
   const assetViews = (Array.isArray(root.assets) ? root.assets : [])
     .map(normalizeBinanceAssetPerformance)
     .filter((entry) => entry.asset);
-  const legacy = normalizeDashboardPerformance(payload, "Binance 实盘");
+  const fallback = normalizeDashboardPerformance(payload, "Binance 实盘");
   const performance = {
-    ...legacy,
+    ...fallback,
     configured,
     connected,
     source: "Binance 实盘",
@@ -543,7 +987,7 @@ function normalizeBinanceDashboardPerformance(payload) {
     account,
     assetViews,
     selectedAsset: "",
-    currency: String(root.currency || account?.currency || legacy.currency || "USDT").toUpperCase().slice(0, 12),
+    currency: String(root.currency || account?.currency || fallback.currency || "USDT").toUpperCase().slice(0, 12),
     fundingFee: firstFinite(root.metrics?.funding_fee, root.funding_fee),
     commission: firstFinite(root.metrics?.commission, root.commission),
     truncated: Boolean(root.truncated) || (root.history_status === "available" && root.history_complete === false),
@@ -551,11 +995,11 @@ function normalizeBinanceDashboardPerformance(payload) {
       ? root.totals_by_asset
       : Object.fromEntries(assetViews.map((entry) => [entry.asset, entry])),
     generatedAt: root.generated_at || "",
-    dataAsOf: root.data_as_of || legacy.dataAsOf,
-    calendarMonth: root.calendar?.month || root.month || legacy.calendarMonth,
-    timezoneLabel: root.calendar?.timezone_label || root.timezone_label || legacy.timezoneLabel,
+    dataAsOf: root.data_as_of || fallback.dataAsOf,
+    calendarMonth: root.calendar?.month || root.month || fallback.calendarMonth,
+    timezoneLabel: root.calendar?.timezone_label || root.timezone_label || fallback.timezoneLabel,
     calendarBasis: root.calendar?.basis || root.income_basis || "",
-    recordsIncluded: firstFinite(root.records_included) ?? legacy.tradeCount,
+    recordsIncluded: firstFinite(root.records_included) ?? fallback.tradeCount,
     aggregationPolicy: root.aggregation_policy || "",
   };
   return assetViews.length ? withBinancePerformanceAsset(performance) : performance;
@@ -1014,9 +1458,6 @@ async function refreshDashboardPerformance() {
   if (binanceResult.status === "fulfilled") {
     currentUserHasBinanceCredentials = binanceResult.value.configured;
     renderBinanceDashboardPerformance(binanceResult.value);
-    if (binanceResult.value.account) {
-      renderBinanceAccount(binanceResult.value.account, binanceResult.value.configured);
-    }
   } else {
     renderBinancePerformanceFailure();
   }
@@ -1042,6 +1483,7 @@ function renderBinanceAccount(account, configuredFallback = false) {
     detail.textContent = "配置 API 凭据后可读取钱包与可用余额";
     detail.removeAttribute("title");
     action.textContent = "去配置";
+    action.dataset.accountAction = "settings";
     return;
   }
 
@@ -1061,7 +1503,9 @@ function renderBinanceAccount(account, configuredFallback = false) {
     }[account?.error_category];
     detail.textContent = errorHint || "请稍后重试，或检查 API 权限与服务器网络";
     detail.removeAttribute("title");
-    action.textContent = "检查 API 凭据";
+    const credentialIssue = ["credential_error", "authentication"].includes(account?.error_category);
+    action.textContent = credentialIssue ? "检查 API 凭据" : "重新连接";
+    action.dataset.accountAction = credentialIssue ? "settings" : "retry";
     return;
   }
 
@@ -1079,14 +1523,190 @@ function renderBinanceAccount(account, configuredFallback = false) {
   if (dataTime) detail.title = `账户数据时间：${new Date(dataTime).toLocaleString("zh-CN", { hour12: false })}`;
   else detail.removeAttribute("title");
   action.classList.add("hidden");
+  action.dataset.accountAction = "settings";
 }
 
 async function refreshBinanceAccount(configuredFallback = false) {
+  const requestVersion = ++binanceAccountRequestVersion;
+  resetBinanceAccount();
   try {
     const account = await api("/api/v2/me/binance-account");
+    if (requestVersion !== binanceAccountRequestVersion) return null;
     renderBinanceAccount(account, configuredFallback);
+    return account;
   } catch (_) {
+    if (requestVersion !== binanceAccountRequestVersion) return null;
     renderBinanceAccount({ configured: configuredFallback, connected: false }, configuredFallback);
+    return null;
+  }
+}
+
+function escapeOrdersHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+}
+
+function ordersNumber(value, maximumFractionDigits = 8) {
+  if (value === null || value === undefined || value === "") return "--";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return number.toLocaleString("zh-CN", { maximumFractionDigits });
+}
+
+function ordersTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function resetBinanceOrders() {
+  binanceOrdersRequestVersion += 1;
+  $("#orders-position-count").textContent = "--";
+  $("#orders-open-count").textContent = "--";
+  $("#orders-account-type").textContent = "--";
+  $("#orders-updated-at").textContent = "等待同步";
+  $("#orders-position-badge").textContent = "0 个";
+  $("#orders-open-badge").textContent = "0 个";
+  $("#orders-positions").innerHTML = '<div class="orders-table-empty">等待读取当前持仓</div>';
+  $("#orders-open-orders").innerHTML = '<div class="orders-table-empty">等待读取当前挂单</div>';
+  const message = $("#orders-message");
+  message.className = "orders-message";
+  message.textContent = "尚未同步 Binance 数据";
+  $("#orders-refresh").disabled = false;
+}
+
+function renderBinancePositions(positions) {
+  const target = $("#orders-positions");
+  if (!positions.length) {
+    target.innerHTML = '<div class="orders-table-empty">当前没有非零合约持仓</div>';
+    return;
+  }
+  const rows = positions.map((position) => {
+    const side = String(position.side || "").toLowerCase() === "short" ? "short" : "long";
+    const upnl = position.upnl === null || position.upnl === undefined ? null : Number(position.upnl);
+    const pnlClass = upnl > 0 ? "profit" : (upnl < 0 ? "loss" : "");
+    const apiNotional = position.notional === null || position.notional === undefined
+      ? null
+      : Number(position.notional);
+    const calculatedNotional = position.amt === null || position.amt === undefined
+      || position.mark_price === null || position.mark_price === undefined
+      ? null
+      : Number(position.amt) * Number(position.mark_price);
+    const notional = Number.isFinite(apiNotional) ? apiNotional : calculatedNotional;
+    const leverage = Number(position.leverage);
+    return `<tr>
+      <td class="symbol">${escapeOrdersHtml(position.symbol)}</td>
+      <td class="${side}">${side === "short" ? "空" : "多"}</td>
+      <td>${ordersNumber(position.amt)}</td>
+      <td>${ordersNumber(position.entry_price)}</td>
+      <td>${ordersNumber(position.mark_price)}</td>
+      <td>${ordersNumber(notional, 2)}</td>
+      <td class="${pnlClass}">${ordersNumber(upnl, 4)}</td>
+      <td>${Number.isFinite(leverage) && leverage > 0 ? `${ordersNumber(leverage, 0)}×` : "--"}</td>
+      <td>${ordersTime(Number(position.ts))}</td>
+    </tr>`;
+  }).join("");
+  target.innerHTML = `<table class="orders-table"><thead><tr>
+    <th>合约</th><th>方向</th><th>数量</th><th>开仓均价</th><th>标记价格</th><th>名义价值</th><th>未实现盈亏</th><th>杠杆</th><th>更新时间</th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderBinanceOpenOrders(openOrders) {
+  const target = $("#orders-open-orders");
+  if (!openOrders.length) {
+    target.innerHTML = '<div class="orders-table-empty">当前没有未成交订单</div>';
+    return;
+  }
+  const typeLabels = {
+    LIMIT: "限价", MARKET: "市价", STOP: "止损限价", STOP_MARKET: "止损市价",
+    TAKE_PROFIT: "止盈限价", TAKE_PROFIT_MARKET: "止盈市价", TRAILING_STOP_MARKET: "跟踪止损",
+  };
+  const statusLabels = { NEW: "待成交", PARTIALLY_FILLED: "部分成交" };
+  const rows = openOrders.map((order) => {
+    const side = String(order.side || "").toUpperCase() === "SELL" ? "sell" : "buy";
+    const quantity = Number(order.quantity);
+    const executed = Number(order.executed_quantity);
+    const remaining = Number.isFinite(quantity) && Number.isFinite(executed) ? Math.max(0, quantity - executed) : NaN;
+    const price = Number(order.price) || Number(order.stop_price) || 0;
+    const flags = [
+      order.conditional ? "条件单" : "",
+      order.reduce_only ? "只减仓" : "",
+      order.close_position ? "全平" : "",
+    ].filter(Boolean).join(" · ") || "--";
+    return `<tr>
+      <td class="symbol">${escapeOrdersHtml(order.symbol)}</td>
+      <td class="${side}">${side === "sell" ? "卖出" : "买入"}</td>
+      <td>${escapeOrdersHtml(typeLabels[order.type] || order.type || "--")}</td>
+      <td>${ordersNumber(price)}</td>
+      <td>${ordersNumber(quantity)}</td>
+      <td>${ordersNumber(executed)}</td>
+      <td>${ordersNumber(remaining)}</td>
+      <td>${escapeOrdersHtml(statusLabels[order.status] || order.status || "--")}</td>
+      <td>${escapeOrdersHtml(flags)}</td>
+      <td title="${escapeOrdersHtml(order.order_id)}">${escapeOrdersHtml(order.order_id)}</td>
+      <td>${ordersTime(Number(order.updated_at))}</td>
+    </tr>`;
+  }).join("");
+  target.innerHTML = `<table class="orders-table"><thead><tr>
+    <th>合约</th><th>方向</th><th>类型</th><th>委托/触发价</th><th>委托数量</th><th>已成交</th><th>剩余</th><th>状态</th><th>标记</th><th>订单 ID</th><th>更新时间</th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderBinanceOrders(state) {
+  const positions = Array.isArray(state?.positions) ? state.positions : [];
+  const openOrders = Array.isArray(state?.open_orders) ? state.open_orders : [];
+  const message = $("#orders-message");
+  $("#orders-refresh").disabled = false;
+
+  if (!state?.configured) {
+    resetBinanceOrders();
+    message.className = "orders-message error";
+    message.textContent = "尚未配置 Binance API 凭据，请先在系统设置中完成配置。";
+    return;
+  }
+  if (!state.connected) {
+    const errorHint = {
+      credential_error: "本地凭据无法解密，请重新配置。",
+      authentication: "Binance 身份验证失败，请检查 API Key、IP 白名单及合约读取权限。",
+      timestamp: "服务器时间与 Binance 不同步，请校准后重试。",
+      rate_limit: "Binance 请求频率受限，请稍后再试。",
+      timeout: "Binance 响应超时，请稍后再试。",
+      network: "服务器暂时无法连接 Binance。",
+      upstream: "Binance 服务暂时不可用。",
+      invalid_response: "Binance 返回了无法识别的订单数据。",
+    }[state.error_category];
+    message.className = "orders-message error";
+    message.textContent = errorHint || "暂时无法读取 Binance 持仓与挂单。";
+    return;
+  }
+
+  $("#orders-position-count").textContent = String(positions.length);
+  $("#orders-open-count").textContent = String(openOrders.length);
+  $("#orders-account-type").textContent = accountTypeLabel(state.account_type);
+  $("#orders-updated-at").textContent = `同步于 ${ordersTime(state.updated_at)}`;
+  $("#orders-position-badge").textContent = `${positions.length} 个`;
+  $("#orders-open-badge").textContent = `${openOrders.length} 个`;
+  message.className = "orders-message success";
+  message.textContent = "已从 Binance 实时同步；页面仅展示数据，不会提交或撤销订单。";
+  renderBinancePositions(positions);
+  renderBinanceOpenOrders(openOrders);
+}
+
+async function refreshBinanceOrders() {
+  const requestVersion = ++binanceOrdersRequestVersion;
+  const message = $("#orders-message");
+  $("#orders-refresh").disabled = true;
+  message.className = "orders-message loading";
+  message.textContent = "正在读取 Binance 账户数据…";
+  try {
+    const state = await api("/api/v2/me/binance-orders");
+    if (requestVersion !== binanceOrdersRequestVersion) return;
+    renderBinanceOrders(state);
+  } catch (error) {
+    if (requestVersion !== binanceOrdersRequestVersion) return;
+    $("#orders-refresh").disabled = false;
+    message.className = "orders-message error";
+    message.textContent = error.message || "读取 Binance 订单失败，请稍后重试。";
   }
 }
 
@@ -1100,6 +1720,11 @@ async function loadDashboard() {
     finishAuthBoot();
     return false;
   }
+
+  if (authenticatedUserId && String(user.id) !== authenticatedUserId) {
+    rejectChangedIdentity(user);
+  }
+  rememberAuthenticatedUser(user);
 
   $("#username").textContent = user.username;
   $("#sidebar-username").textContent = user.username;
@@ -1119,16 +1744,9 @@ async function loadDashboard() {
 
   try {
     const binancePerformancePromise = requestBinanceDashboardPerformance();
-    const accountRequest = binancePerformancePromise
-      .then((performance) => {
-        if (performance.account) return { ok: true, account: performance.account };
-        return api("/api/v2/me/binance-account")
-          .then((account) => ({ ok: true, account }))
-          .catch(() => ({ ok: false, account: null }));
-      })
-      .catch(() => api("/api/v2/me/binance-account")
-        .then((account) => ({ ok: true, account }))
-        .catch(() => ({ ok: false, account: null })));
+    const accountRequest = api("/api/v2/me/binance-account")
+      .then((account) => ({ ok: true, account }))
+      .catch(() => ({ ok: false, account: null }));
     const performanceRequest = requestDashboardPerformance()
       .then((performance) => ({ ok: true, performance }))
       .catch(() => ({ ok: false, performance: null }));
@@ -1226,6 +1844,7 @@ $("#login-form").addEventListener("submit", async (event) => {
         client_type: "web",
       }),
     });
+    clearAuthenticatedUser();
     accessToken = data.access_token;
     formElement.reset();
     await loadDashboard();
@@ -1252,6 +1871,7 @@ $("#credential-form").addEventListener("submit", async (event) => {
     updateCredentialStatus(true, data.fingerprint);
     showMessage($("#dashboard-message"), "凭据已加密保存。", "success");
     await refreshBinanceAccount(true);
+    if (panelFromPath() === "orders") await refreshBinanceOrders();
     await refreshDashboardPerformance();
   } catch (error) {
     showMessage($("#dashboard-message"), error.message, "error");
@@ -1265,11 +1885,38 @@ $("#delete-credentials").addEventListener("click", async () => {
     currentUserHasBinanceCredentials = false;
     updateCredentialStatus(false);
     renderBinanceAccount({ configured: false, connected: false });
+    resetBinanceOrders();
     renderBinancePerformanceFailure(false);
     showMessage($("#dashboard-message"), "凭据已删除。", "success");
   } catch (error) {
     showMessage($("#dashboard-message"), error.message, "error");
   }
+});
+
+$("#ai-model-create").addEventListener("click", () => openAiModelDialog());
+$("#ai-model-dialog-close").addEventListener("click", closeAiModelDialog);
+$("#ai-model-cancel").addEventListener("click", closeAiModelDialog);
+$("#ai-model-dialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeAiModelDialog();
+});
+$("#ai-model-dialog").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) closeAiModelDialog();
+});
+$("#ai-model-provider").addEventListener("change", () => {
+  $("#ai-model-name").value = "";
+  updateAiModelProviderDetails(true);
+});
+$("#ai-model-enabled").addEventListener("change", (event) => {
+  if (!event.currentTarget.checked) $("#ai-model-default").checked = false;
+});
+$("#ai-model-default").addEventListener("change", (event) => {
+  if (event.currentTarget.checked) $("#ai-model-enabled").checked = true;
+});
+$("#ai-model-form").addEventListener("submit", saveAiModelConfig);
+$("#ai-model-config-list").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-ai-action]");
+  if (button) void runAiModelConfigAction(button);
 });
 
 $("#logout").addEventListener("click", async () => {
@@ -1280,6 +1927,7 @@ $("#logout").addEventListener("click", async () => {
     credentials: "include",
   }).catch(() => {});
   accessToken = "";
+  clearAuthenticatedUser();
   showLoginRoute({ preserveNext: false });
 });
 
@@ -1292,6 +1940,7 @@ $("#menu-toggle").addEventListener("click", () => {
 
 $("#sidebar-backdrop").addEventListener("click", closeSidebar);
 $("#performance-refresh").addEventListener("click", refreshDashboardPerformance);
+$("#orders-refresh").addEventListener("click", refreshBinanceOrders);
 $("#binance-performance-asset").addEventListener("change", (event) => {
   if (!binanceDashboardPerformance) return;
   renderBinanceDashboardPerformance(withBinancePerformanceAsset(binanceDashboardPerformance, event.currentTarget.value));
@@ -1313,7 +1962,13 @@ $$("[data-panel-target]").forEach((item) => item.addEventListener("click", (even
   event.preventDefault();
   openPanel(item.dataset.panelTarget);
 }));
-$$("[data-open-panel]").forEach((item) => item.addEventListener("click", () => openPanel(item.dataset.openPanel)));
+$$("[data-open-panel]").forEach((item) => item.addEventListener("click", () => {
+  if (item.dataset.accountAction === "retry") {
+    refreshBinanceAccount(true);
+    return;
+  }
+  openPanel(item.dataset.openPanel);
+}));
 document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeSidebar(); });
 document.addEventListener("quantdesk:navigate", (event) => openPanel(event.detail));
 window.addEventListener("popstate", handleRouteChange);

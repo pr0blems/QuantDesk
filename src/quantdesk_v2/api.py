@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import uuid
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
@@ -15,6 +16,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from . import __version__
+from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
 from .backtest import BacktestRepository, BacktestUnavailable
 from .binance_client import BinanceAccountClient, BinanceAccountClientError
 from .binance_performance import (
@@ -25,14 +27,30 @@ from .binance_performance import (
 )
 from .database import get_db
 from .dependencies import get_current_user
-from .models import AuditLog, BacktestRun, BacktestTrade, PaperAccount, User, UserSession, utcnow
+from .models import (
+    AiModelConfig,
+    AuditLog,
+    BacktestRun,
+    BacktestTrade,
+    PaperAccount,
+    StrategyDeployment,
+    StrategyRevision,
+    User,
+    UserSession,
+    utcnow,
+)
 from .monitor import MonitorRepository, MonitorUnavailable
 from .schemas import (
+    AiModelConfigCreate,
+    AiModelConfigOut,
+    AiModelConfigUpdate,
+    AiProviderOut,
     BacktestRunRequest,
     BinanceAccountSummary,
     BinanceCredentialStatus,
     BinanceCredentialUpdate,
     BinancePerformanceOut,
+    BinanceTradingState,
     DashboardPerformanceOut,
     HealthOut,
     LoginRequest,
@@ -108,6 +126,22 @@ def _client_ip(request: Request) -> str | None:
     return request.client.host[:45] if request.client else None
 
 
+def _require_expected_user(request: Request, user: User) -> None:
+    """Block sensitive writes when a browser tab silently changes accounts."""
+    expected = request.headers.get("X-QuantDesk-User-ID", "").strip()
+    if not expected:
+        raise HTTPException(status_code=428, detail="expected user identity is required")
+    try:
+        expected_user_id = int(expected)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="expected user identity is invalid") from None
+    if expected_user_id != user.id:
+        raise HTTPException(
+            status_code=409,
+            detail="authenticated user changed; sign in again before updating credentials",
+        )
+
+
 def _user_out(user: User) -> UserOut:
     return UserOut(
         id=user.id,
@@ -138,6 +172,117 @@ def _audit(
             resource_id=resource_id,
             ip_address=_client_ip(request),
         )
+    )
+
+
+def _ai_provider_out(preset: AiProviderPreset) -> AiProviderOut:
+    return AiProviderOut(
+        code=preset.code,
+        name=preset.label,
+        base_url=preset.base_url,
+        default_model=preset.default_model,
+        models=list(preset.models),
+    )
+
+
+def _ai_model_config_out(config: AiModelConfig) -> AiModelConfigOut:
+    preset = get_ai_provider(config.provider_code)
+    if preset is None:
+        raise HTTPException(status_code=500, detail="stored AI provider is unsupported")
+    return AiModelConfigOut(
+        id=config.public_id,
+        provider_code=config.provider_code,
+        provider_name=preset.label,
+        display_name=config.display_name,
+        base_url=preset.base_url,
+        model_name=config.model_name,
+        api_key_configured=bool(config.api_key_encrypted),
+        api_key_fingerprint=config.api_key_fingerprint,
+        is_enabled=config.is_enabled,
+        is_default=config.is_default,
+        created_at=config.created_at,
+        updated_at=config.updated_at,
+    )
+
+
+def _lock_ai_model_owner(db: Session, user_id: int) -> None:
+    """Serialize default-model transitions for one tenant."""
+
+    locked_user_id = db.scalar(select(User.id).where(User.id == user_id).with_for_update())
+    if locked_user_id is None:
+        raise HTTPException(status_code=404, detail="user not found")
+
+
+def _has_default_ai_model(db: Session, user_id: int) -> bool:
+    return (
+        db.scalar(
+            select(AiModelConfig.id)
+            .where(
+                AiModelConfig.user_id == user_id,
+                AiModelConfig.is_default.is_(True),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def _get_owned_ai_model_config(
+    db: Session, user_id: int, public_id: str, *, for_update: bool = False
+) -> AiModelConfig:
+    statement = select(AiModelConfig).where(
+        AiModelConfig.user_id == user_id,
+        AiModelConfig.public_id == public_id,
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    config = db.scalar(statement)
+    if config is None:
+        raise HTTPException(status_code=404, detail="AI model configuration not found")
+    return config
+
+
+def _set_default_ai_model(db: Session, config: AiModelConfig) -> None:
+    if not config.is_enabled:
+        raise HTTPException(
+            status_code=422,
+            detail="a default AI model configuration must be enabled",
+        )
+    existing_defaults = db.scalars(
+        select(AiModelConfig)
+        .where(
+            AiModelConfig.user_id == config.user_id,
+            AiModelConfig.public_id != config.public_id,
+            AiModelConfig.is_default.is_(True),
+        )
+        .with_for_update()
+    ).all()
+    for existing in existing_defaults:
+        existing.is_default = False
+    if existing_defaults:
+        db.flush()
+    config.is_default = True
+
+
+def _promote_ai_model_default(
+    db: Session, user_id: int, *, exclude_public_id: str | None = None
+) -> None:
+    statement = select(AiModelConfig).where(
+        AiModelConfig.user_id == user_id,
+        AiModelConfig.is_enabled.is_(True),
+    )
+    if exclude_public_id is not None:
+        statement = statement.where(AiModelConfig.public_id != exclude_public_id)
+    candidate = db.scalar(statement.order_by(AiModelConfig.id).limit(1).with_for_update())
+    if candidate is not None:
+        _set_default_ai_model(db, candidate)
+
+
+def _ai_config_conflict(db: Session) -> HTTPException:
+    db.rollback()
+    return HTTPException(
+        status_code=409,
+        detail="AI model configuration conflicts with an existing configuration",
     )
 
 
@@ -709,6 +854,73 @@ def binance_account_summary(
     )
 
 
+@router.get("/me/binance-orders", response_model=BinanceTradingState)
+def binance_orders(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> BinanceTradingState:
+    """Return a fresh, read-only view of Binance futures positions and open orders."""
+
+    response.headers["Cache-Control"] = "private, no-store"
+    checked_at = datetime.now(UTC)
+    if not user.binance_credentials_configured:
+        return BinanceTradingState(
+            configured=False,
+            connected=False,
+            updated_at=checked_at,
+            error_category="not_configured",
+        )
+
+    encrypted_key = user.binance_api_key_encrypted
+    encrypted_secret = user.binance_api_secret_encrypted
+    db.rollback()
+    cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
+    try:
+        api_key = cipher.decrypt(encrypted_key or "")
+        api_secret = cipher.decrypt(encrypted_secret or "")
+    except SecurityError:
+        return BinanceTradingState(
+            configured=True,
+            connected=False,
+            updated_at=checked_at,
+            error_category="credential_error",
+        )
+
+    settings = request.app.state.settings
+    client = BinanceAccountClient(
+        settings.binance_futures_base_url,
+        settings.binance_portfolio_base_url,
+        recv_window_ms=settings.binance_futures_recv_window_ms,
+        timeout_seconds=settings.binance_futures_timeout_seconds,
+    )
+    try:
+        account = client.account(api_key, api_secret)
+        open_orders = client.open_orders(
+            api_key,
+            api_secret,
+            account_type=account.account_type,
+        )
+    except BinanceAccountClientError as exc:
+        return BinanceTradingState(
+            configured=True,
+            connected=False,
+            updated_at=checked_at,
+            error_category=exc.category,
+        )
+
+    return BinanceTradingState(
+        configured=True,
+        connected=True,
+        account_type=account.account_type,
+        updated_at=datetime.now(UTC),
+        positions=list(account.positions),
+        open_orders=list(open_orders),
+        error_category=None,
+    )
+
+
 @router.get("/dashboard/binance-performance", response_model=BinancePerformanceOut)
 def binance_performance(
     request: Request,
@@ -837,6 +1049,7 @@ def update_binance_credentials(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> BinanceCredentialStatus:
+    _require_expected_user(request, user)
     api_key = payload.api_key.get_secret_value().strip()
     api_secret = payload.api_secret.get_secret_value().strip()
     cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
@@ -862,6 +1075,7 @@ def delete_binance_credentials(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> MessageOut:
+    _require_expected_user(request, user)
     user.binance_api_key_encrypted = None
     user.binance_api_secret_encrypted = None
     user.binance_key_fingerprint = None
@@ -871,6 +1085,178 @@ def delete_binance_credentials(
     _audit(db, request, "binance.credentials.delete", user.id, "user", str(user.id))
     db.commit()
     return MessageOut(message="Binance credentials removed")
+
+
+@router.get("/me/ai-model-providers", response_model=list[AiProviderOut])
+def list_ai_model_providers(
+    _: User = Depends(get_current_user),
+) -> list[AiProviderOut]:
+    return [_ai_provider_out(preset) for preset in AI_PROVIDER_PRESETS.values()]
+
+
+@router.get("/me/ai-model-configs", response_model=list[AiModelConfigOut])
+def list_ai_model_configs(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[AiModelConfigOut]:
+    configs = db.scalars(
+        select(AiModelConfig)
+        .where(AiModelConfig.user_id == user.id)
+        .order_by(AiModelConfig.is_default.desc(), AiModelConfig.updated_at.desc())
+    ).all()
+    return [_ai_model_config_out(config) for config in configs]
+
+
+@router.post(
+    "/me/ai-model-configs",
+    response_model=AiModelConfigOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_ai_model_config(
+    payload: AiModelConfigCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> AiModelConfigOut:
+    _require_expected_user(request, user)
+    preset = get_ai_provider(payload.provider_code)
+    if preset is None:
+        raise HTTPException(status_code=422, detail="unsupported AI provider")
+    api_key = payload.api_key.get_secret_value()
+    cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
+
+    try:
+        _lock_ai_model_owner(db, user.id)
+        has_default = _has_default_ai_model(db, user.id)
+        config = AiModelConfig(
+            user_id=user.id,
+            provider_code=preset.code,
+            display_name=payload.display_name,
+            model_name=payload.model_name,
+            api_key_encrypted=cipher.encrypt(api_key),
+            api_key_fingerprint=api_key_fingerprint(api_key),
+            api_key_version=1,
+            is_enabled=payload.is_enabled,
+            is_default=False,
+        )
+        db.add(config)
+        db.flush()
+        if payload.is_default or (not has_default and config.is_enabled):
+            _set_default_ai_model(db, config)
+        _audit(
+            db,
+            request,
+            "ai_model_config.create",
+            user.id,
+            "ai_model_config",
+            config.public_id,
+        )
+        db.commit()
+    except IntegrityError:
+        raise _ai_config_conflict(db) from None
+    db.refresh(config)
+    return _ai_model_config_out(config)
+
+
+@router.put("/me/ai-model-configs/{config_id}", response_model=AiModelConfigOut)
+def update_ai_model_config(
+    config_id: uuid.UUID,
+    payload: AiModelConfigUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> AiModelConfigOut:
+    _require_expected_user(request, user)
+    try:
+        _lock_ai_model_owner(db, user.id)
+        config = _get_owned_ai_model_config(db, user.id, str(config_id), for_update=True)
+        was_default = config.is_default
+
+        if payload.provider_code is not None:
+            preset = get_ai_provider(payload.provider_code)
+            if preset is None:
+                raise HTTPException(status_code=422, detail="unsupported AI provider")
+            if preset.code != config.provider_code:
+                if payload.api_key is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="api_key is required when changing AI provider",
+                    )
+                if payload.model_name is None:
+                    config.model_name = preset.default_model
+            config.provider_code = preset.code
+        if payload.display_name is not None:
+            config.display_name = payload.display_name
+        if payload.model_name is not None:
+            config.model_name = payload.model_name
+        if payload.api_key is not None:
+            api_key = payload.api_key.get_secret_value()
+            cipher = CredentialCipher(
+                request.app.state.settings.credential_master_key.get_secret_value()
+            )
+            config.api_key_encrypted = cipher.encrypt(api_key)
+            config.api_key_fingerprint = api_key_fingerprint(api_key)
+            config.api_key_version += 1
+        if payload.is_enabled is not None:
+            config.is_enabled = payload.is_enabled
+
+        if payload.is_default is True:
+            _set_default_ai_model(db, config)
+        elif payload.is_default is False or not config.is_enabled:
+            config.is_default = False
+            db.flush()
+            if was_default:
+                _promote_ai_model_default(db, user.id, exclude_public_id=config.public_id)
+        elif payload.is_enabled is True and not _has_default_ai_model(db, user.id):
+            _set_default_ai_model(db, config)
+
+        _audit(
+            db,
+            request,
+            "ai_model_config.update",
+            user.id,
+            "ai_model_config",
+            config.public_id,
+        )
+        db.commit()
+    except IntegrityError:
+        raise _ai_config_conflict(db) from None
+    db.refresh(config)
+    return _ai_model_config_out(config)
+
+
+@router.delete(
+    "/me/ai-model-configs/{config_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_ai_model_config(
+    config_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    _require_expected_user(request, user)
+    try:
+        _lock_ai_model_owner(db, user.id)
+        config = _get_owned_ai_model_config(db, user.id, str(config_id), for_update=True)
+        was_default = config.is_default
+        public_id = config.public_id
+        db.delete(config)
+        db.flush()
+        if was_default:
+            _promote_ai_model_default(db, user.id)
+        _audit(
+            db,
+            request,
+            "ai_model_config.delete",
+            user.id,
+            "ai_model_config",
+            public_id,
+        )
+        db.commit()
+    except IntegrityError:
+        raise _ai_config_conflict(db) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/monitor/overview")
@@ -1070,7 +1456,11 @@ def create_paper_account(
             "public_id": strategy.public_id,
             "name": strategy.name,
             "engine_key": strategy.engine_key,
+            "strategy_kind": strategy.strategy_kind,
             "version": strategy.version,
+            "spec_schema_version": strategy.spec_schema_version,
+            "spec": strategy.spec_json,
+            "spec_hash": strategy.spec_hash,
             "parameters": strategy.parameters_json,
             "risk_defaults": strategy.risk_defaults_json,
         },
@@ -1081,6 +1471,30 @@ def create_paper_account(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="paper account name already exists") from exc
+    revision = db.scalar(
+        select(StrategyRevision).where(
+            StrategyRevision.user_strategy_id == strategy.id,
+            StrategyRevision.user_id == user.id,
+            StrategyRevision.version == strategy.version,
+        )
+    )
+    if revision is None:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+    db.add(
+        StrategyDeployment(
+            public_id=str(uuid.uuid4()),
+            user_id=user.id,
+            strategy_id=strategy.id,
+            strategy_revision_id=revision.id,
+            mode="paper",
+            target_account_id=account.id,
+            name=account.name,
+            status="running",
+            runtime_state_json={},
+            started_at=utcnow(),
+        )
+    )
     _audit(db, request, "paper.account.create", user.id, "paper_account", account.public_id)
     db.commit()
     db.refresh(account)
@@ -1109,6 +1523,20 @@ def update_paper_account_status(
         if int(open_count or 0):
             raise HTTPException(status_code=409, detail="close positions before archiving")
     account.status = payload.status
+    deployment = db.scalar(
+        select(StrategyDeployment).where(
+            StrategyDeployment.user_id == user.id,
+            StrategyDeployment.mode == "paper",
+            StrategyDeployment.target_account_id == account.id,
+        )
+    )
+    if deployment is not None:
+        deployment.status = {
+            "active": "running",
+            "paused": "paused",
+            "archived": "stopped",
+        }[payload.status]
+        deployment.updated_at = utcnow()
     _audit(db, request, "paper.account.status", user.id, "paper_account", account.public_id)
     db.commit()
     db.refresh(account)
@@ -1119,13 +1547,16 @@ def update_paper_account_status(
 def paper_account(
     request: Request,
     account_id: str | None = Query(default=None, min_length=36, max_length=36),
+    timezone_offset_minutes: int = Query(default=0, ge=-720, le=840),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict:
     account = _paper_account_record(db, user.id, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="paper account not found")
-    return _paper_response(_monitor(request).paper(user.id, account.id))
+    return _paper_response(
+        _monitor(request).paper(user.id, account.id, timezone_offset_minutes)
+    )
 
 
 @router.get("/dashboard/performance", response_model=DashboardPerformanceOut)
@@ -1206,6 +1637,18 @@ def create_backtest(
         if selected is not None and selected.status == "active"
         else None
     )
+    selected_strategy_id = selected.id if database_strategy is not None else None
+    selected_revision_id = None
+    if selected_strategy_id is not None:
+        selected_revision_id = db.scalar(
+            select(StrategyRevision.id).where(
+                StrategyRevision.user_strategy_id == selected_strategy_id,
+                StrategyRevision.user_id == user_id,
+                StrategyRevision.version == selected.version,
+            )
+        )
+        if selected_revision_id is None:
+            raise HTTPException(status_code=409, detail="strategy revision is unavailable")
     db.commit()
     # Authentication only reads from MySQL. End that transaction before the CPU-heavy
     # synchronous replay so a pooled database connection is not held for the whole run.
@@ -1225,7 +1668,15 @@ def create_backtest(
             strategy = _strategy_from_catalog(catalog, payload.strategy_id)
         config = _engine_config(payload, strategy)
         try:
-            raw_result = repository.run(config)
+            if strategy.get("strategy_kind") == "full_strategy":
+                spec = strategy.get("spec")
+                if not isinstance(spec, dict):
+                    raise HTTPException(
+                        status_code=409, detail="full strategy spec is unavailable"
+                    )
+                raw_result = repository.run_full_strategy(config, spec)
+            else:
+                raw_result = repository.run(config)
         except BacktestUnavailable as exc:
             detail = str(exc)
             raise HTTPException(status_code=_backtest_error_status(detail), detail=detail) from None
@@ -1329,6 +1780,26 @@ def create_backtest(
         )
         db.add(run)
         db.flush()
+        if selected_strategy_id is not None and selected_revision_id is not None:
+            db.add(
+                StrategyDeployment(
+                    public_id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    strategy_id=selected_strategy_id,
+                    strategy_revision_id=selected_revision_id,
+                    mode="backtest",
+                    target_account_id=run.id,
+                    name=f"回测 · {strategy['name'].strip()} · {payload.symbol}",
+                    status="stopped",
+                    runtime_state_json={
+                        "result": "completed",
+                        "backtest_run_id": run.id,
+                    },
+                    started_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
 
         known_trade_fields = {
             "side",

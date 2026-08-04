@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import JSON, Numeric, create_engine
+from sqlalchemy import JSON, Numeric
 
-from quantdesk_v2.models import BacktestRun, BacktestTrade, Base
+from quantdesk_v2.models import BacktestRun, BacktestTrade
 from quantdesk_v2.schemas import BacktestRunRequest
 
 
@@ -61,9 +61,6 @@ def test_backtest_request_rejects_invalid_or_unbounded_input(overrides) -> None:
 
 
 def test_backtest_models_are_tenant_scoped_commented_and_decimal_safe() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-
     run_table = BacktestRun.__table__
     trade_table = BacktestTrade.__table__
     for table in (run_table, trade_table):

@@ -11,6 +11,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from quantdesk_v2 import binance_client
@@ -26,33 +27,31 @@ from quantdesk_v2.binance_performance import (
     month_window_ms,
 )
 from quantdesk_v2.config import Settings
-from quantdesk_v2.database import build_engine, get_db
+from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
-from quantdesk_v2.models import Base
 
 FIXED_TIME_MS = 1_735_689_600_123
 API_KEY = "K" * 64
 API_SECRET = "S" * 64
 
 
-def _client() -> TestClient:
+def _client(mysql_test_engine: Engine) -> TestClient:
     settings = Settings(
         _env_file=None,
         app_env="test",
-        database_url="sqlite+pysqlite:///:memory:",
-        db_password=SecretStr(""),
-        db_ssl_required=False,
-        db_ssl_verify_identity=False,
+        database_url=mysql_test_engine.url.render_as_string(hide_password=False),
         jwt_secret=SecretStr("test-jwt-secret-that-is-long-enough-123456"),
         credential_master_key=SecretStr(Fernet.generate_key().decode("ascii")),
         app_cookie_secure=False,
         app_allowed_hosts="testserver",
         app_allowed_origins="http://testserver",
     )
-    engine = build_engine(settings)
-    Base.metadata.create_all(engine)
-    test_session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    test_session = sessionmaker(
+        bind=mysql_test_engine, autoflush=False, expire_on_commit=False
+    )
     app = create_app(settings)
+    app.state.database_engine.dispose()
+    app.state.database_engine = mysql_test_engine
 
     def override_db():
         db = test_session()
@@ -66,13 +65,11 @@ def _client() -> TestClient:
 
 
 def _login(client: TestClient, *, configure: bool = True) -> dict[str, str]:
-    assert (
-        client.post(
-            "/api/v2/auth/register",
-            json={"username": "income-user", "password": "correct horse battery staple"},
-        ).status_code
-        == 201
+    registered = client.post(
+        "/api/v2/auth/register",
+        json={"username": "income-user", "password": "correct horse battery staple"},
     )
+    assert registered.status_code == 201
     login = client.post(
         "/api/v2/auth/login",
         json={
@@ -81,7 +78,10 @@ def _login(client: TestClient, *, configure: bool = True) -> dict[str, str]:
             "client_type": "web",
         },
     )
-    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    headers = {
+        "Authorization": f"Bearer {login.json()['access_token']}",
+        "X-QuantDesk-User-ID": str(registered.json()["id"]),
+    }
     if configure:
         assert (
             client.put(
@@ -121,6 +121,7 @@ def _months_ago(value: datetime, count: int) -> str:
 
 def test_current_month_fapi_performance_is_signed_and_grouped_per_asset(
     monkeypatch: pytest.MonkeyPatch,
+    mysql_test_engine: Engine,
 ) -> None:
     current_month = datetime.now(UTC).strftime("%Y-%m")
     start_ms, _ = month_window_ms(current_month, 0)
@@ -170,7 +171,7 @@ def test_current_month_fapi_performance_is_signed_and_grouped_per_asset(
 
     monkeypatch.setattr(binance_client, "current_time_ms", lambda: FIXED_TIME_MS)
     monkeypatch.setattr(binance_client, "_http_transport", transport)
-    client = _client()
+    client = _client(mysql_test_engine)
     with client:
         headers = _login(client)
         result = client.get(
@@ -208,11 +209,12 @@ def test_current_month_fapi_performance_is_signed_and_grouped_per_asset(
     assert asset["win_rate_pct"] == 50.0
     assert asset["profit_factor"] == 3.0
     assert "return_pct" not in result.text
-    assert calls == ["/papi/v1/account", "/fapi/v3/account", "/fapi/v1/income"]
+    assert calls == ["/fapi/v3/account", "/fapi/v1/income"]
 
 
 def test_expired_month_returns_account_but_does_not_request_income(
     monkeypatch: pytest.MonkeyPatch,
+    mysql_test_engine: Engine,
 ) -> None:
     selected_month = _months_ago(datetime.now(UTC), 4)
     calls: list[str] = []
@@ -221,6 +223,8 @@ def test_expired_month_returns_account_but_does_not_request_income(
         _assert_signature(url, headers)
         path = urlsplit(url).path
         calls.append(path)
+        if path == "/fapi/v3/account":
+            return _response(400, {"code": -2015, "msg": "not a standard futures key"})
         if path == "/papi/v1/account":
             return _response(
                 200,
@@ -235,7 +239,7 @@ def test_expired_month_returns_account_but_does_not_request_income(
 
     monkeypatch.setattr(binance_client, "current_time_ms", lambda: FIXED_TIME_MS)
     monkeypatch.setattr(binance_client, "_http_transport", transport)
-    client = _client()
+    client = _client(mysql_test_engine)
     with client:
         headers = _login(client)
         result = client.get(
@@ -250,7 +254,7 @@ def test_expired_month_returns_account_but_does_not_request_income(
     assert payload["history_complete"] is False
     assert payload["assets"] == []
     assert payload["account"]["wallet_balance"] == 10.0
-    assert calls == ["/papi/v1/account", "/papi/v1/balance"]
+    assert calls == ["/fapi/v3/account", "/papi/v1/account", "/papi/v1/balance"]
 
 
 def test_portfolio_margin_income_uses_papi_endpoint_and_limit_1000(
@@ -408,12 +412,13 @@ def test_full_unique_pages_stop_at_conservative_weight_cap(
 
 def test_not_configured_is_renderable_and_never_calls_binance(
     monkeypatch: pytest.MonkeyPatch,
+    mysql_test_engine: Engine,
 ) -> None:
     def transport(*_: object) -> tuple[int, bytes]:
         raise AssertionError("network must not be called without credentials")
 
     monkeypatch.setattr(binance_client, "_http_transport", transport)
-    client = _client()
+    client = _client(mysql_test_engine)
     with client:
         headers = _login(client, configure=False)
         result = client.get("/api/v2/dashboard/binance-performance", headers=headers)
@@ -431,12 +436,13 @@ def test_not_configured_is_renderable_and_never_calls_binance(
 
 def test_binance_performance_requires_authentication(
     monkeypatch: pytest.MonkeyPatch,
+    mysql_test_engine: Engine,
 ) -> None:
     def transport(*_: object) -> tuple[int, bytes]:
         raise AssertionError("unauthenticated request must not call Binance")
 
     monkeypatch.setattr(binance_client, "_http_transport", transport)
-    client = _client()
+    client = _client(mysql_test_engine)
     with client:
         result = client.get("/api/v2/dashboard/binance-performance")
 
@@ -469,6 +475,7 @@ def test_binance_performance_requires_authentication(
 )
 def test_income_failure_keeps_connected_account_and_is_redacted(
     monkeypatch: pytest.MonkeyPatch,
+    mysql_test_engine: Engine,
     income_status: int,
     income_payload: object,
     expected_category: str,
@@ -480,6 +487,8 @@ def test_income_failure_keeps_connected_account_and_is_redacted(
         _assert_signature(url, headers)
         path = urlsplit(url).path
         calls.append(path)
+        if path == "/fapi/v3/account":
+            return _response(400, {"code": -2015, "msg": "not a standard futures key"})
         if path == "/papi/v1/account":
             return _response(
                 200,
@@ -496,7 +505,7 @@ def test_income_failure_keeps_connected_account_and_is_redacted(
 
     monkeypatch.setattr(binance_client, "current_time_ms", lambda: FIXED_TIME_MS)
     monkeypatch.setattr(binance_client, "_http_transport", transport)
-    client = _client()
+    client = _client(mysql_test_engine)
     with client:
         headers = _login(client)
         result = client.get(
@@ -512,7 +521,12 @@ def test_income_failure_keeps_connected_account_and_is_redacted(
     assert payload["error_category"] == expected_category
     assert payload["account"]["wallet_balance"] == 50.0
     assert payload["assets"] == []
-    assert calls == ["/papi/v1/account", "/papi/v1/balance", "/papi/v1/um/income"]
+    assert calls == [
+        "/fapi/v3/account",
+        "/papi/v1/account",
+        "/papi/v1/balance",
+        "/papi/v1/um/income",
+    ]
     assert API_KEY not in result.text
     assert API_SECRET not in result.text
 

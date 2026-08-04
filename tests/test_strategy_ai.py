@@ -6,7 +6,12 @@ from typing import Any
 import pytest
 
 from quantdesk_v2 import strategy_ai
-from quantdesk_v2.strategy_ai import StrategyAiError, generate_strategy_preview
+from quantdesk_v2.ai_providers import AI_PROVIDER_PRESETS
+from quantdesk_v2.strategy_ai import (
+    StrategyAiError,
+    generate_strategy_preview,
+    generate_user_model_strategy_preview,
+)
 
 
 def strategy() -> dict[str, Any]:
@@ -56,6 +61,22 @@ def responses_body(model_output: dict[str, Any] | str) -> bytes:
                 {
                     "type": "message",
                     "content": [{"type": "output_text", "text": text}],
+                }
+            ],
+        }
+    ).encode()
+
+
+def chat_completions_body(model_output: dict[str, Any] | str) -> bytes:
+    text = model_output if isinstance(model_output, str) else json.dumps(model_output)
+    return json.dumps(
+        {
+            "id": "chatcmpl-redacted",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": text},
                 }
             ],
         }
@@ -176,6 +197,209 @@ def test_openai_request_is_server_side_structured_and_store_is_disabled(
     assert '"engine_key"' not in request_text
     assert preview["provider"] == "openai"
     assert preview["changes"] == [{"path": "parameters.fast_period", "before": 5, "after": 9}]
+
+
+@pytest.mark.parametrize("provider_code", sorted(AI_PROVIDER_PRESETS))
+def test_user_model_uses_server_owned_chat_completion_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_code: str,
+) -> None:
+    current = strategy()
+    preset = AI_PROVIDER_PRESETS[provider_code]
+    model_output = output_for(
+        current,
+        risk_defaults={**current["risk_defaults"], "take_profit_pct": 8.0},
+    )
+    captured: dict[str, Any] = {}
+
+    def transport(
+        endpoint: Any,
+        body: bytes,
+        headers: dict[str, str],
+        timeout_seconds: float,
+    ) -> tuple[int, bytes]:
+        captured.update(
+            endpoint=endpoint,
+            payload=json.loads(body),
+            headers=headers,
+            timeout=timeout_seconds,
+        )
+        return 200, chat_completions_body(model_output)
+
+    monkeypatch.setattr(strategy_ai, "_chat_http_transport", transport)
+    preview = generate_user_model_strategy_preview(
+        current,
+        "把止盈改成 8%",
+        provider_code=provider_code,
+        api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+        model_name=preset.default_model,
+        timeout_seconds=9,
+    )
+
+    assert captured["endpoint"] is preset
+    assert captured["endpoint"].host == preset.host
+    assert captured["endpoint"].path == preset.path
+    assert captured["payload"]["model"] == preset.default_model
+    assert captured["payload"]["stream"] is False
+    if provider_code == "minimax":
+        assert "response_format" not in captured["payload"]
+        assert captured["payload"]["reasoning_split"] is True
+    else:
+        assert captured["payload"]["response_format"] == {"type": "json_object"}
+        assert "reasoning_split" not in captured["payload"]
+    token_field = (
+        "max_completion_tokens"
+        if provider_code in {"openai", "qwen", "kimi", "minimax"}
+        else "max_tokens"
+    )
+    assert captured["payload"][token_field] == 2_000
+    assert captured["headers"]["Authorization"].startswith("Bearer provider-key-")
+    assert captured["timeout"] == 9
+    assert preview["provider"] == provider_code
+    assert preview["proposed"]["risk_defaults"]["take_profit_pct"] == 8.0
+
+
+@pytest.mark.parametrize(
+    "provider_code",
+    [
+        "custom",
+        "http://api.deepseek.com",
+        "openai@attacker.invalid",
+        "api.openai.com",
+    ],
+)
+def test_user_model_rejects_non_allowlisted_provider_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_code: str,
+) -> None:
+    monkeypatch.setattr(
+        strategy_ai,
+        "_chat_http_transport",
+        lambda *_: pytest.fail("network must not be called"),
+    )
+
+    with pytest.raises(StrategyAiError) as caught:
+        generate_user_model_strategy_preview(
+            strategy(),
+            "修改止盈",
+            provider_code=provider_code,
+            api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+            model_name="model-name",
+        )
+    assert caught.value.category == "not_configured"
+
+
+def test_user_model_does_not_follow_redirect_or_leak_upstream_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        strategy_ai,
+        "_chat_http_transport",
+        lambda *_: (302, b'{"location":"https://attacker.invalid/?key=secret"}'),
+    )
+
+    with pytest.raises(StrategyAiError) as caught:
+        generate_user_model_strategy_preview(
+            strategy(),
+            "修改止盈",
+            provider_code="deepseek",
+            api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+            model_name="deepseek-v4-flash",
+        )
+    assert caught.value.category == "upstream"
+    assert "attacker" not in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_user_model_accepts_schema_compatible_model_name_with_slash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = strategy()
+    captured: dict[str, Any] = {}
+
+    def transport(
+        _: Any,
+        body: bytes,
+        _headers: dict[str, str],
+        _timeout_seconds: float,
+    ) -> tuple[int, bytes]:
+        captured["payload"] = json.loads(body)
+        return 200, chat_completions_body(output_for(current))
+
+    monkeypatch.setattr(strategy_ai, "_chat_http_transport", transport)
+    preview = generate_user_model_strategy_preview(
+        current,
+        "保持现有设置",
+        provider_code="qwen",
+        api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+        model_name="workspace/team-model:v2",
+    )
+
+    assert captured["payload"]["model"] == "workspace/team-model:v2"
+    assert preview["provider"] == "qwen"
+
+
+def test_user_model_rejects_model_name_beyond_schema_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        strategy_ai,
+        "_chat_http_transport",
+        lambda *_: pytest.fail("network must not be called"),
+    )
+    with pytest.raises(StrategyAiError) as caught:
+        generate_user_model_strategy_preview(
+            strategy(),
+            "保持现有设置",
+            provider_code="qwen",
+            api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+            model_name="m" * 129,
+        )
+    assert caught.value.category == "not_configured"
+
+
+@pytest.mark.parametrize("api_key", ["k" * 8, "k" * 2_048])
+def test_user_model_accepts_persisted_api_key_length_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    api_key: str,
+) -> None:
+    current = strategy()
+    monkeypatch.setattr(
+        strategy_ai,
+        "_chat_http_transport",
+        lambda *_: (200, chat_completions_body(output_for(current))),
+    )
+
+    preview = generate_user_model_strategy_preview(
+        current,
+        "保持现有设置",
+        provider_code="deepseek",
+        api_key=api_key,
+        model_name="deepseek-v4-flash",
+    )
+
+    assert preview["provider"] == "deepseek"
+
+
+@pytest.mark.parametrize("api_key", ["k" * 7, "k" * 2_049])
+def test_user_model_rejects_api_key_outside_persistence_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    api_key: str,
+) -> None:
+    monkeypatch.setattr(
+        strategy_ai,
+        "_chat_http_transport",
+        lambda *_: pytest.fail("network must not be called"),
+    )
+    with pytest.raises(StrategyAiError) as caught:
+        generate_user_model_strategy_preview(
+            strategy(),
+            "保持现有设置",
+            provider_code="deepseek",
+            api_key=api_key,
+            model_name="deepseek-v4-flash",
+        )
+    assert caught.value.category == "not_configured"
 
 
 @pytest.mark.parametrize(

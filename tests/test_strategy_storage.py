@@ -5,11 +5,11 @@ import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import JSON, ForeignKeyConstraint, create_engine, func, select
+from sqlalchemy import JSON, ForeignKeyConstraint, func, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from quantdesk_v2.models import (
-    Base,
     StrategyRevision,
     StrategyTemplate,
     User,
@@ -51,10 +51,8 @@ EXPECTED_NAMES = [
 
 
 @pytest.fixture
-def session() -> Session:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
+def session(mysql_test_engine: Engine) -> Session:
+    with Session(mysql_test_engine) as db:
         yield db
 
 
@@ -66,9 +64,6 @@ def _user(db: Session, username: str) -> User:
 
 
 def test_strategy_models_are_commented_json_backed_and_tenant_scoped() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-
     for table in (
         StrategyTemplate.__table__,
         UserStrategy.__table__,
@@ -99,10 +94,11 @@ def test_strategy_models_are_commented_json_backed_and_tenant_scoped() -> None:
     assert UserStrategy.revisions.property.passive_deletes
 
 
-def test_system_catalog_has_all_19_defaults_and_safe_parameters(session: Session) -> None:
+def test_system_catalog_has_full_strategy_and_all_legacy_defaults(session: Session) -> None:
     templates = ensure_system_templates(session)
 
-    assert len(SYSTEM_STRATEGY_DEFINITIONS) == 19
+    assert len(SYSTEM_STRATEGY_DEFINITIONS) == 20
+    assert sum(item["template_kind"] == "strategy" for item in SYSTEM_STRATEGY_DEFINITIONS) == 1
     assert [template.name for template in templates] == EXPECTED_NAMES
     assert {template.engine_key for template in templates} == {
         "multi_factor",
@@ -131,8 +127,8 @@ def test_system_catalog_has_all_19_defaults_and_safe_parameters(session: Session
     }
     assert "2.5×ATR 固定止盈" in paper_template.description
 
-    assert len(ensure_system_templates(session)) == 19
-    assert session.scalar(select(func.count()).select_from(StrategyTemplate)) == 19
+    assert len(ensure_system_templates(session)) == 20
+    assert session.scalar(select(func.count()).select_from(StrategyTemplate)) == 20
 
 
 def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
@@ -147,16 +143,16 @@ def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
     first = ensure_user_default_strategies(session, user.id)
     second = ensure_user_default_strategies(session, user.id)
 
-    assert len(first) == len(second) == 19
+    assert len(first) == len(second) == 20
     assert [strategy.name for strategy in first] == EXPECTED_NAMES
-    assert len({strategy.source_template_id for strategy in first}) == 19
+    assert len({strategy.source_template_id for strategy in first}) == 20
     assert all(uuid.UUID(strategy.public_id).version == 4 for strategy in first)
     assert all(strategy.created_via == "system_default" for strategy in first)
     assert (
         session.scalar(
             select(func.count()).select_from(UserStrategy).where(UserStrategy.user_id == user.id)
         )
-        == 19
+        == 20
     )
     assert (
         session.scalar(
@@ -164,7 +160,7 @@ def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
             .select_from(StrategyRevision)
             .where(StrategyRevision.user_id == user.id)
         )
-        == 19
+        == 20
     )
     assert all(strategy.revisions[0].snapshot_json["name"] == strategy.name for strategy in first)
 
@@ -175,8 +171,8 @@ def test_user_strategy_queries_do_not_cross_tenants(session: Session) -> None:
     alice_strategies = ensure_user_default_strategies(session, alice.id)
     bob_strategies = ensure_user_default_strategies(session, bob.id)
 
-    assert len(list_user_strategies(session, alice.id)) == 19
-    assert len(list_user_strategies(session, bob.id)) == 19
+    assert len(list_user_strategies(session, alice.id)) == 20
+    assert len(list_user_strategies(session, bob.id)) == 20
     assert {item.public_id for item in alice_strategies}.isdisjoint(
         {item.public_id for item in bob_strategies}
     )
@@ -185,8 +181,8 @@ def test_user_strategy_queries_do_not_cross_tenants(session: Session) -> None:
     alice_strategies[0].status = "archived"
     session.flush()
     assert len(list_user_strategies(session, alice.id)) == 18
-    assert len(list_user_strategies(session, alice.id, include_archived=True)) == 19
-    assert len(list_user_strategies(session, bob.id)) == 19
+    assert len(list_user_strategies(session, alice.id, include_archived=True)) == 20
+    assert len(list_user_strategies(session, bob.id)) == 20
 
 
 def test_revision_relationship_and_catalog_serialization(session: Session) -> None:

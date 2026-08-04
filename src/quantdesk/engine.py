@@ -1,6 +1,10 @@
 """调度引擎：行情轮询 / K线更新 / 评分计算 / 提醒触发 / 持仓同步"""
-import json, threading, time, traceback
-from . import store, signals, binance_client as bc
+import json
+import threading
+import time
+
+from . import binance_client as bc
+from . import signals, store
 from .config_loader import settings, tradfi_symbols
 
 TF_MS = {"15m": 15 * 60 * 1000, "1h": 60 * 60 * 1000, "4h": 4 * 60 * 60 * 1000}
@@ -9,7 +13,6 @@ _state = {
     "started": False,
     "last_ticker": 0,
     "last_kline_batch": {},
-    "positions": [],
     "errors": [],
     "price_hist": {},   # symbol -> [(ts, price)] 用于5分钟异动
 }
@@ -34,7 +37,9 @@ def ingest_tickers(rows, full=True):
     syms = set(tradfi_symbols())
     now = int(time.time())
     out, lite = [], []
-    for s, price, pct, qvol, ts in rows:
+    rules = store.admin_alert_rules()
+    spike_threshold = float(rules.get("spike_alert_pct_5m", settings.get("spike_alert_pct_5m", 2.0)))
+    for s, price, pct, qvol, _ts in rows:
         if s not in syms:
             continue
         if full:
@@ -49,7 +54,7 @@ def ingest_tickers(rows, full=True):
         old = _state["price_hist"][s][0]
         if now - old[0] >= 300 and old[1] > 0:
             chg = (price - old[1]) / old[1] * 100
-            if abs(chg) >= settings.get("spike_alert_pct_5m", 2.0):
+            if abs(chg) >= spike_threshold:
                 maybe_alert(s, "spike", "long" if chg > 0 else "short", None,
                             f"⚡ {s} 5分钟{'急涨' if chg>0 else '急跌'} {chg:+.2f}%（{old[1]:.6g} → {price:.6g}）",
                             dedup_key=f"spike:{s}", dedup_sec=300)
@@ -63,25 +68,35 @@ def ingest_tickers(rows, full=True):
 def price_loop():
     """高频价格轮询（2s）：ticker/price 全量权重仅 2，30次/分共60权重，远低于1200上限"""
     while True:
+        if store.collector_paused("price"):
+            time.sleep(2)
+            continue
         try:
             data = bc._get(f"{bc.FAPI}/fapi/v1/ticker/price", timeout=10)
             now = int(time.time())
             rows = [(t["symbol"], float(t["price"]), None, None, now) for t in data]
             ingest_tickers(rows, full=False)
+            store.collector_report("price", success=True, items=len(rows))
         except Exception as e:
             log_err("price", e)
+            store.collector_report("price", success=False, error=str(e))
         time.sleep(settings.get("price_poll_seconds", 2))
 
 def ticker_loop():
     """低频完整统计（60s）：24h涨跌幅/成交额，权重40"""
     while True:
+        if store.collector_paused("ticker"):
+            time.sleep(5)
+            continue
         try:
             data = bc.fetch_tickers()
             rows = [(t["symbol"], float(t["lastPrice"]), float(t["priceChangePercent"]),
                      float(t.get("quoteVolume", 0)), int(time.time())) for t in data]
             ingest_tickers(rows)
+            store.collector_report("ticker", success=True, items=len(rows))
         except Exception as e:
             log_err("ticker", e)
+            store.collector_report("ticker", success=False, error=str(e))
         time.sleep(settings.get("ticker_rest_seconds", 60))
 
 # ---------- klines ----------
@@ -91,13 +106,16 @@ def kline_loop():
     limit = settings.get("kline_limit", 300)
     first = True
     while True:
+        if store.collector_paused("kline"):
+            time.sleep(5)
+            continue
         now_ms = int(time.time() * 1000)
+        cycle_ok = cycle_fail = 0
         for tf in tfs:
             tfms = TF_MS[tf]
             # 当前未收盘K线的开盘时间；上一根已收盘K线开盘时间 = 边界 - 2*tfms 之后
             boundary = now_ms - (now_ms % tfms)          # 当前周期起点
             last_closed_open = boundary - tfms           # 上一根已收盘K线
-            key = f"batch:{tf}"
             if not first and _state["last_kline_batch"].get(tf, 0) >= last_closed_open:
                 continue  # 本周期已抓过
             ok, fail = 0, 0
@@ -114,15 +132,44 @@ def kline_loop():
                 if not first:
                     time.sleep(0.06)  # 控制速率
             _state["last_kline_batch"][tf] = last_closed_open
+            cycle_ok += ok
+            cycle_fail += fail
             print(f"[kline] {tf} 更新完成 ok={ok} fail={fail}")
             # 触发评分
             try:
                 score_all(tf, last_closed_open)
             except Exception as e:
                 log_err(f"score {tf}", e)
+        if cycle_ok:
+            try:
+                from . import opportunity
+
+                opportunity_result = opportunity.scan_all(syms)
+                store.collector_report(
+                    "opportunity",
+                    success=not opportunity_result["failed"],
+                    items=opportunity_result["scanned"],
+                    error=(
+                        f"{opportunity_result['failed']} symbol scans failed"
+                        if opportunity_result["failed"]
+                        else None
+                    ),
+                    details=opportunity_result,
+                )
+                print(f"[opportunity] 扫描完成 {opportunity_result}")
+            except Exception as e:
+                log_err("opportunity", e)
+                store.collector_report("opportunity", success=False, error=str(e))
         if first:
             first = False
             print("[kline] 首次全量回填完成")
+        store.collector_report(
+            "kline",
+            success=cycle_fail == 0,
+            items=cycle_ok,
+            error=f"{cycle_fail} symbol updates failed" if cycle_fail else None,
+            details={"ok": cycle_ok, "failed": cycle_fail},
+        )
         time.sleep(30)
 
 # ---------- scoring ----------
@@ -139,8 +186,11 @@ def score_all(tf, open_time):
         check_score_alert(s, tf, score, factors)
 
 def check_score_alert(symbol, tf, score, factors):
+    rules = store.admin_alert_rules()
+    if tf not in rules.get("enabled_timeframes", settings.get("timeframes", ["15m", "1h", "4h"])):
+        return
     users = store.query(
-        "SELECT u.id,CASE WHEN p.symbol IS NULL THEN 0 ELSE 1 END AS is_held "
+        "SELECT u.id,u.monitor_watchlist,CASE WHEN p.symbol IS NULL THEN 0 ELSE 1 END AS is_held "
         "FROM users u LEFT JOIN positions p ON p.user_id=u.id AND p.symbol=? "
         "WHERE u.is_active=1",
         (symbol,),
@@ -148,9 +198,17 @@ def check_score_alert(symbol, tf, score, factors):
     for user in users:
         user_id = int(user["id"])
         is_held = bool(user["is_held"])
-        held_threshold = settings.get("score_alert_position", 40)
-        long_th = held_threshold if is_held else settings.get("score_alert_long", 60)
-        short_th = -held_threshold if is_held else settings.get("score_alert_short", -60)
+        watchlist = user.get("monitor_watchlist") or []
+        if isinstance(watchlist, str):
+            try:
+                watchlist = json.loads(watchlist)
+            except json.JSONDecodeError:
+                watchlist = []
+        if rules.get("watchlist_only", False) and not is_held and symbol not in watchlist:
+            continue
+        held_threshold = int(rules.get("score_alert_position", settings.get("score_alert_position", 40)))
+        long_th = held_threshold if is_held else int(rules.get("score_alert_long", settings.get("score_alert_long", 60)))
+        short_th = -held_threshold if is_held else int(rules.get("score_alert_short", settings.get("score_alert_short", -60)))
         if score >= long_th:
             maybe_alert(
                 symbol, "score", "long", score,
@@ -203,9 +261,12 @@ def start():
     threading.Thread(target=price_loop, daemon=True, name="price").start()
     threading.Thread(target=ticker_loop, daemon=True, name="ticker").start()
     threading.Thread(target=kline_loop, daemon=True, name="kline").start()
+    from . import news, social
+    threading.Thread(target=news.news_loop, daemon=True, name="news").start()
+    threading.Thread(target=social.social_loop, daemon=True, name="social").start()
     if settings.get("paper_trading", True):
         from . import paper
         threading.Thread(target=paper.paper_loop, daemon=True, name="paper").start()
-        print("[engine] 四个后台循环已启动: price(2s) / ticker(60s统计) / kline / paper(5s)")
+        print("[engine] workers started: price / ticker / kline / news / social / paper")
     else:
-        print("[engine] 三个后台循环已启动: price / ticker / kline")
+        print("[engine] workers started: price / ticker / kline / news / social")

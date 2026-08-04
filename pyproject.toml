@@ -11,6 +11,7 @@ dependencies = [
   "alembic>=1.16,<2",
   "argon2-cffi>=23.1,<26",
   "cryptography>=45,<50",
+  "defusedxml>=0.7.1,<1",
   "fastapi>=0.116,<1",
   "pydantic-settings>=2.10,<3",
   "PyJWT>=2.10,<3",
@@ -46,13 +47,13 @@ addopts = "-q"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = ["src/quantdesk", "src/backtest_compare.py", "src/run.py"]
 
 [tool.ruff.lint]
 select = ["B", "E4", "E7", "E9", "F", "I", "S", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/quantdesk_v2/api.py" = ["B008"]
+"src/quantdesk_v2/admin.py" = ["B008"]
 "src/quantdesk_v2/dependencies.py" = ["B008"]
 "src/quantdesk_v2/strategy_routes.py" = ["B008"]
 "src/quantdesk_v2/schemas.py" = ["S105"]

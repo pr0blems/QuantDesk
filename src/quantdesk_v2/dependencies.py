@@ -48,3 +48,29 @@ def get_current_user(
     if user is None or not user.is_active:
         raise unauthorized
     return user
+
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Require an active platform administrator for read-only admin APIs."""
+
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="administrator access required")
+    return user
+
+
+def require_admin_write(
+    request: Request,
+    user: User = Depends(require_admin),
+) -> User:
+    """Protect admin mutations against silent cross-account browser changes."""
+
+    expected = request.headers.get("X-QuantDesk-User-ID", "").strip()
+    if not expected:
+        raise HTTPException(status_code=428, detail="expected user identity is required")
+    try:
+        expected_user_id = int(expected)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="expected user identity is invalid") from None
+    if expected_user_id != user.id:
+        raise HTTPException(status_code=409, detail="authenticated administrator changed")
+    return user

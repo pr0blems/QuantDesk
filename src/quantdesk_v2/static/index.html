@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#07101d">
   <title>QuantDesk V2 · 多用户量化交易平台</title>
   <link rel="manifest" href="/assets/manifest.json">
-  <link rel="stylesheet" href="/assets/style.css?v=20260803-6">
-  <link rel="stylesheet" href="/assets/strategies.css?v=20260803-3">
+  <link rel="stylesheet" href="/assets/style.css?v=20260804-7">
+  <link rel="stylesheet" href="/assets/strategies.css?v=20260804-1">
 </head>
 <body>
   <div id="auth-boot" class="auth-boot" role="status" aria-live="polite" aria-label="正在恢复登录状态">
@@ -74,11 +74,11 @@
         <a class="nav-item" href="/overview" data-panel-target="overview"><span>概</span>工作台</a>
         <a class="nav-item active" href="/monitor" data-panel-target="monitor" aria-current="page"><span>监</span>合约监控</a>
         <a class="nav-item" href="/paper" data-panel-target="paper"><span>模</span>模拟盘</a>
-        <a class="nav-item" href="/credentials" data-panel-target="credentials"><span>钥</span>API 凭据</a>
         <a class="nav-item" href="/strategies" data-panel-target="strategies"><span>策</span>策略中心</a>
         <a class="nav-item" href="/backtest" data-panel-target="backtest"><span>测</span>数据回测</a>
-        <a class="nav-item" href="/orders" data-panel-target="orders"><span>单</span>订单与持仓<i>规划中</i></a>
+        <a class="nav-item" href="/orders" data-panel-target="orders"><span>单</span>订单与持仓<i>只读</i></a>
         <p>安全与管理</p>
+        <a class="nav-item" href="/settings" data-panel-target="settings"><span>设</span>系统设置</a>
         <a class="nav-item" href="/risk" data-panel-target="risk"><span>风</span>风险控制<i>规划中</i></a>
         <a class="nav-item" href="/audit" data-panel-target="audit"><span>审</span>审计日志<i>规划中</i></a>
       </nav>
@@ -117,7 +117,7 @@
               <div class="metric-card-label"><span>Binance 账户</span><span id="binance-account-state" class="account-state">检查中</span></div>
               <strong id="binance-wallet-balance">--</strong>
               <small id="binance-account-detail">正在读取当前用户的账户状态</small>
-              <button id="binance-account-action" class="account-card-action hidden" type="button" data-open-panel="credentials">配置 API 凭据</button>
+              <button id="binance-account-action" class="account-card-action hidden" type="button" data-open-panel="settings">配置 API 凭据</button>
             </article>
             <article class="metric-card"><span>Binance 凭据</span><strong data-credential-status>尚未配置</strong><small>只显示状态，不回显密钥</small></article>
           </div>
@@ -175,7 +175,7 @@
                 </div>
                 <div id="binance-performance-callout" class="binance-performance-callout hidden" role="status">
                   <div><strong id="binance-performance-callout-title">需要配置 Binance API</strong><p id="binance-performance-callout-message">配置只读收益权限后才能展示实盘数据。</p></div>
-                  <button id="binance-performance-configure" type="button" data-open-panel="credentials">配置 API 凭据</button>
+                  <button id="binance-performance-configure" type="button" data-open-panel="settings">配置 API 凭据</button>
                 </div>
                 <article class="returns-calendar-card">
                   <header class="calendar-heading"><div><h3>Binance 收益日历</h3><p id="binance-calendar-subtitle">按浏览器本地时区汇总账户收益事件</p></div></header>
@@ -191,28 +191,99 @@
           </section>
         </section>
 
-        <section class="workspace-panel hidden" data-panel="credentials">
+        <section class="workspace-panel hidden" data-panel="settings">
           <div class="page-heading">
-            <div><span class="eyebrow">ACCOUNT SECURITY</span><h1>API 凭据</h1><p>管理当前用户独立的 Binance API 连接</p></div>
+            <div><span class="eyebrow">SYSTEM SETTINGS</span><h1>系统设置</h1><p>管理当前账户的安全设置、交易所与 AI 服务连接</p></div>
           </div>
-          <article class="card credentials-card">
-            <div class="credential-copy">
-              <span class="section-number">01</span>
-              <h2>Binance API Key</h2>
-              <p>凭据将加密后保存至当前用户记录，保存后不会再次回显。请关闭提现权限，并绑定生产服务器出口 IP。</p>
-              <div class="credential-state"><span>当前状态</span><strong data-credential-status>尚未配置</strong></div>
+          <div class="settings-layout">
+            <nav class="settings-subnav" aria-label="系统设置二级导航">
+              <span class="settings-subnav-label">设置分类</span>
+              <button class="settings-subnav-item active" type="button" data-settings-section="api-credentials" aria-current="page">
+                <span aria-hidden="true">钥</span>
+                <span><strong>API 凭证</strong><small>交易所与 AI 模型</small></span>
+              </button>
+            </nav>
+
+            <div class="settings-content">
+              <section id="settings-api-credentials" class="settings-section" aria-labelledby="api-credentials-title">
+                <header class="settings-section-head">
+                  <div><span class="eyebrow">API CREDENTIALS</span><h2 id="api-credentials-title">API 凭证</h2><p>每位用户独立配置，敏感密钥加密保存且不会再次回显。</p></div>
+                  <span class="settings-security-badge"><i></i>用户级加密隔离</span>
+                </header>
+
+                <article class="card credentials-card" aria-labelledby="binance-credential-title">
+                  <div class="credential-copy">
+                    <span class="section-number">01</span>
+                    <h2 id="binance-credential-title">Binance API 凭据</h2>
+                    <p>用于读取账户与执行已授权的交易。请关闭提现权限，并绑定生产服务器出口 IP。</p>
+                    <div class="credential-state"><span>当前状态</span><strong data-credential-status>尚未配置</strong></div>
+                  </div>
+                  <form id="credential-form">
+                    <label>API Key<input name="api_key" type="password" autocomplete="new-password" minlength="16" placeholder="输入 Binance API Key" required></label>
+                    <label>API Secret<input name="api_secret" type="password" autocomplete="new-password" minlength="16" placeholder="输入 Binance API Secret" required></label>
+                    <div class="permission-box"><span>申请权限</span><strong>READ · TRADE</strong><small>系统不接受 WITHDRAW 权限</small></div>
+                    <div class="button-row">
+                      <button class="primary" type="submit">加密保存</button>
+                      <button id="delete-credentials" class="danger" type="button">删除凭据</button>
+                    </div>
+                  </form>
+                </article>
+                <p id="dashboard-message" class="message settings-inline-message" aria-live="polite"></p>
+
+                <article class="card ai-model-settings-card" aria-labelledby="ai-model-settings-title">
+                  <header class="ai-model-settings-head">
+                    <div class="ai-model-title">
+                      <span class="section-number">02</span>
+                      <div><span class="eyebrow">AI MODEL PROVIDERS</span><h2 id="ai-model-settings-title">AI 模型配置</h2><p>为策略语义编辑选择自己的模型服务。服务地址由系统托管，API Key 仅当前用户可用。</p></div>
+                    </div>
+                    <button id="ai-model-create" class="primary" type="button"><span aria-hidden="true">＋</span>新增模型</button>
+                  </header>
+                  <div class="ai-provider-strip" aria-label="支持的 AI 服务商">
+                    <span>DeepSeek</span><span>豆包</span><span>千问</span><span>Kimi</span><span>MiniMax</span><span>OpenAI</span>
+                  </div>
+                  <div class="ai-model-data-notice"><span aria-hidden="true">!</span><p><strong>第三方数据说明</strong>：使用策略 AI 功能时，当前策略快照与修改指令会发送给所选模型服务商，请勿在指令中填写交易密钥或其他敏感信息。</p></div>
+                  <div id="ai-model-list-status" class="ai-model-list-status" role="status" aria-live="polite">进入系统设置后加载模型配置。</div>
+                  <div id="ai-model-config-list" class="ai-model-config-list" aria-live="polite" aria-busy="false"></div>
+                </article>
+              </section>
             </div>
-            <form id="credential-form">
-              <label>API Key<input name="api_key" type="password" autocomplete="off" minlength="16" placeholder="输入 Binance API Key" required></label>
-              <label>API Secret<input name="api_secret" type="password" autocomplete="off" minlength="16" placeholder="输入 Binance API Secret" required></label>
-              <div class="permission-box"><span>申请权限</span><strong>READ · TRADE</strong><small>系统不接受 WITHDRAW 权限</small></div>
-              <div class="button-row">
-                <button class="primary" type="submit">加密保存</button>
-                <button id="delete-credentials" class="danger" type="button">删除凭据</button>
+          </div>
+
+          <dialog id="ai-model-dialog" class="ai-model-dialog" aria-labelledby="ai-model-dialog-title">
+            <form id="ai-model-form" class="ai-model-form">
+              <header class="ai-model-dialog-head">
+                <div><span class="eyebrow">AI CREDENTIAL</span><h2 id="ai-model-dialog-title">新增 AI 模型</h2><p id="ai-model-dialog-subtitle">API Key 将加密保存，提交后不再回显。</p></div>
+                <button id="ai-model-dialog-close" class="ai-model-dialog-close" type="button" aria-label="关闭 AI 模型配置">×</button>
+              </header>
+              <input id="ai-model-config-id" name="config_id" type="hidden">
+              <div class="ai-model-field-grid">
+                <label>模型服务商
+                  <select id="ai-model-provider" name="provider_code" required aria-describedby="ai-provider-endpoint"></select>
+                </label>
+                <label>配置名称
+                  <input id="ai-model-display-name" name="display_name" type="text" minlength="1" maxlength="80" autocomplete="off" placeholder="例如：策略编辑主模型" required>
+                </label>
               </div>
+              <div id="ai-provider-endpoint" class="ai-provider-endpoint"><span>服务地址</span><strong>选择服务商后显示</strong><small>地址由系统安全托管，不接受自定义代理地址。</small></div>
+              <label>模型名称
+                <input id="ai-model-name" name="model_name" type="text" minlength="1" maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}" title="仅支持字母、数字、点、下划线、冒号、斜杠与连字符" list="ai-model-name-options" autocomplete="off" placeholder="选择或输入模型名称" required>
+                <datalist id="ai-model-name-options"></datalist>
+              </label>
+              <label>API Key
+                <input id="ai-model-api-key" name="api_key" type="password" autocomplete="new-password" minlength="8" maxlength="2048" placeholder="输入服务商 API Key" required>
+                <small id="ai-model-api-key-hint">保存后不会再次显示完整密钥。</small>
+              </label>
+              <div class="ai-model-switches">
+                <label><input id="ai-model-enabled" name="is_enabled" type="checkbox" checked><span><strong>启用此配置</strong><small>关闭后策略功能不会调用此模型</small></span></label>
+                <label><input id="ai-model-default" name="is_default" type="checkbox"><span><strong>设为默认模型</strong><small>策略 AI 功能优先使用此配置</small></span></label>
+              </div>
+              <p id="ai-model-form-message" class="message" role="alert" aria-live="assertive"></p>
+              <footer class="ai-model-dialog-actions">
+                <button id="ai-model-cancel" class="secondary" type="button">取消</button>
+                <button id="ai-model-save" class="primary" type="submit">加密保存</button>
+              </footer>
             </form>
-          </article>
-          <p id="dashboard-message" class="message" aria-live="polite"></p>
+          </dialog>
         </section>
 
         <section class="workspace-panel hidden" data-panel="strategies">
@@ -224,8 +295,29 @@
         </section>
 
         <section class="workspace-panel hidden" data-panel="orders">
-          <div class="page-heading"><div><span class="eyebrow">EXECUTION</span><h1>订单与持仓</h1><p>订单生命周期、成交与账户持仓</p></div></div>
-          <article class="card empty-state"><span>单</span><h2>订单执行模块尚未启用</h2><p>实盘执行保持关闭。后续将实现订单状态机、成交回报、持仓对账和幂等下单。</p></article>
+          <div class="page-heading orders-heading">
+            <div><span class="eyebrow">BINANCE LIVE STATE</span><h1>订单与持仓</h1><p>读取当前 Binance U 本位合约持仓与未成交订单</p></div>
+            <div class="orders-heading-actions">
+              <span class="live-lock"><i></i>只读 · 不执行下单</span>
+              <button id="orders-refresh" class="secondary" type="button">刷新数据</button>
+            </div>
+          </div>
+          <div id="orders-summary" class="orders-summary" aria-live="polite">
+            <article class="metric-card"><span>当前持仓</span><strong id="orders-position-count">--</strong><small>非零合约仓位</small></article>
+            <article class="metric-card"><span>当前挂单</span><strong id="orders-open-count">--</strong><small>尚未完全成交</small></article>
+            <article class="metric-card"><span>账户模式</span><strong id="orders-account-type">--</strong><small id="orders-updated-at">等待同步</small></article>
+          </div>
+          <p id="orders-message" class="orders-message loading" role="status">正在读取 Binance 账户数据…</p>
+          <div class="orders-data-grid">
+            <article class="card orders-table-card">
+              <header><div><span class="eyebrow">POSITIONS</span><h2>当前持仓</h2></div><span id="orders-position-badge" class="orders-count-badge">0 个</span></header>
+              <div id="orders-positions" class="orders-table-wrap"></div>
+            </article>
+            <article class="card orders-table-card">
+              <header><div><span class="eyebrow">OPEN ORDERS</span><h2>当前挂单</h2></div><span id="orders-open-badge" class="orders-count-badge">0 个</span></header>
+              <div id="orders-open-orders" class="orders-table-wrap"></div>
+            </article>
+          </div>
         </section>
 
         <section class="workspace-panel hidden" data-panel="risk">
@@ -237,14 +329,15 @@
           <div class="page-heading"><div><span class="eyebrow">AUDIT TRAIL</span><h1>审计日志</h1><p>敏感操作和安全事件追踪</p></div></div>
           <article class="card empty-state"><span>审</span><h2>审计查询界面正在建设</h2><p>注册、登录及凭据变更已经在服务端记录，后续将提供分级查询和导出功能。</p></article>
         </section>
+
       </main>
     </div>
   </section>
 
   <script src="/assets/monitor.js?v=20260804-1" defer></script>
-  <script src="/assets/paper.js?v=20260804-1" defer></script>
-  <script src="/assets/strategies.js?v=20260803-2" defer></script>
+  <script src="/assets/paper.js?v=20260804-2" defer></script>
+  <script src="/assets/strategies.js?v=20260804-1" defer></script>
   <script src="/assets/backtest.js?v=20260803-3" defer></script>
-  <script src="/assets/app.js?v=20260803-15" defer></script>
+  <script src="/assets/app.js?v=20260804-6" defer></script>
 </body>
 </html>

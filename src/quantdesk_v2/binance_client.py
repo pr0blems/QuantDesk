@@ -18,8 +18,16 @@ MAX_RESPONSE_BYTES = 512 * 1024
 FUTURES_ACCOUNT_PATH = "/fapi/v3/account"
 PORTFOLIO_ACCOUNT_PATH = "/papi/v1/account"
 PORTFOLIO_BALANCE_PATH = "/papi/v1/balance"
+FUTURES_TIME_PATH = "/fapi/v1/time"
+PORTFOLIO_TIME_PATH = "/papi/v1/time"
 FUTURES_INCOME_PATH = "/fapi/v1/income"
 PORTFOLIO_UM_INCOME_PATH = "/papi/v1/um/income"
+FUTURES_OPEN_ORDERS_PATH = "/fapi/v1/openOrders"
+PORTFOLIO_UM_OPEN_ORDERS_PATH = "/papi/v1/um/openOrders"
+FUTURES_OPEN_ALGO_ORDERS_PATH = "/fapi/v1/openAlgoOrders"
+PORTFOLIO_UM_OPEN_CONDITIONAL_ORDERS_PATH = "/papi/v1/um/conditional/openOrders"
+FUTURES_POSITION_RISK_PATH = "/fapi/v3/positionRisk"
+PORTFOLIO_UM_POSITION_RISK_PATH = "/papi/v1/um/positionRisk"
 INCOME_PAGE_LIMIT = 1_000
 # Each income page costs 30 IP weight. Keep one interactive refresh bounded to
 # 150 weight in a multi-user deployment and expose complete=False if truncated.
@@ -87,27 +95,165 @@ def _account_positions(value: Any, fallback_ms: int) -> tuple[dict[str, Any], ..
             continue
         side_value = str(item.get("positionSide") or "").upper()
         side = "short" if side_value == "SHORT" or amount < 0 else "long"
+        entry_price = _decimal_first(item, ("entryPrice",), required=False)
+        mark_price = _decimal_first(item, ("markPrice",), required=False)
+        notional = _decimal_first(item, ("notional",), required=False)
+        unrealized_pnl = _decimal_first(
+            item,
+            ("unrealizedProfit", "unRealizedProfit", "crossUnPnl"),
+            required=False,
+        )
         output.append(
             {
                 "symbol": item["symbol"].strip().upper()[:32],
                 "amt": float(abs(amount)),
                 "side": side,
-                "entry_price": float(
-                    _decimal_first(item, ("entryPrice",), required=False) or Decimal(0)
-                ),
-                "mark_price": float(
-                    _decimal_first(item, ("markPrice",), required=False) or Decimal(0)
-                ),
-                "upnl": float(
-                    _decimal_first(
-                        item, ("unrealizedProfit", "unRealizedProfit", "crossUnPnl"), required=False
-                    )
-                    or Decimal(0)
-                ),
-                "leverage": int(_positive_int(item.get("leverage")) or 1),
+                "entry_price": float(entry_price) if entry_price is not None else None,
+                "mark_price": float(mark_price) if mark_price is not None else None,
+                "notional": float(abs(notional)) if notional is not None else None,
+                "upnl": float(unrealized_pnl) if unrealized_pnl is not None else None,
+                "leverage": _position_leverage(item),
                 "ts": int(_positive_int(item.get("updateTime")) or fallback_ms),
             }
         )
+    return tuple(output)
+
+
+def _has_open_position(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        amount = _decimal_first(item, ("positionAmt", "positionAmount"), required=False)
+        if amount is not None and amount != 0:
+            return True
+    return False
+
+
+def _position_leverage(item: dict[str, Any]) -> int | None:
+    configured = _positive_int(item.get("leverage"))
+    if configured is not None:
+        return configured
+    notional = _decimal_first(item, ("notional",), required=False)
+    initial_margin = _decimal_first(
+        item,
+        ("positionInitialMargin", "initialMargin"),
+        required=False,
+    )
+    if notional is None or initial_margin is None or initial_margin <= 0:
+        return None
+    derived = int((abs(notional) / initial_margin).to_integral_value())
+    return derived if derived > 0 else None
+
+
+def _open_orders(value: Any, fallback_ms: int) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise BinanceAccountClientError("invalid_response")
+
+    output: list[dict[str, Any]] = []
+    for item in value:
+        symbol = item.get("symbol")
+        order_id = item.get("orderId")
+        if (
+            not isinstance(symbol, str)
+            or not symbol.strip()
+            or isinstance(order_id, bool)
+            or not isinstance(order_id, (int, str))
+            or not str(order_id).isdigit()
+        ):
+            raise BinanceAccountClientError("invalid_response")
+
+        quantity = _decimal_first(item, ("origQty",), required=True)
+        executed_quantity = _decimal_first(item, ("executedQty",), required=False) or Decimal(0)
+        price = _decimal_first(item, ("price",), required=False) or Decimal(0)
+        average_price = _decimal_first(item, ("avgPrice",), required=False) or Decimal(0)
+        stop_price = _decimal_first(item, ("stopPrice", "activatePrice"), required=False)
+        created_ms = _positive_int(item.get("time")) or fallback_ms
+        updated_ms = _positive_int(item.get("updateTime")) or created_ms
+        output.append(
+            {
+                # Keep IDs as strings so browser JSON consumers never lose integer precision.
+                "order_id": str(order_id),
+                "client_order_id": str(item.get("clientOrderId") or "")[:128],
+                "symbol": symbol.strip().upper()[:32],
+                "side": str(item.get("side") or "").upper()[:8],
+                "position_side": str(item.get("positionSide") or "BOTH").upper()[:8],
+                "type": str(item.get("type") or item.get("origType") or "").upper()[:32],
+                "status": str(item.get("status") or "").upper()[:32],
+                "time_in_force": str(item.get("timeInForce") or "").upper()[:16],
+                "price": float(price),
+                "average_price": float(average_price),
+                "stop_price": float(stop_price) if stop_price is not None else None,
+                "quantity": float(quantity),
+                "executed_quantity": float(executed_quantity),
+                "reduce_only": item.get("reduceOnly") is True,
+                "close_position": item.get("closePosition") is True,
+                "conditional": False,
+                "created_at": created_ms,
+                "updated_at": updated_ms,
+            }
+        )
+    output.sort(key=lambda item: (item["updated_at"], item["symbol"], item["order_id"]), reverse=True)
+    return tuple(output)
+
+
+def _open_conditional_orders(value: Any, fallback_ms: int) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise BinanceAccountClientError("invalid_response")
+
+    output: list[dict[str, Any]] = []
+    for item in value:
+        symbol = item.get("symbol")
+        order_id = item.get("algoId", item.get("strategyId"))
+        if (
+            not isinstance(symbol, str)
+            or not symbol.strip()
+            or isinstance(order_id, bool)
+            or not isinstance(order_id, (int, str))
+            or not str(order_id).isdigit()
+        ):
+            raise BinanceAccountClientError("invalid_response")
+
+        quantity = _decimal_first(item, ("quantity", "origQty"), required=True)
+        price = _decimal_first(item, ("price",), required=False) or Decimal(0)
+        trigger_price = _decimal_first(
+            item,
+            ("triggerPrice", "stopPrice", "activatePrice"),
+            required=False,
+        )
+        created_ms = _positive_int(item.get("createTime"))
+        if created_ms is None:
+            created_ms = _positive_int(item.get("bookTime")) or fallback_ms
+        updated_ms = _positive_int(item.get("updateTime")) or created_ms
+        output.append(
+            {
+                "order_id": str(order_id),
+                "client_order_id": str(
+                    item.get("clientAlgoId") or item.get("newClientStrategyId") or ""
+                )[:128],
+                "symbol": symbol.strip().upper()[:32],
+                "side": str(item.get("side") or "").upper()[:8],
+                "position_side": str(item.get("positionSide") or "BOTH").upper()[:8],
+                "type": str(item.get("orderType") or item.get("strategyType") or "").upper()[:32],
+                "status": str(item.get("algoStatus") or item.get("strategyStatus") or "").upper()[:32],
+                "time_in_force": str(item.get("timeInForce") or "").upper()[:16],
+                "price": float(price),
+                "average_price": 0.0,
+                "stop_price": float(trigger_price) if trigger_price is not None else None,
+                "quantity": float(quantity),
+                "executed_quantity": 0.0,
+                "reduce_only": item.get("reduceOnly") is True,
+                "close_position": item.get("closePosition") is True,
+                "conditional": True,
+                "created_at": created_ms,
+                "updated_at": updated_ms,
+            }
+        )
+    output.sort(
+        key=lambda item: (item["updated_at"], item["symbol"], item["order_id"]),
+        reverse=True,
+    )
     return tuple(output)
 
 
@@ -170,22 +316,40 @@ class BinanceAccountClient:
         self.recv_window_ms = recv_window_ms
         self.timeout_seconds = timeout_seconds
         self.transport = transport or _http_transport
+        self._clock_offsets_ms: dict[str, int] = {}
 
     def account(self, api_key: str, api_secret: str) -> BinanceAccountSnapshot:
         if not _safe_credential(api_key) or not _safe_credential(api_secret):
             raise BinanceAccountClientError("credential_error")
 
-        # Demo USD-M credentials must never be sent to the production PAPI origin.
+        # Most keys are standard USD-M. Query FAPI first so a slow or unavailable
+        # PAPI origin cannot block an otherwise healthy futures account.
         futures_host = urlsplit(self.futures_base_url).hostname
-        if futures_host != "demo-fapi.binance.com":
-            try:
-                return self._portfolio_account(api_key, api_secret)
-            except BinanceAccountClientError as exc:
-                # A standard USD-M key commonly appears invalid to PAPI. Try FAPI once,
-                # but do not loop or retry an actually invalid/restricted key repeatedly.
-                if exc.code != -2015:
-                    raise
-        return self._futures_account(api_key, api_secret)
+        futures_failure: BinanceAccountClientError | None = None
+        try:
+            return self._futures_account(api_key, api_secret)
+        except BinanceAccountClientError as exc:
+            futures_failure = exc
+            if futures_host == "demo-fapi.binance.com":
+                raise
+            if exc.code != -2015 and exc.category not in {
+                "timeout",
+                "network",
+            }:
+                raise
+
+        try:
+            return self._portfolio_account(api_key, api_secret)
+        except BinanceAccountClientError as portfolio_error:
+            # If FAPI was merely unavailable and PAPI proves this is not a portfolio
+            # key, retain the actionable FAPI connectivity error.
+            if (
+                futures_failure is not None
+                and futures_failure.code != -2015
+                and portfolio_error.code == -2015
+            ):
+                raise futures_failure from portfolio_error
+            raise
 
     def income_history(
         self,
@@ -297,6 +461,45 @@ class BinanceAccountClient:
             complete=complete,
         )
 
+    def open_orders(
+        self,
+        api_key: str,
+        api_secret: str,
+        *,
+        account_type: AccountType,
+    ) -> tuple[dict[str, Any], ...]:
+        """Read and normalize all currently open USD-M futures orders."""
+
+        if not _safe_credential(api_key) or not _safe_credential(api_secret):
+            raise BinanceAccountClientError("credential_error")
+        if account_type == "PORTFOLIO_MARGIN":
+            base_url = self.portfolio_base_url
+            path = PORTFOLIO_UM_OPEN_ORDERS_PATH
+            conditional_path = PORTFOLIO_UM_OPEN_CONDITIONAL_ORDERS_PATH
+        elif account_type == "UM_FUTURE":
+            base_url = self.futures_base_url
+            path = FUTURES_OPEN_ORDERS_PATH
+            conditional_path = FUTURES_OPEN_ALGO_ORDERS_PATH
+        else:
+            raise ValueError("unsupported Binance account type")
+
+        payload, fetched_ms = self._signed_get(base_url, path, api_key, api_secret)
+        conditional_payload, conditional_fetched_ms = self._signed_get(
+            base_url,
+            conditional_path,
+            api_key,
+            api_secret,
+        )
+        orders = [
+            *_open_orders(payload, fetched_ms),
+            *_open_conditional_orders(conditional_payload, conditional_fetched_ms),
+        ]
+        orders.sort(
+            key=lambda item: (item["updated_at"], item["symbol"], item["order_id"]),
+            reverse=True,
+        )
+        return tuple(orders)
+
     def _portfolio_account(self, api_key: str, api_secret: str) -> BinanceAccountSnapshot:
         account_payload, account_fetched_ms = self._signed_get(
             self.portfolio_base_url,
@@ -357,6 +560,22 @@ class BinanceAccountClient:
         ]
         updated_ms = max(source_times) if source_times else None
         fallback_ms = max(account_fetched_ms, balance_fetched_ms)
+        positions = account_payload.get("positions")
+        if _has_open_position(positions):
+            positions, position_fetched_ms = self._signed_get(
+                self.portfolio_base_url,
+                PORTFOLIO_UM_POSITION_RISK_PATH,
+                api_key,
+                api_secret,
+            )
+            if not isinstance(positions, list) or not all(
+                isinstance(item, dict) for item in positions
+            ):
+                raise BinanceAccountClientError("invalid_response")
+            fallback_ms = max(fallback_ms, position_fetched_ms)
+            position_updated_ms = _max_update_time(positions)
+            if position_updated_ms is not None:
+                updated_ms = max(updated_ms or 0, position_updated_ms)
         return BinanceAccountSnapshot(
             account_type="PORTFOLIO_MARGIN",
             can_trade=None,
@@ -366,7 +585,7 @@ class BinanceAccountClient:
             currency="USD",
             updated_at=_updated_at(updated_ms, fallback_ms),
             unrealized_pnl_by_asset=_unrealized_by_asset(balance_rows, ("umUnrealizedPNL",)),
-            positions=_account_positions(account_payload.get("positions"), fallback_ms),
+            positions=_account_positions(positions, fallback_ms),
         )
 
     def _futures_account(self, api_key: str, api_secret: str) -> BinanceAccountSnapshot:
@@ -380,6 +599,18 @@ class BinanceAccountClient:
             raise BinanceAccountClientError("invalid_response")
         assets = payload.get("assets")
         positions = payload.get("positions")
+        if _has_open_position(positions):
+            positions, position_fetched_ms = self._signed_get(
+                self.futures_base_url,
+                FUTURES_POSITION_RISK_PATH,
+                api_key,
+                api_secret,
+            )
+            if not isinstance(positions, list) or not all(
+                isinstance(item, dict) for item in positions
+            ):
+                raise BinanceAccountClientError("invalid_response")
+            fetched_ms = max(fetched_ms, position_fetched_ms)
         update_sources: list[dict[str, Any]] = []
         if isinstance(assets, list):
             update_sources.extend(item for item in assets if isinstance(item, dict))
@@ -412,18 +643,61 @@ class BinanceAccountClient:
         *,
         params: Iterable[tuple[str, str | int]] = (),
     ) -> tuple[dict[str, Any] | list[Any], int]:
-        fetched_ms = current_time_ms()
-        query = signed_query(
-            api_secret,
-            self.recv_window_ms,
-            fetched_ms,
-            params,
+        for attempt in range(2):
+            fetched_ms = current_time_ms() + self._clock_offsets_ms.get(base_url, 0)
+            query = signed_query(
+                api_secret,
+                self.recv_window_ms,
+                fetched_ms,
+                params,
+            )
+            url = f"{base_url}{path}?{query}"
+            try:
+                status_code, body = self.transport(
+                    url,
+                    {"X-MBX-APIKEY": api_key, "Accept": "application/json"},
+                    self.timeout_seconds,
+                )
+            except BinanceAccountClientError:
+                raise
+            except TimeoutError:
+                raise BinanceAccountClientError("timeout") from None
+            except OSError:
+                raise BinanceAccountClientError("network") from None
+
+            try:
+                payload = json.loads(body)
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                raise BinanceAccountClientError("invalid_response") from None
+            error_payload = payload if isinstance(payload, dict) else {}
+            code = _error_code(error_payload)
+            if status_code < 200 or status_code >= 300 or (code is not None and code < 0):
+                error = BinanceAccountClientError(
+                    _error_category(status_code, error_payload), code=code
+                )
+                if code == -1021 and attempt == 0:
+                    try:
+                        self._synchronize_clock(base_url)
+                    except BinanceAccountClientError:
+                        raise error from None
+                    continue
+                raise error
+            if not isinstance(payload, (dict, list)):
+                raise BinanceAccountClientError("invalid_response")
+            return payload, fetched_ms
+        raise BinanceAccountClientError("timestamp", code=-1021)
+
+    def _synchronize_clock(self, base_url: str) -> None:
+        path = (
+            PORTFOLIO_TIME_PATH
+            if urlsplit(base_url).hostname == "papi.binance.com"
+            else FUTURES_TIME_PATH
         )
-        url = f"{base_url}{path}?{query}"
+        started_ms = current_time_ms()
         try:
             status_code, body = self.transport(
-                url,
-                {"X-MBX-APIKEY": api_key, "Accept": "application/json"},
+                f"{base_url}{path}",
+                {"Accept": "application/json"},
                 self.timeout_seconds,
             )
         except BinanceAccountClientError:
@@ -432,18 +706,28 @@ class BinanceAccountClient:
             raise BinanceAccountClientError("timeout") from None
         except OSError:
             raise BinanceAccountClientError("network") from None
-
+        finished_ms = current_time_ms()
         try:
             payload = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
             raise BinanceAccountClientError("invalid_response") from None
-        error_payload = payload if isinstance(payload, dict) else {}
-        code = _error_code(error_payload)
-        if status_code < 200 or status_code >= 300 or (code is not None and code < 0):
-            raise BinanceAccountClientError(_error_category(status_code, error_payload), code=code)
-        if not isinstance(payload, (dict, list)):
+        if status_code < 200 or status_code >= 300 or not isinstance(payload, dict):
+            error_payload = payload if isinstance(payload, dict) else {}
+            raise BinanceAccountClientError(
+                _error_category(status_code, error_payload)
+            )
+        server_time = payload.get("serverTime")
+        if isinstance(server_time, bool) or not isinstance(server_time, (int, str)):
             raise BinanceAccountClientError("invalid_response")
-        return payload, fetched_ms
+        try:
+            server_time_ms = int(server_time)
+        except (TypeError, ValueError):
+            raise BinanceAccountClientError("invalid_response") from None
+        midpoint_ms = started_ms + (finished_ms - started_ms) // 2
+        offset_ms = server_time_ms - midpoint_ms
+        if server_time_ms <= 0 or abs(offset_ms) > 86_400_000:
+            raise BinanceAccountClientError("invalid_response")
+        self._clock_offsets_ms[base_url] = offset_ms
 
 
 def _approved_origin(base_url: str, allowed_hosts: set[str], label: str) -> str:

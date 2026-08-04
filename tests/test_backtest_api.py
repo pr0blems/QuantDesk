@@ -7,19 +7,21 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from quantdesk_v2 import api
 from quantdesk_v2.backtest import BacktestUnavailable
 from quantdesk_v2.config import Settings
-from quantdesk_v2.database import build_engine, get_db
+from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
-from quantdesk_v2.models import AuditLog, BacktestRun, BacktestTrade, Base, User
+from quantdesk_v2.models import AuditLog, BacktestRun, BacktestTrade, User
 
 
 class FakeBacktestRepository:
     def __init__(self) -> None:
         self.configs: list[dict] = []
+        self.full_specs: list[dict] = []
 
     @staticmethod
     def catalog() -> dict:
@@ -126,6 +128,10 @@ class FakeBacktestRepository:
             },
         }
 
+    def run_full_strategy(self, config: dict, spec: dict) -> dict:
+        self.full_specs.append(spec)
+        return self.run(config)
+
 
 class FailingBacktestRepository(FakeBacktestRepository):
     def __init__(self, message: str) -> None:
@@ -172,24 +178,23 @@ class FullTradeCollectionRepository(FakeBacktestRepository):
         return result
 
 
-def build_test_client():
+def build_test_client(mysql_test_engine: Engine):
     settings = Settings(
         _env_file=None,
         app_env="test",
-        database_url="sqlite+pysqlite:///:memory:",
-        db_password=SecretStr(""),
-        db_ssl_required=False,
-        db_ssl_verify_identity=False,
+        database_url=mysql_test_engine.url.render_as_string(hide_password=False),
         jwt_secret=SecretStr("test-jwt-secret-that-is-long-enough-123456"),
         credential_master_key=SecretStr(Fernet.generate_key().decode("ascii")),
         app_cookie_secure=False,
         app_allowed_hosts="testserver",
         app_allowed_origins="http://testserver",
     )
-    engine = build_engine(settings)
-    Base.metadata.create_all(engine)
-    test_session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    test_session = sessionmaker(
+        bind=mysql_test_engine, autoflush=False, expire_on_commit=False
+    )
     app = create_app(settings)
+    app.state.database_engine.dispose()
+    app.state.database_engine = mysql_test_engine
 
     def override_db():
         db = test_session()
@@ -239,8 +244,8 @@ def backtest_payload() -> dict:
     }
 
 
-def test_backtest_endpoints_require_authentication() -> None:
-    client, _ = build_test_client()
+def test_backtest_endpoints_require_authentication(mysql_test_engine: Engine) -> None:
+    client, _ = build_test_client(mysql_test_engine)
     with client:
         assert client.get("/api/v2/backtests/catalog").status_code == 401
         assert client.get("/api/v2/backtests").status_code == 401
@@ -248,8 +253,10 @@ def test_backtest_endpoints_require_authentication() -> None:
         assert client.post("/api/v2/backtests", json=backtest_payload()).status_code == 401
 
 
-def test_backtest_run_is_saved_audited_and_isolated_by_user(monkeypatch) -> None:
-    client, test_session = build_test_client()
+def test_backtest_run_is_saved_audited_and_isolated_by_user(
+    monkeypatch, mysql_test_engine: Engine
+) -> None:
+    client, test_session = build_test_client(mysql_test_engine)
     repository = FakeBacktestRepository()
     monkeypatch.setattr(api, "_backtest", lambda _: repository)
 
@@ -329,8 +336,10 @@ def test_backtest_run_is_saved_audited_and_isolated_by_user(monkeypatch) -> None
             assert audit.resource_type == "backtest_run"
 
 
-def test_backtest_catalog_and_execution_use_current_users_database_strategy(monkeypatch) -> None:
-    client, test_session = build_test_client()
+def test_backtest_catalog_and_execution_use_current_users_database_strategy(
+    monkeypatch, mysql_test_engine: Engine
+) -> None:
+    client, test_session = build_test_client(mysql_test_engine)
     repository = FakeBacktestRepository()
     monkeypatch.setattr(api, "_backtest", lambda _: repository)
 
@@ -339,7 +348,7 @@ def test_backtest_catalog_and_execution_use_current_users_database_strategy(monk
         catalog_response = client.get("/api/v2/backtests/catalog", headers=headers)
         assert catalog_response.status_code == 200
         strategies = catalog_response.json()["strategies"]
-        assert len(strategies) == 19
+        assert len(strategies) == 20
         assert any(item["name"] == "AI 模拟盘 ATR 趋势" for item in strategies)
         strategy = next(item for item in strategies if item["name"] == "MA 金叉")
         assert strategy["engine_key"] == "ma_cross"
@@ -363,8 +372,38 @@ def test_backtest_catalog_and_execution_use_current_users_database_strategy(monk
             assert saved.metadata_json["strategy"]["revision"] == 1
 
 
-def test_backtest_engine_validation_and_service_errors_are_mapped(monkeypatch) -> None:
-    client, _ = build_test_client()
+def test_full_strategy_uses_multitimeframe_repository_path(
+    monkeypatch, mysql_test_engine: Engine
+) -> None:
+    client, _ = build_test_client(mysql_test_engine)
+    repository = FakeBacktestRepository()
+    monkeypatch.setattr(api, "_backtest", lambda _: repository)
+
+    with client:
+        headers = register_and_login(client, "full-strategy-researcher")
+        catalog = client.get("/api/v2/backtests/catalog", headers=headers).json()
+        strategy = next(
+            item for item in catalog["strategies"] if item["strategy_kind"] == "full_strategy"
+        )
+        payload = backtest_payload()
+        payload["strategy_id"] = strategy["id"]
+        payload["timeframe"] = "15m"
+        payload["leverage"] = 5
+        payload["params"] = {
+            definition["key"]: definition["default"] for definition in strategy["params"]
+        }
+
+        response = client.post("/api/v2/backtests", headers=headers, json=payload)
+
+        assert response.status_code == 201
+        assert repository.configs[-1]["strategy_id"] == "strategy_dsl"
+        assert repository.full_specs[-1]["strategy_type"] == "trend_pullback_continuation"
+
+
+def test_backtest_engine_validation_and_service_errors_are_mapped(
+    monkeypatch, mysql_test_engine: Engine
+) -> None:
+    client, _ = build_test_client(mysql_test_engine)
     with client:
         headers = register_and_login(client, "error-researcher")
 
@@ -385,8 +424,10 @@ def test_backtest_engine_validation_and_service_errors_are_mapped(monkeypatch) -
         assert unavailable.status_code == 503
 
 
-def test_invalid_engine_result_rolls_back_run_trade_and_audit(monkeypatch) -> None:
-    client, test_session = build_test_client()
+def test_invalid_engine_result_rolls_back_run_trade_and_audit(
+    monkeypatch, mysql_test_engine: Engine
+) -> None:
+    client, test_session = build_test_client(mysql_test_engine)
     monkeypatch.setattr(api, "_backtest", lambda _: InvalidResultRepository())
 
     with client:
@@ -403,8 +444,10 @@ def test_invalid_engine_result_rolls_back_run_trade_and_audit(monkeypatch) -> No
             )
 
 
-def test_sub_pico_quantity_remains_nonzero_after_persistence(monkeypatch) -> None:
-    client, test_session = build_test_client()
+def test_sub_pico_quantity_remains_nonzero_after_persistence(
+    monkeypatch, mysql_test_engine: Engine
+) -> None:
+    client, test_session = build_test_client(mysql_test_engine)
     monkeypatch.setattr(api, "_backtest", lambda _: TinyQuantityRepository())
 
     with client:
@@ -419,8 +462,10 @@ def test_sub_pico_quantity_remains_nonzero_after_persistence(monkeypatch) -> Non
             assert Decimal("0") < quantity < Decimal("0.000000000001")
 
 
-def test_full_trade_collection_is_persisted_but_detail_remains_truncated(monkeypatch) -> None:
-    client, test_session = build_test_client()
+def test_full_trade_collection_is_persisted_but_detail_remains_truncated(
+    monkeypatch, mysql_test_engine: Engine
+) -> None:
+    client, test_session = build_test_client(mysql_test_engine)
     monkeypatch.setattr(api, "_backtest", lambda _: FullTradeCollectionRepository())
 
     with client:
@@ -444,8 +489,10 @@ def test_full_trade_collection_is_persisted_but_detail_remains_truncated(monkeyp
             assert saved_run.metadata_json["persisted_trade_count"] == 2
 
 
-def test_trade_storage_quota_rejects_run_atomically(monkeypatch) -> None:
-    client, test_session = build_test_client()
+def test_trade_storage_quota_rejects_run_atomically(
+    monkeypatch, mysql_test_engine: Engine
+) -> None:
+    client, test_session = build_test_client(mysql_test_engine)
     monkeypatch.setattr(api, "_backtest", lambda _: FullTradeCollectionRepository())
     monkeypatch.setattr(api, "MAX_PERSISTED_TRADES", 1)
 

@@ -1,26 +1,35 @@
-"""配置加载（优先读 APP_DIR/config 用户配置，缺失时回退打包内默认配置）"""
-import json, os
-from .paths import CONFIG_DIR, DEFAULT_CONFIG_DIR
+"""Load the shared, non-secret market collector configuration."""
 
-def _load(name, default=None):
-    for d in (CONFIG_DIR, DEFAULT_CONFIG_DIR):
-        p = os.path.join(d, name)
-        try:
-            with open(p, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            continue
-    return default
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_DIR = Path(
+    os.environ.get("QUANTDESK_CONFIG_DIR", PROJECT_ROOT / "config")
+).expanduser().resolve()
+
+
+def _load(name: str, default: Any) -> Any:
+    path = CONFIG_DIR / name
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return default
+
 
 settings = _load("settings.json", {})
-api_keys = _load("api_keys.json", {})
 symbols_meta = _load("tradfi_symbols.json", {"symbols": []})
 
-def tradfi_symbols():
-    return [s["symbol"] for s in symbols_meta.get("symbols", [])]
 
-def reload_all():
-    global settings, api_keys, symbols_meta
+def tradfi_symbols() -> list[str]:
+    return [item["symbol"] for item in symbols_meta.get("symbols", [])]
+
+
+def reload_all() -> None:
+    global settings, symbols_meta
     settings = _load("settings.json", {})
-    api_keys = _load("api_keys.json", {})
     symbols_meta = _load("tradfi_symbols.json", {"symbols": []})

@@ -10,6 +10,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -42,6 +43,41 @@ class Base(DeclarativeBase):
 
 
 BIGINT_PK = BigInteger()
+
+NEWS_DEDUP_EXPRESSION = (
+    "CASE WHEN link IS NULL THEN NULL "
+    "ELSE SHA2(CONCAT(COALESCE(source, ''), CHAR(0), link), 256) END"
+)
+
+
+class News(Base):
+    __tablename__ = "news"
+    __table_args__ = (
+        Index("ix_news_ts", "ts"),
+        Index("uq_news_source_link_hash", "source_link_hash", unique=True),
+        {
+            "comment": "系统共享的新闻、翻译、情绪和摘要数据",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True, comment="新闻稳定标识主键")
+    ts: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="新闻发布时间的 Unix 时间戳"
+    )
+    source: Mapped[str | None] = mapped_column(String(80), comment="新闻来源名称")
+    lang: Mapped[str | None] = mapped_column(String(16), comment="新闻原文语言代码")
+    title: Mapped[str] = mapped_column(Text, nullable=False, comment="新闻原始标题")
+    title_zh: Mapped[str | None] = mapped_column(Text, comment="新闻中文翻译标题")
+    link: Mapped[str | None] = mapped_column(Text, comment="新闻原文链接")
+    sentiment: Mapped[str | None] = mapped_column(String(32), comment="新闻情绪分类")
+    summary: Mapped[str | None] = mapped_column(Text, comment="新闻摘要或深度舆情摘要")
+    source_link_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        Computed(NEWS_DEDUP_EXPRESSION, persisted=True),
+        comment="来源名称与原文链接生成的 SHA-256 去重键",
+    )
 
 
 class User(Base):
@@ -123,10 +159,97 @@ class User(Base):
     paper_accounts: Mapped[list[PaperAccount]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
+    ai_model_configs: Mapped[list[AiModelConfig]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     @property
     def binance_credentials_configured(self) -> bool:
         return bool(self.binance_api_key_encrypted and self.binance_api_secret_encrypted)
+
+
+class AiModelConfig(Base):
+    __tablename__ = "ai_model_configs"
+    __table_args__ = (
+        CheckConstraint(
+            "provider_code IN ('openai', 'deepseek', 'doubao', 'qwen', 'kimi', 'minimax')",
+            name="valid_provider",
+        ),
+        CheckConstraint("is_default = 0 OR is_enabled = 1", name="default_enabled"),
+        UniqueConstraint("public_id", name="uq_ai_model_configs_public_id"),
+        UniqueConstraint(
+            "user_id", "display_name", name="uq_ai_model_configs_user_display_name"
+        ),
+        UniqueConstraint("default_user_id", name="uq_ai_model_configs_default_user_id"),
+        Index(
+            "ix_ai_model_configs_user_updated",
+            "user_id",
+            "updated_at",
+        ),
+        Index("ix_ai_model_configs_provider", "provider_code"),
+        {
+            "comment": "用户隔离并加密保存的 AI 模型调用配置",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="AI 模型配置内部主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36),
+        default=lambda: str(uuid.uuid4()),
+        nullable=False,
+        comment="供接口使用的公开 UUID",
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属用户 ID，用于租户隔离",
+    )
+    provider_code: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="服务端白名单中的 AI 服务商代码"
+    )
+    display_name: Mapped[str] = mapped_column(
+        String(80), nullable=False, comment="用户自定义配置名称，同一用户内唯一"
+    )
+    model_name: Mapped[str] = mapped_column(
+        String(128), nullable=False, comment="服务商模型标识"
+    )
+    api_key_encrypted: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="Fernet 加密后的 AI 服务商 API Key"
+    )
+    api_key_fingerprint: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="API Key 的 SHA-256 短指纹，仅用于识别"
+    )
+    api_key_version: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False, comment="API Key 版本，每次替换时递增"
+    )
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, comment="该模型配置是否允许被调用"
+    )
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, comment="是否为当前用户默认 AI 模型"
+    )
+    default_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        Computed("CASE WHEN is_default = 1 THEN user_id ELSE NULL END", persisted=True),
+        comment="默认配置唯一性生成列；非默认配置为空",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="配置创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="配置最后更新时间（UTC）",
+    )
+
+    user: Mapped[User] = relationship(back_populates="ai_model_configs")
 
 
 class UserSession(Base):
@@ -195,14 +318,75 @@ class AuditLog(Base):
     )
 
 
+class AdminSetting(Base):
+    __tablename__ = "admin_settings"
+    __table_args__ = ({"comment": "管理员发布的系统运行配置"},)
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True, comment="配置稳定键")
+    value_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, comment="配置 JSON")
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False, comment="配置版本")
+    updated_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), comment="最后更新管理员"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False, comment="最后更新时间"
+    )
+
+
+class NewsSourceSetting(Base):
+    __tablename__ = "news_source_settings"
+    __table_args__ = (
+        Index("ix_news_source_settings_enabled", "enabled"),
+        {"comment": "可由管理员维护的新闻来源与健康状态"},
+    )
+
+    name: Mapped[str] = mapped_column(String(80), primary_key=True, comment="来源名称")
+    url: Mapped[str] = mapped_column(Text, nullable=False, comment="RSS HTTPS 地址")
+    lang: Mapped[str] = mapped_column(String(16), default="en", nullable=False, comment="内容语言")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, comment="是否启用")
+    slow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="是否低频轮询")
+    weight: Mapped[int] = mapped_column(Integer, default=100, nullable=False, comment="来源展示权重")
+    hourly_limit: Mapped[int] = mapped_column(
+        Integer, default=600, nullable=False, comment="每小时最大入库数量"
+    )
+    last_success_at: Mapped[int | None] = mapped_column(BigInteger, comment="最后成功 Unix 时间")
+    last_error_at: Mapped[int | None] = mapped_column(BigInteger, comment="最后失败 Unix 时间")
+    last_error: Mapped[str | None] = mapped_column(Text, comment="最近错误摘要")
+    fetched_items: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    inserted_items: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    updated_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), comment="最后更新管理员"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class CollectorStatus(Base):
+    __tablename__ = "collector_status"
+    __table_args__ = ({"comment": "后台采集器心跳与最近运行结果"},)
+
+    name: Mapped[str] = mapped_column(String(32), primary_key=True, comment="采集器名称")
+    heartbeat_at: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="最近心跳 Unix 时间")
+    last_success_at: Mapped[int | None] = mapped_column(BigInteger, comment="最近成功 Unix 时间")
+    last_error_at: Mapped[int | None] = mapped_column(BigInteger, comment="最近失败 Unix 时间")
+    last_error: Mapped[str | None] = mapped_column(Text, comment="最近错误摘要")
+    cycles: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False, comment="累计周期数")
+    items: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False, comment="累计处理条数")
+    details_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="脱敏运行详情")
+
+
 class StrategyTemplate(Base):
     __tablename__ = "strategy_templates"
     __table_args__ = (
         CheckConstraint("version > 0", name="positive_version"),
         CheckConstraint(
             "engine_key IN ('multi_factor', 'ma_cross', 'macd_momentum', "
-            "'rsi_reversal', 'bollinger_reversion')",
+            "'rsi_reversal', 'bollinger_reversion', 'strategy_dsl')",
             name="supported_engine",
+        ),
+        CheckConstraint(
+            "template_kind IN ('strategy', 'legacy_signal')", name="valid_template_kind"
         ),
         UniqueConstraint("template_key", name="uq_strategy_templates_template_key"),
         Index("ix_strategy_templates_active_sort", "is_active", "sort_order"),
@@ -228,6 +412,24 @@ class StrategyTemplate(Base):
     )
     engine_key: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="受支持的安全回测引擎标识"
+    )
+    template_kind: Mapped[str] = mapped_column(
+        String(24),
+        default="legacy_signal",
+        nullable=False,
+        comment="模板类型：完整策略 strategy 或旧版指标信号 legacy_signal",
+    )
+    spec_schema_version: Mapped[int | None] = mapped_column(
+        Integer, comment="完整策略 DSL 结构版本；旧版指标信号为空"
+    )
+    spec_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="完整且受约束的系统策略 DSL 定义"
+    )
+    implementation_version: Mapped[str] = mapped_column(
+        String(32), default="legacy_v1", nullable=False, comment="策略求值器实现版本"
+    )
+    deprecated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="模板停止用于新策略的时间（UTC）"
     )
     parameter_schema_json: Mapped[list[dict[str, Any]]] = mapped_column(
         JSON, nullable=False, comment="策略参数定义、类型、默认值及上下界"
@@ -273,9 +475,17 @@ class UserStrategy(Base):
         ),
         CheckConstraint(
             "engine_key IN ('multi_factor', 'ma_cross', 'macd_momentum', "
-            "'rsi_reversal', 'bollinger_reversion')",
+            "'rsi_reversal', 'bollinger_reversion', 'strategy_dsl')",
             name="supported_engine",
         ),
+        CheckConstraint(
+            "strategy_kind IN ('full_strategy', 'legacy_signal')", name="valid_strategy_kind"
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ('draft', 'published', 'retired')",
+            name="valid_lifecycle_status",
+        ),
+        CheckConstraint("risk_level IN ('low', 'medium', 'high')", name="valid_risk_level"),
         UniqueConstraint("public_id", name="uq_user_strategies_public_id"),
         UniqueConstraint(
             "user_id",
@@ -327,6 +537,30 @@ class UserStrategy(Base):
     )
     engine_key: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="受支持的安全回测引擎标识"
+    )
+    strategy_kind: Mapped[str] = mapped_column(
+        String(24),
+        default="legacy_signal",
+        nullable=False,
+        comment="策略类型：完整策略 full_strategy 或旧版指标信号 legacy_signal",
+    )
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(16),
+        default="published",
+        nullable=False,
+        comment="策略生命周期：draft、published 或 retired",
+    )
+    spec_schema_version: Mapped[int | None] = mapped_column(
+        Integer, comment="完整策略 DSL 结构版本"
+    )
+    spec_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="用户当前完整策略 DSL 定义"
+    )
+    spec_hash: Mapped[str | None] = mapped_column(
+        String(64), comment="规范化策略 DSL 的 SHA-256 哈希"
+    )
+    risk_level: Mapped[str] = mapped_column(
+        String(16), default="medium", nullable=False, comment="策略风险等级：low、medium 或 high"
     )
     parameter_schema_json: Mapped[list[dict[str, Any]]] = mapped_column(
         JSON, nullable=False, comment="策略参数定义、类型、默认值及上下界快照"
@@ -382,6 +616,7 @@ class StrategyRevision(Base):
         UniqueConstraint(
             "user_strategy_id", "version", name="uq_strategy_revisions_strategy_version"
         ),
+        UniqueConstraint("id", "user_id", name="uq_strategy_revisions_id_user_id"),
         Index("ix_strategy_revisions_user_created", "user_id", "created_at"),
         {
             "comment": "用户策略每次修改后的不可变版本快照",
@@ -411,11 +646,374 @@ class StrategyRevision(Base):
     snapshot_json: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, comment="该版本完整且可复现的策略配置快照"
     )
+    spec_schema_version: Mapped[int | None] = mapped_column(
+        Integer, comment="该修订采用的策略 DSL 结构版本"
+    )
+    spec_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="该修订不可变的完整策略 DSL 定义"
+    )
+    spec_hash: Mapped[str | None] = mapped_column(
+        String(64), comment="该修订规范化策略 DSL 的 SHA-256 哈希"
+    )
+    validation_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="发布时的静态校验、数据依赖和风险提示"
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="该修订正式发布时间（UTC）；草稿为空"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False, comment="策略修订创建时间（UTC）"
     )
 
     strategy: Mapped[UserStrategy] = relationship(back_populates="revisions")
+
+
+class MarketFeatureSnapshot(Base):
+    __tablename__ = "market_feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "timeframe",
+            "bar_open_time",
+            "feature_set_key",
+            "feature_set_version",
+            "params_hash",
+            name="uq_market_feature_snapshots_identity",
+        ),
+        Index("ix_market_feature_snapshots_symbol_tf_time", "symbol", "timeframe", "bar_open_time"),
+        {
+            "comment": "系统共享的已收盘行情指标与数据质量快照",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="市场特征快照主键"
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="合约代码")
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False, comment="K 线周期")
+    bar_open_time: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="对应已收盘 K 线开盘时间戳"
+    )
+    feature_set_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="标准特征集合稳定标识"
+    )
+    feature_set_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="标准特征集合实现版本"
+    )
+    params_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="指标参数规范化 SHA-256 哈希"
+    )
+    values_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="指标和派生市场特征值"
+    )
+    quality_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="行情缺口、陈旧、异常和可用性信息"
+    )
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="特征计算完成时间（UTC）"
+    )
+
+
+class MarketOpportunity(Base):
+    __tablename__ = "market_opportunities"
+    __table_args__ = (
+        CheckConstraint(
+            "direction IN ('long', 'short', 'neutral')", name="valid_direction"
+        ),
+        CheckConstraint(
+            "status IN ('detected', 'watching', 'confirmed', 'expired', 'rejected', 'consumed')",
+            name="valid_status",
+        ),
+        UniqueConstraint("public_id", name="uq_market_opportunities_public_id"),
+        UniqueConstraint("dedup_key", name="uq_market_opportunities_dedup_key"),
+        Index("ix_market_opportunities_status_quality", "status", "quality_score"),
+        Index("ix_market_opportunities_symbol_time", "symbol", "detected_bar_time"),
+        {
+            "comment": "系统共享的可解释市场机会及生命周期",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="市场机会主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="市场机会公开 UUID"
+    )
+    scanner_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="机会扫描器稳定标识"
+    )
+    scanner_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="机会扫描器实现版本"
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="合约代码")
+    primary_timeframe: Mapped[str] = mapped_column(
+        String(8), nullable=False, comment="机会主周期"
+    )
+    direction: Mapped[str] = mapped_column(
+        String(12), nullable=False, comment="机会方向：long、short 或 neutral"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="机会生命周期状态"
+    )
+    quality_score: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), nullable=False, comment="机会质量分，仅用于排序和解释"
+    )
+    detected_bar_time: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="首次发现机会的已收盘 K 线时间"
+    )
+    expires_bar_time: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="机会失效的 K 线时间"
+    )
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="机会条件、指标值和解释证据"
+    )
+    dedup_key: Mapped[str] = mapped_column(
+        String(191), nullable=False, comment="机会事件幂等去重键"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="机会创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="机会最后状态更新时间（UTC）",
+    )
+
+
+class UserOpportunityState(Base):
+    __tablename__ = "user_opportunity_states"
+    __table_args__ = (
+        CheckConstraint("state IN ('watching', 'ignored')", name="valid_state"),
+        Index("ix_user_opportunity_states_user_state", "user_id", "state", "updated_at"),
+        {
+            "comment": "用户对公共市场机会的关注、忽略和提醒偏好",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        comment="所属用户 ID，用于租户隔离",
+    )
+    opportunity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("market_opportunities.id", ondelete="CASCADE"),
+        primary_key=True,
+        comment="用户关注或忽略的公共市场机会 ID",
+    )
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="用户状态：watching 关注或 ignored 忽略"
+    )
+    notify_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, comment="该机会状态更新时是否生成用户提醒"
+    )
+    last_viewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="用户最后查看该机会证据的时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="用户机会状态创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="用户机会状态最后更新时间（UTC）",
+    )
+
+
+class StrategyDeployment(Base):
+    __tablename__ = "strategy_deployments"
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('backtest', 'paper', 'shadow', 'live')", name="valid_mode"
+        ),
+        CheckConstraint(
+            "status IN ('created', 'running', 'paused', 'stopped', 'error')",
+            name="valid_status",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_id", "user_id"],
+            ["user_strategies.id", "user_strategies.user_id"],
+            name="fk_strategy_deployments_strategy_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_strategy_deployments_revision_tenant",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_deployments_public_id"),
+        UniqueConstraint("id", "user_id", name="uq_strategy_deployments_id_user_id"),
+        Index("ix_strategy_deployments_user_status", "user_id", "status", "updated_at"),
+        {
+            "comment": "用户将固定策略修订绑定到回测、模拟、影子或实盘的部署实例",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="策略部署内部主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="策略部署公开 UUID"
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属用户 ID",
+    )
+    strategy_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="所属用户策略内部 ID"
+    )
+    strategy_revision_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="部署固定的不可变策略修订 ID"
+    )
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="部署模式：回测、模拟、影子或实盘"
+    )
+    target_account_id: Mapped[int | None] = mapped_column(
+        BigInteger, comment="模拟盘或实盘目标账户内部 ID"
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False, comment="策略部署显示名称")
+    status: Mapped[str] = mapped_column(
+        String(16), default="created", nullable=False, comment="策略部署运行状态"
+    )
+    universe_override_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="部署级交易标的范围覆盖"
+    )
+    risk_override_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="部署级仅收紧风险参数覆盖"
+    )
+    runtime_state_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False, comment="机会、冷却和幂等等策略运行状态"
+    )
+    last_evaluated_bar_time: Mapped[int | None] = mapped_column(
+        BigInteger, comment="最后完成求值的 K 线时间"
+    )
+    last_error_code: Mapped[str | None] = mapped_column(
+        String(64), comment="最后一次脱敏运行错误代码"
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="策略部署启动时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="策略部署创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="策略部署最后更新时间（UTC）",
+    )
+
+
+class StrategySignal(Base):
+    __tablename__ = "strategy_signals"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('LONG_ENTRY', 'SHORT_ENTRY', 'EXIT', 'HOLD', 'SKIP')",
+            name="valid_decision",
+        ),
+        CheckConstraint(
+            "status IN ('proposed', 'risk_rejected', 'approved', 'expired', 'executed')",
+            name="valid_status",
+        ),
+        ForeignKeyConstraint(
+            ["deployment_id", "user_id"],
+            ["strategy_deployments.id", "strategy_deployments.user_id"],
+            name="fk_strategy_signals_deployment_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_strategy_signals_revision_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["opportunity_id"],
+            ["market_opportunities.id"],
+            name="fk_strategy_signals_opportunity",
+            ondelete="SET NULL",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_signals_public_id"),
+        UniqueConstraint("idempotency_key", name="uq_strategy_signals_idempotency_key"),
+        Index("ix_strategy_signals_user_created", "user_id", "created_at"),
+        Index("ix_strategy_signals_deployment_bar", "deployment_id", "signal_bar_time"),
+        {
+            "comment": "用户策略求值产生的可解释信号及风控审批结果",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="策略信号主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="策略信号公开 UUID"
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属用户 ID",
+    )
+    deployment_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="产生信号的策略部署 ID"
+    )
+    strategy_revision_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="产生信号的不可变策略修订 ID"
+    )
+    opportunity_id: Mapped[int | None] = mapped_column(
+        BigInteger, comment="关联的公共市场机会 ID"
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="合约代码")
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False, comment="信号触发周期")
+    signal_bar_time: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="信号对应的已收盘 K 线时间"
+    )
+    decision: Mapped[str] = mapped_column(
+        String(24), nullable=False, comment="结构化策略决策代码"
+    )
+    confidence: Mapped[Decimal | None] = mapped_column(
+        Numeric(8, 4), comment="规则置信度，仅用于排序和解释"
+    )
+    status: Mapped[str] = mapped_column(
+        String(24), default="proposed", nullable=False, comment="信号审批与执行状态"
+    )
+    valid_until: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="策略信号有效期（UTC）"
+    )
+    reason_codes_json: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, comment="稳定且可检索的决策原因代码"
+    )
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="参与策略决策的指标和条件证据"
+    )
+    risk_decision_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="账户与组合风控的批准或拒绝结果"
+    )
+    idempotency_key: Mapped[str] = mapped_column(
+        String(191), nullable=False, comment="部署、标的、修订、K 线和决策组成的幂等键"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="策略信号创建时间（UTC）"
+    )
 
 
 class BacktestRun(Base):
@@ -646,9 +1244,7 @@ class PaperAccount(Base):
     initial_balance: Mapped[Decimal] = mapped_column(
         Numeric(30, 8), nullable=False, comment="初始资金"
     )
-    balance: Mapped[Decimal] = mapped_column(
-        Numeric(30, 8), nullable=False, comment="当前可用余额"
-    )
+    balance: Mapped[Decimal] = mapped_column(Numeric(30, 8), nullable=False, comment="当前可用余额")
     config_json: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, comment="杠杆、仓位和风控配置"
     )
@@ -658,9 +1254,7 @@ class PaperAccount(Base):
     started_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False, comment="本轮模拟盘启动时间"
     )
-    last_tick_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="最后一次策略执行时间"
-    )
+    last_tick_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最后一次策略执行时间")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False, comment="模拟盘创建时间"
     )

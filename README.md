@@ -1,40 +1,62 @@
-# QuantDesk · 币安 TradFi 量化工作台 — 使用说明
+# QuantDesk
 
-## 日常使用
-- **启动**：双击 `start.bat`（只启动 MySQL 版 V2，并带崩溃自动重启）；或运行 `quantdesk-v2 serve`
-- **打开界面**：浏览器访问 http://127.0.0.1:8200
-- **停止**：关闭 start.bat 的黑色窗口，或在任务管理器结束 python 进程
-- **取消开机自启**：删除 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\QuantDesk.vbs`
+面向多用户的 Binance TradFi 量化交易系统。当前主应用统一运行在
+`http://127.0.0.1:8200`，不再包含旧桌面工作台和本地文件数据库存储链路。
 
-## 功能对照
-| 功能 | 位置 |
-|---|---|
-| 150 个 TradFi 合约实时监控 | 左侧网格（⭐自选 / 💼持仓 自动置顶） |
-| K线图（15m/1h/4h） | 点击任意合约卡片 |
-| 多空评分 + 7 因子理由 | 弹窗下半部分，每个因子一行 |
-| 买卖/异动提醒 | 右侧信号流 + 弹窗/Toast + 音效 |
-| 舆情流（英文自动翻译） | 右下，自动滚动，悬停暂停 |
-| 深度舆情摘要 | 每 2 小时由 Kimi 定时任务生成，出现在舆情流顶部（Kimi深度摘要），全文在 `reports/` |
+## 启动
 
-## 配置（改完重启 start.bat 生效）
-- `.env`：MySQL/MariaDB 连接、应用密钥和服务端配置；应用不会再读取本地数据库文件
-- `config/settings.json`：评分阈值（默认 ±60 / 持仓 ±40）、异动阈值（5分钟 2%）、刷新频率、新闻源
-- 币安 API：每个用户登录后在“凭据”页面独立配置；密钥加密保存到 MySQL，不使用共享配置文件
-- 自选列表：在界面弹窗里点 ☆/★ 切换，自动保存
+1. 从 `.env.example` 创建 `.env`，配置 MySQL/MariaDB、JWT 和凭据加密密钥。
+2. 安装依赖：
 
-## 多用户数据隔离
+   ```powershell
+   python -m pip install -e ".[dev]"
+   ```
 
-- 实盘 Binance 凭据和持仓快照按 `user_id` 隔离，一个用户无法读取或覆盖其他用户数据。
-- 提醒按用户分别保存和标记已读。
-- 用户状态写入 `user_states`；只有行情采集进度、全市场舆情等真正的系统状态使用 `system_state`。
-- 一个用户可创建多个模拟盘并绑定不同策略；每个模拟盘的资金、持仓、成交、权益和信号去重状态完全独立。
+3. 检查数据库并执行迁移：
 
-## 提醒通道
-- 系统通知开启 → Windows Toast
-- 系统通知关闭 → 自动降级为弹窗（10 秒自动消失）
-- 浏览器页面开着 → 页面内通知 + 音效（需点一次 🔔 授权）
+   ```powershell
+   quantdesk-v2 check-db
+   alembic upgrade head
+   ```
 
-## 注意事项
-- API Key 应绑定当前公网 IP 白名单（例如 `<YOUR_PUBLIC_IP>`）：如果公网 IP 变了，**持仓读取会失败**（行情监控不受影响），需到币安后台更新白名单
-- 本工具只做监控提醒，**不具备也不会执行任何下单操作**
-- 评分是概率倾向参考，不构成投资建议
+4. 双击 `start.bat`，或执行：
+
+   ```powershell
+   quantdesk-v2 serve
+   ```
+
+5. 首次启用管理后台时创建管理员：
+
+   ```powershell
+   $env:QUANTDESK_ADMIN_PASSWORD = "使用至少 12 位的独立强密码"
+   quantdesk-v2 create-admin --username admin
+   ```
+
+## 数据与配置
+
+- 用户、会话、Binance/AI 模型加密凭据、策略、回测、行情、提醒、实盘持仓快照和模拟盘数据全部存入 MySQL/MariaDB。
+- `config/settings.json` 只保存无密钥的行情采集参数。
+- `config/tradfi_symbols.json` 保存受支持合约的静态元数据。
+- Binance API 密钥和当前用户的 AI 模型 API Key 统一在“系统设置 → API 凭证”录入；服务端加密保存且不会回显明文。
+- AI 模型配置按用户隔离，可分别维护 DeepSeek、豆包、千问、Kimi、MiniMax 与 OpenAI，并选择一个启用的默认模型供策略语义编辑使用。
+- 项目只使用 MySQL/MariaDB 持久化业务数据，不读取本地数据库或共享密钥文件。
+
+## 主要页面
+
+- `/monitor`：合约监控
+- `/paper`：多账户模拟盘
+- `/strategies`：用户策略与 AI 语义编辑
+- `/backtest`：策略数据回测
+- `/overview`：虚拟盘与 Binance 实盘绩效
+- `/settings`：系统设置；二级分类“API 凭证”管理 Binance 与用户自己的 AI 模型连接
+- `/admin`：独立管理应用（独立登录与 UI），细分为运行总览、采集器、提醒事件、信号规则、舆情来源、合约数据、用户权限、存储维护和审计日志（仅管理员）
+
+## 生产要求
+
+- 使用 HTTPS，并设置 `APP_ENV=production`、`APP_COOKIE_SECURE=true`。
+- MySQL/MariaDB 必须启用 TLS、证书主机名校验和 CA 验证。
+- 数据库防火墙仅允许应用服务器访问 3306。
+- Binance API Key 禁止提现权限，并绑定应用出口 IP。
+- `JWT_SECRET`、`CREDENTIAL_MASTER_KEY` 和数据库密码应由密钥管理系统注入；`OPENAI_API_KEY` 仅作为未配置用户模型时的可选服务端回退密钥。
+
+详细部署和测试说明见 [V2 运行说明](docs/V2运行说明.md)。

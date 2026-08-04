@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,14 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
+
+from .strategy_runtime import (
+    StrategyMarketDataError,
+    StrategySpecError,
+    evaluate_strategy,
+    full_strategy_parameter_schema,
+    validate_strategy_spec,
+)
 
 
 class BacktestUnavailable(RuntimeError):
@@ -189,6 +198,11 @@ STRATEGY_TEMPLATES: tuple[dict[str, Any], ...] = (
 )
 
 _STRATEGIES = {item["id"]: item for item in STRATEGY_TEMPLATES}
+_STRATEGIES["strategy_dsl"] = {
+    "id": "strategy_dsl",
+    "name": "完整策略 DSL",
+    "params": full_strategy_parameter_schema(),
+}
 _REQUIRED_CONFIG = {
     "strategy_id",
     "symbol",
@@ -328,6 +342,8 @@ class BacktestRepository:
 
     def run(self, config: dict[str, Any]) -> dict[str, Any]:
         validated = self._validate_config(config)
+        if validated["strategy_id"] == "strategy_dsl":
+            raise BacktestUnavailable("full strategy backtest requires an immutable strategy spec")
         series = self._series_info(validated["symbol"], validated["timeframe"])
         scale = series["scale"]
         start_raw = validated["start_ts"] * scale
@@ -357,50 +373,136 @@ class BacktestRepository:
             raise BacktestUnavailable("at least two valid klines are required")
 
         result = _run_engine(candles, validated)
-        full_curve = result.pop("_full_equity_curve")
-        all_trades = result["trades"]
-        equity_curve = _even_sample(full_curve, MAX_EQUITY_POINTS)
-        returned_trades = all_trades[-MAX_RETURNED_TRADES:]
+        return _finalize_result(result, candles, validated, raw_count, quality)
+
+    def run_full_strategy(
+        self,
+        config: dict[str, Any],
+        spec_value: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replay a full strategy using only bars closed at each trigger decision."""
+
+        try:
+            spec = validate_strategy_spec(spec_value)
+        except (StrategySpecError, TypeError, ValueError) as exc:
+            raise BacktestUnavailable(f"invalid full strategy spec: {exc}") from None
+        config_with_engine = dict(config)
+        config_with_engine["strategy_id"] = "strategy_dsl"
+        validated = self._validate_config(config_with_engine)
+        spec["parameters"].update(validated["params"])
+        try:
+            spec = validate_strategy_spec(spec)
+        except StrategySpecError as exc:
+            raise BacktestUnavailable(f"invalid full strategy parameters: {exc}") from None
+
+        trigger_timeframe = spec["timeframes"]["trigger"]
+        if validated["timeframe"] != trigger_timeframe:
+            raise BacktestUnavailable(
+                f"full strategy trigger timeframe must be {trigger_timeframe}"
+            )
+        if validated["leverage"] > int(spec["risk"]["max_leverage"]):
+            raise BacktestUnavailable(
+                f"leverage exceeds strategy maximum of {spec['risk']['max_leverage']}"
+            )
+        validated["max_holding_bars"] = int(spec["exit"]["max_holding_bars"])
+
+        candles_by_timeframe: dict[str, list[_Candle]] = {}
+        quality_by_timeframe: dict[str, dict[str, Any]] = {}
+        raw_counts: dict[str, int] = {}
+        window_sizes = _strategy_window_sizes(spec)
+        for role, timeframe in spec["timeframes"].items():
+            series = self._series_info(validated["symbol"], timeframe)
+            interval = _timeframe_seconds(timeframe)
+            if interval is None:
+                raise BacktestUnavailable(f"unsupported strategy timeframe: {timeframe}")
+            warmup_start = max(
+                series["start_ts"],
+                validated["start_ts"] - interval * window_sizes[role],
+            )
+            start_raw = warmup_start * series["scale"]
+            end_raw = validated["end_ts"] * series["scale"] + series["scale"] - 1
+            rows = self._query(
+                """
+                SELECT open_time, open, high, low, close, volume FROM klines
+                WHERE symbol=? AND tf=? AND open_time>=? AND open_time<=?
+                ORDER BY open_time ASC
+                """,
+                (validated["symbol"], timeframe, start_raw, end_raw),
+            )
+            candles, timeframe_quality = _clean_candles(
+                rows, series["scale"], timeframe
+            )
+            candles_by_timeframe[timeframe] = candles
+            quality_by_timeframe[timeframe] = timeframe_quality
+            raw_counts[timeframe] = len(rows)
+
+        trigger_all = candles_by_timeframe[trigger_timeframe]
+        trigger_candles = [
+            candle
+            for candle in trigger_all
+            if validated["start_ts"] <= candle.ts <= validated["end_ts"]
+        ]
+        if len(trigger_candles) < 2:
+            raise BacktestUnavailable("at least two valid trigger klines are required")
+        if len(trigger_candles) > MAX_BARS:
+            raise BacktestUnavailable(f"backtest range exceeds the {MAX_BARS} bar limit")
+
+        close_times = {
+            timeframe: [
+                candle.ts + int(_timeframe_seconds(timeframe) or 0)
+                for candle in candles
+            ]
+            for timeframe, candles in candles_by_timeframe.items()
+        }
+        signals: list[int] = []
+        risk_proposals: list[dict[str, Any] | None] = []
+        decision_counts: dict[str, int] = {}
+        for trigger in trigger_candles:
+            decision_at = trigger.ts + int(_timeframe_seconds(trigger_timeframe) or 0)
+            market: dict[str, list[dict[str, float | int]]] = {}
+            for role, timeframe in spec["timeframes"].items():
+                end_index = bisect_right(close_times[timeframe], decision_at)
+                start_index = max(0, end_index - window_sizes[role])
+                market[timeframe] = [
+                    _runtime_candle(candle)
+                    for candle in candles_by_timeframe[timeframe][start_index:end_index]
+                ]
+            try:
+                decision = evaluate_strategy(spec, market)
+            except (StrategySpecError, StrategyMarketDataError, ValueError) as exc:
+                raise BacktestUnavailable(f"full strategy evaluation failed: {exc}") from None
+            direction = {"LONG_ENTRY": 1, "SHORT_ENTRY": -1}.get(decision.decision, 0)
+            signals.append(direction)
+            risk_proposals.append(decision.risk_proposal if direction else None)
+            decision_counts[decision.decision] = decision_counts.get(decision.decision, 0) + 1
+
+        result = _run_engine(
+            trigger_candles,
+            validated,
+            signals=signals,
+            risk_proposals=risk_proposals,
+        )
+        quality = dict(quality_by_timeframe[trigger_timeframe])
         quality.update(
             {
-                "requested_start_ts": validated["start_ts"],
-                "requested_end_ts": validated["end_ts"],
-                "actual_start_ts": candles[0].ts,
-                "actual_end_ts": candles[-1].ts,
-                "bars_loaded": raw_count,
-                "bars_used": len(candles),
-                "equity_points_total": len(full_curve),
-                "equity_points_returned": len(equity_curve),
-                "equity_curve_truncated": len(equity_curve) < len(full_curve),
-                "trades_total": len(all_trades),
-                "trades_returned": len(returned_trades),
-                "trades_truncated": len(returned_trades) < len(all_trades),
-                "timestamp_unit": "seconds",
-                "assumptions": [
-                    "信号在当前 K 线收盘确认，并于下一根 K 线开盘成交",
-                    "同一根 K 线同时触发有利和不利退出价位时，保守地按不利退出优先",
-                    "每次仅交易一个标的并持有一个方向的单一仓位",
-                    "手续费和滑点均在开仓、平仓两端计入",
-                    (
-                        "强平采用固定 0.5% 维持保证金率的简化逐仓模型；逐 K 线检查，"
-                        "跳空越过强平价时按更差的开盘价成交"
-                    ),
-                    (
-                        "止损与强平同时触发时，按从开盘价向不利方向最先遇到的价位执行；"
-                        "该模型不包含阶梯维持保证金、保险基金或自动减仓"
-                    ),
-                    "收益计算未覆盖资金费率与借贷成本，长时间持仓的结果可能偏乐观",
-                ],
+                "strategy_kind": "full_strategy",
+                "strategy_type": spec["strategy_type"],
+                "timeframes": quality_by_timeframe,
+                "raw_bars_by_timeframe": raw_counts,
+                "decision_counts": decision_counts,
             }
         )
-        result["equity_curve"] = equity_curve
-        result["trades"] = returned_trades
-        if len(returned_trades) < len(all_trades):
-            # The API persists this private payload, while its response and the
-            # browser continue to use the bounded public ``trades`` collection.
-            result["_all_trades"] = all_trades
-        result["data_quality"] = quality
-        return result
+        return _finalize_result(
+            result,
+            trigger_candles,
+            validated,
+            len(trigger_candles),
+            quality,
+            extra_assumptions=[
+                "完整策略严格按 4h/1h/15m 各周期已收盘 K 线对齐求值",
+                "完整策略入场后的止损和止盈使用信号时生成的 ATR 风险距离",
+            ],
+        )
 
     def _series_info(self, symbol: str, timeframe: str) -> dict[str, int]:
         rows = self._query(
@@ -644,14 +746,115 @@ def _clean_candles(
     }
 
 
-def _run_engine(candles: list[_Candle], config: dict[str, Any]) -> dict[str, Any]:
-    signals = _build_signals(config["strategy_id"], candles, config["params"])
+def _strategy_window_sizes(spec: dict[str, Any]) -> dict[str, int]:
+    parameters = spec["parameters"]
+    return {
+        "regime": max(
+            int(parameters["regime_slow_ema"]) + 10,
+            int(parameters["regime_adx_period"]) * 3 + 10,
+        ),
+        "setup": max(
+            int(parameters["setup_ema_period"])
+            + int(parameters["setup_lookback_bars"])
+            + 10,
+            int(parameters["setup_atr_period"])
+            + int(parameters["setup_lookback_bars"])
+            + 10,
+        ),
+        "trigger": max(
+            int(parameters["trigger_donchian_period"]) + 10,
+            int(parameters["trigger_volume_period"]) + 10,
+        ),
+    }
+
+
+def _runtime_candle(candle: _Candle) -> dict[str, float | int]:
+    return {
+        "open_time": candle.ts,
+        "open": candle.open,
+        "high": candle.high,
+        "low": candle.low,
+        "close": candle.close,
+        "volume": candle.volume,
+    }
+
+
+def _finalize_result(
+    result: dict[str, Any],
+    candles: list[_Candle],
+    config: dict[str, Any],
+    raw_count: int,
+    quality: dict[str, Any],
+    *,
+    extra_assumptions: list[str] | None = None,
+) -> dict[str, Any]:
+    full_curve = result.pop("_full_equity_curve")
+    all_trades = result["trades"]
+    equity_curve = _even_sample(full_curve, MAX_EQUITY_POINTS)
+    returned_trades = all_trades[-MAX_RETURNED_TRADES:]
+    assumptions = [
+        "信号在当前 K 线收盘确认，并于下一根 K 线开盘成交",
+        "同一根 K 线同时触发有利和不利退出价位时，保守地按不利退出优先",
+        "每次仅交易一个标的并持有一个方向的单一仓位",
+        "手续费和滑点均在开仓、平仓两端计入",
+        (
+            "强平采用固定 0.5% 维持保证金率的简化逐仓模型；逐 K 线检查，"
+            "跳空越过强平价时按更差的开盘价成交"
+        ),
+        (
+            "止损与强平同时触发时，按从开盘价向不利方向最先遇到的价位执行；"
+            "该模型不包含阶梯维持保证金、保险基金或自动减仓"
+        ),
+        "收益计算未覆盖资金费率与借贷成本，长时间持仓的结果可能偏乐观",
+    ]
+    if extra_assumptions:
+        assumptions.extend(extra_assumptions)
+    quality.update(
+        {
+            "requested_start_ts": config["start_ts"],
+            "requested_end_ts": config["end_ts"],
+            "actual_start_ts": candles[0].ts,
+            "actual_end_ts": candles[-1].ts,
+            "bars_loaded": raw_count,
+            "bars_used": len(candles),
+            "equity_points_total": len(full_curve),
+            "equity_points_returned": len(equity_curve),
+            "equity_curve_truncated": len(equity_curve) < len(full_curve),
+            "trades_total": len(all_trades),
+            "trades_returned": len(returned_trades),
+            "trades_truncated": len(returned_trades) < len(all_trades),
+            "timestamp_unit": "seconds",
+            "assumptions": assumptions,
+        }
+    )
+    result["equity_curve"] = equity_curve
+    result["trades"] = returned_trades
+    if len(returned_trades) < len(all_trades):
+        result["_all_trades"] = all_trades
+    result["data_quality"] = quality
+    return result
+
+
+def _run_engine(
+    candles: list[_Candle],
+    config: dict[str, Any],
+    *,
+    signals: list[int] | None = None,
+    risk_proposals: list[dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    if signals is None:
+        signals = _build_signals(config["strategy_id"], candles, config["params"])
+    if len(signals) != len(candles):
+        raise BacktestUnavailable("strategy signal count does not match trigger candles")
+    if risk_proposals is not None and len(risk_proposals) != len(candles):
+        raise BacktestUnavailable("strategy risk proposal count does not match trigger candles")
     initial_capital = config["initial_capital"]
     balance = initial_capital
     fee_rate = config["fee_bps"] / 10_000
     slippage_rate = config["slippage_bps"] / 10_000
     position: dict[str, Any] | None = None
     pending_signal = 0
+    pending_risk: dict[str, Any] | None = None
     trades: list[dict[str, Any]] = []
     total_fees = 0.0
     exposed_bars = 0
@@ -703,7 +906,11 @@ def _run_engine(candles: list[_Candle], config: dict[str, Any]) -> dict[str, Any
         )
         position = None
 
-    def open_position(candle: _Candle, direction: int) -> None:
+    def open_position(
+        candle: _Candle,
+        direction: int,
+        risk_proposal: dict[str, Any] | None,
+    ) -> None:
         nonlocal balance, position, total_fees
         if balance <= 0:
             return
@@ -716,6 +923,23 @@ def _run_engine(candles: list[_Candle], config: dict[str, Any]) -> dict[str, Any
         entry_fee = notional * fee_rate
         balance -= entry_fee
         total_fees += entry_fee
+        stop_price = None
+        take_price = None
+        if isinstance(risk_proposal, dict):
+            try:
+                stop_distance = float(risk_proposal.get("stop_distance"))
+                take_distance = float(risk_proposal.get("take_profit_distance"))
+            except (TypeError, ValueError):
+                stop_distance = math.nan
+                take_distance = math.nan
+            if math.isfinite(stop_distance) and stop_distance > 0:
+                candidate = entry_price - direction * stop_distance
+                if candidate > 0:
+                    stop_price = candidate
+            if math.isfinite(take_distance) and take_distance > 0:
+                candidate = entry_price + direction * take_distance
+                if candidate > 0:
+                    take_price = candidate
         position = {
             "direction": direction,
             "entry_ts": candle.ts,
@@ -729,6 +953,8 @@ def _run_engine(candles: list[_Candle], config: dict[str, Any]) -> dict[str, Any
             ),
             "entry_fee": entry_fee,
             "holding_bars": 0,
+            "stop_price": stop_price,
+            "take_price": take_price,
         }
 
     for index, candle in enumerate(candles):
@@ -751,7 +977,7 @@ def _run_engine(candles: list[_Candle], config: dict[str, Any]) -> dict[str, Any
             if position is not None and position["direction"] != pending_signal:
                 close_position(candle, candle.open, "strategy_reversal")
             if position is None:
-                open_position(candle, pending_signal)
+                open_position(candle, pending_signal, pending_risk)
 
         if position is not None:
             position["holding_bars"] += 1
@@ -760,8 +986,12 @@ def _run_engine(candles: list[_Candle], config: dict[str, Any]) -> dict[str, Any
             entry_price = position["entry_price"]
             stop_pct = config["stop_loss_pct"] / 100
             take_pct = config["take_profit_pct"] / 100
-            stop_price = entry_price * (1 - direction * stop_pct) if stop_pct else None
-            take_price = entry_price * (1 + direction * take_pct) if take_pct else None
+            stop_price = position.get("stop_price")
+            take_price = position.get("take_price")
+            if stop_price is None and stop_pct:
+                stop_price = entry_price * (1 - direction * stop_pct)
+            if take_price is None and take_pct:
+                take_price = entry_price * (1 + direction * take_pct)
             liquidation_price = position["liquidation_price"]
             stop_hit = bool(
                 stop_price is not None
@@ -847,6 +1077,7 @@ def _run_engine(candles: list[_Candle], config: dict[str, Any]) -> dict[str, Any
             }
         )
         pending_signal = signals[index]
+        pending_risk = risk_proposals[index] if risk_proposals is not None else None
 
     final_equity = balance
     net_profit = final_equity - initial_capital

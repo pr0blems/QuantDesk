@@ -6,10 +6,17 @@ import json
 import math
 import threading
 import time
+import uuid
 from datetime import UTC
 from typing import Any
 
 from quantdesk_v2.backtest import _build_signals, _Candle
+from quantdesk_v2.strategy_runtime import (
+    StrategyMarketDataError,
+    StrategySpecError,
+    evaluate_strategy,
+    validate_strategy_spec,
+)
 
 from . import indicators as ind
 from . import store
@@ -59,12 +66,12 @@ def _account(user_id: int, account_id: int) -> dict[str, Any]:
     return account
 
 
-def _active_accounts(account_id: int | None = None) -> list[dict[str, Any]]:
+def _tracked_accounts(account_id: int | None = None) -> list[dict[str, Any]]:
     if account_id is None:
-        rows = store.query("SELECT * FROM paper_accounts WHERE status='active' ORDER BY id")
+        rows = store.query("SELECT * FROM paper_accounts WHERE status<>'archived' ORDER BY id")
     else:
         rows = store.query(
-            "SELECT * FROM paper_accounts WHERE id=? AND status='active'", (account_id,)
+            "SELECT * FROM paper_accounts WHERE id=? AND status<>'archived'", (account_id,)
         )
     result = []
     for row in rows:
@@ -141,6 +148,38 @@ def _equity(
     return float(account["balance"]) + _used_margin(positions) + unrealized, unrealized
 
 
+def _local_day_start_ts(now: int, timezone_offset_minutes: int) -> int:
+    offset_seconds = int(timezone_offset_minutes) * 60
+    local_now = int(now) + offset_seconds
+    return local_now - local_now % 86_400 - offset_seconds
+
+
+def _today_pnl(
+    account: dict[str, Any],
+    current_equity: float,
+    now: int,
+    timezone_offset_minutes: int,
+) -> float:
+    """Return the account equity change since the user's local day began."""
+
+    day_start_ts = _local_day_start_ts(now, timezone_offset_minutes)
+    rows = store.query(
+        """SELECT equity FROM paper_equity
+           WHERE paper_account_id=? AND user_id=? AND ts<?
+           ORDER BY ts DESC LIMIT 1""",
+        (account["id"], account["user_id"], day_start_ts),
+    )
+    baseline = float(account["initial_balance"])
+    if rows:
+        try:
+            candidate = float(rows[0]["equity"])
+        except (KeyError, TypeError, ValueError):
+            candidate = math.nan
+        if math.isfinite(candidate):
+            baseline = candidate
+    return current_equity - baseline
+
+
 def _set_balance(account: dict[str, Any], balance: float) -> None:
     safe_balance = max(round(balance, 8), 0.0)
     store.execute(
@@ -170,6 +209,9 @@ def _strategy_signal(
     account: dict[str, Any], symbol: str
 ) -> tuple[int, float | None, list[str], int | None]:
     snapshot = account["strategy_snapshot_json"]
+    if snapshot.get("strategy_kind") == "full_strategy":
+        return _full_strategy_signal(account, snapshot, symbol)
+
     engine_key = str(snapshot.get("engine_key") or "multi_factor")
     parameters = _json_object(snapshot.get("parameters"))
     candles, rows = _candles(symbol)
@@ -193,6 +235,110 @@ def _strategy_signal(
         "周期：4h",
     ]
     return direction, atr, basis, int(rows[-1]["open_time"])
+
+
+def _full_strategy_signal(
+    account: dict[str, Any], snapshot: dict[str, Any], symbol: str
+) -> tuple[int, float | None, list[str], int | None]:
+    """Evaluate one immutable full-strategy snapshot on its declared timeframes."""
+
+    raw_spec = snapshot.get("spec") or snapshot.get("spec_json")
+    try:
+        spec = validate_strategy_spec(raw_spec)
+        timeframes = set(spec["timeframes"].values())
+        market = {
+            timeframe: store.get_klines(symbol, timeframe, 600)
+            for timeframe in timeframes
+        }
+        decision = evaluate_strategy(spec, market)
+    except (StrategySpecError, StrategyMarketDataError, KeyError, TypeError, ValueError) as exc:
+        return 0, None, [f"完整策略不可用：{type(exc).__name__}"], None
+
+    direction = {
+        "LONG_ENTRY": 1,
+        "SHORT_ENTRY": -1,
+    }.get(decision.decision, 0)
+    setup = decision.evidence.get("setup")
+    atr = None
+    if isinstance(setup, dict):
+        try:
+            candidate = float(setup.get("atr"))
+        except (TypeError, ValueError):
+            candidate = math.nan
+        if math.isfinite(candidate) and candidate > 0:
+            atr = candidate
+    basis = [
+        f"策略：{snapshot.get('name') or spec['strategy_type']}",
+        "类型：完整策略",
+        f"周期：{spec['timeframes']['regime']}/{spec['timeframes']['setup']}/{spec['timeframes']['trigger']}",
+        f"决策：{decision.decision}",
+    ]
+    if decision.reason_codes:
+        basis.append(f"依据：{' / '.join(decision.reason_codes)}")
+    if decision.confidence is not None:
+        basis.append(f"置信度：{decision.confidence:.2%}")
+    if direction and not _record_full_strategy_decision(account, symbol, spec, decision):
+        return 0, atr, [*basis, "信号未执行：缺少可审计的策略部署记录"], decision.signal_time
+    return direction, atr, basis, decision.signal_time
+
+
+def _record_full_strategy_decision(
+    account: dict[str, Any],
+    symbol: str,
+    spec: dict[str, Any],
+    decision: Any,
+) -> bool:
+    deployments = store.query(
+        """SELECT id,strategy_revision_id FROM strategy_deployments
+           WHERE user_id=? AND mode='paper' AND target_account_id=? AND status='running'
+           ORDER BY id DESC LIMIT 1""",
+        (account["user_id"], account["id"]),
+    )
+    if not deployments or decision.signal_time is None:
+        return False
+    deployment = deployments[0]
+    timeframe = str(spec["timeframes"]["trigger"])
+    idempotency_key = (
+        f"paper:{deployment['id']}:{deployment['strategy_revision_id']}:"
+        f"{symbol}:{timeframe}:{decision.signal_time}:{decision.decision}"
+    )
+    valid_until = decision.valid_until
+    if valid_until is not None and int(valid_until) >= 100_000_000_000:
+        valid_until = int(valid_until) // 1_000
+    try:
+        store.execute(
+            """INSERT IGNORE INTO strategy_signals(
+                   public_id,user_id,deployment_id,strategy_revision_id,opportunity_id,
+                   symbol,timeframe,signal_bar_time,decision,confidence,status,valid_until,
+                   reason_codes_json,evidence_json,risk_decision_json,idempotency_key,created_at
+               ) VALUES(?,?,?,?,NULL,?,?,?,?,?,'approved',FROM_UNIXTIME(?),?,?,?,?,CURRENT_TIMESTAMP)""",
+            (
+                str(uuid.uuid4()),
+                account["user_id"],
+                deployment["id"],
+                deployment["strategy_revision_id"],
+                symbol,
+                timeframe,
+                decision.signal_time,
+                decision.decision,
+                decision.confidence,
+                valid_until,
+                json.dumps(list(decision.reason_codes), ensure_ascii=False),
+                json.dumps(decision.evidence, ensure_ascii=False),
+                json.dumps(decision.risk_proposal, ensure_ascii=False),
+                idempotency_key,
+            ),
+        )
+        store.execute(
+            """UPDATE strategy_deployments
+               SET last_evaluated_bar_time=?,last_error_code=NULL,updated_at=CURRENT_TIMESTAMP
+               WHERE id=? AND user_id=?""",
+            (decision.signal_time, deployment["id"], account["user_id"]),
+        )
+    except Exception as exc:
+        print(f"[paper] full strategy signal persistence failed: {type(exc).__name__}")
+        return False
+    return True
 
 
 def _execution_price(price: float, side: int, opening: bool, slippage_bps: float) -> float:
@@ -257,7 +403,7 @@ def _repair_missing_target(
     atr: float | None,
     config: dict[str, float | int],
 ) -> None:
-    """Backfill legacy zero/invalid targets before evaluating exit conditions."""
+    """Backfill existing zero or invalid targets before evaluating exits."""
 
     entry = float(position["avg_entry"])
     side = int(position["side"])
@@ -485,6 +631,12 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             ):
                 positions = _positions(account)
 
+    _record_equity(account, prices, positions, now)
+
+
+def _record_equity(
+    account: dict[str, Any], prices: dict[str, float], positions: list[dict[str, Any]], now: int
+) -> None:
     equity, _ = _equity(account, prices, positions)
     minute = now - now % 60
     store.execute(
@@ -505,17 +657,26 @@ def tick(account_id: int | None = None) -> None:
         if not prices:
             return
         with _lock:
-            for account in _active_accounts(account_id):
-                _tick_account(account, prices, int(time.time()))
+            now = int(time.time())
+            for account in _tracked_accounts(account_id):
+                if account["status"] == "active":
+                    _tick_account(account, prices, now)
+                else:
+                    _record_equity(account, prices, _positions(account), now)
 
 
 def paper_loop() -> None:
     print("[paper] multi-user paper engine started")
     while True:
+        if store.collector_paused("paper"):
+            time.sleep(5)
+            continue
         try:
             tick()
+            store.collector_report("paper", success=True)
         except Exception as exc:
             print("[paper] tick error:", exc)
+            store.collector_report("paper", success=False, error=str(exc))
         time.sleep(5)
 
 
@@ -546,13 +707,16 @@ def reset(user_id: int, account_id: int) -> None:
         )
 
 
-def api_data(user_id: int, account_id: int) -> dict[str, Any]:
+def api_data(
+    user_id: int, account_id: int, timezone_offset_minutes: int = 0
+) -> dict[str, Any]:
     account = _account(user_id, account_id)
     prices = _prices()
     positions = _positions(account)
     equity, unrealized = _equity(account, prices, positions)
     config = _config(account)
     now = int(time.time())
+    today_pnl = _today_pnl(account, equity, now, timezone_offset_minutes)
     output_positions = []
     for position in positions:
         price = prices.get(position["symbol"], float(position["avg_entry"]))
@@ -611,7 +775,7 @@ def api_data(user_id: int, account_id: int) -> dict[str, Any]:
             "used_margin": round(_used_margin(positions), 2),
             "margin_usage": round(_used_margin(positions) / equity * 100 if equity else 0, 2),
             "upnl": round(unrealized, 2),
-            "today_pnl": 0.0,
+            "today_pnl": round(today_pnl, 2),
             "ret_pct": round((equity - initial) / initial * 100, 2),
             "leverage": config["leverage"],
             "max_positions": config["max_positions"],

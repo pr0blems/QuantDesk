@@ -1,34 +1,34 @@
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from quantdesk_v2.config import Settings
-from quantdesk_v2.database import build_engine, get_db
+from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
-from quantdesk_v2.models import Base, User
+from quantdesk_v2.models import User
 from quantdesk_v2.security import CredentialCipher
 
 
-def build_test_client():
+def build_test_client(mysql_test_engine: Engine):
     master_key = Fernet.generate_key().decode("ascii")
     settings = Settings(
         _env_file=None,
         app_env="test",
-        database_url="sqlite+pysqlite:///:memory:",
-        db_password=SecretStr(""),
-        db_ssl_required=False,
-        db_ssl_verify_identity=False,
+        database_url=mysql_test_engine.url.render_as_string(hide_password=False),
         jwt_secret=SecretStr("test-jwt-secret-that-is-long-enough-123456"),
         credential_master_key=SecretStr(master_key),
         app_cookie_secure=False,
         app_allowed_hosts="testserver",
         app_allowed_origins="http://testserver",
     )
-    engine = build_engine(settings)
-    Base.metadata.create_all(engine)
-    test_session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    test_session = sessionmaker(
+        bind=mysql_test_engine, autoflush=False, expire_on_commit=False
+    )
     app = create_app(settings)
+    app.state.database_engine.dispose()
+    app.state.database_engine = mysql_test_engine
 
     def override_db():
         db = test_session()
@@ -41,8 +41,8 @@ def build_test_client():
     return TestClient(app), test_session, master_key
 
 
-def test_register_login_and_encrypt_binance_credentials() -> None:
-    client, test_session, master_key = build_test_client()
+def test_register_login_and_encrypt_binance_credentials(mysql_test_engine: Engine) -> None:
+    client, test_session, master_key = build_test_client(mysql_test_engine)
     with client:
         registered = client.post(
             "/api/v2/auth/register",
@@ -82,7 +82,10 @@ def test_register_login_and_encrypt_binance_credentials() -> None:
 
         saved = client.put(
             "/api/v2/me/binance-credentials",
-            headers={"Authorization": f"Bearer {access}"},
+            headers={
+                "Authorization": f"Bearer {access}",
+                "X-QuantDesk-User-ID": str(registered.json()["id"]),
+            },
             json={
                 "api_key": "A" * 64,
                 "api_secret": "S" * 64,
@@ -107,8 +110,8 @@ def test_register_login_and_encrypt_binance_credentials() -> None:
         assert me.json()["binance_credentials_configured"] is True
 
 
-def test_multiple_users_without_email_and_permission_allowlist() -> None:
-    client, _, _ = build_test_client()
+def test_multiple_users_without_email_and_permission_allowlist(mysql_test_engine: Engine) -> None:
+    client, _, _ = build_test_client(mysql_test_engine)
     with client:
         for username in ("without-email-one", "without-email-two"):
             response = client.post(
@@ -126,9 +129,15 @@ def test_multiple_users_without_email_and_permission_allowlist() -> None:
             },
         )
         access_token = login.json()["access_token"]
+        current_user = client.get(
+            "/api/v2/me", headers={"Authorization": f"Bearer {access_token}"}
+        ).json()
         invalid = client.put(
             "/api/v2/me/binance-credentials",
-            headers={"Authorization": f"Bearer {access_token}"},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "X-QuantDesk-User-ID": str(current_user["id"]),
+            },
             json={
                 "api_key": "K" * 32,
                 "api_secret": "S" * 32,
@@ -138,17 +147,78 @@ def test_multiple_users_without_email_and_permission_allowlist() -> None:
         assert invalid.status_code == 422
 
 
-def test_login_page_and_navigation_shell_are_served() -> None:
-    client, _, _ = build_test_client()
+def test_binance_credentials_require_matching_tab_user(mysql_test_engine: Engine) -> None:
+    client, test_session, _ = build_test_client(mysql_test_engine)
+    with client:
+        first = client.post(
+            "/api/v2/auth/register",
+            json={"username": "identity-one", "password": "correct horse battery staple"},
+        ).json()
+        second = client.post(
+            "/api/v2/auth/register",
+            json={"username": "identity-two", "password": "correct horse battery staple"},
+        ).json()
+        login = client.post(
+            "/api/v2/auth/login",
+            json={
+                "username": "identity-one",
+                "password": "correct horse battery staple",
+                "client_type": "web",
+            },
+        )
+        access = login.json()["access_token"]
+        payload = {
+            "api_key": "K" * 32,
+            "api_secret": "S" * 32,
+            "permissions": ["READ"],
+        }
+
+        missing = client.put(
+            "/api/v2/me/binance-credentials",
+            headers={"Authorization": f"Bearer {access}"},
+            json=payload,
+        )
+        mismatched = client.put(
+            "/api/v2/me/binance-credentials",
+            headers={
+                "Authorization": f"Bearer {access}",
+                "X-QuantDesk-User-ID": str(second["id"]),
+            },
+            json=payload,
+        )
+
+        assert missing.status_code == 428
+        assert mismatched.status_code == 409
+        with test_session() as db:
+            assert db.get(User, first["id"]).binance_credentials_configured is False
+            assert db.get(User, second["id"]).binance_credentials_configured is False
+
+        saved = client.put(
+            "/api/v2/me/binance-credentials",
+            headers={
+                "Authorization": f"Bearer {access}",
+                "X-QuantDesk-User-ID": str(first["id"]),
+            },
+            json=payload,
+        )
+        assert saved.status_code == 200
+
+        with test_session() as db:
+            assert db.get(User, first["id"]).binance_credentials_configured is True
+            assert db.get(User, second["id"]).binance_credentials_configured is False
+
+
+def test_login_page_and_navigation_shell_are_served(mysql_test_engine: Engine) -> None:
+    client, _, _ = build_test_client(mysql_test_engine)
     with client:
         page = client.get("/")
         assert page.status_code == 200
         assert '<html lang="zh-CN" class="auth-booting">' in page.text
         assert 'id="auth-boot"' in page.text
         assert "正在恢复登录状态" in page.text
-        assert '/assets/style.css?v=20260803-6' in page.text
-        assert '/assets/app.js?v=20260803-15' in page.text
-        assert page.text.index('/assets/backtest.js') < page.text.index('/assets/app.js?v=20260803-15')
+        assert '/assets/style.css?v=20260804-7' in page.text
+        assert '/assets/app.js?v=20260804-6' in page.text
+        assert page.text.index('/assets/backtest.js') < page.text.index('/assets/app.js?v=20260804-6')
         assert 'id="login-page"' in page.text
         assert 'id="sidebar"' in page.text
         assert 'href="/monitor" data-panel-target="monitor" aria-current="page"' in page.text
@@ -166,6 +236,9 @@ def test_login_page_and_navigation_shell_are_served() -> None:
         assert '<strategy-center id="strategy-center">' in page.text
         assert "策略中心</a>" in page.text
         assert 'id="binance-account-card"' in page.text
+        assert 'id="orders-refresh"' in page.text
+        assert 'id="orders-positions"' in page.text
+        assert 'id="orders-open-orders"' in page.text
         assert 'id="binance-wallet-balance"' in page.text
         assert 'id="db-status"' not in page.text
         assert "数据库连接" not in page.text
@@ -220,14 +293,19 @@ def test_login_page_and_navigation_shell_are_served() -> None:
         assert "scrollbar-gutter: stable" in strategy_stylesheet.text
         assert "max-height: calc(100vh - 122px)" not in strategy_stylesheet.text
         assert "@media (max-width: 420px)" in backtest_stylesheet.text
-        assert 'data-panel-target="credentials"' in page.text
+        assert 'href="/settings" data-panel-target="settings"' in page.text
+        assert 'data-panel-target="credentials"' not in page.text
+        assert 'data-panel="settings"' in page.text
+        assert 'data-open-panel="settings"' in page.text
+        assert 'data-open-panel="credentials"' not in page.text
+        assert 'id="credential-form"' in page.text
         assert page.headers["x-frame-options"] == "DENY"
         for frontend_path in (
             "/login",
             "/monitor",
             "/paper",
             "/overview",
-            "/credentials",
+            "/settings",
             "/strategies",
             "/backtest",
             "/orders",
@@ -244,6 +322,8 @@ def test_login_page_and_navigation_shell_are_served() -> None:
         assert script.status_code == 200
         assert "apiErrorMessage" in script.text
         assert 'api("/api/v2/me/binance-account")' in script.text
+        assert 'api("/api/v2/me/binance-orders")' in script.text
+        assert "renderBinanceOrders" in script.text
         assert "renderBinanceAccount" in script.text
         assert "formatAccountAmount" in script.text
         assert "/api/v2/dashboard/performance?month=" in script.text

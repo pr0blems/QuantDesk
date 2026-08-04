@@ -1,10 +1,16 @@
 """社交情绪层：Stocktwits（牛熊标签+热榜）+ ApeWisdom（Reddit/4chan 提及量）
 容错策略：超时/截断自动重试；403/429 触发 45 分钟冷却；404/非美股标的永久跳过不刷屏。"""
-import json, threading, time, urllib.request, urllib.parse, urllib.error
+import json
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
 from . import store
-from .config_loader import settings, symbols_meta
+from .config_loader import symbols_meta
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) quantdesk-local"}
+_ALLOWED_SOCIAL_HOSTS = {"api.stocktwits.com", "apewisdom.io"}
 
 class RateLimited(Exception):
     pass
@@ -19,15 +25,18 @@ _BASE_TYPE = {s["symbol"].replace("USDT", "").replace("USD1", ""): s.get("underl
 _SKIP_BASES = {"SPCX", "TENCENT"}  # 映射特殊或重复的
 
 def _get_json(url, timeout=20, retries=3):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_SOCIAL_HOSTS:
+        raise ValueError("social data URL must use an approved HTTPS host")
     last = None
     for i in range(retries):
         try:
-            req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            req = urllib.request.Request(url, headers=UA)  # noqa: S310 - URL validated above
+            with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
             if e.code in (403, 418, 429):
-                raise RateLimited(f"HTTP {e.code}")
+                raise RateLimited(f"HTTP {e.code}") from e
             if e.code == 404:
                 raise
             last = f"HTTP {e.code}"
@@ -41,8 +50,10 @@ def st_symbol_sentiment(base):
     bull = bear = 0
     for m in d.get("messages", []):
         s = ((m.get("entities") or {}).get("sentiment") or {}).get("basic")
-        if s == "Bullish": bull += 1
-        elif s == "Bearish": bear += 1
+        if s == "Bullish":
+            bull += 1
+        elif s == "Bearish":
+            bear += 1
     return {"bull": bull, "bear": bear, "msgs": len(d.get("messages", []))}
 
 def st_trending():
@@ -98,8 +109,8 @@ def social_once(priority_bases):
             except RateLimited:
                 _cooldown_until = time.time() + 45 * 60
                 print("[social] Stocktwits 触发限流，冷却 45 分钟")
-            except Exception:
-                pass  # 单标的失败不刷屏，下轮再试
+            except Exception as exc:
+                print(f"[social] {base} sentiment fetch failed: {str(exc)[:60]}")
         ape = ape_map.get(base.upper(), {})
         if st["bull"] is None and not ape:
             continue
@@ -109,15 +120,36 @@ def social_once(priority_bases):
              ape.get("mentions"), ape.get("upvotes"), ape.get("rank"), ape.get("rank_24h_ago"), now))
 
 def priority_symbols():
-    from . import engine
-    held = [p["symbol"] for p in engine.state_snapshot()["positions"]]
-    watch = settings.get("watchlist", [])
+    held = [
+        row["symbol"]
+        for row in store.query(
+            "SELECT DISTINCT symbol FROM positions WHERE symbol IS NOT NULL ORDER BY symbol"
+        )
+    ]
+    watch = []
+    for row in store.query(
+        "SELECT monitor_watchlist FROM users "
+        "WHERE is_active=1 AND monitor_watchlist IS NOT NULL"
+    ):
+        value = row["monitor_watchlist"]
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = []
+        if isinstance(value, list):
+            watch.extend(symbol for symbol in value if isinstance(symbol, str))
     return list(dict.fromkeys([base_of(s) for s in held + watch]))
 
 def social_loop():
     while True:
+        if store.collector_paused("social"):
+            time.sleep(15)
+            continue
         try:
             social_once(priority_symbols())
+            store.collector_report("social", success=True)
         except Exception as e:
             print("[social] 循环异常（下轮继续）:", str(e)[:60])
+            store.collector_report("social", success=False, error=str(e))
         time.sleep(900)  # 15分钟一轮，避免触发限流

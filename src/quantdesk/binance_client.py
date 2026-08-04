@@ -1,66 +1,207 @@
-"""币安数据层：公开行情轮询 + 统一账户持仓同步（纯 stdlib，带重试/限频）"""
-import hmac, hashlib, json, time, urllib.request, urllib.parse, urllib.error
+"""币安数据层：公开行情轮询与统一账户持仓同步。"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Mapping
+from typing import Any
 
 FAPI = "https://fapi.binance.com"
 PAPI = "https://papi.binance.com"
 
+_ALLOWED_BINANCE_HOSTS = frozenset({"fapi.binance.com", "papi.binance.com"})
 UA = {"User-Agent": "Mozilla/5.0 (quantdesk-local)"}
 
-def _get(url, headers=None, timeout=20, retries=3, backoff=2.0):
-    hdr = dict(UA); hdr.update(headers or {})
-    last = None
-    for i in range(retries):
-        try:
-            req = urllib.request.Request(url, headers=hdr)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()[:200]
-            last = f"HTTP {e.code}: {body}"
-            if e.code in (418, 429):  # 限频：退避
-                time.sleep(backoff * (i + 2))
-            else:
-                break
-        except Exception as e:
-            last = str(e)
-            time.sleep(backoff * (i + 1))
-    raise RuntimeError(f"GET {url} 失败: {last}")
 
-def fetch_exchange_info():
+def _validate_binance_url(url: str) -> str:
+    """Allow only exact Binance HTTPS origins used by the market collector."""
+
+    if not isinstance(url, str) or not url:
+        raise ValueError("Binance URL must be a non-empty string")
+    if any(ord(character) < 32 or ord(character) == 127 for character in url):
+        raise ValueError("Binance URL must not contain control characters")
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Binance URL contains an invalid port") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.hostname not in _ALLOWED_BINANCE_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or not parsed.path.startswith("/")
+        or parsed.fragment
+    ):
+        raise ValueError("Binance URL must use an approved HTTPS origin")
+    return url
+
+
+def _safe_endpoint(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+class _BinanceRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        _validate_binance_url(new_url)
+        original = urllib.parse.urlsplit(request.full_url)
+        redirected = urllib.parse.urlsplit(new_url)
+        original_origin = (
+            original.scheme.lower(),
+            original.hostname,
+            original.port or 443,
+        )
+        redirected_origin = (
+            redirected.scheme.lower(),
+            redirected.hostname,
+            redirected.port or 443,
+        )
+        if original_origin != redirected_origin:
+            raise ValueError("Binance redirects must remain on the original HTTPS origin")
+        return super().redirect_request(
+            request,
+            file_pointer,
+            code,
+            message,
+            headers,
+            new_url,
+        )
+
+
+_BINANCE_OPENER = urllib.request.build_opener(_BinanceRedirectHandler())
+
+
+def _get(
+    url: str,
+    headers: Mapping[str, str] | None = None,
+    timeout: float = 20,
+    retries: int = 3,
+    backoff: float = 2.0,
+) -> Any:
+    target = _validate_binance_url(url)
+    if retries < 1:
+        raise ValueError("retries must be at least one")
+    request_headers = dict(UA)
+    request_headers.update(headers or {})
+    last_error = "request did not run"
+    for attempt in range(retries):
+        try:
+            # Safe because target was restricted to exact Binance HTTPS origins above.
+            request = urllib.request.Request(  # noqa: S310
+                target,
+                headers=request_headers,
+                method="GET",
+            )
+            with _BINANCE_OPENER.open(request, timeout=timeout) as response:  # noqa: S310
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:200]
+            last_error = f"HTTP {exc.code}: {body}"
+            if exc.code not in {418, 429}:
+                break
+            if attempt + 1 < retries:
+                time.sleep(backoff * (attempt + 2))
+        except (
+            json.JSONDecodeError,
+            OSError,
+            TimeoutError,
+            UnicodeDecodeError,
+            urllib.error.URLError,
+        ) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt + 1 < retries:
+                time.sleep(backoff * (attempt + 1))
+    raise RuntimeError(f"GET {_safe_endpoint(target)} failed: {last_error}") from None
+
+
+def fetch_exchange_info() -> Any:
     return _get(f"{FAPI}/fapi/v1/exchangeInfo", timeout=30)
 
-def fetch_tickers():
-    """全部合约 24h ticker（单次请求，weight 40）"""
+
+def fetch_tickers() -> Any:
+    """Return all futures 24-hour ticker rows in one request."""
+
     return _get(f"{FAPI}/fapi/v1/ticker/24hr", timeout=20)
 
-def fetch_klines(symbol, interval, limit=300):
-    q = urllib.parse.urlencode({"symbol": symbol, "interval": interval, "limit": limit})
-    data = _get(f"{FAPI}/fapi/v1/klines?{q}", timeout=20)
-    # [open_time, o, h, l, c, v, close_time, ...]
-    return [(int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])) for k in data]
 
-def _signed_get(base, path, api_key, secret, timeout=25):
-    params = {"timestamp": int(time.time() * 1000), "recvWindow": 10000}
-    qs = urllib.parse.urlencode(params)
-    sig = hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
-    url = f"{base}{path}?{qs}&signature={sig}"
-    return _get(url, headers={"X-MBX-APIKEY": api_key}, timeout=timeout, retries=3)
+def fetch_klines(symbol: str, interval: str, limit: int = 300) -> list[tuple]:
+    query = urllib.parse.urlencode(
+        {"symbol": symbol, "interval": interval, "limit": limit}
+    )
+    data = _get(f"{FAPI}/fapi/v1/klines?{query}", timeout=20)
+    # Binance rows: [open_time, open, high, low, close, volume, close_time, ...]
+    return [
+        (
+            int(row[0]),
+            float(row[1]),
+            float(row[2]),
+            float(row[3]),
+            float(row[4]),
+            float(row[5]),
+        )
+        for row in data
+    ]
 
-def fetch_positions(api_key, secret):
-    """统一账户 UM 持仓，返回 [{symbol, amt, side, entry, mark, upnl, leverage}]"""
+
+def _signed_get(
+    base: str,
+    path: str,
+    api_key: str,
+    secret: str,
+    timeout: float = 25,
+) -> Any:
+    if base not in {FAPI, PAPI}:
+        raise ValueError("signed Binance requests require an approved base URL")
+    parsed_path = urllib.parse.urlsplit(path)
+    if (
+        not path.startswith("/")
+        or parsed_path.scheme
+        or parsed_path.netloc
+        or parsed_path.query
+        or parsed_path.fragment
+    ):
+        raise ValueError("signed Binance request path is invalid")
+    params = {"timestamp": int(time.time() * 1_000), "recvWindow": 10_000}
+    query = urllib.parse.urlencode(params)
+    signature = hmac.new(
+        secret.encode(), query.encode(), hashlib.sha256
+    ).hexdigest()
+    url = f"{base}{path}?{query}&signature={signature}"
+    return _get(
+        url,
+        headers={"X-MBX-APIKEY": api_key},
+        timeout=timeout,
+        retries=3,
+    )
+
+
+def fetch_positions(api_key: str, secret: str) -> list[dict[str, Any]]:
+    """Return non-zero unified-account UM positions."""
+
     data = _signed_get(PAPI, "/papi/v1/um/positionRisk", api_key, secret)
-    out = []
-    for p in data:
-        amt = float(p.get("positionAmt", 0))
-        if amt == 0:
+    positions = []
+    for item in data:
+        amount = float(item.get("positionAmt", 0))
+        if amount == 0:
             continue
-        out.append({
-            "symbol": p["symbol"],
-            "amt": amt,
-            "side": p.get("positionSide") or ("LONG" if amt > 0 else "SHORT"),
-            "entry": float(p.get("entryPrice", 0)),
-            "mark": float(p.get("markPrice", 0)),
-            "upnl": float(p.get("unRealizedProfit", 0)),
-            "leverage": int(float(p.get("leverage", 0))),
-        })
-    return out
+        positions.append(
+            {
+                "symbol": item["symbol"],
+                "amt": amount,
+                "side": item.get("positionSide")
+                or ("LONG" if amount > 0 else "SHORT"),
+                "entry": float(item.get("entryPrice", 0)),
+                "mark": float(item.get("markPrice", 0)),
+                "upnl": float(item.get("unRealizedProfit", 0)),
+                "leverage": int(float(item.get("leverage", 0))),
+            }
+        )
+    return positions

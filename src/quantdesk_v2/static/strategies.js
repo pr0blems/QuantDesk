@@ -7,6 +7,10 @@ class StrategyCenter extends HTMLElement {
     this.loadVersion = 0;
     this.items = [];
     this.templates = [];
+    this.indicators = [];
+    this.deployments = [];
+    this.signals = [];
+    this.section = "strategies";
     this.query = "";
     this.statusFilter = "all";
     this.categoryFilter = "all";
@@ -24,18 +28,25 @@ class StrategyCenter extends HTMLElement {
           <div class="strategy-title-copy">
             <span class="strategy-kicker">STRATEGY LIBRARY</span>
             <div class="strategy-title-line"><span class="strategy-title-mark" aria-hidden="true">策</span><h1>策略中心</h1><span class="strategy-db-badge"><i></i>数据库同步</span></div>
-            <p>管理当前账户的策略、参数和风险默认值；数据回测会直接读取这里的最新版本。</p>
+            <p>完整策略负责市场环境、入场、退出与风控；指标只负责计算，旧版信号仅保留兼容运行。</p>
           </div>
           <button id="strategy-create" class="strategy-create-button" type="button"><span aria-hidden="true">＋</span>新增策略</button>
         </header>
 
         <div id="strategy-notice" class="strategy-notice hidden" role="status" aria-live="polite"></div>
 
+        <nav class="strategy-section-tabs" aria-label="策略中心功能">
+          <button class="active" type="button" data-section="strategies" aria-pressed="true"><span>完整策略</span><strong id="strategy-tab-full">0</strong></button>
+          <button type="button" data-section="indicators" aria-pressed="false"><span>指标库</span><strong id="strategy-tab-indicators">0</strong></button>
+          <button type="button" data-section="deployments" aria-pressed="false"><span>运行部署</span><strong id="strategy-tab-deployments">0</strong></button>
+          <button type="button" data-section="legacy" aria-pressed="false"><span>旧版信号</span><strong id="strategy-tab-legacy">0</strong></button>
+        </nav>
+
         <section class="strategy-overview" aria-label="策略统计">
-          <article><span>我的策略</span><strong id="strategy-total">--</strong><small>按用户独立保存</small></article>
-          <article><span>已启用</span><strong id="strategy-active">--</strong><small>可用于数据回测</small></article>
-          <article><span>默认副本</span><strong id="strategy-defaults">--</strong><small>首次登录自动创建</small></article>
-          <article><span>最近更新</span><strong id="strategy-latest">--</strong><small>版本变更可追溯</small></article>
+          <article><span>完整策略</span><strong id="strategy-total">--</strong><small>具备入场、退出与风控</small></article>
+          <article><span>运行中部署</span><strong id="strategy-active">--</strong><small>模拟盘按账户独立运行</small></article>
+          <article><span>标准指标</span><strong id="strategy-defaults">--</strong><small>统一计算口径与版本</small></article>
+          <article><span>旧版信号</span><strong id="strategy-latest">--</strong><small>兼容保留，不等同完整策略</small></article>
         </section>
 
         <section class="strategy-library-card">
@@ -129,6 +140,15 @@ class StrategyCenter extends HTMLElement {
   bindEvents() {
     this.querySelector("#strategy-create").addEventListener("click", () => this.openCreate());
     this.querySelector("#strategy-refresh").addEventListener("click", () => this.load(true));
+    this.querySelectorAll("[data-section]").forEach((button) => button.addEventListener("click", () => {
+      this.section = button.dataset.section || "strategies";
+      this.querySelectorAll("[data-section]").forEach((item) => {
+        const active = item === button;
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-pressed", String(active));
+      });
+      this.renderSection();
+    }));
     this.querySelector("#strategy-search").addEventListener("input", (event) => {
       this.query = String(event.target.value || "").trim().toLocaleLowerCase("zh-CN");
       this.renderCards();
@@ -188,6 +208,10 @@ class StrategyCenter extends HTMLElement {
     this.loadVersion += 1;
     this.items = [];
     this.templates = [];
+    this.indicators = [];
+    this.deployments = [];
+    this.signals = [];
+    this.section = "strategies";
     this.query = "";
     this.statusFilter = "all";
     this.categoryFilter = "all";
@@ -195,6 +219,11 @@ class StrategyCenter extends HTMLElement {
     this.preview = null;
     this.querySelector("#strategy-search").value = "";
     this.querySelector("#strategy-category-filter").replaceChildren(this.option("all", "全部分类"));
+    this.querySelectorAll("[data-section]").forEach((button) => {
+      const active = button.dataset.section === "strategies";
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
     this.querySelectorAll("[data-status]").forEach((button) => {
       const active = button.dataset.status === "all";
       button.classList.toggle("active", active);
@@ -215,13 +244,21 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-refresh").disabled = true;
     this.showNotice("");
     try {
-      const payload = await this.api();
+      const [payload, indicatorPayload, deploymentPayload, signalPayload] = await Promise.all([
+        this.api(),
+        this.api("/indicators/catalog"),
+        this.api("/deployments"),
+        this.api("/signals?limit=100"),
+      ]);
       if (generation !== this.sessionGeneration || requestVersion !== this.loadVersion) return;
       this.items = Array.isArray(payload?.items) ? payload.items.map((item) => this.normalizeItem(item)) : [];
       this.templates = Array.isArray(payload?.templates) ? payload.templates.map((item) => this.normalizeTemplate(item)) : [];
+      this.indicators = Array.isArray(indicatorPayload?.items) ? indicatorPayload.items : [];
+      this.deployments = Array.isArray(deploymentPayload?.items) ? deploymentPayload.items : [];
+      this.signals = Array.isArray(signalPayload?.items) ? signalPayload.items : [];
       this.renderFilters();
       this.renderStats();
-      this.renderCards();
+      this.renderSection();
     } catch (error) {
       if (generation !== this.sessionGeneration || requestVersion !== this.loadVersion) return;
       this.renderError(error?.message || "策略列表加载失败");
@@ -246,6 +283,9 @@ class StrategyCenter extends HTMLElement {
       status: String(item.status ?? "active").toLowerCase(),
       version: Number(item.version ?? 1),
       engine_key: String(item.engine_key ?? "rule_engine"),
+      strategy_kind: String(item.strategy_kind ?? "legacy_signal"),
+      lifecycle_status: String(item.lifecycle_status ?? "published"),
+      spec: this.plainObject(item.spec),
       is_default: Boolean(item.is_default),
       parameter_schema: schema,
       parameters: this.plainObject(item.parameters),
@@ -260,6 +300,8 @@ class StrategyCenter extends HTMLElement {
       name: String(item.name ?? "未命名模板"),
       description: String(item.description ?? ""),
       category: String(item.category ?? "自定义"),
+      template_kind: String(item.template_kind ?? "legacy_signal"),
+      spec: this.plainObject(item.spec),
     };
   }
 
@@ -312,37 +354,74 @@ class StrategyCenter extends HTMLElement {
   }
 
   renderStats() {
-    const total = this.items.length;
-    const active = this.items.filter((item) => item.status === "active").length;
-    const defaults = this.items.filter((item) => item.is_default || item.source_template_key).length;
-    const latest = [...this.items].sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0))[0];
-    this.querySelector("#strategy-total").textContent = total ? String(total).padStart(2, "0") : "0";
-    this.querySelector("#strategy-active").textContent = active ? String(active).padStart(2, "0") : "0";
-    this.querySelector("#strategy-defaults").textContent = defaults ? String(defaults).padStart(2, "0") : "0";
-    this.querySelector("#strategy-latest").textContent = latest ? this.shortDate(latest.updated_at || latest.created_at) : "暂无";
+    const full = this.items.filter((item) => item.strategy_kind === "full_strategy").length;
+    const legacy = this.items.filter((item) => item.strategy_kind !== "full_strategy").length;
+    const running = this.deployments.filter((item) => item.status === "running").length;
+    this.querySelector("#strategy-total").textContent = String(full).padStart(2, "0");
+    this.querySelector("#strategy-active").textContent = String(running).padStart(2, "0");
+    this.querySelector("#strategy-defaults").textContent = String(this.indicators.length).padStart(2, "0");
+    this.querySelector("#strategy-latest").textContent = String(legacy).padStart(2, "0");
+    this.querySelector("#strategy-tab-full").textContent = String(full);
+    this.querySelector("#strategy-tab-indicators").textContent = String(this.indicators.length);
+    this.querySelector("#strategy-tab-deployments").textContent = String(this.deployments.length);
+    this.querySelector("#strategy-tab-legacy").textContent = String(legacy);
   }
 
   filteredItems() {
     return this.items.filter((item) => {
+      const kindMatches = this.section === "legacy"
+        ? item.strategy_kind !== "full_strategy"
+        : item.strategy_kind === "full_strategy";
       const isDefault = Boolean(item.is_default || item.source_template_key);
       const statusMatches = this.statusFilter === "all"
         || (this.statusFilter === "default" && isDefault)
         || (this.statusFilter === "custom" && !isDefault);
       const categoryMatches = this.categoryFilter === "all" || item.category === this.categoryFilter;
       const haystack = `${item.name} ${item.category} ${item.description} ${item.engine_key}`.toLocaleLowerCase("zh-CN");
-      return statusMatches && categoryMatches && (!this.query || haystack.includes(this.query));
+      return kindMatches && statusMatches && categoryMatches && (!this.query || haystack.includes(this.query));
     });
+  }
+
+  renderSection() {
+    const strategyView = ["strategies", "legacy"].includes(this.section);
+    this.querySelector("#strategy-create").classList.toggle("hidden", this.section !== "strategies");
+    this.querySelector("#strategy-status-filter").classList.toggle("hidden", !strategyView);
+    this.querySelector("#strategy-category-filter").closest("label").classList.toggle("hidden", !strategyView);
+    const placeholders = {
+      strategies: "搜索完整策略名称、分类或说明",
+      legacy: "搜索旧版指标信号",
+      indicators: "搜索指标名称、类别或输出",
+      deployments: "搜索模拟盘或回测部署",
+    };
+    this.querySelector("#strategy-search").placeholder = placeholders[this.section] || "搜索";
+    this.renderCards();
   }
 
   renderCards() {
     const grid = this.querySelector("#strategy-grid");
     grid.setAttribute("aria-busy", "false");
+    if (this.section === "indicators") {
+      const items = this.indicators.filter((item) => {
+        const text = `${item.name || ""} ${item.category || ""} ${(item.outputs || []).join(" ")}`.toLocaleLowerCase("zh-CN");
+        return !this.query || text.includes(this.query);
+      });
+      grid.replaceChildren(...(items.length ? items.map((item) => this.indicatorCard(item)) : [this.emptyState("没有匹配的指标", "指标由统一计算内核提供，不包含入场和退出规则。")]));
+      return;
+    }
+    if (this.section === "deployments") {
+      const items = this.deployments.filter((item) => {
+        const text = `${item.name || ""} ${item.mode || ""} ${item.status || ""}`.toLocaleLowerCase("zh-CN");
+        return !this.query || text.includes(this.query);
+      });
+      grid.replaceChildren(...(items.length ? items.map((item) => this.deploymentCard(item)) : [this.emptyState("还没有运行部署", "创建模拟盘或完成一次数据库策略回测后，会在这里形成独立部署记录。")]));
+      return;
+    }
     const items = this.filteredItems();
     if (!items.length) {
       const empty = this.node("div", "strategy-grid-state");
       empty.append(this.node("span", "strategy-state-icon", this.items.length ? "⌕" : "策"));
       empty.append(this.node("strong", "", this.items.length ? "没有匹配的策略" : "还没有个人策略"));
-      empty.append(this.node("small", "", this.items.length ? "调整搜索词或筛选条件后再试" : "首次登录的默认策略正在创建；也可以手动新增策略"));
+      empty.append(this.node("small", "", this.section === "legacy" ? "旧版信号仅用于兼容，不建议继续新增。" : "从完整策略模板创建后，可用于多周期回测和独立模拟盘。"));
       const action = this.node("button", "strategy-create-button", this.items.length ? "清除筛选" : "新增策略");
       action.type = "button";
       action.addEventListener("click", () => {
@@ -358,7 +437,7 @@ class StrategyCenter extends HTMLElement {
             button.setAttribute("aria-pressed", String(active));
           });
           this.renderCards();
-        } else this.openCreate();
+        } else if (this.section === "strategies") this.openCreate();
       });
       empty.append(action);
       grid.replaceChildren(empty);
@@ -369,16 +448,20 @@ class StrategyCenter extends HTMLElement {
   }
 
   strategyCard(item) {
-    const card = this.node("article", "strategy-card-item");
+    const isFull = item.strategy_kind === "full_strategy";
+    const card = this.node("article", `strategy-card-item ${isFull ? "full-strategy" : "legacy-signal"}`);
     const head = this.node("header", "strategy-card-head");
     const icon = this.node("span", "strategy-card-icon", this.strategyInitial(item.name));
     const title = this.node("div", "strategy-card-title");
-    title.append(this.node("strong", "", item.name), this.node("small", "", item.category));
+    title.append(this.node("strong", "", item.name), this.node("small", "", `${item.category} · ${isFull ? "完整策略" : "旧版信号"}`));
     const state = this.node("span", `strategy-state ${item.status === "active" ? "active" : "draft"}`, item.status === "active" ? "已启用" : "草稿");
     head.append(icon, title, state);
 
     const description = this.node("p", "strategy-card-description", item.description || "尚未填写策略说明");
     const tags = this.node("div", "strategy-card-tags");
+    const timeframes = this.plainObject(item.spec?.timeframes);
+    if (isFull) tags.append(this.node("span", "strategy-kind-tag", `多周期 ${timeframes.regime || "4h"}/${timeframes.setup || "1h"}/${timeframes.trigger || "15m"}`));
+    else tags.append(this.node("span", "strategy-legacy-tag", "兼容指标信号"));
     const schema = Array.isArray(item.parameter_schema) ? item.parameter_schema : [];
     schema.slice(0, 3).forEach((field) => {
       const key = String(field.key ?? "");
@@ -398,6 +481,48 @@ class StrategyCenter extends HTMLElement {
     meta.append(identity, edit);
     card.append(head, description, tags, meta);
     return card;
+  }
+
+  indicatorCard(item) {
+    const card = this.node("article", "strategy-card-item indicator-card");
+    const head = this.node("header", "strategy-card-head");
+    const title = this.node("div", "strategy-card-title");
+    title.append(this.node("strong", "", item.name || item.key), this.node("small", "", `${item.category || "标准指标"} · v${item.version || 1}`));
+    head.append(this.node("span", "strategy-card-icon", "ƒ"), title, this.node("span", "strategy-state active", "统一口径"));
+    const description = this.node("p", "strategy-card-description", "仅计算市场特征，不直接决定开仓、平仓或仓位。");
+    const tags = this.node("div", "strategy-card-tags");
+    (item.outputs || []).forEach((output) => tags.append(this.node("span", "", `输出 ${output}`)));
+    const meta = this.node("div", "strategy-card-meta");
+    const identity = this.node("div");
+    identity.append(this.node("span", "", `指标键 ${item.key}`), this.node("small", "", `${(item.parameters || []).length} 个参数定义`));
+    meta.append(identity);
+    card.append(head, description, tags, meta);
+    return card;
+  }
+
+  deploymentCard(item) {
+    const card = this.node("article", "strategy-card-item deployment-card");
+    const head = this.node("header", "strategy-card-head");
+    const title = this.node("div", "strategy-card-title");
+    const modeLabel = { paper: "模拟盘", backtest: "回测", shadow: "影子", live: "实盘" }[item.mode] || item.mode;
+    const statusLabel = { running: "运行中", paused: "已暂停", stopped: "已结束", error: "异常", created: "待启动" }[item.status] || item.status;
+    title.append(this.node("strong", "", item.name || "未命名部署"), this.node("small", "", `${modeLabel} · 固定策略修订 #${item.strategy_revision_id}`));
+    head.append(this.node("span", "strategy-card-icon", item.mode === "paper" ? "P" : "R"), title, this.node("span", `strategy-state ${item.status === "running" ? "active" : "draft"}`, statusLabel));
+    const description = this.node("p", "strategy-card-description", item.last_error_code ? `最近错误：${item.last_error_code}` : "部署按当前用户隔离，运行期间始终绑定同一个不可变策略版本。");
+    const tags = this.node("div", "strategy-card-tags");
+    tags.append(this.node("span", "", `模式 ${modeLabel}`), this.node("span", "", `目标 #${item.target_account_id ?? "--"}`));
+    const meta = this.node("div", "strategy-card-meta");
+    const identity = this.node("div");
+    identity.append(this.node("span", "", `部署 ${String(item.id || "").slice(0, 8)}`), this.node("small", "", `创建于 ${this.shortDate(item.created_at)}`));
+    meta.append(identity);
+    card.append(head, description, tags, meta);
+    return card;
+  }
+
+  emptyState(title, detail) {
+    const empty = this.node("div", "strategy-grid-state");
+    empty.append(this.node("span", "strategy-state-icon", "·"), this.node("strong", "", title), this.node("small", "", detail));
+    return empty;
   }
 
   strategyInitial(name) {
@@ -425,7 +550,7 @@ class StrategyCenter extends HTMLElement {
     this.preview = null;
     this.querySelector("#strategy-editor-kicker").textContent = "CREATE STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = "新增策略";
-    this.querySelector("#strategy-editor-subtitle").textContent = "从系统默认模板复制，或创建一个空白的安全参数策略。";
+    this.querySelector("#strategy-editor-subtitle").textContent = "从受约束的完整策略模板创建；不会生成或执行任意代码。";
     this.querySelector("#strategy-version-strip").classList.add("hidden");
     this.querySelector("#strategy-template-field").classList.remove("hidden");
     this.querySelector("#strategy-basic-index").textContent = "02";
@@ -435,10 +560,11 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-save strong").textContent = "创建策略";
     this.populateTemplateSelect();
     this.querySelector("#strategy-form").reset();
-    this.querySelector("#strategy-template").value = "";
-    this.querySelector("#strategy-name").value = "";
-    this.querySelector("#strategy-category").value = "自定义";
-    this.querySelector("#strategy-description").value = "";
+    const preferred = this.templates.find((item) => item.template_kind === "strategy");
+    this.querySelector("#strategy-template").value = preferred?.template_key || "";
+    this.querySelector("#strategy-name").value = preferred?.name || "";
+    this.querySelector("#strategy-category").value = preferred?.category || "自定义";
+    this.querySelector("#strategy-description").value = preferred?.description || "";
     this.renderParameterFields([], {});
     this.renderRiskFields({});
     this.showFormError("");
@@ -492,7 +618,8 @@ class StrategyCenter extends HTMLElement {
 
   populateTemplateSelect() {
     const select = this.querySelector("#strategy-template");
-    select.replaceChildren(this.option("", "基础空白 · 趋势突破引擎"), ...this.templates.map((template) => this.option(template.template_key, `${template.name} · ${template.category}`)));
+    const ordered = [...this.templates].sort((a, b) => Number(b.template_kind === "strategy") - Number(a.template_kind === "strategy"));
+    select.replaceChildren(...ordered.map((template) => this.option(template.template_key, `${template.template_kind === "strategy" ? "完整策略" : "旧版信号"} · ${template.name}`)));
   }
 
   applyTemplate(key) {

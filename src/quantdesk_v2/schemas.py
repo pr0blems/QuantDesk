@@ -34,6 +34,7 @@ BacktestTimeframe = Literal[
 ]
 BacktestRunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 BacktestTradeSide = Literal["long", "short"]
+AiProviderCode = Literal["openai", "deepseek", "doubao", "qwen", "kimi", "minimax"]
 
 
 def _bounded_numeric_map(value: dict[str, int | float], field_name: str) -> dict[str, int | float]:
@@ -97,6 +98,96 @@ class UserOut(BaseModel):
     created_at: datetime
 
 
+class AdminAlertRulesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    score_alert_long: int = Field(default=60, ge=40, le=100)
+    score_alert_short: int = Field(default=-60, ge=-100, le=-40)
+    score_alert_position: int = Field(default=40, ge=20, le=100)
+    spike_alert_pct_5m: float = Field(default=2.0, ge=0.1, le=20)
+    watchlist_only: bool = True
+    enabled_timeframes: list[Literal["15m", "1h", "4h"]] = Field(
+        default_factory=lambda: ["15m", "1h", "4h"], min_length=1, max_length=3
+    )
+
+    @field_validator("enabled_timeframes")
+    @classmethod
+    def unique_timeframes(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
+
+
+def _validate_news_source_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not re.match(r"^https?://[^\s]+$", value, re.IGNORECASE):
+        raise ValueError("news source URL must use http or https")
+    return value
+
+
+class AdminNewsSourceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=10, max_length=2048)
+    lang: str = Field(default="en", min_length=2, max_length=16, pattern=r"^[A-Za-z0-9-]+$")
+    enabled: bool = True
+    slow: bool = False
+    weight: int = Field(default=100, ge=1, le=1000)
+    hourly_limit: int = Field(default=600, ge=1, le=10000)
+
+    @field_validator("url")
+    @classmethod
+    def valid_url(cls, value: str) -> str:
+        return _validate_news_source_url(value) or value
+
+
+class AdminNewsSourceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    url: str | None = Field(default=None, min_length=10, max_length=2048)
+    lang: str | None = Field(default=None, min_length=2, max_length=16, pattern=r"^[A-Za-z0-9-]+$")
+    enabled: bool | None = None
+    slow: bool | None = None
+    weight: int | None = Field(default=None, ge=1, le=1000)
+    hourly_limit: int | None = Field(default=None, ge=1, le=10000)
+
+    @field_validator("url")
+    @classmethod
+    def valid_url(cls, value: str | None) -> str | None:
+        return _validate_news_source_url(value)
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if all(
+            getattr(self, name) is None
+            for name in ("url", "lang", "enabled", "slow", "weight", "hourly_limit")
+        ):
+            raise ValueError("at least one news source field is required")
+        return self
+
+
+class AdminUserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool | None = None
+    is_admin: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if self.is_active is None and self.is_admin is None:
+            raise ValueError("at least one user field is required")
+        return self
+
+
+class AdminCleanupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    alerts_days: int = Field(default=30, ge=1, le=3650)
+    news_days: int = Field(default=90, ge=1, le=3650)
+    scores_days: int = Field(default=180, ge=1, le=3650)
+    confirm: bool = False
+
+
 class BinanceCredentialUpdate(BaseModel):
     api_key: SecretStr = Field(min_length=16, max_length=256)
     api_secret: SecretStr = Field(min_length=16, max_length=512)
@@ -123,6 +214,137 @@ class BinanceCredentialStatus(BaseModel):
     updated_at: datetime | None
 
 
+class AiProviderOut(BaseModel):
+    code: AiProviderCode
+    name: str
+    base_url: str
+    default_model: str
+    models: list[str]
+
+
+def _normalize_ai_display_name(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise ValueError("display_name must not be blank or contain control characters")
+    return normalized
+
+
+def _validate_ai_api_key(value: SecretStr) -> SecretStr:
+    raw = value.get_secret_value().strip()
+    if len(raw) < 8:
+        raise ValueError("api_key must contain at least 8 characters")
+    if not raw.isascii() or not raw.isprintable() or any(character.isspace() for character in raw):
+        raise ValueError("api_key must contain printable ASCII without spaces")
+    return SecretStr(raw)
+
+
+class AiModelConfigCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_code: AiProviderCode
+    display_name: str = Field(min_length=1, max_length=80)
+    model_name: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+    )
+    api_key: SecretStr = Field(min_length=8, max_length=2048)
+    is_enabled: bool = True
+    is_default: bool = False
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        return _normalize_ai_display_name(value)
+
+    @field_validator("model_name")
+    @classmethod
+    def normalize_model_name(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr) -> SecretStr:
+        return _validate_ai_api_key(value)
+
+    @model_validator(mode="after")
+    def default_must_be_enabled(self) -> Self:
+        if self.is_default and not self.is_enabled:
+            raise ValueError("a default AI model configuration must be enabled")
+        return self
+
+
+class AiModelConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_code: AiProviderCode | None = None
+    display_name: str | None = Field(default=None, min_length=1, max_length=80)
+    model_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+    )
+    api_key: SecretStr | None = Field(default=None, max_length=2048)
+    is_enabled: bool | None = None
+    is_default: bool | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        return _normalize_ai_display_name(value) if value is not None else None
+
+    @field_validator("model_name")
+    @classmethod
+    def normalize_model_name(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def empty_api_key_preserves_existing(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        return _validate_ai_api_key(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def default_must_be_enabled(self) -> Self:
+        if all(
+            getattr(self, field_name) is None
+            for field_name in (
+                "provider_code",
+                "display_name",
+                "model_name",
+                "api_key",
+                "is_enabled",
+                "is_default",
+            )
+        ):
+            raise ValueError("at least one AI model configuration field is required")
+        if self.is_default and self.is_enabled is False:
+            raise ValueError("a default AI model configuration must be enabled")
+        return self
+
+
+class AiModelConfigOut(BaseModel):
+    id: str
+    provider_code: AiProviderCode
+    provider_name: str
+    display_name: str
+    base_url: str
+    model_name: str
+    api_key_configured: bool
+    api_key_fingerprint: str
+    is_enabled: bool
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class BinanceAccountSummary(BaseModel):
     configured: bool
     connected: bool
@@ -134,6 +356,30 @@ class BinanceAccountSummary(BaseModel):
     currency: Literal["USD"] = "USD"
     updated_at: datetime
     positions: list[dict[str, Any]] = Field(default_factory=list)
+    error_category: (
+        Literal[
+            "not_configured",
+            "credential_error",
+            "authentication",
+            "timestamp",
+            "rate_limit",
+            "timeout",
+            "network",
+            "upstream",
+            "rejected",
+            "invalid_response",
+        ]
+        | None
+    ) = None
+
+
+class BinanceTradingState(BaseModel):
+    configured: bool
+    connected: bool
+    account_type: Literal["UM_FUTURE", "PORTFOLIO_MARGIN"] | None = None
+    updated_at: datetime
+    positions: list[dict[str, Any]] = Field(default_factory=list)
+    open_orders: list[dict[str, Any]] = Field(default_factory=list)
     error_category: (
         Literal[
             "not_configured",
