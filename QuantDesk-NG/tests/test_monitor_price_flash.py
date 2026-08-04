@@ -20,4 +20,8 @@ def test_contract_cards_flash_in_the_price_move_direction() -> None:
     assert "red_flashes_30m" in script
     assert "多头力量" in script
     assert "空头力量" in script
+    assert "多空博弈预测" in script
+    assert "启发式未校准" in script
+    assert "battle-compact" in stylesheet
+    assert "battle-horizon" in stylesheet
     assert "prefers-reduced-motion: reduce" in stylesheet

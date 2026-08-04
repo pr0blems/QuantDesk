@@ -5,6 +5,8 @@
 # Python environments and caches
 .venv/
 venv/
+.local/
+mariadb-*-winx64.zip
 __pycache__/
 *.py[cod]
 .pytest_cache/

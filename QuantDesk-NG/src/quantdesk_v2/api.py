@@ -1277,7 +1277,7 @@ def monitor_overview(
     request: Request,
     user: User = Depends(get_current_user),
 ) -> dict:
-    return _monitor(request).overview(user.monitor_watchlist or [])
+    return _monitor(request).overview(user.monitor_watchlist or [], user.id)
 
 
 @router.get("/monitor/breadth")

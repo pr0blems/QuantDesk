@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any
 
-from . import store
+from . import battle, store
 
 HORIZONS = (30, 60, 300, 900, 3_600, 14_400)
 
@@ -126,11 +126,12 @@ def outcome_loop(stop_event=None) -> None:
         try:
             seeded = seed_outcomes()
             result = update_pending()
+            battle_result = battle.update_prediction_outcomes()
             store.collector_report(
                 "outcome_labeler",
                 success=True,
-                items=seeded + result["completed"],
-                details={"seeded": seeded, **result},
+                items=seeded + result["completed"] + battle_result["completed"],
+                details={"seeded": seeded, **result, "battle": battle_result},
             )
         except Exception as exc:
             store.collector_report("outcome_labeler", success=False, error=str(exc))

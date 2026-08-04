@@ -473,6 +473,15 @@
       "onboardDate": 1783672200000
     },
     {
+      "symbol": "GIGADEVUSDT",
+      "pair": "GIGADEVUSDT",
+      "underlyingType": "HK_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1785735000000
+    },
+    {
       "symbol": "GLWUSDT",
       "pair": "GLWUSDT",
       "underlyingType": "EQUITY",

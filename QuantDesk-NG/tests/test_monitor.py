@@ -5,6 +5,7 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -150,6 +151,57 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) ->
     repository.mark_alerts_read(user_id)
     assert repository.alerts(user_id, 10)[0]["read"] is True
     assert repository.latest_alert_id(user_id) == 1
+
+
+def test_monitor_battle_prediction_uses_real_user_commission(
+    mysql_test_engine, tmp_path
+) -> None:
+    repository, user_id, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
+    now_ms = int(time.time() * 1_000)
+    with mysql_test_engine.begin() as connection:
+        connection.execute(
+            text(
+                """INSERT INTO prediction_feature_snapshots(
+                       symbol,as_of_ms,feature_schema_version,features_json,quality_score,created_at)
+                   VALUES('TESTUSDT',:now_ms,1,'{}',1,CURRENT_TIMESTAMP)"""
+            ),
+            {"now_ms": now_ms},
+        )
+        feature_id = connection.execute(text("SELECT LAST_INSERT_ID()")).scalar_one()
+        connection.execute(
+            text(
+                """INSERT INTO battle_predictions(
+                       public_id,feature_snapshot_id,symbol,horizon_seconds,current_marker,
+                       prediction_state,result,battle_score,long_probability,short_probability,
+                       neutral_probability,confidence_score,confidence_label,gross_edge_bps,
+                       entry_price,spread_bps,target_bps,stop_bps,reason_codes_json,
+                       components_json,model_key,model_version,predicted_at_ms,valid_until_ms,
+                       created_at)
+                   VALUES('22222222-2222-2222-2222-222222222222',:feature_id,'TESTUSDT',900,1,
+                          'heuristic','long',45,0.55,0.20,0.25,0.56,'medium',15,
+                          101.5,1.5,30,20,'[\"TAKER_FLOW\"]','{}','battle-ensemble',1,
+                          :now_ms,:valid_until,CURRENT_TIMESTAMP)"""
+            ),
+            {"feature_id": feature_id, "now_ms": now_ms, "valid_until": now_ms + 600_000},
+        )
+        connection.execute(
+            text(
+                """INSERT INTO binance_user_commission_rates(
+                       user_id,symbol,maker_rate,taker_rate,credential_version,synced_at_ms)
+                   VALUES(:user_id,'TESTUSDT',0.0002,0.0004,1,:now_ms)"""
+            ),
+            {"user_id": user_id, "now_ms": now_ms},
+        )
+
+    battle = repository.overview([], user_id)["items"][0]["battle"]["15m"]
+
+    assert battle["state"] == "heuristic"
+    assert battle["long"] == 55.0
+    assert battle["confidence"] == "中"
+    assert battle["fee_source"] == "binance_user_commission"
+    assert battle["estimated_cost_bps"] == pytest.approx(10.0)
+    assert battle["edge_after_cost_bps"] == pytest.approx(5.0)
+    assert battle["execution_allowed"] is False
 
 
 def test_monitor_detail_queries(mysql_test_engine, tmp_path) -> None:

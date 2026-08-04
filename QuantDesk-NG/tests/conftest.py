@@ -18,7 +18,11 @@ TEST_DATABASE_PREFIX = "quantdesk_test_"
 TEST_ADMIN_URL_ENV = "QUANTDESK_TEST_DATABASE_ADMIN_URL"
 TEST_DATABASE_URL_ENV = "QUANTDESK_TEST_DATABASE_URL"
 _SAFE_IDENTIFIER = re.compile(r"^[a-z0-9_]+$")
-_PRESERVED_TABLES = {"alembic_version", "strategy_templates"}
+_PRESERVED_TABLES = {
+    "alembic_version",
+    "strategy_templates",
+    "prediction_model_versions",
+}
 _ROOT = Path(__file__).resolve().parents[1]
 _UNAVAILABLE_DATABASE_URL = "mysql+pymysql://test:test@127.0.0.1:3306/quantdesk_test_unavailable"
 

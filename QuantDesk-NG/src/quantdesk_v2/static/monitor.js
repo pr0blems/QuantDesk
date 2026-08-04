@@ -28,7 +28,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-8">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-10">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -78,7 +78,7 @@ class ContractMonitor extends HTMLElement {
               <div id="alerts" class="alerts"></div>
             </section>
             <section class="panel grow">
-              <div class="panel-title"><span>舆情流 <em id="news-count"></em></span></div>
+              <div class="panel-title"><span>多轮新闻研判 <em id="news-count"></em></span></div>
               <div id="news" class="news"></div>
             </section>
           </aside>
@@ -103,6 +103,7 @@ class ContractMonitor extends HTMLElement {
             </div>
           </div>
           <canvas id="chart" class="chart" width="960" height="380"></canvas>
+          <div id="battle-detail" class="battle-detail"></div>
           <div id="opportunity-detail" class="opportunity-detail"></div>
           <div id="score-summary" class="score-summary"></div>
           <div id="report" class="report"></div>
@@ -259,6 +260,30 @@ class ContractMonitor extends HTMLElement {
     return "中性观望";
   }
 
+  battleLabel(result, state) {
+    if (state === "data_insufficient") return "数据不足";
+    return { long: "多头占优", short: "空头占优", neutral: "多空均衡" }[result] || "等待预测";
+  }
+
+  battleTone(result, state) {
+    if (state === "data_insufficient") return "neutral";
+    return result === "long" ? "long" : result === "short" ? "short" : "neutral";
+  }
+
+  reasonLabel(code) {
+    return ({
+      AGGRESSIVE_FLOW: "主动成交",
+      BOOK_IMBALANCE: "盘口失衡",
+      VELOCITY: "价格速度",
+      FLASH_IMBALANCE: "30分钟力量",
+      TAKER_FLOW: "主动买卖量",
+      PRICE_OI_IMPULSE: "价格与持仓量",
+      TREND: "趋势结构",
+      CROWDING_RISK: "持仓拥挤风险",
+      DATA_INSUFFICIENT: "数据不足",
+    })[code] || code;
+  }
+
   showError(message = "") {
     const banner = this.q("#error-banner");
     banner.textContent = message;
@@ -291,11 +316,18 @@ class ContractMonitor extends HTMLElement {
       const tags = `${item.watch ? "★" : ""}${item.trending ? "🔥" : ""}`;
       const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
       const moveMark = item.priceMove === "up" ? '<i class="price-move" aria-hidden="true">↑</i>' : item.priceMove === "down" ? '<i class="price-move" aria-hidden="true">↓</i>' : "";
+      const battle = item.battle?.["15m"] || item.battle?.["5m"];
+      const battleBlock = battle ? `<div class="battle-compact ${this.battleTone(battle.result, battle.state)}" title="启发式多空博弈估算，尚未校准为真实胜率">
+        <div><strong>${this.battleLabel(battle.result, battle.state)}</strong><em>15m · ${battle.confidence || "低"}置信</em></div>
+        <div class="battle-bar"><i class="long" style="width:${Number(battle.long) || 0}%"></i><i class="neutral" style="width:${Number(battle.neutral) || 0}%"></i><i class="short" style="width:${Number(battle.short) || 0}%"></i></div>
+        <div class="battle-values"><span>多 ${Number(battle.long).toFixed(0)}</span><span>中 ${Number(battle.neutral).toFixed(0)}</span><span>空 ${Number(battle.short).toFixed(0)}</span></div>
+      </div>` : '<div class="battle-compact pending"><div><strong>博弈数据采集中</strong><em>--</em></div></div>';
       return `<article class="contract-card ${alertClass} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
         <div class="symbol">${this.escape(item.symbol.replace("USDT", ""))}<span class="tags">${tags}</span></div>
         <div class="signal ${opportunity ? this.opportunityTone(direction) : this.signalTone(score)}">${opportunity ? `${this.opportunityLabel(direction)} ${Number(opportunity.quality_score).toFixed(0)}` : this.signalLabel(score)}</div>
         <div class="price">${this.formatPrice(item.price)}${moveMark}</div>
         <div class="pct ${pctClass}">${this.formatPercent(item.pct_24h)} ${score == null ? "" : `<span class="score ${this.signalTone(score)}">(${score > 0 ? "+" : ""}${score})</span>`}</div>
+        ${battleBlock}
         <div class="flash-stats" title="最近 30 分钟价格方向高亮次数"><em>近 30 分钟</em><span class="green-flashes">多头力量 <b>${Number(item.green_flashes_30m) || 0}</b></span><span class="red-flashes">空头力量 <b>${Number(item.red_flashes_30m) || 0}</b></span></div>
         <div class="scorebar"><i data-score="${score ?? ""}"></i></div>
       </article>`;
@@ -406,12 +438,32 @@ class ContractMonitor extends HTMLElement {
       const news = await this.api("/news?limit=60");
       this.q("#news-count").textContent = news.length ? `${news.length}条` : "";
       const content = news.map((item) => {
-        const sentimentText = { bull: "利好", bear: "利空", neutral: "中性" }[item.sentiment] || "";
+        const stateText = {
+          DETECTED: "已发现", PROVENANCE_OK: "来源通过", FACT_VERIFIED: "事实已验证",
+          IMPACT_ASSESSED: "影响已评估", CHALLENGED: "已反证", VALIDATED: "多轮通过",
+          MARKET_CONFIRMED: "市场确认", REFERENCE_ELIGIBLE: "可供参考", DISPUTED: "存在争议",
+          REFUTED: "已证伪", DATA_INSUFFICIENT: "证据不足", EXPIRED: "已失效",
+        }[item.verification_state] || "待验证";
+        const assessments = (item.assessments || []).map((assessment) => {
+          const direction = { long: "偏多", short: "偏空", neutral: "中性", conflicted: "冲突" }[assessment.direction] || "未定";
+          const reference = { eligible: "可参考", risk_only: "仅风控", observe: "观察", display_only: "仅展示", blocked: "禁用" }[assessment.reference_status] || "仅展示";
+          const tone = assessment.direction === "long" ? "bull" : assessment.direction === "short" ? "bear" : "neutral";
+          const truth = assessment.truth_confidence == null ? "--" : `${Math.round(assessment.truth_confidence * 100)}%`;
+          const impact = assessment.impact_confidence == null ? "--" : `${Math.round(assessment.impact_confidence * 100)}%`;
+          const market = { confirmed: "市场确认", partial: "部分确认", pending: "等待复核", contrary: "市场反向" }[assessment.market_confirmation] || "未验证";
+          const counter = (assessment.counterevidence || []).join("；");
+          return `<div class="news-assessment ${tone}" title="${this.escape(counter)}">
+            <strong>${this.escape(assessment.symbol)} · ${direction}</strong>
+            <span>事实 ${truth} / 影响 ${impact} / ${market} / ${reference}</span>
+          </div>`;
+        }).join("");
+        const stateTone = item.verification_state === "REFERENCE_ELIGIBLE" ? "verified" : ["DISPUTED", "REFUTED"].includes(item.verification_state) ? "blocked" : "pending";
         return `<article class="news-item">
-          <span class="source">${this.escape(item.source)}</span><span class="time">${this.timeString(item.ts)}</span>
-          <span class="sentiment ${this.escape(item.sentiment)}">${sentimentText}</span>
+          <span class="source">${this.escape(item.source)}${item.source_tier ? ` · ${this.escape(item.source_tier)}级` : ""}</span><span class="time">${this.timeString(item.ts)}</span>
+          <span class="verification ${stateTone}">${stateText}</span>
           <div class="news-title"><a href="${this.safeUrl(item.link)}" target="_blank" rel="noopener noreferrer">${this.escape(item.title_zh || item.title)}</a></div>
           ${item.title_zh && item.lang === "en" ? `<div class="time">${this.escape(item.title)}</div>` : ""}
+          ${assessments || '<div class="news-assessment neutral"><span>尚未形成标的级结论，不进入系统参考</span></div>'}
         </article>`;
       }).join("");
       const newsBox = this.q("#news");
@@ -489,6 +541,7 @@ class ContractMonitor extends HTMLElement {
       ]);
       this.state.modal.opportunity = opportunities.items?.[0] || null;
       this.drawChart(this.q("#chart"), klines);
+      this.renderBattle(overview.battle || {});
       this.renderOpportunity(this.state.modal.opportunity);
       this.renderScoreSummary(scores, report);
       this.renderReport(report);
@@ -496,6 +549,27 @@ class ContractMonitor extends HTMLElement {
     } catch (error) {
       this.q("#report").innerHTML = `<div class="error-banner">${this.escape(error.message || "详情加载失败")}</div>`;
     }
+  }
+
+  renderBattle(battles) {
+    const order = ["5m", "15m", "1h"];
+    const cards = order.map((horizon) => {
+      const battle = battles[horizon];
+      if (!battle) return `<article class="battle-horizon pending"><div><strong>${horizon}</strong><span>数据采集中</span></div></article>`;
+      const reasons = (battle.reason_codes || []).map((code) => `<span>${this.escape(this.reasonLabel(code))}</span>`).join("");
+      const costText = battle.edge_after_cost_bps == null
+        ? "账户费率待同步"
+        : `扣费后边际 ${Number(battle.edge_after_cost_bps) >= 0 ? "+" : ""}${Number(battle.edge_after_cost_bps).toFixed(1)} bps`;
+      const freshness = battle.stale ? "已过期" : "有效";
+      return `<article class="battle-horizon ${this.battleTone(battle.result, battle.state)}">
+        <div class="battle-horizon-head"><strong>${horizon}</strong><b>${this.battleLabel(battle.result, battle.state)}</b><em>${battle.state === "heuristic" ? "启发式未校准" : "数据不足"}</em></div>
+        <div class="battle-probabilities"><span class="long">多 ${Number(battle.long).toFixed(1)}%</span><span>震荡 ${Number(battle.neutral).toFixed(1)}%</span><span class="short">空 ${Number(battle.short).toFixed(1)}%</span></div>
+        <div class="battle-bar large"><i class="long" style="width:${Number(battle.long) || 0}%"></i><i class="neutral" style="width:${Number(battle.neutral) || 0}%"></i><i class="short" style="width:${Number(battle.short) || 0}%"></i></div>
+        <div class="battle-meta"><span>置信度 ${this.escape(battle.confidence || "低")}</span><span>${this.escape(costText)}</span><span>${freshness}</span></div>
+        <div class="battle-reasons">${reasons}</div>
+      </article>`;
+    }).join("");
+    this.q("#battle-detail").innerHTML = `<div class="battle-title"><strong>多空博弈预测</strong><span>仅用于 Shadow 验证，不触发自动下单</span></div><div class="battle-grid">${cards}</div>`;
   }
 
   renderOpportunity(opportunity) {
@@ -586,16 +660,17 @@ class ContractMonitor extends HTMLElement {
       const basis = (horizon.basis || []).map((item) => `<li>${this.escape(item)}</li>`).join("");
       const news = (horizon.news || []).map((item) => `<li>
         <a href="${this.safeUrl(item.link)}" target="_blank" rel="noopener noreferrer">${this.escape(item.title_zh || item.title)}</a>
-        <span class="sentiment ${this.escape(item.sentiment)}">${({ bull: "利好", bear: "利空", neutral: "中性" })[item.sentiment] || ""}</span>
+        <span class="sentiment ${this.escape(item.sentiment)}">${({ bull: "偏多", bear: "偏空", neutral: "中性" })[item.sentiment] || ""}</span>
+        <small class="dim">${this.escape(({ eligible: "可参考", risk_only: "仅风控", observe: "观察", display_only: "仅展示", blocked: "禁用" })[item.reference_status] || "仅展示")}</small>
       </li>`).join("") || '<li class="dim">近 48 小时无相关资讯</li>';
       return `<article class="horizon ${border}">
         <div class="horizon-head"><span>${this.escape(horizon.name)}</span><strong class="score ${this.tone(horizon.score)}">${this.escape(horizon.suggestion)}</strong>${horizon.score == null ? "" : `<span class="dim">周期分 ${horizon.score > 0 ? "+" : ""}${horizon.score}</span>`}</div>
         ${levels}
         <div class="horizon-section"><div class="section-title">理论依据</div><ul>${basis}</ul></div>
-        <div class="horizon-section"><div class="section-title">新闻支撑</div><ul>${news}</ul></div>
+        <div class="horizon-section"><div class="section-title">多轮新闻研判（不参与当前评分）</div><ul>${news}</ul></div>
       </article>`;
     }).join("");
-    this.q("#report").innerHTML = `${horizons}<div class="disclaimer">${this.escape(report.disclaimer)}</div>`;
+    this.q("#report").innerHTML = `${horizons}<div class="disclaimer">${this.escape(report.news_policy || "")}<br>${this.escape(report.disclaimer)}</div>`;
   }
 
   renderFactors(current) {

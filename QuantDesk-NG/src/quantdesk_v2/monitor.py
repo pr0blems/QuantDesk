@@ -42,6 +42,18 @@ def _json_object(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _json_array(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        return decoded if isinstance(decoded, list) else []
+    return []
+
+
 def _opportunity_out(row: dict[str, Any], *, compact: bool = False) -> dict[str, Any]:
     evidence = _json_object(row.get("evidence_json"))
     result = {
@@ -110,7 +122,7 @@ class MonitorRepository:
 
         market_store.configure_engine(self.engine)
 
-    def overview(self, watchlist: list[str]) -> dict[str, Any]:
+    def overview(self, watchlist: list[str], user_id: int | None = None) -> dict[str, Any]:
         tickers = {row["symbol"]: row for row in self._query("SELECT * FROM ticker")}
         movement_rows = self._query(
             """SELECT symbol,SUM(up_count) AS up_count,SUM(down_count) AS down_count
@@ -118,6 +130,65 @@ class MonitorRepository:
             (int(time.time()) - 30 * 60,),
         )
         movements = {row["symbol"]: row for row in movement_rows}
+        battle_rows = self._query(
+            """SELECT p.*,f.quality_score FROM battle_predictions p
+               JOIN prediction_feature_snapshots f ON f.id=p.feature_snapshot_id
+               WHERE p.current_marker=1 ORDER BY p.symbol,p.horizon_seconds"""
+        )
+        commission_rows = (
+            self._query(
+                "SELECT symbol,taker_rate FROM binance_user_commission_rates WHERE user_id=?",
+                (user_id,),
+            )
+            if user_id is not None
+            else []
+        )
+        commissions = {
+            str(row["symbol"]): float(row["taker_rate"]) for row in commission_rows
+        }
+        horizon_names = {300: "5m", 900: "15m", 3_600: "1h"}
+        battles: dict[str, dict[str, dict[str, Any]]] = {}
+        now_ms = int(time.time() * 1_000)
+        for row in battle_rows:
+            symbol = str(row["symbol"])
+            spread = max(0.0, float(row.get("spread_bps") or 0))
+            taker_rate = commissions.get(symbol)
+            cost_bps = (
+                spread + max(0.5, spread * 0.15) + taker_rate * 20_000
+                if taker_rate is not None
+                else None
+            )
+            gross_edge = _finite_number(row.get("gross_edge_bps"))
+            after_cost = (
+                round(float(gross_edge) - cost_bps, 4)
+                if gross_edge is not None and cost_bps is not None
+                else None
+            )
+            horizon = horizon_names.get(int(row["horizon_seconds"]), str(row["horizon_seconds"]))
+            battles.setdefault(symbol, {})[horizon] = {
+                "id": row.get("public_id"),
+                "horizon_seconds": int(row["horizon_seconds"]),
+                "state": row.get("prediction_state"),
+                "result": row.get("result"),
+                "battle_score": _finite_number(row.get("battle_score")),
+                "long": round(float(row.get("long_probability") or 0) * 100, 1),
+                "short": round(float(row.get("short_probability") or 0) * 100, 1),
+                "neutral": round(float(row.get("neutral_probability") or 0) * 100, 1),
+                "confidence": {"low": "低", "medium": "中", "high": "高"}.get(
+                    str(row.get("confidence_label")), "低"
+                ),
+                "confidence_score": _finite_number(row.get("confidence_score")),
+                "data_quality": _finite_number(row.get("quality_score")),
+                "gross_edge_bps": gross_edge,
+                "estimated_cost_bps": round(cost_bps, 4) if cost_bps is not None else None,
+                "edge_after_cost_bps": after_cost,
+                "fee_source": "binance_user_commission" if taker_rate is not None else "unavailable",
+                "reason_codes": _json_array(row.get("reason_codes_json")),
+                "predicted_at_ms": int(row.get("predicted_at_ms") or 0),
+                "valid_until_ms": int(row.get("valid_until_ms") or 0),
+                "stale": now_ms > int(row.get("valid_until_ms") or 0),
+                "execution_allowed": False,
+            }
         score_rows = self._query(
             """
             SELECT s.symbol, s.tf, s.score FROM scores s
@@ -184,6 +255,7 @@ class MonitorRepository:
                     "opportunity": opportunities.get(symbol),
                     "green_flashes_30m": int(movements.get(symbol, {}).get("up_count") or 0),
                     "red_flashes_30m": int(movements.get(symbol, {}).get("down_count") or 0),
+                    "battle": battles.get(symbol, {}),
                 }
             )
         return {
@@ -395,7 +467,51 @@ class MonitorRepository:
             raise MonitorUnavailable("contract monitor alert update failed") from exc
 
     def news(self, limit: int) -> list[dict[str, Any]]:
-        return self._query("SELECT * FROM news ORDER BY ts DESC LIMIT ?", (limit,))
+        rows = self._query(
+            """SELECT n.*,nd.source_tier,c.public_id event_id,c.state verification_state,
+                      c.independent_origins,c.quality_score,d.symbol,d.direction,
+                      d.truth_confidence,d.impact_confidence,d.market_confirmation,
+                      d.reference_status,d.counterevidence_json,d.valid_until
+               FROM news n
+               LEFT JOIN news_documents nd ON nd.news_id=n.id
+               LEFT JOIN news_event_clusters c ON c.id=nd.event_id
+               LEFT JOIN news_decisions d ON d.event_id=c.id AND d.current_marker=1
+               ORDER BY n.ts DESC LIMIT ?""",
+            (limit * 5,),
+        )
+        output: list[dict[str, Any]] = []
+        indexed: dict[str, dict[str, Any]] = {}
+        for source_row in rows:
+            row = dict(source_row)
+            news_id = str(row["id"])
+            if news_id not in indexed and len(output) >= limit:
+                break
+            assessment = None
+            if row.get("symbol"):
+                counterevidence = row.get("counterevidence_json")
+                if isinstance(counterevidence, str):
+                    try:
+                        counterevidence = json.loads(counterevidence)
+                    except (TypeError, ValueError):
+                        counterevidence = []
+                assessment = {
+                    "symbol": row.pop("symbol"),
+                    "direction": row.pop("direction"),
+                    "truth_confidence": _finite_number(row.pop("truth_confidence")),
+                    "impact_confidence": _finite_number(row.pop("impact_confidence")),
+                    "market_confirmation": row.pop("market_confirmation"),
+                    "reference_status": row.pop("reference_status"),
+                    "counterevidence": counterevidence or [],
+                    "valid_until": row.pop("valid_until"),
+                }
+            row.pop("counterevidence_json", None)
+            if news_id not in indexed:
+                row["assessments"] = []
+                indexed[news_id] = row
+                output.append(row)
+            if assessment:
+                indexed[news_id]["assessments"].append(assessment)
+        return output[:limit]
 
     def klines(self, symbol: str, timeframe: str, limit: int) -> list[dict[str, Any]]:
         normalized = self._validate_symbol(symbol)

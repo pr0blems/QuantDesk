@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -166,6 +167,7 @@ BEAR_WORDS = [
     "exploit",
     "ban",
     "lawsuit",
+    "injunction",
     "sec sues",
     "outflow",
     "sell",
@@ -197,10 +199,25 @@ MACRO_WORDS = [
 ]
 
 
+def _contains_sentiment_term(text: str, term: str) -> bool:
+    """Match English terms on token boundaries and CJK terms as phrases."""
+
+    value = term.strip().lower()
+    if not value:
+        return False
+    if re.fullmatch(r"[a-z0-9][a-z0-9 .&'/-]*", value):
+        return re.search(
+            r"(?<![a-z0-9])" + re.escape(value) + r"(?![a-z0-9])",
+            text.lower(),
+        ) is not None
+    return value in text.lower()
+
+
 def sentiment_of(text):
-    t = text.lower()
-    bull = sum(1 for w in BULL_WORDS if w in t)
-    bear = sum(1 for w in BEAR_WORDS if w in t)
+    # Legacy display-only label. Trading/reference decisions are produced by
+    # news_intelligence and must never consume this article-wide label.
+    bull = sum(1 for word in BULL_WORDS if _contains_sentiment_term(text, word))
+    bear = sum(1 for word in BEAR_WORDS if _contains_sentiment_term(text, word))
     if bull > bear:
         return "bull"
     if bear > bull:
@@ -335,7 +352,9 @@ def parse_pub(pub):
     try:
         return int(parsedate_to_datetime(pub).timestamp())
     except Exception:
-        return int(time.time())
+        # Never make an undated article look newly published. The verifier
+        # treats zero as failed provenance and therefore cannot promote it.
+        return 0
 
 
 _fail_streak = {}  # 源名 -> 连续失败次数

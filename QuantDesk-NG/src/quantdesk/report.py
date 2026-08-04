@@ -199,31 +199,46 @@ def _top_reasons(tf_data, tfs, n=4):
 
 
 def _match_news(symbol, limit=4, hours=48):
-    base = symbol.replace("USDT", "").replace("USD1", "")
-    kws = [k.lower() for k in KEYWORDS.get(base, [])]
-    if not kws and len(base) >= 4:
-        kws = [base.lower()]
     since = int(time.time()) - hours * 3600
     rows = store.query(
-        "SELECT ts, source, lang, title, title_zh, link, sentiment FROM news WHERE ts>? ORDER BY ts DESC LIMIT 300",
-        (since,),
+        """SELECT n.ts,n.source,n.lang,n.title,n.title_zh,n.link,n.sentiment,
+                  c.public_id event_id,c.state event_state,c.independent_origins,
+                  e.direction,e.impact_confidence,e.horizons_json,
+                  d.truth_confidence,d.market_confirmation,d.reference_status,
+                  d.counterevidence_json,d.valid_until
+           FROM news_event_entities e
+           JOIN news_event_clusters c ON c.id=e.event_id
+           JOIN news_documents nd ON nd.event_id=e.event_id
+           JOIN news n ON n.id=nd.news_id
+           LEFT JOIN news_decisions d ON d.event_id=e.event_id AND d.symbol=e.symbol
+                                     AND d.current_marker=1
+           WHERE e.symbol=? AND n.ts>? ORDER BY n.ts DESC LIMIT ?""",
+        (symbol, since, limit * 4),
     )
-    hits, macro = [], []
-    for r in rows:
-        text = ((r["title"] or "") + " " + (r["title_zh"] or "")).lower()
-        if kws and any(k in text for k in kws):
-            hits.append(dict(r))
-        elif any(m in text for m in MACRO_KEYS):
-            macro.append(dict(r))
-    out = hits[:limit]
-    if len(out) < limit:
-        for m in macro:
-            m = dict(m)
-            m["macro"] = True
-            out.append(m)
-            if len(out) >= limit:
-                break
-    return out, bool(hits)
+    output: list[dict] = []
+    seen_events: set[str] = set()
+    for source_row in rows:
+        row = dict(source_row)
+        event_id = str(row.get("event_id") or "")
+        if event_id in seen_events:
+            continue
+        seen_events.add(event_id)
+        for field in ("horizons_json", "counterevidence_json"):
+            value = row.get(field)
+            if isinstance(value, str):
+                try:
+                    row[field] = json.loads(value)
+                except (TypeError, ValueError):
+                    row[field] = []
+        # Keep the legacy label visibly separate from the verified decision.
+        row["legacy_sentiment"] = row.pop("sentiment", None)
+        row["sentiment"] = (
+            "bull" if row.get("direction") == "long" else "bear" if row.get("direction") == "short" else "neutral"
+        )
+        output.append(row)
+        if len(output) >= limit:
+            break
+    return output, bool(output)
 
 
 def build_report(symbol):
@@ -301,7 +316,12 @@ def build_report(symbol):
             return "--"
         return f"{v:,.4g}"
 
-    def horizon(name, tfs, weights, atr):
+    def horizon(name, tfs, weights, atr, news_horizon):
+        horizon_news = [
+            item
+            for item in news
+            if news_horizon in (item.get("horizons_json") or [])
+        ][:3]
         sc_num = sum(
             tf_data[t]["score"] * wt for t, wt in zip(tfs, weights, strict=True) if t in tf_data
         )
@@ -314,7 +334,7 @@ def build_report(symbol):
                 "color": "#77808f",
                 "basis": ["K线数据回填中，暂无法给出该周期建议"],
                 "levels": None,
-                "news": news[:2],
+                "news": horizon_news[:2],
             }
         if hs >= 40:
             sug, col, side = ("建议做多", "#2ebd85", 1) if hs >= 60 else ("轻仓偏多", "#7fc8a9", 1)
@@ -344,13 +364,13 @@ def build_report(symbol):
             "color": col,
             "basis": _top_reasons(tf_data, tfs),
             "levels": levels,
-            "news": news[:3],
+            "news": horizon_news,
         }
 
     horizons = [
-        horizon("未来 1 小时", ["15m", "1h"], [0.5, 0.5], atr1h),
-        horizon("未来 4 小时", ["1h", "4h"], [0.4, 0.6], atr4h),
-        horizon("未来 12 小时", ["1h", "4h"], [0.25, 0.75], atr4h),
+        horizon("未来 1 小时", ["15m", "1h"], [0.5, 0.5], atr1h, "1h"),
+        horizon("未来 4 小时", ["1h", "4h"], [0.4, 0.6], atr4h, "4h"),
+        horizon("未来 12 小时", ["1h", "4h"], [0.25, 0.75], atr4h, "1d"),
     ]
     return {
         "symbol": symbol,
@@ -364,5 +384,6 @@ def build_report(symbol):
         "stats": stats,
         "social": social,
         "news_direct": direct,
-        "disclaimer": "评分与建议基于技术指标统计与公开舆情，仅为概率倾向参考，不构成投资建议。",
+        "news_policy": "新闻仅在多轮验证后作为影子特征；当前权重为 0，不触发开仓、反手或修改止损。",
+        "disclaimer": "评分与建议基于技术指标统计；新闻裁决独立展示，仅为概率倾向参考，不构成投资建议。",
     }

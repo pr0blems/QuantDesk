@@ -81,7 +81,7 @@ button { cursor: pointer; }
 .breadth-breakdown strong { font-weight: 800; }
 .breadth-breakdown i { margin: 0 5px; color: rgba(255, 255, 255, .72); font-style: normal; }
 .contract-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 5px; align-content: start; padding: 7px; }
-.contract-card { min-height: 121px; position: relative; isolation: isolate; padding: 7px 9px; border: 1px solid var(--m-border); border-radius: 2px; background: var(--m-card); cursor: pointer; transition: border-color .15s; }
+.contract-card { min-height: 178px; position: relative; isolation: isolate; padding: 7px 9px; border: 1px solid var(--m-border); border-radius: 2px; background: var(--m-card); cursor: pointer; transition: border-color .15s; }
 .contract-card:hover { border-color: var(--m-gold); }
 .contract-card.tick-up::after, .contract-card.tick-down::after { content: ""; position: absolute; z-index: 2; inset: -1px; pointer-events: none; border: 1px solid currentColor; border-radius: 2px; animation: contract-price-pulse 1.5s cubic-bezier(.2, .8, .2, 1) both; }
 .contract-card.tick-up::after { color: var(--m-up); }
@@ -110,6 +110,18 @@ button { cursor: pointer; }
 .flash-stats span { display: flex; justify-content: space-between; gap: 8px; }
 .flash-stats b { font-weight: 800; }
 .flash-stats em { color: var(--m-dim); font-style: normal; }
+.battle-compact { margin-top: 5px; padding: 4px 0; border-top: 1px solid var(--m-border); }
+.battle-compact > div:first-child { display: flex; justify-content: space-between; gap: 5px; font-size: 10px; }
+.battle-compact em { color: var(--m-dim); font-size: 9px; font-style: normal; font-weight: 400; }
+.battle-compact.long strong { color: var(--m-up); }
+.battle-compact.short strong { color: var(--m-down); }
+.battle-compact.neutral strong, .battle-compact.pending strong { color: var(--m-neutral); }
+.battle-bar { height: 4px; display: flex; overflow: hidden; margin-top: 3px; background: var(--m-border); }
+.battle-bar i { height: 100%; }
+.battle-bar i.long { background: var(--m-up); }
+.battle-bar i.neutral { background: var(--m-neutral); opacity: .35; }
+.battle-bar i.short { background: var(--m-down); }
+.battle-values { display: flex; justify-content: space-between; margin-top: 1px; color: var(--m-dim); font-size: 9px; font-variant-numeric: tabular-nums; }
 .scorebar { height: 3px; position: relative; overflow: hidden; margin-top: 5px; border-radius: 0; background: #292d27; }
 .scorebar i { position: absolute; top: 0; bottom: 0; }
 @media (prefers-reduced-motion: reduce) {
@@ -128,6 +140,14 @@ button { cursor: pointer; }
 .news-item .source { margin-right: 6px; color: var(--m-gold); font-size: 10px; }
 .news-item a { color: var(--m-text); text-decoration: none; }
 .news-item a:hover { color: var(--m-gold); }
+.verification { float: right; padding: 1px 5px; border: 1px solid var(--m-border); border-radius: 999px; color: var(--m-dim); font-size: 9px; }
+.verification.verified { border-color: color-mix(in srgb, var(--m-up) 45%, transparent); color: var(--m-up); }
+.verification.blocked { border-color: color-mix(in srgb, var(--m-down) 45%, transparent); color: var(--m-down); }
+.verification.pending { color: var(--m-gold); }
+.news-assessment { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 4px 6px; border-left: 2px solid var(--m-border); background: color-mix(in srgb, var(--m-text) 3%, transparent); color: var(--m-dim); font-size: 9px; }
+.news-assessment strong { color: var(--m-text); font-size: 9px; white-space: nowrap; }
+.news-assessment.bull { border-left-color: var(--m-up); }
+.news-assessment.bear { border-left-color: var(--m-down); }
 .sentiment { margin-left: 6px; padding: 0 5px; border-radius: 7px; font-size: 10px; }
 .sentiment.bull { color: var(--m-up); background: rgba(46, 189, 133, .14); }
 .sentiment.bear { color: var(--m-down); background: rgba(246, 70, 93, .14); }
@@ -144,6 +164,25 @@ button { cursor: pointer; }
 .tf-switch button.on, .watch.on { color: var(--m-gold); border-color: var(--m-gold); }
 .chart { width: 100%; display: block; border-radius: 7px; background: #0d1117; }
 .opportunity-detail { margin-top: 8px; }
+.battle-detail { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--m-border); background: var(--m-bg); }
+.battle-title { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.battle-title strong { font-size: 14px; }
+.battle-title span { color: var(--m-dim); font-size: 10px; }
+.battle-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.battle-horizon { padding: 8px 9px; border-top: 2px solid var(--m-neutral); background: var(--m-card); }
+.battle-horizon.long { border-top-color: var(--m-up); }
+.battle-horizon.short { border-top-color: var(--m-down); }
+.battle-horizon-head { display: flex; align-items: center; gap: 7px; }
+.battle-horizon-head strong { color: var(--m-gold); }
+.battle-horizon.long .battle-horizon-head b { color: var(--m-up); }
+.battle-horizon.short .battle-horizon-head b { color: var(--m-down); }
+.battle-horizon-head em { margin-left: auto; color: var(--m-dim); font-size: 9px; font-style: normal; }
+.battle-probabilities, .battle-meta { display: flex; justify-content: space-between; gap: 7px; margin-top: 6px; color: var(--m-dim); font-size: 10px; }
+.battle-probabilities .long { color: var(--m-up); }
+.battle-probabilities .short { color: var(--m-down); }
+.battle-bar.large { height: 6px; margin-top: 4px; }
+.battle-reasons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.battle-reasons span { padding: 1px 5px; border: 1px solid var(--m-border); color: var(--m-dim); font-size: 9px; }
 .opportunity-empty { padding: 10px 12px; border: 1px dashed var(--m-border); border-radius: 7px; color: var(--m-neutral); }
 .opportunity-card { padding: 10px 12px; border-left: 4px solid var(--m-neutral); border-radius: 7px; background: var(--m-card); }
 .opportunity-card.long { border-left-color: var(--m-up); }
@@ -201,6 +240,7 @@ button { cursor: pointer; }
   .monitor-side .panel:first-child { max-height: 360px; }
   .monitor-side .panel { min-height: 320px; }
   .contract-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  .battle-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {

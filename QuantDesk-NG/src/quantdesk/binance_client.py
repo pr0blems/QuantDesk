@@ -149,6 +149,46 @@ def fetch_tickers() -> Any:
     return _get(f"{FAPI}/fapi/v1/ticker/24hr", timeout=20)
 
 
+def fetch_open_interest(symbol: str) -> dict[str, Any]:
+    query = urllib.parse.urlencode({"symbol": symbol.upper()})
+    data = _get(f"{FAPI}/fapi/v1/openInterest?{query}", timeout=8, retries=2)
+    if not isinstance(data, dict):
+        raise RuntimeError("Binance open interest response is invalid")
+    return data
+
+
+def fetch_global_long_short_ratio(
+    symbol: str, period: str = "5m", limit: int = 2
+) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {"symbol": symbol.upper(), "period": period, "limit": int(limit)}
+    )
+    data = _get(
+        f"{FAPI}/futures/data/globalLongShortAccountRatio?{query}",
+        timeout=8,
+        retries=2,
+    )
+    if not isinstance(data, list):
+        raise RuntimeError("Binance global long/short response is invalid")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def fetch_taker_buy_sell_ratio(
+    symbol: str, period: str = "5m", limit: int = 2
+) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {"symbol": symbol.upper(), "period": period, "limit": int(limit)}
+    )
+    data = _get(
+        f"{FAPI}/futures/data/takerlongshortRatio?{query}",
+        timeout=8,
+        retries=2,
+    )
+    if not isinstance(data, list):
+        raise RuntimeError("Binance taker buy/sell response is invalid")
+    return [item for item in data if isinstance(item, dict)]
+
+
 def fetch_klines(symbol: str, interval: str, limit: int = 300) -> list[tuple]:
     query = urllib.parse.urlencode({"symbol": symbol, "interval": interval, "limit": limit})
     data = _get(f"{FAPI}/fapi/v1/klines?{query}", timeout=20)
