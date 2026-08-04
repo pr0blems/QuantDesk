@@ -23,6 +23,7 @@ def _load(name: str, default: Any) -> Any:
 
 settings = _load("settings.json", {})
 symbols_meta = _load("tradfi_symbols.json", {"symbols": []})
+TRADFI_UNIVERSE_KEY = "binance_tradfi_stocks"
 
 
 def tradfi_symbols() -> list[str]:

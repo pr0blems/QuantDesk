@@ -37,7 +37,7 @@ class PaperDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/paper.css?v=20260803-2">
+      <link rel="stylesheet" href="/assets/paper.css?v=20260804-3">
       <main class="paper-dashboard">
         <nav class="account-switcher" aria-label="模拟盘切换">
           <div id="paper-account-tabs" class="account-tabs" role="tablist" aria-label="我的模拟盘">
@@ -64,7 +64,9 @@ class PaperDashboard extends HTMLElement {
             <span id="paper-updated" class="updated-time">--:--:--</span>
             <button id="paper-refresh" class="action-button" type="button">刷新</button>
             <button id="paper-toggle-status" class="action-button status-button" type="button" disabled>暂停运行</button>
+            <button id="paper-rename" class="action-button manage-button" type="button" disabled>修改名称</button>
             <button id="paper-reset" class="action-button reset-button" type="button" disabled title="重置当前模拟盘，不影响其他模拟盘">重置账户</button>
+            <button id="paper-delete" class="action-button delete-button" type="button" disabled title="删除当前模拟盘">删除</button>
           </div>
         </header>
 
@@ -168,6 +170,8 @@ class PaperDashboard extends HTMLElement {
   bindEvents() {
     this.q("#paper-refresh").addEventListener("click", () => this.load());
     this.q("#paper-reset").addEventListener("click", () => this.resetAccount());
+    this.q("#paper-rename").addEventListener("click", () => this.renameAccount());
+    this.q("#paper-delete").addEventListener("click", () => this.deleteAccount());
     this.q("#paper-toggle-status").addEventListener("click", () => this.toggleAccountStatus());
     this.q("#paper-create").addEventListener("click", () => this.openCreateDialog());
     this.q("#paper-account-tabs").addEventListener("click", (event) => {
@@ -222,6 +226,9 @@ class PaperDashboard extends HTMLElement {
         this.setConnectionState("待创建", "loading");
         this.q("#paper-toggle-status").disabled = true;
         this.q("#paper-reset").disabled = true;
+        this.q("#paper-rename").disabled = true;
+        this.q("#paper-delete").disabled = true;
+        this.renderEmptyAccount();
         return;
       }
       const query = new URLSearchParams({
@@ -461,6 +468,79 @@ class PaperDashboard extends HTMLElement {
     }
   }
 
+  async deleteAccount() {
+    const account = this.accounts.find((item) => item.id === this.selectedAccountId);
+    if (!account) return;
+    if (Array.isArray(this.data?.positions) && this.data.positions.length) {
+      this.showBanner("当前模拟盘仍有持仓，请先完成平仓后再删除。", "error");
+      return;
+    }
+    const typed = window.prompt(`删除后“${account.name}”将从模拟盘列表移除，历史数据仅保留用于审计。请输入完整模拟盘名称确认：`, "");
+    if (typed === null) return;
+    if (typed !== account.name) {
+      this.showBanner("输入的模拟盘名称不匹配，未执行删除。", "error");
+      return;
+    }
+    const button = this.q("#paper-delete");
+    button.disabled = true;
+    button.textContent = "删除中…";
+    try {
+      await this.api(`/accounts/${encodeURIComponent(account.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "archived" }),
+      });
+      this.data = null;
+      this.selectedAccountId = null;
+      this.rememberAccount(null);
+      await this.loadAccounts();
+      await this.load();
+      this.showBanner(`模拟盘“${account.name}”已删除。`, "success");
+    } catch (error) {
+      this.showBanner(`删除失败：${error.message}`, "error");
+    } finally {
+      button.textContent = "删除";
+      button.disabled = !this.selectedAccountId;
+    }
+  }
+
+  async renameAccount() {
+    const account = this.accounts.find((item) => item.id === this.selectedAccountId);
+    if (!account) return;
+    const entered = window.prompt("请输入新的模拟盘名称：", account.name);
+    if (entered === null) return;
+    const name = entered.trim();
+    if (!name) {
+      this.showBanner("模拟盘名称不能为空。", "error");
+      return;
+    }
+    if (name === account.name) return;
+    const button = this.q("#paper-rename"); button.disabled = true; button.textContent = "保存中…";
+    try {
+      const updated = await this.api(`/accounts/${encodeURIComponent(account.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+      });
+      await this.loadAccounts(updated.id);
+      await this.load();
+      this.showBanner(`模拟盘名称已修改为“${updated.name}”。`, "success");
+    } catch (error) {
+      this.showBanner(`名称修改失败：${error.message}`, "error");
+    } finally {
+      button.textContent = "修改名称";
+      button.disabled = !this.selectedAccountId;
+    }
+  }
+
+  renderEmptyAccount() {
+    this.q("#paper-subtitle").textContent = "创建模拟盘后，将在这里显示独立资金、持仓和成交。";
+    this.q("#paper-rules").textContent = "暂无运行中的模拟盘";
+    this.q("#curve-summary").textContent = "每分钟记录一次";
+    ["equity", "balance", "upnl", "realized", "win-rate", "drawdown"].forEach((name) => this.renderMetric(name, "--", "暂无数据", "neutral"));
+    this.renderPositions([]);
+    this.renderTrades([]);
+    window.requestAnimationFrame(() => this.drawCurve([], 10000));
+  }
+
   renderData(data) {
     const account = data.account || {};
     const accountMeta = data.paper_account || {};
@@ -478,6 +558,8 @@ class PaperDashboard extends HTMLElement {
     resetButton.disabled = !canReset;
     resetButton.textContent = "重置账户";
     resetButton.title = "只重置当前用户选中的模拟盘";
+    this.q("#paper-delete").disabled = false;
+    this.q("#paper-rename").disabled = false;
     const statusButton = this.q("#paper-toggle-status");
     statusButton.disabled = false;
     statusButton.textContent = accountMeta.status === "paused" ? "继续运行" : "暂停运行";

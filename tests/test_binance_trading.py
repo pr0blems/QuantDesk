@@ -6,7 +6,18 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from quantdesk_v2.binance_trading import BinanceUsdMTradingClient
+from quantdesk_v2.binance_client import MAX_RESPONSE_BYTES
+from quantdesk_v2.binance_trading import (
+    MAX_EXCHANGE_INFO_BYTES,
+    BinanceUsdMTradingClient,
+    _trade_response_limit,
+)
+
+
+def test_exchange_info_has_a_larger_but_bounded_response_limit() -> None:
+    assert _trade_response_limit("/fapi/v1/exchangeInfo") == MAX_EXCHANGE_INFO_BYTES
+    assert MAX_EXCHANGE_INFO_BYTES == 2 * 1024 * 1024
+    assert _trade_response_limit("/fapi/v1/order") == MAX_RESPONSE_BYTES
 
 
 def test_symbol_rules_round_down_and_market_order_is_signed() -> None:
@@ -57,6 +68,7 @@ def test_symbol_rules_round_down_and_market_order_is_signed() -> None:
     query = parse_qs(urlsplit(url).query)
     assert method == "POST"
     assert query["symbol"] == ["BTCUSDT"]
+    assert query["positionSide"] == ["BOTH"]
     assert query["quantity"] == ["0.123"]
     assert query["newClientOrderId"] == ["qd1-abc"]
     assert "timestamp" in query
@@ -87,9 +99,62 @@ def test_close_trigger_is_exchange_side_mark_price_protection() -> None:
     assert query["closePosition"] == ["true"]
     assert query["workingType"] == ["MARK_PRICE"]
     assert query["priceProtect"] == ["true"]
+    assert query["positionSide"] == ["BOTH"]
     assert query["triggerPrice"] == ["62000.1"]
     assert query["clientAlgoId"] == ["qd1-stop"]
     assert "quantity" not in query
+
+
+def test_hedge_orders_bind_position_side_without_reduce_only() -> None:
+    captured: list[str] = []
+
+    def transport(_method: str, url: str, _headers: dict[str, str], _timeout: float):
+        captured.append(url)
+        if urlsplit(url).path == "/fapi/v1/order":
+            return 200, b'{"orderId":123,"status":"FILLED"}'
+        return 200, b'{"algoId":456,"algoStatus":"NEW"}'
+
+    client = BinanceUsdMTradingClient("https://fapi.binance.com", transport=transport)
+    client.place_market_order(
+        "api-key",
+        "api-secret",
+        symbol="AAPLUSDT",
+        side="BUY",
+        position_side="LONG",
+        quantity=Decimal("0.5"),
+        client_order_id="qd-hedge-open",
+    )
+    client.place_close_trigger(
+        "api-key",
+        "api-secret",
+        symbol="AAPLUSDT",
+        side="SELL",
+        position_side="LONG",
+        order_type="STOP_MARKET",
+        stop_price=Decimal("200"),
+        quantity=Decimal("0.5"),
+        client_order_id="qd-hedge-stop",
+    )
+
+    market_query = parse_qs(urlsplit(captured[0]).query)
+    protection_query = parse_qs(urlsplit(captured[1]).query)
+    assert market_query["positionSide"] == ["LONG"]
+    assert "reduceOnly" not in market_query
+    assert protection_query["positionSide"] == ["LONG"]
+    assert protection_query["quantity"] == ["0.5"]
+    assert "closePosition" not in protection_query
+
+    with pytest.raises(ValueError, match="reduceOnly"):
+        client.place_market_order(
+            "api-key",
+            "api-secret",
+            symbol="AAPLUSDT",
+            side="SELL",
+            position_side="LONG",
+            quantity=Decimal("0.5"),
+            client_order_id="qd-invalid-close",
+            reduce_only=True,
+        )
 
 
 def test_unapproved_origin_and_over_limit_leverage_are_rejected_locally() -> None:

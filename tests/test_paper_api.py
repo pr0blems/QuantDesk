@@ -200,7 +200,28 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
         assert reset.json()["permissions"] == {"can_reset": True}
         assert repository.reset_calls == [(alice_user_id, database_account_id)]
 
+        renamed = client.patch(
+            f"/api/v2/paper/accounts/{public_account_id}",
+            headers=alice_headers,
+            json={"name": "Alice renamed paper"},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "Alice renamed paper"
+
+        archived = client.patch(
+            f"/api/v2/paper/accounts/{public_account_id}",
+            headers=alice_headers,
+            json={"status": "archived"},
+        )
+        assert archived.status_code == 200
+        assert archived.json()["status"] == "archived"
+        assert client.get("/api/v2/paper/accounts", headers=alice_headers).json() == []
+
         with test_session() as db:
             audit = db.query(AuditLog).filter(AuditLog.action == "paper.account.reset").one()
             assert audit.resource_type == "paper_account"
             assert audit.resource_id == public_account_id
+            rename_audit = (
+                db.query(AuditLog).filter(AuditLog.action == "paper.account.rename").one()
+            )
+            assert rename_audit.resource_id == public_account_id

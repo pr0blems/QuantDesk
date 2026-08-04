@@ -191,8 +191,9 @@ def check_score_alert(symbol, tf, score, factors):
     if tf not in rules.get("enabled_timeframes", settings.get("timeframes", ["15m", "1h", "4h"])):
         return
     users = store.query(
-        "SELECT u.id,u.monitor_watchlist,CASE WHEN p.symbol IS NULL THEN 0 ELSE 1 END AS is_held "
-        "FROM users u LEFT JOIN positions p ON p.user_id=u.id AND p.symbol=? "
+        "SELECT u.id,u.monitor_watchlist,CASE WHEN EXISTS("
+        "SELECT 1 FROM positions p WHERE p.user_id=u.id AND p.symbol=?"
+        ") THEN 1 ELSE 0 END AS is_held FROM users u "
         "WHERE u.is_active=1",
         (symbol,),
     )

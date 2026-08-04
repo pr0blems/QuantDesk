@@ -1354,6 +1354,9 @@ class LiveOrderIntent(Base):
         ),
         CheckConstraint("side IN ('BUY', 'SELL')", name="valid_side"),
         CheckConstraint(
+            "position_side IN ('BOTH', 'LONG', 'SHORT')", name="valid_position_side"
+        ),
+        CheckConstraint(
             "status IN ('created', 'submitted', 'filled', 'canceled', 'rejected', 'unknown')",
             name="valid_status",
         ),
@@ -1373,7 +1376,13 @@ class LiveOrderIntent(Base):
         UniqueConstraint("signal_key", name="uq_live_order_intents_signal_key"),
         UniqueConstraint("client_order_id", name="uq_live_order_intents_client_order_id"),
         Index("ix_live_order_intents_user_created", "user_id", "created_at"),
-        Index("ix_live_order_intents_account_symbol", "live_account_id", "symbol", "status"),
+        Index(
+            "ix_live_order_intents_account_symbol",
+            "live_account_id",
+            "symbol",
+            "position_side",
+            "status",
+        ),
         {
             "comment": "Binance 实盘订单的幂等意图、脱敏响应与审计状态",
             "mysql_engine": "InnoDB",
@@ -1406,6 +1415,9 @@ class LiveOrderIntent(Base):
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="USD-M 合约代码")
     action: Mapped[str] = mapped_column(String(16), nullable=False, comment="开仓、平仓或保护单")
     side: Mapped[str] = mapped_column(String(4), nullable=False, comment="BUY 或 SELL")
+    position_side: Mapped[str] = mapped_column(
+        String(8), default="BOTH", nullable=False, comment="BOTH、LONG 或 SHORT 持仓方向"
+    )
     order_type: Mapped[str] = mapped_column(String(32), nullable=False, comment="Binance 订单类型")
     quantity: Mapped[Decimal | None] = mapped_column(
         Numeric(30, 18), comment="下单数量；closePosition 保护单可为空"

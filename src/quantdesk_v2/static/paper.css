@@ -132,7 +132,7 @@ input, select { font: inherit; }
 }
 #paper-subtitle { margin: 6px 0 0 36px; color: #8794a6; font-size: 11px; }
 .paper-rules { max-width: 1500px; margin: 4px 0 0 36px; color: #5e6f83; font-size: 10px; line-height: 1.45; }
-.paper-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+.paper-actions { max-width: min(100%, 720px); flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .running-state {
   min-height: 30px;
   display: inline-flex;
@@ -163,6 +163,9 @@ input, select { font: inherit; }
 .action-button:hover:not(:disabled) { border-color: #52657c; background: #1a293c; }
 .action-button:focus-visible { outline: 2px solid var(--paper-green); outline-offset: 2px; }
 .reset-button { color: var(--paper-yellow); border-color: rgba(240, 185, 11, .35); }
+.manage-button { color: #8dbdff; border-color: rgba(47, 140, 255, .34); }
+.delete-button { color: #ff8797; border-color: rgba(246, 70, 93, .38); background: rgba(246, 70, 93, .055); }
+.delete-button:hover:not(:disabled) { color: #fff; border-color: rgba(246, 70, 93, .7); background: rgba(246, 70, 93, .14); }
 .status-button { color: #8dbdff; border-color: rgba(47, 140, 255, .34); }
 .status-button.resume-button { color: var(--paper-green); border-color: rgba(43, 215, 163, .34); }
 .action-button:disabled { cursor: not-allowed; opacity: .42; }
@@ -299,7 +302,7 @@ input, select { font: inherit; }
 
 @media (max-width: 1120px) {
   .paper-head { flex-direction: column; gap: 12px; }
-  .paper-actions { width: 100%; }
+  .paper-actions { width: 100%; justify-content: flex-start; }
   .paper-columns { grid-template-columns: 1fr; }
   .paper-table { max-height: 360px; }
 }

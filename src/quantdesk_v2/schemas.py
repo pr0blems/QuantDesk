@@ -563,9 +563,16 @@ class PaperAccountCreateRequest(BaseModel):
 
 
 class PaperAccountStatusUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    status: Literal["active", "paused", "archived"]
+    status: Literal["active", "paused", "archived"] | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if self.status is None and self.name is None:
+            raise ValueError("at least one paper account field is required")
+        return self
 
 
 class LiveAccountCreateRequest(BaseModel):
@@ -573,31 +580,33 @@ class LiveAccountCreateRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=100)
     strategy_id: str = Field(min_length=36, max_length=36)
-    symbols: list[str] = Field(min_length=1, max_length=5)
     leverage: int = Field(default=3, ge=1, le=20)
-    max_positions: int = Field(default=1, ge=1, le=5)
+    max_positions: int = Field(default=1, ge=1, le=20)
     position_size_pct: float = Field(default=2, gt=0, le=10)
     margin_cap: float = Field(default=0.20, gt=0, le=0.50)
 
-    @field_validator("symbols")
-    @classmethod
-    def normalize_symbols(cls, value: list[str]) -> list[str]:
-        symbols: list[str] = []
-        for raw in value:
-            symbol = str(raw).strip().upper()
-            if not re.fullmatch(r"[A-Z0-9]{3,32}", symbol):
-                raise ValueError("invalid Binance futures symbol")
-            if symbol not in symbols:
-                symbols.append(symbol)
-        if not symbols:
-            raise ValueError("at least one symbol is required")
-        return symbols
+
+class LiveAccountStrategyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    strategy_id: str = Field(min_length=36, max_length=36)
+    leverage: int = Field(ge=1, le=20)
+    max_positions: int = Field(ge=1, le=20)
+    position_size_pct: float = Field(gt=0, le=10)
+    margin_cap: float = Field(gt=0, le=0.50)
 
 
 class LiveAccountStatusUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    status: Literal["paused", "archived"]
+    status: Literal["paused", "archived"] | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def require_change(self) -> Self:
+        if self.status is None and self.name is None:
+            raise ValueError("at least one live account field is required")
+        return self
 
 
 class LiveAccountArmRequest(BaseModel):

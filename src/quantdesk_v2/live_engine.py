@@ -21,6 +21,7 @@ from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings
+from .market_config import tradfi_symbols
 from .paper_engine import _exit_levels, _strategy_signal
 from .security import CredentialCipher, SecurityError
 
@@ -61,6 +62,29 @@ def _json_object(value: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _strategy_universe(config: dict[str, Any]) -> list[str]:
+    """Return the server-owned paper universe, narrowed only by live preflight."""
+    universe = tradfi_symbols()
+    eligible = config.get("eligible_symbols")
+    if not isinstance(eligible, list):
+        return universe
+    eligible_set = {str(value).upper() for value in eligible}
+    return [symbol for symbol in universe if symbol in eligible_set]
+
+
+def _strategy_position_side(position_mode: str, direction: int) -> str:
+    if position_mode == "hedge":
+        return "LONG" if direction > 0 else "SHORT"
+    return "BOTH"
+
+
+def _position_key(position: dict[str, Any]) -> tuple[str, str]:
+    symbol = str(position.get("symbol") or "").upper()
+    raw_side = str(position.get("position_side") or "BOTH").upper()
+    position_side = raw_side if raw_side in {"BOTH", "LONG", "SHORT"} else "BOTH"
+    return symbol, position_side
 
 
 def _active_accounts(account_id: int | None = None) -> list[dict[str, Any]]:
@@ -113,6 +137,9 @@ def _safe_response(payload: dict[str, Any]) -> dict[str, Any]:
         "status",
         "type",
         "side",
+        "positionSide",
+        "reduceOnly",
+        "closePosition",
         "avgPrice",
         "origQty",
         "executedQty",
@@ -134,6 +161,7 @@ def _create_intent(
     symbol: str,
     action: str,
     side: str,
+    position_side: str,
     order_type: str,
     quantity: Decimal | None,
     request_json: dict[str, Any],
@@ -142,8 +170,9 @@ def _create_intent(
     created = store.execute(
         """INSERT IGNORE INTO live_order_intents(
                public_id,user_id,live_account_id,deployment_id,signal_key,client_order_id,
-               symbol,action,side,order_type,quantity,status,request_json,created_at,updated_at
-           ) VALUES(UUID(),?,?,?,?,?,?,?,?,?,?,'created',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""",
+               symbol,action,side,position_side,order_type,quantity,status,request_json,
+               created_at,updated_at
+           ) VALUES(UUID(),?,?,?,?,?,?,?,?,?,?,?,'created',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""",
         (
             account["user_id"],
             account["id"],
@@ -153,6 +182,7 @@ def _create_intent(
             symbol,
             action,
             side,
+            position_side,
             order_type,
             quantity,
             json.dumps(request_json, ensure_ascii=False),
@@ -220,6 +250,7 @@ def _place_market(
     symbol: str,
     action: str,
     side: str,
+    position_side: str,
     quantity: Decimal,
     reduce_only: bool,
 ) -> dict[str, Any] | None:
@@ -231,11 +262,13 @@ def _place_market(
         symbol=symbol,
         action=action,
         side=side,
+        position_side=position_side,
         order_type="MARKET",
         quantity=quantity,
         request_json={
             "symbol": symbol,
             "side": side,
+            "position_side": position_side,
             "type": "MARKET",
             "quantity": format(quantity, "f"),
             "reduce_only": reduce_only,
@@ -251,6 +284,7 @@ def _place_market(
             side=side,  # type: ignore[arg-type]
             quantity=quantity,
             client_order_id=intent["client_order_id"],
+            position_side=position_side,  # type: ignore[arg-type]
             reduce_only=reduce_only,
         )
     except BinanceAccountClientError as exc:
@@ -273,9 +307,18 @@ def _place_market(
                 intent["id"], account["user_id"], status="rejected", error_code=exc.category
             )
             return None
-    order_status = str(response.get("status") or "submitted").upper()
-    local_status = "filled" if order_status == "FILLED" else "submitted"
-    _update_intent(intent["id"], account["user_id"], status=local_status, response=response)
+    order_status = str(response.get("status") or "").upper()
+    if order_status != "FILLED":
+        _update_intent(
+            intent["id"],
+            account["user_id"],
+            status="unknown",
+            response=response,
+            error_code="unexpected_order_status",
+        )
+        _fail_account(account, "order_state_unknown")
+        return None
+    _update_intent(intent["id"], account["user_id"], status="filled", response=response)
     return response
 
 
@@ -286,6 +329,8 @@ def _place_protection(
     *,
     symbol: str,
     side: str,
+    position_side: str,
+    quantity: Decimal | None,
     signal_time: int,
     stop: Decimal,
     target: Decimal,
@@ -297,21 +342,27 @@ def _place_protection(
         ("stop", "STOP_MARKET", stop),
         ("take_profit", "TAKE_PROFIT_MARKET", target),
     ):
-        signal_key = f"live:{account['deployment_id']}:{symbol}:{signal_time}:{action}"
+        signal_key = (
+            f"live:{account['deployment_id']}:{symbol}:{position_side}:"
+            f"{signal_time}:{action}"
+        )
         intent = _create_intent(
             account,
             signal_key=signal_key,
             symbol=symbol,
             action=action,
             side=side,
+            position_side=position_side,
             order_type=order_type,
-            quantity=None,
+            quantity=quantity,
             request_json={
                 "symbol": symbol,
                 "side": side,
+                "position_side": position_side,
                 "type": order_type,
                 "stop_price": format(trigger, "f"),
-                "close_position": True,
+                "quantity": format(quantity, "f") if quantity is not None else None,
+                "close_position": quantity is None,
                 "working_type": "MARK_PRICE",
             },
         )
@@ -326,6 +377,8 @@ def _place_protection(
                 order_type=order_type,  # type: ignore[arg-type]
                 stop_price=trigger,
                 client_order_id=intent["client_order_id"],
+                position_side=position_side,  # type: ignore[arg-type]
+                quantity=quantity,
             )
         except BinanceAccountClientError as exc:
             if exc.category in {"timeout", "network", "upstream"}:
@@ -370,15 +423,19 @@ def _place_protection(
 
 
 def _cancel_protection(
-    account: dict[str, Any], api_key: str, api_secret: str, symbol: str
+    account: dict[str, Any],
+    api_key: str,
+    api_secret: str,
+    symbol: str,
+    position_side: str,
 ) -> None:
     if _trading_client is None:
         return
     rows = store.query(
         """SELECT id,client_order_id FROM live_order_intents
-           WHERE user_id=? AND live_account_id=? AND symbol=?
+           WHERE user_id=? AND live_account_id=? AND symbol=? AND position_side=?
              AND action IN ('stop','take_profit') AND status='submitted'""",
-        (account["user_id"], account["id"], symbol),
+        (account["user_id"], account["id"], symbol, position_side),
     )
     for row in rows:
         try:
@@ -394,25 +451,43 @@ def _cancel_protection(
                 _fail_account(account, "protective_cancel_failed")
 
 
-def _managed_open(account: dict[str, Any], symbol: str) -> bool:
+def _managed_positions(account: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
     rows = store.query(
-        """SELECT action,status FROM live_order_intents
-           WHERE user_id=? AND live_account_id=? AND symbol=?
-             AND action IN ('open','close') AND status IN ('filled','submitted')
-           ORDER BY id DESC LIMIT 1""",
-        (account["user_id"], account["id"], symbol),
+        """SELECT id,symbol,position_side,action,status,quantity FROM live_order_intents
+           WHERE user_id=? AND live_account_id=?
+             AND action IN ('open','close') AND status='filled'
+           ORDER BY id DESC""",
+        (account["user_id"], account["id"]),
     )
-    return bool(rows and rows[0]["action"] == "open")
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw_row in rows:
+        row = dict(raw_row)
+        key = (str(row["symbol"]), str(row.get("position_side") or "BOTH"))
+        if key not in latest:
+            latest[key] = row
+    return {key: row for key, row in latest.items() if row["action"] == "open"}
 
 
-def _protection_count(account: dict[str, Any], symbol: str) -> int:
+def _managed_open(
+    account: dict[str, Any], symbol: str, position_side: str
+) -> dict[str, Any] | None:
+    return _managed_positions(account).get((symbol, position_side))
+
+
+def _protection_counts(account: dict[str, Any]) -> dict[tuple[str, str], int]:
     rows = store.query(
-        """SELECT COUNT(*) AS total FROM live_order_intents
-           WHERE user_id=? AND live_account_id=? AND symbol=?
-             AND action IN ('stop','take_profit') AND status='submitted'""",
-        (account["user_id"], account["id"], symbol),
+        """SELECT symbol,position_side,COUNT(*) AS total FROM live_order_intents
+           WHERE user_id=? AND live_account_id=?
+             AND action IN ('stop','take_profit') AND status='submitted'
+           GROUP BY symbol,position_side""",
+        (account["user_id"], account["id"]),
     )
-    return int(rows[0]["total"] or 0) if rows else 0
+    return {
+        (str(row["symbol"]), str(row.get("position_side") or "BOTH")): int(
+            row["total"] or 0
+        )
+        for row in rows
+    }
 
 
 def _close_position(
@@ -421,11 +496,20 @@ def _close_position(
     if _trading_client is None:
         return
     symbol = str(position["symbol"])
+    position_side = str(position.get("position_side") or "BOTH").upper()
+    managed = _managed_open(account, symbol, position_side)
+    if managed is None:
+        return
     rules = _trading_client.symbol_rules(symbol)
-    quantity = rules.quantity(Decimal(str(position["amt"])))
-    _cancel_protection(account, api_key, api_secret, symbol)
+    actual_quantity = Decimal(str(position["amt"]))
+    managed_quantity = Decimal(str(managed.get("quantity") or actual_quantity))
+    quantity = rules.quantity(min(actual_quantity, managed_quantity))
+    _cancel_protection(account, api_key, api_secret, symbol, position_side)
     side = "SELL" if position["side"] == "long" else "BUY"
-    signal_key = f"live:{account['deployment_id']}:{symbol}:close:{reason}:{int(time.time()) // 60}"
+    signal_key = (
+        f"live:{account['deployment_id']}:{symbol}:{position_side}:close:"
+        f"{reason}:{int(time.time()) // 60}"
+    )
     response = _place_market(
         account,
         api_key,
@@ -434,8 +518,9 @@ def _close_position(
         symbol=symbol,
         action="close",
         side=side,
+        position_side=position_side,
         quantity=quantity,
-        reduce_only=True,
+        reduce_only=position_side == "BOTH",
     )
     if response is None:
         _fail_account(account, "position_close_failed")
@@ -456,6 +541,8 @@ def _open_position(
     if _trading_client is None:
         return
     config = account["config_json"]
+    position_mode = str(config.get("position_mode") or "one_way")
+    position_side = _strategy_position_side(position_mode, direction)
     leverage = max(1, min(int(config.get("leverage", 3)), 20))
     rules = _trading_client.symbol_rules(symbol)
     available = Decimal(str(snapshot.available_balance))
@@ -496,6 +583,7 @@ def _open_position(
         symbol=symbol,
         action="open",
         side=side,
+        position_side=position_side,
         quantity=quantity,
         reduce_only=False,
     )
@@ -511,7 +599,12 @@ def _open_position(
             account,
             api_key,
             api_secret,
-            {"symbol": symbol, "amt": float(quantity), "side": "long" if direction > 0 else "short"},
+            {
+                "symbol": symbol,
+                "amt": float(quantity),
+                "side": "long" if direction > 0 else "short",
+                "position_side": position_side,
+            },
             "missing_protection",
         )
         _fail_account(account, "missing_protection")
@@ -524,6 +617,8 @@ def _open_position(
         api_secret,
         symbol=symbol,
         side=close_side,
+        position_side=position_side,
+        quantity=quantity if position_side != "BOTH" else None,
         signal_time=signal_time,
         stop=stop,
         target=target,
@@ -532,7 +627,12 @@ def _open_position(
             account,
             api_key,
             api_secret,
-            {"symbol": symbol, "amt": float(quantity), "side": "long" if direction > 0 else "short"},
+            {
+                "symbol": symbol,
+                "amt": float(quantity),
+                "side": "long" if direction > 0 else "short",
+                "position_side": position_side,
+            },
             "protection_failed",
         )
         _fail_account(account, "protection_failed")
@@ -554,30 +654,39 @@ def _tick_account(account: dict[str, Any]) -> None:
         _fail_account(account, "portfolio_margin_unsupported")
         return
     config = account["config_json"]
-    symbols = [str(value) for value in config.get("symbols", [])][:5]
-    positions = {str(item["symbol"]): item for item in snapshot.positions}
-    max_positions = max(1, min(int(config.get("max_positions", 1)), 5))
+    configured_mode = str(config.get("position_mode") or "one_way")
+    current_mode = _trading_client.position_mode(api_key, api_secret)
+    if current_mode != configured_mode:
+        _fail_account(account, "position_mode_changed")
+        return
+    symbols = _strategy_universe(config)
+    positions = {_position_key(item): item for item in snapshot.positions}
+    managed = _managed_positions(account)
+    protection_counts = _protection_counts(account)
+    max_positions = max(1, min(int(config.get("max_positions", 1)), 20))
 
-    for symbol in symbols:
-        position = positions.get(symbol)
+    for key in managed:
+        symbol, position_side = key
+        if symbol not in symbols:
+            continue
+        position = positions.get(key)
         if position is None:
-            if _managed_open(account, symbol):
-                _cancel_protection(account, api_key, api_secret, symbol)
+            _cancel_protection(account, api_key, api_secret, symbol, position_side)
             continue
-        if not _managed_open(account, symbol):
-            continue
-        if _protection_count(account, symbol) != 2:
+        if protection_counts.get(key, 0) != 2:
             _close_position(account, api_key, api_secret, position, "protection_missing")
             _fail_account(account, "protection_missing")
             return
         direction, _, _, signal_time = _strategy_signal(account, symbol)
-        side = 1 if position["side"] == "long" else -1
+        side = 1 if position_side == "LONG" or position["side"] == "long" else -1
         if signal_time is not None and direction == -side:
             _close_position(account, api_key, api_secret, position, "strategy_reversal")
 
     snapshot = _account_service.account(api_key, api_secret, force_refresh=True)
-    positions = {str(item["symbol"]): item for item in snapshot.positions}
-    if len(positions) >= max_positions:
+    positions = {_position_key(item): item for item in snapshot.positions}
+    managed = _managed_positions(account)
+    managed_position_count = sum(1 for key in positions if key in managed)
+    if managed_position_count >= max_positions:
         return
     symbol_set = set(symbols)
     prices = {
@@ -585,8 +694,9 @@ def _tick_account(account: dict[str, Any]) -> None:
         for row in store.query("SELECT symbol,price FROM ticker WHERE price IS NOT NULL")
         if row["symbol"] in symbol_set
     }
+    occupied_symbols = {key[0] for key in positions}
     for symbol in symbols:
-        if len(positions) >= max_positions or symbol in positions:
+        if managed_position_count >= max_positions or symbol in occupied_symbols:
             continue
         price = prices.get(symbol)
         if price is None or not math.isfinite(price) or price <= 0:

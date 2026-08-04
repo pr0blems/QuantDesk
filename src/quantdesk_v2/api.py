@@ -27,6 +27,7 @@ from .binance_performance import (
 )
 from .database import get_db
 from .dependencies import get_current_user
+from .market_config import TRADFI_UNIVERSE_KEY, tradfi_symbols
 from .models import (
     AiModelConfig,
     AuditLog,
@@ -60,6 +61,7 @@ from .schemas import (
     HealthOut,
     LiveAccountArmRequest,
     LiveAccountCreateRequest,
+    LiveAccountStrategyUpdate,
     LiveAccountStatusUpdate,
     LoginRequest,
     LogoutRequest,
@@ -839,9 +841,9 @@ def binance_account_summary(
         db.execute(
             text(
                 """INSERT INTO positions(
-                       user_id,symbol,amt,side,entry_price,mark_price,upnl,leverage,ts
+                       user_id,symbol,position_side,amt,side,entry_price,mark_price,upnl,leverage,ts
                    ) VALUES(
-                       :user_id,:symbol,:amt,:side,:entry_price,:mark_price,:upnl,:leverage,:ts
+                       :user_id,:symbol,:position_side,:amt,:side,:entry_price,:mark_price,:upnl,:leverage,:ts
                    )"""
             ),
             [{**position, "user_id": user.id} for position in snapshot.positions],
@@ -1699,7 +1701,10 @@ def update_paper_account_status(
         )
         if int(open_count or 0):
             raise HTTPException(status_code=409, detail="close positions before archiving")
-    account.status = payload.status
+    if payload.status is not None:
+        account.status = payload.status
+    if payload.name is not None:
+        account.name = payload.name
     deployment = db.scalar(
         select(StrategyDeployment).where(
             StrategyDeployment.user_id == user.id,
@@ -1708,14 +1713,22 @@ def update_paper_account_status(
         )
     )
     if deployment is not None:
-        deployment.status = {
-            "active": "running",
-            "paused": "paused",
-            "archived": "stopped",
-        }[payload.status]
+        if payload.status is not None:
+            deployment.status = {
+                "active": "running",
+                "paused": "paused",
+                "archived": "stopped",
+            }[payload.status]
+        if payload.name is not None:
+            deployment.name = payload.name
         deployment.updated_at = utcnow()
-    _audit(db, request, "paper.account.status", user.id, "paper_account", account.public_id)
-    db.commit()
+    action = "paper.account.rename" if payload.name is not None else "paper.account.status"
+    _audit(db, request, action, user.id, "paper_account", account.public_id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="paper account name already exists") from exc
     db.refresh(account)
     return _paper_account_out(account)
 
@@ -1796,11 +1809,17 @@ def list_live_accounts(
         .order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
     ).all()
     enabled = request.app.state.settings.binance_live_trading_enabled
+    universe = tradfi_symbols()
     return {
         "items": [_live_account_out(account, enabled=enabled) for account in accounts],
         "system_enabled": enabled,
         "credentials_configured": user.binance_credentials_configured,
         "trade_permission_requested": _binance_permissions_include_trade(user),
+        "universe": {
+            "key": TRADFI_UNIVERSE_KEY,
+            "count": len(universe),
+            "label": "Binance TradFi 股票及传统资产合约池",
+        },
     }
 
 
@@ -1840,9 +1859,14 @@ def create_live_account(
     )
     if revision is None:
         raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+    universe = tradfi_symbols()
+    if not universe:
+        raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
     risk = dict(strategy.risk_defaults_json or {})
     config = {
-        "symbols": payload.symbols,
+        "symbols": universe,
+        "universe_key": TRADFI_UNIVERSE_KEY,
+        "universe_count": len(universe),
         "leverage": payload.leverage,
         "max_positions": payload.max_positions,
         "position_size_pct": payload.position_size_pct,
@@ -1887,7 +1911,10 @@ def create_live_account(
             target_account_id=account.id,
             name=account.name,
             status="paused",
-            universe_override_json={"symbols": payload.symbols},
+            universe_override_json={
+                "universe_key": TRADFI_UNIVERSE_KEY,
+                "symbols": universe,
+            },
             risk_override_json={
                 "leverage": payload.leverage,
                 "max_positions": payload.max_positions,
@@ -1948,7 +1975,9 @@ def arm_live_account(
     encrypted_key = user.binance_api_key_encrypted or ""
     encrypted_secret = user.binance_api_secret_encrypted or ""
     credential_version = user.binance_key_version
-    symbols = list((account.config_json or {}).get("symbols") or [])
+    symbols = tradfi_symbols()
+    if not symbols:
+        raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
     db.rollback()
     cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
     try:
@@ -1960,31 +1989,58 @@ def arm_live_account(
         if snapshot.account_type != "UM_FUTURE":
             raise HTTPException(
                 status_code=409,
-                detail="portfolio margin live execution is not supported by this risk model",
+                detail="实盘启用失败：当前风险模型不支持 Binance 统一账户，请使用标准 USD-M 合约账户。",
             )
-        if request.app.state.binance_trading_client.position_mode(api_key, api_secret) != "one_way":
-            raise HTTPException(
-                status_code=409, detail="switch Binance position mode to one-way before arming"
-            )
+        position_mode = request.app.state.binance_trading_client.position_mode(
+            api_key, api_secret
+        )
+        eligible_symbols: list[str] = []
         for symbol in symbols:
-            request.app.state.binance_trading_client.symbol_rules(symbol)
+            try:
+                request.app.state.binance_trading_client.symbol_rules(symbol)
+            except BinanceAccountClientError as exc:
+                if exc.category == "unsupported_symbol":
+                    continue
+                raise
+            eligible_symbols.append(symbol)
+        if not eligible_symbols:
+            raise HTTPException(
+                status_code=409,
+                detail="实盘启用失败：当前 TradFi 品种池没有可交易的 Binance USD-M 合约。",
+            )
     except SecurityError:
         raise HTTPException(status_code=409, detail="Binance credentials cannot be decrypted") from None
     except BinanceAccountClientError as exc:
+        reason = {
+            "authentication": "API 密钥认证失败或没有合约交易权限",
+            "timestamp": "本机时间与 Binance 服务器时间不同步",
+            "rate_limit": "Binance 请求频率受限",
+            "timeout": "连接 Binance 超时",
+            "network": "无法连接 Binance",
+            "upstream": "Binance 服务暂时异常",
+            "invalid_response": "Binance 返回了无法识别的数据",
+            "rejected": "Binance 拒绝了预检请求",
+        }.get(exc.category, exc.category)
         raise HTTPException(
-            status_code=409, detail=f"Binance live preflight failed: {exc.category}"
+            status_code=409, detail=f"实盘启用失败：{reason}。"
         ) from None
-    occupied = {str(item["symbol"]) for item in snapshot.positions}.intersection(symbols)
-    if occupied:
-        raise HTTPException(
-            status_code=409,
-            detail="configured symbols already have Binance positions; close them before arming",
-        )
-
     account = _live_account_record(db, user.id, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="live account not found")
     account.status = "active"
+    account_config = dict(account.config_json or {})
+    account_config.update(
+        {
+            "symbols": symbols,
+            "universe_key": TRADFI_UNIVERSE_KEY,
+            "universe_count": len(symbols),
+            "eligible_symbols": eligible_symbols,
+            "eligible_count": len(eligible_symbols),
+            "position_mode": position_mode,
+            "preexisting_position_count": len(snapshot.positions),
+        }
+    )
+    account.config_json = account_config
     account.credential_version = credential_version
     account.armed_at = utcnow()
     account.last_error_code = None
@@ -1997,6 +2053,12 @@ def arm_live_account(
     )
     if deployment is None:
         raise HTTPException(status_code=409, detail="live deployment is unavailable")
+    deployment.universe_override_json = {
+        "universe_key": TRADFI_UNIVERSE_KEY,
+        "symbols": symbols,
+        "eligible_symbols": eligible_symbols,
+        "position_mode": position_mode,
+    }
     deployment.status = "running"
     deployment.started_at = utcnow()
     deployment.last_error_code = None
@@ -2031,7 +2093,10 @@ def update_live_account_status(
                 status_code=409,
                 detail="pause deployment and resolve managed orders before archiving",
             )
-    account.status = payload.status
+    if payload.status is not None:
+        account.status = payload.status
+    if payload.name is not None:
+        account.name = payload.name
     if payload.status == "paused":
         account.last_error_code = None
     deployment = db.scalar(
@@ -2042,9 +2107,152 @@ def update_live_account_status(
         )
     )
     if deployment is not None:
-        deployment.status = "paused" if payload.status == "paused" else "stopped"
+        if payload.status is not None:
+            deployment.status = "paused" if payload.status == "paused" else "stopped"
+        if payload.name is not None:
+            deployment.name = payload.name
         deployment.updated_at = utcnow()
-    _audit(db, request, "live.account.status", user.id, "live_account", account.public_id)
+    action = "live.account.rename" if payload.name is not None else "live.account.status"
+    _audit(db, request, action, user.id, "live_account", account.public_id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="live account name already exists") from exc
+    db.refresh(account)
+    return _live_account_out(
+        account, enabled=request.app.state.settings.binance_live_trading_enabled
+    )
+
+
+@router.put("/live/accounts/{account_id}/strategy")
+def update_live_account_strategy(
+    account_id: str,
+    payload: LiveAccountStrategyUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Replace the frozen strategy/risk snapshot without executing any exchange action."""
+    _require_expected_user(request, user)
+    account = _live_account_record(db, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="live account not found")
+    if account.status != "paused":
+        raise HTTPException(
+            status_code=409,
+            detail="pause the live deployment before adjusting its strategy",
+        )
+    pending = db.scalar(
+        select(func.count(LiveOrderIntent.id)).where(
+            LiveOrderIntent.user_id == user.id,
+            LiveOrderIntent.live_account_id == account.id,
+            LiveOrderIntent.status.in_(["created", "submitted", "unknown"]),
+        )
+    )
+    if int(pending or 0):
+        raise HTTPException(
+            status_code=409,
+            detail="resolve managed orders before adjusting the live strategy",
+        )
+    strategy = get_user_strategy(db, user.id, payload.strategy_id)
+    if (
+        strategy is None
+        or strategy.status != "active"
+        or strategy.lifecycle_status != "published"
+    ):
+        raise HTTPException(status_code=404, detail="published active strategy not found")
+    revision = db.scalar(
+        select(StrategyRevision).where(
+            StrategyRevision.user_strategy_id == strategy.id,
+            StrategyRevision.user_id == user.id,
+            StrategyRevision.version == strategy.version,
+        )
+    )
+    if revision is None:
+        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+    universe = tradfi_symbols()
+    if not universe:
+        raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
+
+    risk = dict(strategy.risk_defaults_json or {})
+    config = dict(account.config_json or {})
+    config.update(
+        {
+            "symbols": universe,
+            "universe_key": TRADFI_UNIVERSE_KEY,
+            "universe_count": len(universe),
+            "leverage": payload.leverage,
+            "max_positions": payload.max_positions,
+            "position_size_pct": payload.position_size_pct,
+            "margin_cap": payload.margin_cap,
+            "stop_loss_pct": max(0.1, min(float(risk.get("stop_loss_pct", 3)), 20)),
+            "take_profit_pct": max(0.1, min(float(risk.get("take_profit_pct", 5)), 50)),
+            "max_holding_bars": max(
+                0, min(int(risk.get("max_holding_bars", 12)), 1_000)
+            ),
+        }
+    )
+    for stale_key in (
+        "eligible_symbols",
+        "eligible_count",
+        "position_mode",
+        "preexisting_position_count",
+    ):
+        config.pop(stale_key, None)
+
+    account.strategy_id = strategy.id
+    account.config_json = config
+    account.strategy_snapshot_json = {
+        "public_id": strategy.public_id,
+        "name": strategy.name,
+        "engine_key": strategy.engine_key,
+        "strategy_kind": strategy.strategy_kind,
+        "version": strategy.version,
+        "spec_schema_version": strategy.spec_schema_version,
+        "spec": strategy.spec_json,
+        "spec_hash": strategy.spec_hash,
+        "parameters": strategy.parameters_json,
+        "risk_defaults": strategy.risk_defaults_json,
+    }
+    account.armed_at = None
+    account.last_error_code = None
+
+    deployment = db.scalar(
+        select(StrategyDeployment).where(
+            StrategyDeployment.user_id == user.id,
+            StrategyDeployment.mode == "live",
+            StrategyDeployment.target_account_id == account.id,
+        )
+    )
+    if deployment is None:
+        raise HTTPException(status_code=409, detail="live deployment is unavailable")
+    deployment.strategy_id = strategy.id
+    deployment.strategy_revision_id = revision.id
+    deployment.status = "paused"
+    deployment.universe_override_json = {
+        "universe_key": TRADFI_UNIVERSE_KEY,
+        "symbols": universe,
+    }
+    deployment.risk_override_json = {
+        "leverage": payload.leverage,
+        "max_positions": payload.max_positions,
+        "position_size_pct": payload.position_size_pct,
+        "margin_cap": payload.margin_cap,
+    }
+    deployment.runtime_state_json = {}
+    deployment.last_evaluated_bar_time = None
+    deployment.last_error_code = None
+    deployment.started_at = None
+    deployment.updated_at = utcnow()
+    _audit(
+        db,
+        request,
+        "live.account.strategy.update",
+        user.id,
+        "live_account",
+        account.public_id,
+    )
     db.commit()
     db.refresh(account)
     return _live_account_out(
@@ -2084,10 +2292,13 @@ def live_trading_dashboard(
             "symbol": item.symbol,
             "action": item.action,
             "side": item.side,
+            "position_side": item.position_side,
             "order_type": item.order_type,
             "quantity": float(item.quantity) if item.quantity is not None else None,
             "status": item.status,
             "error_code": item.error_code,
+            "request": item.request_json or {},
+            "response": item.response_json or {},
             "submitted_at": item.submitted_at,
             "created_at": item.created_at,
         }

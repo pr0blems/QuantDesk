@@ -97,6 +97,8 @@ def _account_positions(value: Any, fallback_ms: int) -> tuple[dict[str, Any], ..
         side = "short" if side_value == "SHORT" or amount < 0 else "long"
         entry_price = _decimal_first(item, ("entryPrice",), required=False)
         mark_price = _decimal_first(item, ("markPrice",), required=False)
+        break_even_price = _decimal_first(item, ("breakEvenPrice",), required=False)
+        liquidation_price = _decimal_first(item, ("liquidationPrice",), required=False)
         notional = _decimal_first(item, ("notional",), required=False)
         unrealized_pnl = _decimal_first(
             item,
@@ -108,8 +110,15 @@ def _account_positions(value: Any, fallback_ms: int) -> tuple[dict[str, Any], ..
                 "symbol": item["symbol"].strip().upper()[:32],
                 "amt": float(abs(amount)),
                 "side": side,
+                "position_side": side_value if side_value in {"LONG", "SHORT"} else "BOTH",
                 "entry_price": float(entry_price) if entry_price is not None else None,
                 "mark_price": float(mark_price) if mark_price is not None else None,
+                "break_even_price": (
+                    float(break_even_price) if break_even_price is not None else None
+                ),
+                "liquidation_price": (
+                    float(liquidation_price) if liquidation_price is not None else None
+                ),
                 "notional": float(abs(notional)) if notional is not None else None,
                 "upnl": float(unrealized_pnl) if unrealized_pnl is not None else None,
                 "leverage": _position_leverage(item),

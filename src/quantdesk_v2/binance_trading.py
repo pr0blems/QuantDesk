@@ -27,6 +27,14 @@ from .binance_client import (
 
 TradeTransport = Callable[[str, str, dict[str, str], float], tuple[int, bytes]]
 OrderSide = Literal["BUY", "SELL"]
+PositionSide = Literal["BOTH", "LONG", "SHORT"]
+MAX_EXCHANGE_INFO_BYTES = 2 * 1024 * 1024
+
+
+def _trade_response_limit(path: str) -> int:
+    if path == "/fapi/v1/exchangeInfo":
+        return MAX_EXCHANGE_INFO_BYTES
+    return MAX_RESPONSE_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +74,9 @@ def _trade_transport(
     try:
         connection.request(method, path, headers=headers)
         response = connection.getresponse()
-        body = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(body) > MAX_RESPONSE_BYTES:
+        response_limit = _trade_response_limit(parsed.path)
+        body = response.read(response_limit + 1)
+        if len(body) > response_limit:
             raise BinanceAccountClientError("invalid_response")
         return response.status, body
     finally:
@@ -151,11 +160,16 @@ class BinanceUsdMTradingClient:
         side: OrderSide,
         quantity: Decimal,
         client_order_id: str,
+        position_side: PositionSide = "BOTH",
         reduce_only: bool = False,
     ) -> dict[str, Any]:
+        normalized_position_side = self._position_side(position_side)
+        if reduce_only and normalized_position_side != "BOTH":
+            raise ValueError("reduceOnly cannot be used in Hedge Mode")
         params: list[tuple[str, str | int]] = [
             ("symbol", self._symbol(symbol)),
             ("side", self._side(side)),
+            ("positionSide", normalized_position_side),
             ("type", "MARKET"),
             ("quantity", self._decimal(quantity)),
             ("newClientOrderId", self._client_order_id(client_order_id)),
@@ -177,9 +191,19 @@ class BinanceUsdMTradingClient:
         order_type: Literal["STOP_MARKET", "TAKE_PROFIT_MARKET"],
         stop_price: Decimal,
         client_order_id: str,
+        position_side: PositionSide = "BOTH",
+        quantity: Decimal | None = None,
     ) -> dict[str, Any]:
         if order_type not in {"STOP_MARKET", "TAKE_PROFIT_MARKET"}:
             raise ValueError("unsupported protective order type")
+        normalized_position_side = self._position_side(position_side)
+        if normalized_position_side != "BOTH" and quantity is None:
+            raise ValueError("Hedge Mode protection requires an explicit quantity")
+        close_parameters: tuple[tuple[str, str], ...]
+        if quantity is None:
+            close_parameters = (("closePosition", "true"),)
+        else:
+            close_parameters = (("quantity", self._decimal(quantity)),)
         return self._object(
             self._signed(
                 "POST",
@@ -190,9 +214,10 @@ class BinanceUsdMTradingClient:
                     ("algoType", "CONDITIONAL"),
                     ("symbol", self._symbol(symbol)),
                     ("side", self._side(side)),
+                    ("positionSide", normalized_position_side),
                     ("type", order_type),
                     ("triggerPrice", self._decimal(stop_price)),
-                    ("closePosition", "true"),
+                    *close_parameters,
                     ("workingType", "MARK_PRICE"),
                     ("priceProtect", "true"),
                     ("clientAlgoId", self._client_order_id(client_order_id)),
@@ -408,6 +433,13 @@ class BinanceUsdMTradingClient:
         normalized = str(value).upper()
         if normalized not in {"BUY", "SELL"}:
             raise ValueError("invalid Binance order side")
+        return normalized  # type: ignore[return-value]
+
+    @staticmethod
+    def _position_side(value: str) -> PositionSide:
+        normalized = str(value).upper()
+        if normalized not in {"BOTH", "LONG", "SHORT"}:
+            raise ValueError("invalid Binance position side")
         return normalized  # type: ignore[return-value]
 
     @staticmethod

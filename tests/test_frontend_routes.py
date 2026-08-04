@@ -95,6 +95,15 @@ def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     live_asset = client.get("/assets/live.js")
     assert live_asset.status_code == 200
     assert "REAL FUNDS" in live_asset.text
+    assert "与模拟盘完全相同" in live_asset.text
+    assert "live-symbols" not in live_asset.text
+    assert "BTCUSDT" not in live_asset.text
+    assert 'id="live-delete"' in live_asset.text
+    assert 'id="live-rename"' in live_asset.text
+    paper_asset = client.get("/assets/paper.js")
+    assert paper_asset.status_code == 200
+    assert 'id="paper-delete"' in paper_asset.text
+    assert 'id="paper-rename"' in paper_asset.text
     assert 'href="/live" data-panel-target="live"' in client.get("/").text
     assert docs.status_code == 200
     assert api_missing.status_code == 404
