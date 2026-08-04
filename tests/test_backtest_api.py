@@ -11,11 +11,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from quantdesk_v2 import api
-from quantdesk_v2.backtest import BacktestUnavailable
+from quantdesk_v2.backtest import BacktestRepository, BacktestUnavailable
 from quantdesk_v2.config import Settings
 from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
-from quantdesk_v2.models import AuditLog, BacktestRun, BacktestTrade, User
+from quantdesk_v2.models import AuditLog, BacktestRun, BacktestTrade, User, UserStrategy
 
 
 class FakeBacktestRepository:
@@ -244,6 +244,70 @@ def backtest_payload() -> dict:
     }
 
 
+def test_catalog_keeps_symbols_without_local_history_for_on_demand_fetch() -> None:
+    catalog = api._catalog_response(
+        {
+            "strategies": [],
+            "symbols": [
+                {
+                    "symbol": "AAPLUSDT",
+                    "available": False,
+                    "timeframes": [],
+                }
+            ],
+            "timeframes": ["15m", "1h", "4h"],
+            "limits": {},
+        }
+    )
+
+    assert catalog["symbols"] == [
+        {
+            "symbol": "AAPLUSDT",
+            "available": False,
+            "timeframes": [],
+        }
+    ]
+    assert [item["value"] for item in catalog["timeframes"]] == ["15m", "1h", "4h"]
+
+
+def test_repository_fetches_and_persists_an_empty_local_range() -> None:
+    repository = object.__new__(BacktestRepository)
+    repository.symbol_set = {"AAPLUSDT"}
+    query_results = iter(
+        [
+            [{"bars": 0, "end_time": None}],
+            [{"bars": 0}],
+        ]
+    )
+    repository._query = lambda *_: next(query_results)
+    fetched_calls: list[tuple[str, str, int, int]] = []
+    repository.kline_fetcher = lambda symbol, timeframe, start_ms, end_ms: (
+        fetched_calls.append((symbol, timeframe, start_ms, end_ms))
+        or [(start_ms, 10.0, 12.0, 9.0, 11.0, 100.0)]
+    )
+    persisted: list[tuple[str, str, list[tuple]]] = []
+    repository._upsert_binance_klines = (
+        lambda symbol, timeframe, rows: persisted.append((symbol, timeframe, rows))
+    )
+
+    result = repository._ensure_klines_if_missing(
+        "AAPLUSDT", "15m", 1_700_000_000, 1_700_003_600
+    )
+
+    assert fetched_calls == [
+        ("AAPLUSDT", "15m", 1_700_000_000_000, 1_700_003_600_000)
+    ]
+    assert persisted and persisted[0][:2] == ("AAPLUSDT", "15m")
+    assert result == {
+        "source": "binance_fapi",
+        "symbol": "AAPLUSDT",
+        "timeframe": "15m",
+        "requested_start_ts": 1_700_000_000,
+        "requested_end_ts": 1_700_003_600,
+        "bars_fetched": 1,
+    }
+
+
 def test_backtest_endpoints_require_authentication(mysql_test_engine: Engine) -> None:
     client, _ = build_test_client(mysql_test_engine)
     with client:
@@ -336,7 +400,7 @@ def test_backtest_run_is_saved_audited_and_isolated_by_user(
             assert audit.resource_type == "backtest_run"
 
 
-def test_backtest_catalog_and_execution_use_current_users_database_strategy(
+def test_backtest_catalog_only_exposes_current_users_full_strategies(
     monkeypatch, mysql_test_engine: Engine
 ) -> None:
     client, test_session = build_test_client(mysql_test_engine)
@@ -348,28 +412,22 @@ def test_backtest_catalog_and_execution_use_current_users_database_strategy(
         catalog_response = client.get("/api/v2/backtests/catalog", headers=headers)
         assert catalog_response.status_code == 200
         strategies = catalog_response.json()["strategies"]
-        assert len(strategies) == 20
-        assert any(item["name"] == "AI 模拟盘 ATR 趋势" for item in strategies)
-        strategy = next(item for item in strategies if item["name"] == "MA 金叉")
-        assert strategy["engine_key"] == "ma_cross"
-        assert strategy["id"] != "ma_cross"
-
-        payload = backtest_payload()
-        payload["strategy_id"] = strategy["id"]
-        payload["params"] = {
-            definition["key"]: definition["default"] for definition in strategy["params"]
-        }
-        created = client.post("/api/v2/backtests", headers=headers, json=payload)
-        assert created.status_code == 201
-        assert created.json()["run"]["strategy_id"] == strategy["id"]
-        assert created.json()["run"]["strategy_name"] == "MA 金叉"
-        assert repository.configs[-1]["strategy_id"] == "ma_cross"
+        assert len(strategies) == 1
+        assert strategies[0]["strategy_kind"] == "full_strategy"
+        assert strategies[0]["lifecycle_status"] == "published"
+        assert strategies[0]["name"] == "多周期趋势回踩延续"
 
         with test_session() as db:
-            saved = db.scalar(select(BacktestRun).where(BacktestRun.strategy_id == strategy["id"]))
-            assert saved is not None
-            assert saved.config_json["engine_key"] == "ma_cross"
-            assert saved.metadata_json["strategy"]["revision"] == 1
+            legacy = db.scalar(
+                select(UserStrategy).where(UserStrategy.name == "MA 金叉")
+            )
+            assert legacy is not None
+
+        payload = backtest_payload()
+        payload["strategy_id"] = legacy.public_id
+        rejected = client.post("/api/v2/backtests", headers=headers, json=payload)
+        assert rejected.status_code == 422
+        assert "full strategies" in rejected.json()["detail"]
 
 
 def test_full_strategy_uses_multitimeframe_repository_path(

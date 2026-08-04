@@ -4,13 +4,15 @@ import math
 import struct
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from quantdesk import binance_client, indicators, notify, ws_ticker
+from quantdesk_v2 import indicators, notify, ws_ticker
+from quantdesk_v2 import market_data_client as binance_client
 
 
 class _Response:
@@ -81,9 +83,61 @@ def test_binance_http_client_accepts_exact_https_origin(monkeypatch) -> None:
     ]
 
 
-def test_binance_redirect_and_error_output_cannot_escape_or_leak_signature(
+def test_binance_kline_range_is_paginated_and_only_returns_closed_bars(
     monkeypatch,
 ) -> None:
+    interval_ms = 15 * 60_000
+    start_ms = 1_700_000_100_000
+    aligned_start = start_ms - start_ms % interval_ms
+    rows = [
+        [aligned_start + index * interval_ms, "10", "12", "9", "11", "100"]
+        for index in range(3)
+    ]
+    calls: list[dict[str, list[str]]] = []
+
+    def get_page(url: str, **_):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        calls.append(query)
+        cursor = int(query["startTime"][0])
+        limit = int(query["limit"][0])
+        return [row for row in rows if row[0] >= cursor][:limit]
+
+    monkeypatch.setattr(binance_client, "_get", get_page)
+    monkeypatch.setattr(binance_client, "_BINANCE_KLINE_PAGE_SIZE", 2)
+    monkeypatch.setattr(
+        binance_client.time,
+        "time",
+        lambda: (rows[-1][0] + interval_ms * 2) / 1_000,
+    )
+
+    result = binance_client.fetch_klines_range(
+        "AAPLUSDT",
+        "15m",
+        start_ms,
+        rows[-1][0],
+    )
+
+    assert [row[0] for row in result] == [row[0] for row in rows]
+    assert len(calls) == 2
+    assert calls[1]["startTime"] == [str(rows[1][0] + interval_ms)]
+
+
+def test_binance_kline_range_rejects_unbounded_or_unsupported_requests() -> None:
+    with pytest.raises(ValueError, match="symbol"):
+        binance_client.fetch_klines_range("../AAPL", "15m", 0, 1)
+    with pytest.raises(ValueError, match="interval"):
+        binance_client.fetch_klines_range("AAPLUSDT", "5m", 0, 1)
+    with pytest.raises(ValueError, match="bar limit"):
+        binance_client.fetch_klines_range(
+            "AAPLUSDT",
+            "15m",
+            0,
+            10 * 15 * 60_000,
+            max_bars=2,
+        )
+
+
+def test_binance_redirect_cannot_escape_the_public_market_origin() -> None:
     handler = binance_client._BinanceRedirectHandler()
     with pytest.raises(ValueError, match="approved HTTPS origin"):
         handler.redirect_request(
@@ -96,32 +150,13 @@ def test_binance_redirect_and_error_output_cannot_escape_or_leak_signature(
         )
     with pytest.raises(ValueError, match="original HTTPS origin"):
         handler.redirect_request(
-            urllib.request.Request(
-                "https://papi.binance.com/papi/v1/um/positionRisk",
-                headers={"X-MBX-APIKEY": "unit-test-key"},
-            ),
+            urllib.request.Request("https://papi.binance.com/papi/v1/time"),
             None,
             302,
             "redirect",
             {},
             "https://fapi.binance.com/fapi/v1/positionRisk",
         )
-
-    def offline(*_, **__):
-        raise urllib.error.URLError("offline")
-
-    monkeypatch.setattr(binance_client._BINANCE_OPENER, "open", offline)
-    monkeypatch.setattr(binance_client.time, "sleep", lambda _: None)
-    with pytest.raises(RuntimeError) as raised:
-        binance_client._signed_get(
-            binance_client.PAPI,
-            "/papi/v1/um/positionRisk",
-            "unit-test-key",
-            "unit-test-secret",
-        )
-    message = str(raised.value)
-    assert "signature=" not in message
-    assert "unit-test-secret" not in message
 
 
 def test_indicator_outputs_and_keyword_compatibility() -> None:

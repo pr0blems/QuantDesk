@@ -7,7 +7,7 @@
   <title>QuantDesk V2 · 多用户量化交易平台</title>
   <link rel="manifest" href="/assets/manifest.json">
   <link rel="stylesheet" href="/assets/style.css?v=20260804-7">
-  <link rel="stylesheet" href="/assets/strategies.css?v=20260804-1">
+  <link rel="stylesheet" href="/assets/strategies.css?v=20260804-4">
 </head>
 <body>
   <div id="auth-boot" class="auth-boot" role="status" aria-live="polite" aria-label="正在恢复登录状态">
@@ -74,6 +74,7 @@
         <a class="nav-item" href="/overview" data-panel-target="overview"><span>概</span>工作台</a>
         <a class="nav-item active" href="/monitor" data-panel-target="monitor" aria-current="page"><span>监</span>合约监控</a>
         <a class="nav-item" href="/paper" data-panel-target="paper"><span>模</span>模拟盘</a>
+        <a class="nav-item" href="/live" data-panel-target="live"><span>实</span>实盘交易<i>风控</i></a>
         <a class="nav-item" href="/strategies" data-panel-target="strategies"><span>策</span>策略中心</a>
         <a class="nav-item" href="/backtest" data-panel-target="backtest"><span>测</span>数据回测</a>
         <a class="nav-item" href="/orders" data-panel-target="orders"><span>单</span>订单与持仓<i>只读</i></a>
@@ -103,6 +104,10 @@
 
         <section class="workspace-panel hidden" data-panel="paper">
           <paper-dashboard id="paper-dashboard"></paper-dashboard>
+        </section>
+
+        <section class="workspace-panel hidden" data-panel="live">
+          <live-dashboard id="live-dashboard"></live-dashboard>
         </section>
 
         <section class="workspace-panel hidden" data-panel="overview">
@@ -336,8 +341,9 @@
 
   <script src="/assets/monitor.js?v=20260804-2" defer></script>
   <script src="/assets/paper.js?v=20260804-2" defer></script>
-  <script src="/assets/strategies.js?v=20260804-1" defer></script>
-  <script src="/assets/backtest.js?v=20260803-3" defer></script>
-  <script src="/assets/app.js?v=20260804-6" defer></script>
+  <script src="/assets/live.js?v=20260804-2" defer></script>
+  <script src="/assets/strategies.js?v=20260804-4" defer></script>
+  <script src="/assets/backtest.js?v=20260804-6" defer></script>
+  <script src="/assets/app.js?v=20260804-7" defer></script>
 </body>
 </html>

@@ -11,8 +11,8 @@ from collections.abc import Collection
 
 from defusedxml import ElementTree as ET
 
-from . import store
-from .config_loader import settings
+from . import market_store as store
+from .market_config import settings
 
 RSS_ALLOWED_HOSTS = frozenset(
     {

@@ -213,7 +213,7 @@ def score_klines(kl):
 
 def combined_score(per_tf):
     """per_tf: {tf: (score, factors)} 按配置权重合成"""
-    from .config_loader import settings
+    from .market_config import settings
     w = settings["timeframe_weights"]
     num, den = 0.0, 0.0
     for tf, val in per_tf.items():

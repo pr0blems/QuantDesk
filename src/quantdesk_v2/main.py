@@ -16,6 +16,9 @@ from . import __version__
 from .admin import initialize_admin_runtime
 from .admin import router as admin_router
 from .api import router
+from .binance_client import BinanceAccountClient
+from .binance_service import BinanceAccountService
+from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings, get_settings
 from .database import build_engine, engine
 from .strategy_routes import router as strategy_router
@@ -24,6 +27,7 @@ FRONTEND_ROUTES = (
     "/login",
     "/monitor",
     "/paper",
+    "/live",
     "/overview",
     "/settings",
     "/strategies",
@@ -127,12 +131,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # The production ASGI app owns the market collectors and the
             # multi-account paper executor. Explicitly constructed apps are
             # used by tests/tools and must not start perpetual worker threads.
-            from quantdesk import engine as market_engine
-            from quantdesk import store as market_store
+            from . import live_engine, market_engine, market_store
 
             market_store.configure_engine(database_engine)
             initialize_admin_runtime(database_engine)
             market_engine.start()
+            live_engine.configure(
+                runtime_settings,
+                app.state.binance_service,
+                app.state.binance_trading_client,
+            )
+            live_engine.start()
         yield
 
     app = FastAPI(
@@ -144,6 +153,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = runtime_settings
     app.state.database_engine = database_engine
+    app.state.binance_service = BinanceAccountService(
+        BinanceAccountClient(
+            runtime_settings.binance_futures_base_url,
+            runtime_settings.binance_portfolio_base_url,
+            recv_window_ms=runtime_settings.binance_futures_recv_window_ms,
+            timeout_seconds=runtime_settings.binance_futures_timeout_seconds,
+        )
+    )
+    app.state.binance_trading_client = BinanceUsdMTradingClient(
+        runtime_settings.binance_futures_base_url,
+        recv_window_ms=runtime_settings.binance_futures_recv_window_ms,
+        timeout_seconds=runtime_settings.binance_futures_timeout_seconds,
+    )
     app.add_exception_handler(RequestValidationError, _safe_request_validation_error)
     app.add_middleware(
         TrustedHostMiddleware,

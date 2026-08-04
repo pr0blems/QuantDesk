@@ -105,7 +105,7 @@ class MonitorRepository:
 
     def _configure_market_store(self) -> None:
         """Point the in-process market modules at the shared MySQL engine."""
-        from quantdesk import store as market_store
+        from . import market_store
 
         market_store.configure_engine(self.engine)
 
@@ -326,7 +326,7 @@ class MonitorRepository:
     def report(self, symbol: str) -> dict[str, Any]:
         normalized = self._validate_symbol(symbol)
         with _REPORT_LOCK:
-            from quantdesk import report as market_report
+            from . import report as market_report
 
             self._configure_market_store()
             return market_report.build_report(normalized)
@@ -335,7 +335,7 @@ class MonitorRepository:
         self, user_id: int, account_id: int, timezone_offset_minutes: int = 0
     ) -> dict[str, Any]:
         with _REPORT_LOCK:
-            from quantdesk import paper as paper_engine
+            from . import paper_engine
 
             self._configure_market_store()
             return paper_engine.api_data(user_id, account_id, timezone_offset_minutes)
@@ -511,7 +511,7 @@ class MonitorRepository:
 
     def reset_paper(self, user_id: int, account_id: int) -> dict[str, Any]:
         with _REPORT_LOCK:
-            from quantdesk import paper as paper_engine
+            from . import paper_engine
 
             self._configure_market_store()
             paper_engine.reset(user_id, account_id)

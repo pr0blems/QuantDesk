@@ -315,6 +315,90 @@ def test_ai_preview_prefers_current_users_enabled_default_model(
         assert bob_key not in str(captured)
 
 
+def test_create_indicator_composition_persists_executable_strategy(
+    mysql_test_engine: Engine,
+) -> None:
+    client, session_factory = build_test_client(mysql_test_engine)
+    with client:
+        headers = register_and_login(client, "strategy-composer")
+        response = client.post(
+            "/api/v2/strategies",
+            headers=headers,
+            json={
+                "name": "EMA ADX 放量策略",
+                "description": "趋势与成交量共同确认",
+                "category": "指标组合",
+                "timeframe": "15m",
+                "directions": ["long"],
+                "confirmation_threshold": 65,
+                "signal_valid_bars": 3,
+                "indicators": [
+                    {
+                        "key": "ema",
+                        "weight": 2,
+                        "parameters": {"fast_period": 8, "slow_period": 21},
+                    },
+                    {
+                        "key": "adx",
+                        "weight": 1,
+                        "parameters": {"period": 10, "min_strength": 20},
+                    },
+                    {
+                        "key": "volume_ratio",
+                        "weight": 1,
+                        "parameters": {"period": 20, "min_ratio": 1.5},
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 201
+        strategy = response.json()
+        assert strategy["strategy_kind"] == "full_strategy"
+        assert strategy["engine_key"] == "strategy_dsl"
+        assert strategy["spec"]["strategy_type"] == "indicator_composite"
+        assert strategy["spec"]["timeframes"]["trigger"] == "15m"
+        assert strategy["parameters"]["ema_fast_period"] == 8
+        assert {item["key"] for item in strategy["parameter_schema"]} >= {
+            "ema_fast_period",
+            "adx_min_strength",
+            "volume_ratio_min_ratio",
+        }
+
+        with session_factory() as db:
+            owner = db.scalar(select(User).where(User.username == "strategy-composer"))
+            saved = db.scalar(
+                select(UserStrategy).where(UserStrategy.public_id == strategy["id"])
+            )
+            assert owner is not None and saved is not None
+            assert saved.user_id == owner.id
+            assert saved.spec_hash
+
+
+def test_ai_composer_returns_reviewable_indicator_draft(
+    mysql_test_engine: Engine,
+) -> None:
+    client, _ = build_test_client(mysql_test_engine)
+    with client:
+        headers = register_and_login(client, "strategy-ai-composer")
+        response = client.post(
+            "/api/v2/strategies/compose/ai-preview",
+            headers=headers,
+            json={"prompt": "使用 RSI、布林带和 ATR 做 15 分钟反转策略，只做多"},
+        )
+
+        assert response.status_code == 200
+        proposal = response.json()
+        assert proposal["provider"] == "local_semantic"
+        assert proposal["draft"]["timeframe"] == "15m"
+        assert proposal["draft"]["directions"] == ["long"]
+        assert {item["key"] for item in proposal["draft"]["indicators"]} == {
+            "rsi",
+            "bollinger",
+            "atr",
+        }
+
+
 def test_strategy_edit_rejects_parameter_expansion_and_cross_tenant_apply(
     mysql_test_engine: Engine,
 ) -> None:

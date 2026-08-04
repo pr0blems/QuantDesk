@@ -185,7 +185,7 @@ def test_opportunity_preferences_are_isolated_by_user(mysql_test_engine, tmp_pat
 
 
 def test_paper_account_uses_shared_mysql_engine(mysql_test_engine, tmp_path) -> None:
-    from quantdesk import store as market_store
+    from quantdesk_v2 import market_store
 
     repository, user_id, account_id = build_monitor_fixture(mysql_test_engine, tmp_path)
     account = repository.paper(user_id, account_id)
@@ -209,7 +209,7 @@ def test_paper_account_uses_shared_mysql_engine(mysql_test_engine, tmp_path) -> 
 def test_paper_performance_aggregates_calendar_in_requested_timezone(
     mysql_test_engine, tmp_path
 ) -> None:
-    from quantdesk import store as market_store
+    from quantdesk_v2 import market_store
 
     repository, user_id, account_id = build_monitor_fixture(mysql_test_engine, tmp_path)
     repository.paper(user_id, account_id)

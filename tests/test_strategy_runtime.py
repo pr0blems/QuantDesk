@@ -10,9 +10,11 @@ from quantdesk_v2.strategy_runtime import (
     StrategySpecError,
     adx_series,
     atr_series,
+    build_indicator_composite_spec,
     build_trend_pullback_spec,
     ema_series,
     evaluate_strategy,
+    strategy_required_bars,
     strategy_spec_hash,
     validate_strategy_spec,
 )
@@ -104,6 +106,69 @@ def test_signal_validity_preserves_millisecond_timestamp_units() -> None:
     assert decision.signal_time is not None
     assert decision.valid_until is not None
     assert decision.valid_until - decision.signal_time == 2 * 15 * 60 * 1_000
+
+
+def test_indicator_composition_builds_dynamic_schema_and_explainable_signal() -> None:
+    spec, schema, parameters = build_indicator_composite_spec(
+        [
+            {"key": "ema", "weight": 2, "parameters": {"fast_period": 8, "slow_period": 21}},
+            {"key": "adx", "weight": 1, "parameters": {"period": 10, "min_strength": 10}},
+            {
+                "key": "volume_ratio",
+                "weight": 1,
+                "parameters": {"period": 12, "min_ratio": 1.2},
+            },
+        ],
+        timeframe="15m",
+        directions=["long"],
+        confirmation_threshold=60,
+        signal_valid_bars=3,
+    )
+
+    assert spec["strategy_type"] == "indicator_composite"
+    assert [item["key"] for item in spec["indicators"]] == [
+        "ema",
+        "adx",
+        "volume_ratio",
+    ]
+    assert {item["key"] for item in schema} >= {
+        "ema_fast_period",
+        "adx_min_strength",
+        "volume_ratio_min_ratio",
+    }
+    assert parameters["ema_fast_period"] == 8
+    assert strategy_required_bars(spec)["trigger"] >= 23
+
+    rows = _bars(80, start=100, step=0.8)
+    rows[-1]["volume"] = 300
+    decision = evaluate_strategy(spec, {"15m": rows})
+
+    assert decision.decision == "LONG_ENTRY"
+    assert decision.confidence == 1
+    assert "INDICATOR_CONSENSUS_LONG" in decision.reason_codes
+    assert decision.evidence["consensus"]["filters_passed"] is True
+    assert decision.valid_until - decision.signal_time == 3 * 15 * 60
+
+
+def test_indicator_composition_rejects_invalid_selection_and_relations() -> None:
+    with pytest.raises(StrategySpecError):
+        build_indicator_composite_spec(
+            [
+                {"key": "volume_ratio", "parameters": {}},
+                {"key": "atr", "parameters": {}},
+            ]
+        )
+
+    with pytest.raises(StrategySpecError):
+        build_indicator_composite_spec(
+            [
+                {
+                    "key": "ema",
+                    "parameters": {"fast_period": 50, "slow_period": 20},
+                },
+                {"key": "adx", "parameters": {}},
+            ]
+        )
 
 
 def test_strategy_skips_insufficient_or_invalid_market_data() -> None:

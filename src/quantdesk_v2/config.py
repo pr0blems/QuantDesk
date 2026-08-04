@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     binance_portfolio_base_url: str = "https://papi.binance.com"
     binance_futures_timeout_seconds: float = 10.0
     binance_futures_recv_window_ms: int = 5_000
+    # Process-wide kill switch.  A user must still explicitly arm one paused
+    # deployment before any signed TRADE request can be emitted.
+    binance_live_trading_enabled: bool = False
+    binance_live_trading_interval_seconds: int = 15
 
     # Strategy edits are requested server-side only. The browser never receives
     # this credential and the client uses a fixed OpenAI HTTPS origin.
@@ -119,6 +123,10 @@ class Settings(BaseSettings):
             raise RuntimeError("BINANCE_FUTURES_TIMEOUT_SECONDS must be between 1 and 10")
         if not 1_000 <= self.binance_futures_recv_window_ms <= 5_000:
             raise RuntimeError("BINANCE_FUTURES_RECV_WINDOW_MS must be between 1000 and 5000")
+        if not 10 <= self.binance_live_trading_interval_seconds <= 300:
+            raise RuntimeError(
+                "BINANCE_LIVE_TRADING_INTERVAL_SECONDS must be between 10 and 300"
+            )
 
     def _validate_openai_settings(self) -> None:
         if self.openai_strategy_model not in {

@@ -3,9 +3,10 @@ import json
 import threading
 import time
 
-from . import binance_client as bc
-from . import signals, store
-from .config_loader import settings, tradfi_symbols
+from . import market_data_client as bc
+from . import market_store as store
+from . import signals
+from .market_config import settings, tradfi_symbols
 
 TF_MS = {"15m": 15 * 60 * 1000, "1h": 60 * 60 * 1000, "4h": 4 * 60 * 60 * 1000}
 
@@ -265,7 +266,7 @@ def start():
     threading.Thread(target=news.news_loop, daemon=True, name="news").start()
     threading.Thread(target=social.social_loop, daemon=True, name="social").start()
     if settings.get("paper_trading", True):
-        from . import paper
+        from . import paper_engine as paper
         threading.Thread(target=paper.paper_loop, daemon=True, name="paper").start()
         print("[engine] workers started: price / ticker / kline / news / social / paper")
     else:

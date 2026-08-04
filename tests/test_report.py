@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from quantdesk import report
+from quantdesk_v2 import report
 
 
 def test_conclusion_labels_are_unchanged() -> None:

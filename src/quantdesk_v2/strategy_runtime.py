@@ -54,45 +54,115 @@ class StrategyDecision:
 INDICATOR_CATALOG: tuple[dict[str, Any], ...] = (
     {
         "key": "ema",
-        "name": "EMA 指数移动平均",
+        "name": "EMA 趋势组合",
         "category": "趋势",
-        "outputs": ["value", "slope_pct", "distance_pct"],
-        "parameters": [{"key": "period", "type": "integer", "min": 2, "max": 500}],
+        "description": "通过快速与慢速 EMA 的相对位置判断趋势方向。",
+        "role": "directional",
+        "outputs": ["fast", "slow", "spread_pct"],
+        "parameters": [
+            {"key": "fast_period", "label": "快速 EMA", "type": "integer", "default": 20, "min": 2, "max": 200},
+            {"key": "slow_period", "label": "慢速 EMA", "type": "integer", "default": 50, "min": 3, "max": 500},
+        ],
         "version": 1,
     },
     {
-        "key": "atr",
-        "name": "ATR 真实波幅",
-        "category": "波动",
-        "outputs": ["value", "percent"],
-        "parameters": [{"key": "period", "type": "integer", "min": 2, "max": 100}],
+        "key": "macd",
+        "name": "MACD 动量",
+        "category": "动量",
+        "description": "使用 MACD 线与信号线判断动量方向。",
+        "role": "directional",
+        "outputs": ["macd", "signal", "histogram"],
+        "parameters": [
+            {"key": "fast_period", "label": "快速周期", "type": "integer", "default": 12, "min": 2, "max": 100},
+            {"key": "slow_period", "label": "慢速周期", "type": "integer", "default": 26, "min": 3, "max": 200},
+            {"key": "signal_period", "label": "信号周期", "type": "integer", "default": 9, "min": 2, "max": 100},
+        ],
+        "version": 1,
+    },
+    {
+        "key": "rsi",
+        "name": "RSI 超买超卖",
+        "category": "反转",
+        "description": "在超卖区域寻找多头反转，在超买区域寻找空头反转。",
+        "role": "directional",
+        "outputs": ["value", "oversold", "overbought"],
+        "parameters": [
+            {"key": "period", "label": "RSI 周期", "type": "integer", "default": 14, "min": 2, "max": 100},
+            {"key": "oversold", "label": "超卖线", "type": "number", "default": 30, "min": 1, "max": 49},
+            {"key": "overbought", "label": "超买线", "type": "number", "default": 70, "min": 51, "max": 99},
+        ],
+        "version": 1,
+    },
+    {
+        "key": "bollinger",
+        "name": "布林带均值回归",
+        "category": "反转",
+        "description": "价格触及上下轨时识别均值回归方向。",
+        "role": "directional",
+        "outputs": ["upper", "middle", "lower", "zscore"],
+        "parameters": [
+            {"key": "period", "label": "统计周期", "type": "integer", "default": 20, "min": 3, "max": 300},
+            {"key": "stddev", "label": "标准差倍数", "type": "number", "default": 2, "min": 0.5, "max": 5},
+        ],
         "version": 1,
     },
     {
         "key": "adx",
-        "name": "ADX 趋势强度",
+        "name": "ADX + DI 趋势强度",
         "category": "趋势",
+        "description": "过滤弱趋势，并通过 +DI 与 -DI 判断方向。",
+        "role": "directional",
         "outputs": ["adx", "plus_di", "minus_di"],
-        "parameters": [{"key": "period", "type": "integer", "min": 2, "max": 100}],
+        "parameters": [
+            {"key": "period", "label": "ADX 周期", "type": "integer", "default": 14, "min": 2, "max": 100},
+            {"key": "min_strength", "label": "最小趋势强度", "type": "number", "default": 18, "min": 0, "max": 100},
+        ],
         "version": 1,
     },
     {
         "key": "donchian",
-        "name": "Donchian 结构通道",
+        "name": "Donchian 通道突破",
         "category": "突破",
-        "outputs": ["prior_high", "prior_low"],
-        "parameters": [{"key": "period", "type": "integer", "min": 2, "max": 300}],
+        "description": "突破前序通道高低点时输出方向。",
+        "role": "directional",
+        "outputs": ["prior_high", "prior_low", "breakout"],
+        "parameters": [
+            {"key": "period", "label": "通道周期", "type": "integer", "default": 20, "min": 2, "max": 300},
+        ],
         "version": 1,
     },
     {
         "key": "volume_ratio",
-        "name": "成交量比",
+        "name": "成交量确认",
         "category": "量价",
-        "outputs": ["value", "average_volume"],
-        "parameters": [{"key": "period", "type": "integer", "min": 2, "max": 300}],
+        "description": "要求当前成交量达到历史均量倍数，用作入场过滤。",
+        "role": "filter",
+        "outputs": ["ratio", "average_volume", "passed"],
+        "parameters": [
+            {"key": "period", "label": "均量周期", "type": "integer", "default": 20, "min": 2, "max": 300},
+            {"key": "min_ratio", "label": "最小量比", "type": "number", "default": 1.2, "min": 0, "max": 10},
+        ],
+        "version": 1,
+    },
+    {
+        "key": "atr",
+        "name": "ATR 波动率过滤",
+        "category": "波动",
+        "description": "限制过低或过高波动环境，并提供止损距离。",
+        "role": "filter",
+        "outputs": ["value", "percent", "passed"],
+        "parameters": [
+            {"key": "period", "label": "ATR 周期", "type": "integer", "default": 14, "min": 2, "max": 100},
+            {"key": "min_pct", "label": "最小 ATR (%)", "type": "number", "default": 0.1, "min": 0, "max": 20},
+            {"key": "max_pct", "label": "最大 ATR (%)", "type": "number", "default": 8, "min": 0.1, "max": 50},
+        ],
         "version": 1,
     },
 )
+
+INDICATOR_BY_KEY: dict[str, dict[str, Any]] = {
+    item["key"]: item for item in INDICATOR_CATALOG
+}
 
 
 TREND_PULLBACK_SPEC_V1: dict[str, Any] = {
@@ -160,6 +230,132 @@ def full_strategy_parameter_schema() -> list[dict[str, Any]]:
     ]
 
 
+def indicator_composite_parameter_schema(indicator_keys: Sequence[str]) -> list[dict[str, Any]]:
+    """Build the editable flat parameter schema for one indicator composition."""
+
+    keys = [str(key).strip().lower() for key in indicator_keys]
+    if not 2 <= len(keys) <= 8 or len(set(keys)) != len(keys):
+        raise StrategySpecError("指标组合必须选择 2 到 8 个不同指标")
+    if any(key not in INDICATOR_BY_KEY for key in keys):
+        raise StrategySpecError("指标组合包含未知指标")
+    if not any(INDICATOR_BY_KEY[key]["role"] == "directional" for key in keys):
+        raise StrategySpecError("指标组合至少需要一个方向指标")
+    schema: list[dict[str, Any]] = [
+        {
+            "key": "confirmation_threshold",
+            "label": "指标确认阈值 (%)",
+            "type": "number",
+            "default": 60,
+            "min": 1,
+            "max": 100,
+            "help": "方向指标的加权同意比例达到该阈值才产生信号。",
+        },
+        {
+            "key": "signal_valid_bars",
+            "label": "信号有效 K 线数",
+            "type": "integer",
+            "default": 2,
+            "min": 1,
+            "max": 10,
+        },
+        {
+            "key": "risk_atr_period",
+            "label": "风控 ATR 周期",
+            "type": "integer",
+            "default": 14,
+            "min": 2,
+            "max": 100,
+        },
+    ]
+    for key in keys:
+        indicator = INDICATOR_BY_KEY[key]
+        schema.append(
+            {
+                "key": f"{key}_weight",
+                "label": f"{indicator['name']} · 权重",
+                "type": "number",
+                "default": 1,
+                "min": 0.1,
+                "max": 5,
+            }
+        )
+        for definition in indicator["parameters"]:
+            schema.append(
+                {
+                    **copy.deepcopy(definition),
+                    "key": f"{key}_{definition['key']}",
+                    "label": f"{indicator['name']} · {definition['label']}",
+                }
+            )
+    return schema
+
+
+def build_indicator_composite_spec(
+    selections: Sequence[Mapping[str, Any]],
+    *,
+    timeframe: str = "1h",
+    directions: Sequence[str] = ("long", "short"),
+    confirmation_threshold: int | float = 60,
+    signal_valid_bars: int = 2,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int | float]]:
+    """Create a validated executable strategy from selected catalog indicators."""
+
+    if not isinstance(selections, Sequence) or isinstance(selections, (str, bytes)):
+        raise StrategySpecError("指标选择必须是数组")
+    keys: list[str] = []
+    raw_by_key: dict[str, Mapping[str, Any]] = {}
+    for selection in selections:
+        if not isinstance(selection, Mapping):
+            raise StrategySpecError("指标选择项必须是对象")
+        key = str(selection.get("key", "")).strip().lower()
+        keys.append(key)
+        raw_by_key[key] = selection
+    schema = indicator_composite_parameter_schema(keys)
+    parameters: dict[str, int | float] = {
+        "confirmation_threshold": confirmation_threshold,
+        "signal_valid_bars": signal_valid_bars,
+        "risk_atr_period": 14,
+    }
+    for key in keys:
+        selection = raw_by_key[key]
+        parameters[f"{key}_weight"] = selection.get("weight", 1)
+        supplied = selection.get("parameters", {})
+        if not isinstance(supplied, Mapping):
+            raise StrategySpecError(f"{key} 指标参数必须是对象")
+        definition_keys = {item["key"] for item in INDICATOR_BY_KEY[key]["parameters"]}
+        unknown = sorted(set(supplied) - definition_keys)
+        if unknown:
+            raise StrategySpecError(f"{key} 包含未知参数：{', '.join(unknown)}")
+        for definition in INDICATOR_BY_KEY[key]["parameters"]:
+            parameters[f"{key}_{definition['key']}"] = supplied.get(
+                definition["key"], definition["default"]
+            )
+    parameter_rules = {item["key"]: item for item in schema}
+    normalized_parameters = _validate_numeric_object(
+        parameters, parameter_rules, "指标组合参数"
+    )
+    spec = {
+        "schema_version": 1,
+        "strategy_type": "indicator_composite",
+        "market": "BINANCE_TRADIFI_PERPETUAL",
+        "directions": list(dict.fromkeys(str(item).lower() for item in directions)),
+        "timeframes": {"regime": timeframe, "setup": timeframe, "trigger": timeframe},
+        "indicators": [{"key": key} for key in keys],
+        "parameters": normalized_parameters,
+        "exit": {
+            "initial_stop_atr": 1.5,
+            "take_profit_r": 2.0,
+            "trailing_after_r": 1.0,
+            "max_holding_bars": 120,
+            "exit_on_regime_break": False,
+        },
+        "risk": copy.deepcopy(TREND_PULLBACK_SPEC_V1["risk"]),
+        "execution": copy.deepcopy(TREND_PULLBACK_SPEC_V1["execution"]),
+    }
+    validated = validate_strategy_spec(spec)
+    return validated, schema, normalized_parameters
+
+
 def _field(
     key: str,
     label: str,
@@ -202,7 +398,8 @@ def validate_strategy_spec(value: Mapping[str, Any]) -> dict[str, Any]:
     spec = copy.deepcopy(dict(value))
     if spec.get("schema_version") != 1:
         raise StrategySpecError("仅支持策略 DSL v1")
-    if spec.get("strategy_type") != "trend_pullback_continuation":
+    strategy_type = spec.get("strategy_type")
+    if strategy_type not in {"trend_pullback_continuation", "indicator_composite"}:
         raise StrategySpecError("不支持的真实策略类型")
     if spec.get("market") != "BINANCE_TRADIFI_PERPETUAL":
         raise StrategySpecError("V1 仅支持 Binance TradFi 永续合约")
@@ -220,10 +417,28 @@ def validate_strategy_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         raise StrategySpecError("V1 策略周期仅支持 15m、1h 和 4h")
 
     parameters = spec.get("parameters")
-    schema = {item["key"]: item for item in full_strategy_parameter_schema()}
-    spec["parameters"] = _validate_numeric_object(parameters, schema, "策略参数")
-    if spec["parameters"]["regime_fast_ema"] >= spec["parameters"]["regime_slow_ema"]:
-        raise StrategySpecError("4h 快速 EMA 必须小于慢速 EMA")
+    if strategy_type == "trend_pullback_continuation":
+        schema = {item["key"]: item for item in full_strategy_parameter_schema()}
+        spec["parameters"] = _validate_numeric_object(parameters, schema, "策略参数")
+        if spec["parameters"]["regime_fast_ema"] >= spec["parameters"]["regime_slow_ema"]:
+            raise StrategySpecError("4h 快速 EMA 必须小于慢速 EMA")
+    else:
+        raw_indicators = spec.get("indicators")
+        if not isinstance(raw_indicators, list):
+            raise StrategySpecError("指标组合必须定义指标数组")
+        indicator_keys: list[str] = []
+        for item in raw_indicators:
+            if not isinstance(item, Mapping) or set(item) != {"key"}:
+                raise StrategySpecError("指标组合项只允许包含指标 key")
+            indicator_keys.append(str(item["key"]).strip().lower())
+        composite_schema = indicator_composite_parameter_schema(indicator_keys)
+        spec["indicators"] = [{"key": key} for key in indicator_keys]
+        spec["parameters"] = _validate_numeric_object(
+            parameters,
+            {item["key"]: item for item in composite_schema},
+            "指标组合参数",
+        )
+        _validate_indicator_parameter_relations(indicator_keys, spec["parameters"])
 
     exit_config = spec.get("exit")
     exit_schema = {
@@ -270,6 +485,20 @@ def validate_strategy_spec(value: Mapping[str, Any]) -> dict[str, Any]:
     return spec
 
 
+def _validate_indicator_parameter_relations(
+    indicator_keys: Sequence[str], parameters: Mapping[str, int | float]
+) -> None:
+    for key in indicator_keys:
+        if key in {"ema", "macd"} and (
+            parameters[f"{key}_fast_period"] >= parameters[f"{key}_slow_period"]
+        ):
+            raise StrategySpecError(f"{INDICATOR_BY_KEY[key]['name']} 的快速周期必须小于慢速周期")
+    if "rsi" in indicator_keys and parameters["rsi_oversold"] >= parameters["rsi_overbought"]:
+        raise StrategySpecError("RSI 超卖线必须小于超买线")
+    if "atr" in indicator_keys and parameters["atr_min_pct"] >= parameters["atr_max_pct"]:
+        raise StrategySpecError("ATR 最小波动率必须小于最大波动率")
+
+
 def _validate_numeric_object(
     value: Any,
     schema: Mapping[str, Mapping[str, Any]],
@@ -306,26 +535,15 @@ def evaluate_strategy(
     bars_by_timeframe: Mapping[str, Sequence[Mapping[str, Any] | Candle]],
 ) -> StrategyDecision:
     spec = validate_strategy_spec(spec_value)
+    if spec["strategy_type"] == "indicator_composite":
+        return _evaluate_indicator_composite(spec, bars_by_timeframe)
     timeframes = spec["timeframes"]
     market = {
         role: normalize_candles(bars_by_timeframe.get(timeframe, []))
         for role, timeframe in timeframes.items()
     }
     parameters = spec["parameters"]
-    minimums = {
-        "regime": max(
-            int(parameters["regime_slow_ema"]) + 2,
-            int(parameters["regime_adx_period"]) * 2 + 2,
-        ),
-        "setup": max(
-            int(parameters["setup_ema_period"]) + int(parameters["setup_lookback_bars"]),
-            int(parameters["setup_atr_period"]) + int(parameters["setup_lookback_bars"]) + 1,
-        ),
-        "trigger": max(
-            int(parameters["trigger_donchian_period"]) + 1,
-            int(parameters["trigger_volume_period"]) + 1,
-        ),
-    }
+    minimums = strategy_required_bars(spec)
     shortages = {
         role: {"required": minimums[role], "actual": len(candles)}
         for role, candles in market.items()
@@ -416,6 +634,207 @@ def evaluate_strategy(
         evidence,
         {},
     )
+
+
+def strategy_required_bars(spec: Mapping[str, Any]) -> dict[str, int]:
+    """Return deterministic warm-up windows for a validated full strategy."""
+
+    parameters = spec["parameters"]
+    if spec["strategy_type"] == "indicator_composite":
+        required = int(parameters["risk_atr_period"]) + 2
+        for item in spec["indicators"]:
+            key = item["key"]
+            if key == "ema":
+                required = max(required, int(parameters[f"{key}_slow_period"]) + 2)
+            elif key == "macd":
+                required = max(
+                    required,
+                    int(parameters["macd_slow_period"])
+                    + int(parameters["macd_signal_period"])
+                    + 2,
+                )
+            elif key == "adx":
+                required = max(required, int(parameters["adx_period"]) * 2 + 2)
+            elif key in {"rsi", "bollinger", "donchian", "volume_ratio", "atr"}:
+                required = max(required, int(parameters[f"{key}_period"]) + 2)
+        return {"regime": required, "setup": required, "trigger": required}
+    return {
+        "regime": max(
+            int(parameters["regime_slow_ema"]) + 2,
+            int(parameters["regime_adx_period"]) * 2 + 2,
+        ),
+        "setup": max(
+            int(parameters["setup_ema_period"]) + int(parameters["setup_lookback_bars"]),
+            int(parameters["setup_atr_period"]) + int(parameters["setup_lookback_bars"]) + 1,
+        ),
+        "trigger": max(
+            int(parameters["trigger_donchian_period"]) + 1,
+            int(parameters["trigger_volume_period"]) + 1,
+        ),
+    }
+
+
+def _evaluate_indicator_composite(
+    spec: Mapping[str, Any],
+    bars_by_timeframe: Mapping[str, Sequence[Mapping[str, Any] | Candle]],
+) -> StrategyDecision:
+    timeframe = spec["timeframes"]["trigger"]
+    candles = normalize_candles(bars_by_timeframe.get(timeframe, []))
+    required = strategy_required_bars(spec)["trigger"]
+    if len(candles) < required:
+        return StrategyDecision(
+            "SKIP",
+            None,
+            None,
+            None,
+            ("INSUFFICIENT_DATA",),
+            {"data_requirements": {"trigger": {"required": required, "actual": len(candles)}}},
+            {},
+        )
+    parameters = spec["parameters"]
+    results: list[dict[str, Any]] = []
+    long_weight = short_weight = directional_weight = 0.0
+    filters_passed = True
+    for item in spec["indicators"]:
+        key = item["key"]
+        weight = float(parameters[f"{key}_weight"])
+        result = _evaluate_composite_indicator(key, candles, parameters)
+        result.update({"key": key, "name": INDICATOR_BY_KEY[key]["name"], "weight": weight})
+        results.append(result)
+        if INDICATOR_BY_KEY[key]["role"] == "filter":
+            filters_passed = filters_passed and bool(result["passed"])
+            continue
+        directional_weight += weight
+        if result["vote"] > 0:
+            long_weight += weight
+        elif result["vote"] < 0:
+            short_weight += weight
+    long_pct = long_weight / directional_weight * 100 if directional_weight else 0.0
+    short_pct = short_weight / directional_weight * 100 if directional_weight else 0.0
+    threshold = float(parameters["confirmation_threshold"])
+    latest = candles[-1]
+    signal_time = latest.open_time
+    scale = 1_000 if signal_time >= 100_000_000_000 else 1
+    valid_until = signal_time + (
+        _timeframe_seconds(timeframe) * scale * int(parameters["signal_valid_bars"])
+    )
+    highs = [candle.high for candle in candles]
+    lows = [candle.low for candle in candles]
+    closes = [candle.close for candle in candles]
+    risk_atr = _required(
+        atr_series(highs, lows, closes, int(parameters["risk_atr_period"]))[-1],
+        "risk ATR",
+    )
+    evidence = {
+        "setup": {"atr": risk_atr},
+        "indicators": results,
+        "consensus": {
+            "long_pct": round(long_pct, 4),
+            "short_pct": round(short_pct, 4),
+            "threshold": threshold,
+            "filters_passed": filters_passed,
+        },
+    }
+    risk = _risk_proposal(spec, risk_atr, latest.close)
+    directions = set(spec["directions"])
+    if filters_passed and "long" in directions and long_pct >= threshold:
+        reasons = ["INDICATOR_CONSENSUS_LONG"] + [
+            f"{item['key'].upper()}_LONG" for item in results if item.get("vote") == 1
+        ]
+        return StrategyDecision(
+            "LONG_ENTRY",
+            signal_time,
+            valid_until,
+            round(long_pct / 100, 4),
+            tuple(reasons),
+            evidence,
+            {**risk, "side": "long"},
+        )
+    if filters_passed and "short" in directions and short_pct >= threshold:
+        reasons = ["INDICATOR_CONSENSUS_SHORT"] + [
+            f"{item['key'].upper()}_SHORT" for item in results if item.get("vote") == -1
+        ]
+        return StrategyDecision(
+            "SHORT_ENTRY",
+            signal_time,
+            valid_until,
+            round(short_pct / 100, 4),
+            tuple(reasons),
+            evidence,
+            {**risk, "side": "short"},
+        )
+    reason = "FILTER_NOT_CONFIRMED" if not filters_passed else "INDICATOR_CONSENSUS_NOT_REACHED"
+    return StrategyDecision("HOLD", signal_time, valid_until, None, (reason,), evidence, {})
+
+
+def _evaluate_composite_indicator(
+    key: str, candles: Sequence[Candle], parameters: Mapping[str, Any]
+) -> dict[str, Any]:
+    closes = [item.close for item in candles]
+    highs = [item.high for item in candles]
+    lows = [item.low for item in candles]
+    latest = candles[-1]
+    if key == "ema":
+        fast = _required(ema_series(closes, int(parameters["ema_fast_period"]))[-1], "EMA fast")
+        slow = _required(ema_series(closes, int(parameters["ema_slow_period"]))[-1], "EMA slow")
+        vote = 1 if fast > slow else -1 if fast < slow else 0
+        return {"vote": vote, "fast": fast, "slow": slow, "spread_pct": (fast / slow - 1) * 100}
+    if key == "macd":
+        fast_series = ema_series(closes, int(parameters["macd_fast_period"]))
+        slow_series = ema_series(closes, int(parameters["macd_slow_period"]))
+        macd_values = [
+            float(fast) - float(slow)
+            for fast, slow in zip(fast_series, slow_series, strict=True)
+            if fast is not None and slow is not None
+        ]
+        signal = _required(
+            ema_series(macd_values, int(parameters["macd_signal_period"]))[-1],
+            "MACD signal",
+        )
+        macd = macd_values[-1]
+        vote = 1 if macd > signal else -1 if macd < signal else 0
+        return {"vote": vote, "macd": macd, "signal": signal, "histogram": macd - signal}
+    if key == "rsi":
+        value = _required(rsi_series(closes, int(parameters["rsi_period"]))[-1], "RSI")
+        vote = 1 if value <= float(parameters["rsi_oversold"]) else -1 if value >= float(parameters["rsi_overbought"]) else 0
+        return {"vote": vote, "value": value}
+    if key == "bollinger":
+        period = int(parameters["bollinger_period"])
+        window = closes[-period:]
+        middle = sum(window) / period
+        variance = sum((value - middle) ** 2 for value in window) / period
+        deviation = math.sqrt(variance) * float(parameters["bollinger_stddev"])
+        upper, lower = middle + deviation, middle - deviation
+        vote = 1 if latest.close <= lower else -1 if latest.close >= upper else 0
+        return {"vote": vote, "upper": upper, "middle": middle, "lower": lower}
+    if key == "adx":
+        adx, plus_di, minus_di = adx_series(
+            highs, lows, closes, int(parameters["adx_period"])
+        )
+        strength = _required(adx[-1], "ADX")
+        plus = _required(plus_di[-1], "+DI")
+        minus = _required(minus_di[-1], "-DI")
+        vote = 0 if strength < float(parameters["adx_min_strength"]) else 1 if plus > minus else -1 if minus > plus else 0
+        return {"vote": vote, "adx": strength, "plus_di": plus, "minus_di": minus}
+    if key == "donchian":
+        period = int(parameters["donchian_period"])
+        prior = candles[-period - 1 : -1]
+        prior_high = max(item.high for item in prior)
+        prior_low = min(item.low for item in prior)
+        vote = 1 if latest.close > prior_high else -1 if latest.close < prior_low else 0
+        return {"vote": vote, "prior_high": prior_high, "prior_low": prior_low}
+    if key == "volume_ratio":
+        period = int(parameters["volume_ratio_period"])
+        history = candles[-period - 1 : -1]
+        average = sum(item.volume for item in history) / period
+        ratio = latest.volume / average if average > 0 else 0.0
+        return {"vote": 0, "passed": ratio >= float(parameters["volume_ratio_min_ratio"]), "ratio": ratio, "average_volume": average}
+    if key == "atr":
+        value = _required(atr_series(highs, lows, closes, int(parameters["atr_period"]))[-1], "ATR")
+        percent = value / latest.close * 100
+        passed = float(parameters["atr_min_pct"]) <= percent <= float(parameters["atr_max_pct"])
+        return {"vote": 0, "passed": passed, "value": value, "percent": percent}
+    raise StrategySpecError("不支持的指标组合项")
 
 
 def normalize_candles(rows: Sequence[Mapping[str, Any] | Candle]) -> list[Candle]:
@@ -574,6 +993,22 @@ def ema_series(values: Sequence[float], period: int) -> list[float | None]:
     for index in range(period, len(values)):
         previous = values[index] * alpha + previous * (1 - alpha)
         output[index] = previous
+    return output
+
+
+def rsi_series(values: Sequence[float], period: int) -> list[float | None]:
+    output: list[float | None] = [None] * len(values)
+    if period < 2 or len(values) < period + 1:
+        return output
+    gains = [max(values[index] - values[index - 1], 0.0) for index in range(1, len(values))]
+    losses = [max(values[index - 1] - values[index], 0.0) for index in range(1, len(values))]
+    average_gain = sum(gains[:period]) / period
+    average_loss = sum(losses[:period]) / period
+    output[period] = 100.0 if average_loss == 0 else 100 - 100 / (1 + average_gain / average_loss)
+    for index in range(period + 1, len(values)):
+        average_gain = (average_gain * (period - 1) + gains[index - 1]) / period
+        average_loss = (average_loss * (period - 1) + losses[index - 1]) / period
+        output[index] = 100.0 if average_loss == 0 else 100 - 100 / (1 + average_gain / average_loss)
     return output
 
 

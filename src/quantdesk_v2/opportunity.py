@@ -17,7 +17,7 @@ from quantdesk_v2.strategy_runtime import (
     normalize_candles,
 )
 
-from . import store
+from . import market_store as store
 
 FEATURE_SET_KEY = "core_market_features"
 FEATURE_SET_VERSION = 1

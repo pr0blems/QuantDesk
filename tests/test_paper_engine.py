@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from quantdesk import paper
+from quantdesk_v2 import paper_engine as paper
 from quantdesk_v2.strategy_catalog import SYSTEM_STRATEGY_DEFINITIONS
 from quantdesk_v2.strategy_runtime import StrategyDecision, build_trend_pullback_spec
 

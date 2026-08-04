@@ -37,6 +37,7 @@ const panelNames = {
   overview: "工作台",
   monitor: "合约监控",
   paper: "模拟盘",
+  live: "实盘交易",
   settings: "系统设置",
   strategies: "策略中心",
   backtest: "数据回测",
@@ -50,6 +51,7 @@ const DEFAULT_PANEL = "monitor";
 const panelPaths = Object.freeze({
   monitor: "/monitor",
   paper: "/paper",
+  live: "/live",
   overview: "/overview",
   settings: "/settings",
   strategies: "/strategies",
@@ -286,15 +288,18 @@ function openPanel(name, { historyMode = "push" } = {}) {
     else item.removeAttribute("aria-current");
   });
   $("#mobile-title").textContent = panelNames[selected];
-  $(".workspace-content").classList.toggle("monitor-mode", ["monitor", "paper", "backtest"].includes(selected));
+  $(".workspace-content").classList.toggle("monitor-mode", ["monitor", "paper", "live", "backtest"].includes(selected));
   const monitor = $("#contract-monitor");
   const paper = $("#paper-dashboard");
+  const live = $("#live-dashboard");
   const strategies = $("#strategy-center");
   const backtest = $("#backtest-workbench");
   if (monitor && selected === "monitor" && typeof monitor.start === "function") monitor.start();
   if (monitor && selected !== "monitor" && typeof monitor.pause === "function") monitor.pause();
   if (paper && selected === "paper" && typeof paper.start === "function") paper.start();
   if (paper && selected !== "paper" && typeof paper.pause === "function") paper.pause();
+  if (live && selected === "live" && typeof live.start === "function") live.start();
+  if (live && selected !== "live" && typeof live.pause === "function") live.pause();
   if (strategies && selected === "strategies" && typeof strategies.start === "function") strategies.start();
   if (strategies && selected !== "strategies" && typeof strategies.pause === "function") strategies.pause();
   if (backtest && selected === "backtest" && typeof backtest.start === "function") backtest.start();
@@ -326,10 +331,12 @@ function setAuthenticated(authenticated) {
     resetPerformancePanel();
     const monitor = $("#contract-monitor");
     const paper = $("#paper-dashboard");
+    const live = $("#live-dashboard");
     const strategies = $("#strategy-center");
     const backtest = $("#backtest-workbench");
     if (monitor && typeof monitor.pause === "function") monitor.pause();
     if (paper && typeof paper.pause === "function") paper.pause();
+    if (live && typeof live.pause === "function") live.pause();
     if (strategies && typeof strategies.resetSession === "function") strategies.resetSession();
     else if (strategies && typeof strategies.pause === "function") strategies.pause();
     if (backtest && typeof backtest.resetSession === "function") backtest.resetSession();

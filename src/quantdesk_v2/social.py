@@ -6,8 +6,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import store
-from .config_loader import symbols_meta
+from . import market_store as store
+from .market_config import symbols_meta
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) quantdesk-local"}
 _ALLOWED_SOCIAL_HOSTS = {"api.stocktwits.com", "apewisdom.io"}

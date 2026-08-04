@@ -35,7 +35,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["quantdesk_v2*", "quantdesk*"]
+include = ["quantdesk_v2*"]
 
 [tool.setuptools.package-data]
 quantdesk_v2 = ["static/*"]

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, selectinload
 from . import __version__
 from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
 from .backtest import BacktestRepository, BacktestUnavailable
-from .binance_client import BinanceAccountClient, BinanceAccountClientError
+from .binance_client import BinanceAccountClientError
 from .binance_performance import (
     build_binance_performance,
     empty_binance_performance,
@@ -32,6 +32,8 @@ from .models import (
     AuditLog,
     BacktestRun,
     BacktestTrade,
+    LiveOrderIntent,
+    LiveTradingAccount,
     MarketOpportunity,
     PaperAccount,
     StrategyDeployment,
@@ -56,6 +58,9 @@ from .schemas import (
     BinanceTradingState,
     DashboardPerformanceOut,
     HealthOut,
+    LiveAccountArmRequest,
+    LiveAccountCreateRequest,
+    LiveAccountStatusUpdate,
     LoginRequest,
     LogoutRequest,
     MessageOut,
@@ -364,7 +369,11 @@ def _catalog_response(catalog: dict[str, Any]) -> dict[str, Any]:
     """Flatten available periods and expose browser-friendly ISO date bounds."""
     strategies = _json_safe(catalog.get("strategies", []))
     symbols: list[dict[str, Any]] = []
-    timeframe_values: set[str] = set()
+    timeframe_values: set[str] = {
+        str(item).strip()
+        for item in catalog.get("timeframes", [])
+        if isinstance(item, str) and str(item).strip()
+    }
     bounds: dict[str, dict[str, dict[str, Any]]] = {}
     raw_symbols = catalog.get("symbols", [])
     if not isinstance(raw_symbols, list):
@@ -398,10 +407,9 @@ def _catalog_response(catalog: dict[str, Any]) -> dict[str, Any]:
                 "max_date": end_date,
                 "bars": period.get("bars"),
             }
-        if not normalized_periods:
-            continue
         symbol_item = _json_safe(dict(raw_symbol))
         symbol_item["timeframes"] = normalized_periods
+        symbol_item["available"] = bool(normalized_periods)
         symbols.append(symbol_item)
     limits = _json_safe(catalog.get("limits", {}))
     if not isinstance(limits, dict):
@@ -486,6 +494,8 @@ def _engine_config(payload: BacktestRunRequest, strategy: dict[str, Any]) -> dic
 
 
 def _backtest_error_status(message: str) -> int:
+    if "binance" in message.lower():
+        return 502
     unavailable_markers = (
         "database",
         "config is invalid",
@@ -813,15 +823,9 @@ def binance_account_summary(
             error_category="credential_error",
         )
 
-    settings = request.app.state.settings
-    client = BinanceAccountClient(
-        settings.binance_futures_base_url,
-        settings.binance_portfolio_base_url,
-        recv_window_ms=settings.binance_futures_recv_window_ms,
-        timeout_seconds=settings.binance_futures_timeout_seconds,
-    )
+    service = request.app.state.binance_service
     try:
-        snapshot = client.account(api_key, api_secret)
+        snapshot = service.account(api_key, api_secret)
     except BinanceAccountClientError as exc:
         return BinanceAccountSummary(
             configured=True,
@@ -892,16 +896,10 @@ def binance_orders(
             error_category="credential_error",
         )
 
-    settings = request.app.state.settings
-    client = BinanceAccountClient(
-        settings.binance_futures_base_url,
-        settings.binance_portfolio_base_url,
-        recv_window_ms=settings.binance_futures_recv_window_ms,
-        timeout_seconds=settings.binance_futures_timeout_seconds,
-    )
+    service = request.app.state.binance_service
     try:
-        account = client.account(api_key, api_secret)
-        open_orders = client.open_orders(
+        account = service.account(api_key, api_secret)
+        open_orders = service.open_orders(
             api_key,
             api_secret,
             account_type=account.account_type,
@@ -987,15 +985,9 @@ def binance_performance(
             error_category="credential_error",
         )
 
-    settings = request.app.state.settings
-    client = BinanceAccountClient(
-        settings.binance_futures_base_url,
-        settings.binance_portfolio_base_url,
-        recv_window_ms=settings.binance_futures_recv_window_ms,
-        timeout_seconds=settings.binance_futures_timeout_seconds,
-    )
+    service = request.app.state.binance_service
     try:
-        snapshot = client.account(api_key, api_secret)
+        snapshot = service.account(api_key, api_secret)
     except BinanceAccountClientError as exc:
         return empty_result(
             configured=True,
@@ -1019,7 +1011,7 @@ def binance_performance(
     start_time_ms, end_exclusive_ms = month_window_ms(selected_month, timezone_offset_minutes)
     end_time_ms = min(end_exclusive_ms - 1, int(generated_at.timestamp() * 1_000))
     try:
-        history = client.income_history(
+        history = service.income_history(
             api_key,
             api_secret,
             account_type=snapshot.account_type,
@@ -1056,6 +1048,7 @@ def update_binance_credentials(
     _require_expected_user(request, user)
     api_key = payload.api_key.get_secret_value().strip()
     api_secret = payload.api_secret.get_secret_value().strip()
+    request.app.state.binance_service.invalidate(api_key, api_secret)
     cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
     user.binance_api_key_encrypted = cipher.encrypt(api_key)
     user.binance_api_secret_encrypted = cipher.encrypt(api_secret)
@@ -1543,6 +1536,46 @@ def _paper_response(data: dict) -> dict:
     return {**data, "permissions": {"can_reset": True}}
 
 
+def _live_account_record(
+    db: Session, user_id: int, account_id: str | None
+) -> LiveTradingAccount | None:
+    query = select(LiveTradingAccount).where(
+        LiveTradingAccount.user_id == user_id,
+        LiveTradingAccount.status != "archived",
+    )
+    if account_id:
+        query = query.where(LiveTradingAccount.public_id == account_id)
+    else:
+        query = query.order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
+    return db.scalar(query)
+
+
+def _live_account_out(account: LiveTradingAccount, *, enabled: bool) -> dict[str, Any]:
+    snapshot = account.strategy_snapshot_json or {}
+    return {
+        "id": account.public_id,
+        "name": account.name,
+        "status": account.status,
+        "strategy_id": snapshot.get("public_id"),
+        "strategy_name": snapshot.get("name"),
+        "engine_key": snapshot.get("engine_key"),
+        "config": account.config_json,
+        "credential_version": account.credential_version,
+        "armed_at": account.armed_at,
+        "last_tick_at": account.last_tick_at,
+        "last_error_code": account.last_error_code,
+        "system_enabled": enabled,
+        "created_at": account.created_at,
+        "updated_at": account.updated_at,
+    }
+
+
+def _binance_permissions_include_trade(user: User) -> bool:
+    permissions = user.binance_permissions or {}
+    requested = permissions.get("requested") if isinstance(permissions, dict) else None
+    return isinstance(requested, list) and "TRADE" in requested
+
+
 @router.get("/paper/accounts")
 def list_paper_accounts(
     db: Session = Depends(get_db),
@@ -1748,13 +1781,381 @@ def reset_paper_account(
     return _paper_response(data)
 
 
+@router.get("/live/accounts")
+def list_live_accounts(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    accounts = db.scalars(
+        select(LiveTradingAccount)
+        .where(
+            LiveTradingAccount.user_id == user.id,
+            LiveTradingAccount.status != "archived",
+        )
+        .order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
+    ).all()
+    enabled = request.app.state.settings.binance_live_trading_enabled
+    return {
+        "items": [_live_account_out(account, enabled=enabled) for account in accounts],
+        "system_enabled": enabled,
+        "credentials_configured": user.binance_credentials_configured,
+        "trade_permission_requested": _binance_permissions_include_trade(user),
+    }
+
+
+@router.post("/live/accounts", status_code=status.HTTP_201_CREATED)
+def create_live_account(
+    payload: LiveAccountCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_expected_user(request, user)
+    if not user.binance_credentials_configured:
+        raise HTTPException(status_code=409, detail="configure Binance credentials first")
+    if not _binance_permissions_include_trade(user):
+        raise HTTPException(status_code=409, detail="Binance TRADE permission was not requested")
+    existing_count = db.scalar(
+        select(func.count(LiveTradingAccount.id)).where(
+            LiveTradingAccount.user_id == user.id,
+            LiveTradingAccount.status != "archived",
+        )
+    )
+    if int(existing_count or 0) >= 10:
+        raise HTTPException(status_code=409, detail="live account limit reached")
+    strategy = get_user_strategy(db, user.id, payload.strategy_id)
+    if (
+        strategy is None
+        or strategy.status != "active"
+        or strategy.lifecycle_status != "published"
+    ):
+        raise HTTPException(status_code=404, detail="published active strategy not found")
+    revision = db.scalar(
+        select(StrategyRevision).where(
+            StrategyRevision.user_strategy_id == strategy.id,
+            StrategyRevision.user_id == user.id,
+            StrategyRevision.version == strategy.version,
+        )
+    )
+    if revision is None:
+        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+    risk = dict(strategy.risk_defaults_json or {})
+    config = {
+        "symbols": payload.symbols,
+        "leverage": payload.leverage,
+        "max_positions": payload.max_positions,
+        "position_size_pct": payload.position_size_pct,
+        "margin_cap": payload.margin_cap,
+        "stop_loss_pct": max(0.1, min(float(risk.get("stop_loss_pct", 3)), 20)),
+        "take_profit_pct": max(0.1, min(float(risk.get("take_profit_pct", 5)), 50)),
+        "max_holding_bars": max(0, min(int(risk.get("max_holding_bars", 12)), 1_000)),
+    }
+    account = LiveTradingAccount(
+        user_id=user.id,
+        strategy_id=strategy.id,
+        name=payload.name,
+        status="paused",
+        config_json=config,
+        strategy_snapshot_json={
+            "public_id": strategy.public_id,
+            "name": strategy.name,
+            "engine_key": strategy.engine_key,
+            "strategy_kind": strategy.strategy_kind,
+            "version": strategy.version,
+            "spec_schema_version": strategy.spec_schema_version,
+            "spec": strategy.spec_json,
+            "spec_hash": strategy.spec_hash,
+            "parameters": strategy.parameters_json,
+            "risk_defaults": strategy.risk_defaults_json,
+        },
+        credential_version=user.binance_key_version,
+    )
+    db.add(account)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="live account name already exists") from exc
+    db.add(
+        StrategyDeployment(
+            public_id=str(uuid.uuid4()),
+            user_id=user.id,
+            strategy_id=strategy.id,
+            strategy_revision_id=revision.id,
+            mode="live",
+            target_account_id=account.id,
+            name=account.name,
+            status="paused",
+            universe_override_json={"symbols": payload.symbols},
+            risk_override_json={
+                "leverage": payload.leverage,
+                "max_positions": payload.max_positions,
+                "position_size_pct": payload.position_size_pct,
+                "margin_cap": payload.margin_cap,
+            },
+            runtime_state_json={},
+        )
+    )
+    _audit(db, request, "live.account.create", user.id, "live_account", account.public_id)
+    db.commit()
+    db.refresh(account)
+    return _live_account_out(
+        account, enabled=request.app.state.settings.binance_live_trading_enabled
+    )
+
+
+@router.post("/live/accounts/{account_id}/arm")
+def arm_live_account(
+    account_id: str,
+    payload: LiveAccountArmRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_expected_user(request, user)
+    if not request.app.state.settings.binance_live_trading_enabled:
+        raise HTTPException(status_code=503, detail="server live-trading switch is disabled")
+    account = _live_account_record(db, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="live account not found")
+    if payload.confirmation_name != account.name or not payload.acknowledge_real_funds:
+        raise HTTPException(status_code=409, detail="live-trading confirmation did not match")
+    if not user.binance_credentials_configured or not _binance_permissions_include_trade(user):
+        raise HTTPException(status_code=409, detail="Binance TRADE credentials are required")
+    active = db.scalar(
+        select(LiveTradingAccount.id).where(
+            LiveTradingAccount.user_id == user.id,
+            LiveTradingAccount.status == "active",
+            LiveTradingAccount.id != account.id,
+        )
+    )
+    if active is not None:
+        raise HTTPException(status_code=409, detail="pause the other live deployment first")
+    unresolved = db.scalar(
+        select(func.count(LiveOrderIntent.id)).where(
+            LiveOrderIntent.user_id == user.id,
+            LiveOrderIntent.live_account_id == account.id,
+            LiveOrderIntent.status == "unknown",
+        )
+    )
+    if int(unresolved or 0):
+        raise HTTPException(
+            status_code=409,
+            detail="resolve unknown Binance order states before arming",
+        )
+
+    encrypted_key = user.binance_api_key_encrypted or ""
+    encrypted_secret = user.binance_api_secret_encrypted or ""
+    credential_version = user.binance_key_version
+    symbols = list((account.config_json or {}).get("symbols") or [])
+    db.rollback()
+    cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
+    try:
+        api_key = cipher.decrypt(encrypted_key)
+        api_secret = cipher.decrypt(encrypted_secret)
+        snapshot = request.app.state.binance_service.account(
+            api_key, api_secret, force_refresh=True
+        )
+        if snapshot.account_type != "UM_FUTURE":
+            raise HTTPException(
+                status_code=409,
+                detail="portfolio margin live execution is not supported by this risk model",
+            )
+        if request.app.state.binance_trading_client.position_mode(api_key, api_secret) != "one_way":
+            raise HTTPException(
+                status_code=409, detail="switch Binance position mode to one-way before arming"
+            )
+        for symbol in symbols:
+            request.app.state.binance_trading_client.symbol_rules(symbol)
+    except SecurityError:
+        raise HTTPException(status_code=409, detail="Binance credentials cannot be decrypted") from None
+    except BinanceAccountClientError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"Binance live preflight failed: {exc.category}"
+        ) from None
+    occupied = {str(item["symbol"]) for item in snapshot.positions}.intersection(symbols)
+    if occupied:
+        raise HTTPException(
+            status_code=409,
+            detail="configured symbols already have Binance positions; close them before arming",
+        )
+
+    account = _live_account_record(db, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="live account not found")
+    account.status = "active"
+    account.credential_version = credential_version
+    account.armed_at = utcnow()
+    account.last_error_code = None
+    deployment = db.scalar(
+        select(StrategyDeployment).where(
+            StrategyDeployment.user_id == user.id,
+            StrategyDeployment.mode == "live",
+            StrategyDeployment.target_account_id == account.id,
+        )
+    )
+    if deployment is None:
+        raise HTTPException(status_code=409, detail="live deployment is unavailable")
+    deployment.status = "running"
+    deployment.started_at = utcnow()
+    deployment.last_error_code = None
+    _audit(db, request, "live.account.arm", user.id, "live_account", account.public_id)
+    db.commit()
+    db.refresh(account)
+    return _live_account_out(account, enabled=True)
+
+
+@router.patch("/live/accounts/{account_id}")
+def update_live_account_status(
+    account_id: str,
+    payload: LiveAccountStatusUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_expected_user(request, user)
+    account = _live_account_record(db, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="live account not found")
+    if payload.status == "archived":
+        submitted = db.scalar(
+            select(func.count(LiveOrderIntent.id)).where(
+                LiveOrderIntent.user_id == user.id,
+                LiveOrderIntent.live_account_id == account.id,
+                LiveOrderIntent.status.in_(["created", "submitted", "unknown"]),
+            )
+        )
+        if account.status == "active" or int(submitted or 0):
+            raise HTTPException(
+                status_code=409,
+                detail="pause deployment and resolve managed orders before archiving",
+            )
+    account.status = payload.status
+    if payload.status == "paused":
+        account.last_error_code = None
+    deployment = db.scalar(
+        select(StrategyDeployment).where(
+            StrategyDeployment.user_id == user.id,
+            StrategyDeployment.mode == "live",
+            StrategyDeployment.target_account_id == account.id,
+        )
+    )
+    if deployment is not None:
+        deployment.status = "paused" if payload.status == "paused" else "stopped"
+        deployment.updated_at = utcnow()
+    _audit(db, request, "live.account.status", user.id, "live_account", account.public_id)
+    db.commit()
+    db.refresh(account)
+    return _live_account_out(
+        account, enabled=request.app.state.settings.binance_live_trading_enabled
+    )
+
+
+@router.get("/live")
+def live_trading_dashboard(
+    request: Request,
+    response: Response,
+    account_id: str | None = Query(default=None, min_length=36, max_length=36),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "private, no-store"
+    account = _live_account_record(db, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="live account not found")
+    account_out = _live_account_out(
+        account, enabled=request.app.state.settings.binance_live_trading_enabled
+    )
+    intents = db.scalars(
+        select(LiveOrderIntent)
+        .where(
+            LiveOrderIntent.user_id == user.id,
+            LiveOrderIntent.live_account_id == account.id,
+        )
+        .order_by(LiveOrderIntent.created_at.desc(), LiveOrderIntent.id.desc())
+        .limit(100)
+    ).all()
+    intent_items = [
+        {
+            "id": item.public_id,
+            "client_order_id": item.client_order_id,
+            "binance_order_id": item.binance_order_id,
+            "symbol": item.symbol,
+            "action": item.action,
+            "side": item.side,
+            "order_type": item.order_type,
+            "quantity": float(item.quantity) if item.quantity is not None else None,
+            "status": item.status,
+            "error_code": item.error_code,
+            "submitted_at": item.submitted_at,
+            "created_at": item.created_at,
+        }
+        for item in intents
+    ]
+    if not user.binance_credentials_configured:
+        return {
+            "live_account": account_out,
+            "binance": {"configured": False, "connected": False, "error_category": "not_configured"},
+            "positions": [],
+            "open_orders": [],
+            "order_intents": intent_items,
+        }
+    encrypted_key = user.binance_api_key_encrypted or ""
+    encrypted_secret = user.binance_api_secret_encrypted or ""
+    db.rollback()
+    cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
+    try:
+        api_key = cipher.decrypt(encrypted_key)
+        api_secret = cipher.decrypt(encrypted_secret)
+        snapshot = request.app.state.binance_service.account(api_key, api_secret)
+        open_orders = request.app.state.binance_service.open_orders(
+            api_key, api_secret, account_type=snapshot.account_type
+        )
+    except SecurityError:
+        category = "credential_error"
+    except BinanceAccountClientError as exc:
+        category = exc.category
+    else:
+        return {
+            "live_account": account_out,
+            "binance": {
+                "configured": True,
+                "connected": True,
+                "account_type": snapshot.account_type,
+                "wallet_balance": float(snapshot.wallet_balance),
+                "available_balance": float(snapshot.available_balance),
+                "unrealized_pnl": float(snapshot.unrealized_pnl),
+                "updated_at": snapshot.updated_at,
+                "error_category": None,
+            },
+            "positions": list(snapshot.positions),
+            "open_orders": list(open_orders),
+            "order_intents": intent_items,
+        }
+    return {
+        "live_account": account_out,
+        "binance": {"configured": True, "connected": False, "error_category": category},
+        "positions": [],
+        "open_orders": [],
+        "order_intents": intent_items,
+    }
+
+
 @router.get("/backtests/catalog")
 def backtest_catalog(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    strategies = ensure_user_default_strategies(db, user.id)
+    strategies = [
+        strategy
+        for strategy in ensure_user_default_strategies(db, user.id)
+        if strategy.status == "active"
+        and strategy.strategy_kind == "full_strategy"
+        and strategy.lifecycle_status == "published"
+        and isinstance(strategy.spec_json, dict)
+    ]
     db.commit()
     try:
         catalog = _backtest(request).catalog()
@@ -1776,11 +2177,17 @@ def create_backtest(
     user_id = user.id
     ensure_user_default_strategies(db, user_id)
     selected = get_user_strategy(db, user_id, payload.strategy_id)
-    database_strategy = (
-        strategy_to_catalog_item(selected)
-        if selected is not None and selected.status == "active"
-        else None
-    )
+    if selected is not None and not (
+        selected.status == "active"
+        and selected.strategy_kind == "full_strategy"
+        and selected.lifecycle_status == "published"
+        and isinstance(selected.spec_json, dict)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="only active published full strategies can be backtested",
+        )
+    database_strategy = strategy_to_catalog_item(selected) if selected is not None else None
     selected_strategy_id = selected.id if database_strategy is not None else None
     selected_revision_id = None
     if selected_strategy_id is not None:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import time
 import urllib.error
@@ -13,10 +11,11 @@ from collections.abc import Mapping
 from typing import Any
 
 FAPI = "https://fapi.binance.com"
-PAPI = "https://papi.binance.com"
-
-_ALLOWED_BINANCE_HOSTS = frozenset({"fapi.binance.com", "papi.binance.com"})
+_ALLOWED_BINANCE_HOSTS = frozenset({"fapi.binance.com"})
 UA = {"User-Agent": "Mozilla/5.0 (quantdesk-local)"}
+_KLINE_INTERVAL_MS = {"15m": 15 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000}
+_BINANCE_KLINE_PAGE_SIZE = 1_500
+_MAX_ON_DEMAND_KLINES = 50_000
 
 
 def _validate_binance_url(url: str) -> str:
@@ -136,72 +135,99 @@ def fetch_klines(symbol: str, interval: str, limit: int = 300) -> list[tuple]:
     query = urllib.parse.urlencode(
         {"symbol": symbol, "interval": interval, "limit": limit}
     )
-    data = _get(f"{FAPI}/fapi/v1/klines?{query}", timeout=20)
-    # Binance rows: [open_time, open, high, low, close, volume, close_time, ...]
-    return [
-        (
-            int(row[0]),
-            float(row[1]),
-            float(row[2]),
-            float(row[3]),
-            float(row[4]),
-            float(row[5]),
-        )
-        for row in data
-    ]
+    return _normalize_kline_rows(_get(f"{FAPI}/fapi/v1/klines?{query}", timeout=20))
 
 
-def _signed_get(
-    base: str,
-    path: str,
-    api_key: str,
-    secret: str,
-    timeout: float = 25,
-) -> Any:
-    if base not in {FAPI, PAPI}:
-        raise ValueError("signed Binance requests require an approved base URL")
-    parsed_path = urllib.parse.urlsplit(path)
+def fetch_klines_range(
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    max_bars: int = _MAX_ON_DEMAND_KLINES,
+) -> list[tuple]:
+    """Fetch one closed historical range from Binance with bounded pagination."""
+
+    normalized_symbol = str(symbol).strip().upper()
+    if not 2 <= len(normalized_symbol) <= 32 or not normalized_symbol.isalnum():
+        raise ValueError("invalid Binance kline symbol")
+    interval_ms = _KLINE_INTERVAL_MS.get(interval)
+    if interval_ms is None:
+        raise ValueError("unsupported Binance kline interval")
     if (
-        not path.startswith("/")
-        or parsed_path.scheme
-        or parsed_path.netloc
-        or parsed_path.query
-        or parsed_path.fragment
+        isinstance(start_ms, bool)
+        or isinstance(end_ms, bool)
+        or not isinstance(start_ms, int)
+        or not isinstance(end_ms, int)
+        or start_ms < 0
+        or end_ms < start_ms
     ):
-        raise ValueError("signed Binance request path is invalid")
-    params = {"timestamp": int(time.time() * 1_000), "recvWindow": 10_000}
-    query = urllib.parse.urlencode(params)
-    signature = hmac.new(
-        secret.encode(), query.encode(), hashlib.sha256
-    ).hexdigest()
-    url = f"{base}{path}?{query}&signature={signature}"
-    return _get(
-        url,
-        headers={"X-MBX-APIKEY": api_key},
-        timeout=timeout,
-        retries=3,
-    )
+        raise ValueError("invalid Binance kline range")
+    if not 1 <= max_bars <= _MAX_ON_DEMAND_KLINES:
+        raise ValueError("invalid Binance kline limit")
 
+    now_ms = int(time.time() * 1_000)
+    last_closed_open = now_ms - (now_ms % interval_ms) - interval_ms
+    final_open = min(end_ms - (end_ms % interval_ms), last_closed_open)
+    first_open = start_ms - (start_ms % interval_ms)
+    if final_open < first_open:
+        return []
+    expected_bars = (final_open - first_open) // interval_ms + 1
+    if expected_bars > max_bars:
+        raise ValueError(f"Binance kline range exceeds the {max_bars} bar limit")
 
-def fetch_positions(api_key: str, secret: str) -> list[dict[str, Any]]:
-    """Return non-zero unified-account UM positions."""
-
-    data = _signed_get(PAPI, "/papi/v1/um/positionRisk", api_key, secret)
-    positions = []
-    for item in data:
-        amount = float(item.get("positionAmt", 0))
-        if amount == 0:
-            continue
-        positions.append(
+    output: list[tuple] = []
+    seen: set[int] = set()
+    cursor = first_open
+    while cursor <= final_open and len(output) < max_bars:
+        page_limit = min(_BINANCE_KLINE_PAGE_SIZE, max_bars - len(output))
+        query = urllib.parse.urlencode(
             {
-                "symbol": item["symbol"],
-                "amt": amount,
-                "side": item.get("positionSide")
-                or ("LONG" if amount > 0 else "SHORT"),
-                "entry": float(item.get("entryPrice", 0)),
-                "mark": float(item.get("markPrice", 0)),
-                "upnl": float(item.get("unRealizedProfit", 0)),
-                "leverage": int(float(item.get("leverage", 0))),
+                "symbol": normalized_symbol,
+                "interval": interval,
+                "startTime": cursor,
+                "endTime": final_open,
+                "limit": page_limit,
             }
         )
-    return positions
+        page = _normalize_kline_rows(
+            _get(f"{FAPI}/fapi/v1/klines?{query}", timeout=20)
+        )
+        accepted = [row for row in page if cursor <= row[0] <= final_open]
+        for row in accepted:
+            if row[0] not in seen:
+                seen.add(row[0])
+                output.append(row)
+        if not accepted:
+            break
+        next_cursor = max(row[0] for row in accepted) + interval_ms
+        if next_cursor <= cursor:
+            raise RuntimeError("Binance kline pagination made no progress")
+        cursor = next_cursor
+        if len(page) < page_limit:
+            break
+    output.sort(key=lambda row: row[0])
+    return output
+
+
+def _normalize_kline_rows(data: Any) -> list[tuple]:
+    if not isinstance(data, list):
+        raise RuntimeError("Binance kline response must be an array")
+    rows: list[tuple] = []
+    try:
+        for row in data:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                raise ValueError("invalid row")
+            rows.append(
+                (
+                    int(row[0]),
+                    float(row[1]),
+                    float(row[2]),
+                    float(row[3]),
+                    float(row[4]),
+                    float(row[5]),
+                )
+            )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Binance returned invalid kline data") from exc
+    return rows

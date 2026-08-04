@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from quantdesk.opportunity import (
+from quantdesk_v2.opportunity import (
     OpportunityDataError,
     classify_opportunity,
     compute_feature_snapshot,

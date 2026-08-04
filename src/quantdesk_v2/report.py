@@ -4,7 +4,7 @@ import json
 import time
 
 from . import indicators as ind
-from . import store
+from . import market_store as store
 
 # 标的 → 新闻匹配关键词（小写）
 KEYWORDS = {

@@ -19,8 +19,8 @@ from quantdesk_v2.strategy_runtime import (
 )
 
 from . import indicators as ind
-from . import store
-from .config_loader import tradfi_symbols
+from . import market_store as store
+from .market_config import tradfi_symbols
 
 DEFAULT_INITIAL_BALANCE = 10_000.0
 DEFAULT_LEVERAGE = 20
@@ -288,18 +288,21 @@ def _record_full_strategy_decision(
     spec: dict[str, Any],
     decision: Any,
 ) -> bool:
+    deployment_mode = str(account.get("deployment_mode") or "paper")
+    if deployment_mode not in {"paper", "live"}:
+        return False
     deployments = store.query(
         """SELECT id,strategy_revision_id FROM strategy_deployments
-           WHERE user_id=? AND mode='paper' AND target_account_id=? AND status='running'
+           WHERE user_id=? AND mode=? AND target_account_id=? AND status='running'
            ORDER BY id DESC LIMIT 1""",
-        (account["user_id"], account["id"]),
+        (account["user_id"], deployment_mode, account["id"]),
     )
     if not deployments or decision.signal_time is None:
         return False
     deployment = deployments[0]
     timeframe = str(spec["timeframes"]["trigger"])
     idempotency_key = (
-        f"paper:{deployment['id']}:{deployment['strategy_revision_id']}:"
+        f"{deployment_mode}:{deployment['id']}:{deployment['strategy_revision_id']}:"
         f"{symbol}:{timeframe}:{decision.signal_time}:{decision.decision}"
     )
     opportunity_direction = {

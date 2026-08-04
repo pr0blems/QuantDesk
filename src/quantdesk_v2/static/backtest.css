@@ -79,6 +79,8 @@ button { cursor: pointer; }
 .field-grid input:focus, .field-grid select:focus { border-color: var(--bt-brand); box-shadow: 0 0 0 3px rgba(43, 215, 163, .08); }
 .field-grid input:invalid:not(:focus):not(:placeholder-shown) { border-color: rgba(240, 100, 120, .5); }
 .field-help { color: var(--bt-dim); font-size: 8px; line-height: 1.45; }
+.field-help.locked { color: var(--bt-brand); }
+.field-grid select:disabled { color: #9acdbd; border-color: rgba(43, 215, 163, .24); background: rgba(43, 215, 163, .045); cursor: not-allowed; opacity: 1; }
 .checkbox-field { min-height: 37px; display: flex !important; grid-column: span 2; align-items: center; gap: 8px !important; padding: 8px 10px; border: 1px solid #294158; border-radius: 8px; background: #07131f; }
 .checkbox-field input { width: 15px; height: 15px; margin: 0; accent-color: var(--bt-brand); }
 .date-fields { margin-top: 10px; }

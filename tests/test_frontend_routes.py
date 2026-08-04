@@ -92,6 +92,10 @@ def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     assert "String(actualUser.id) !== authenticatedUserId" in asset.text
     assert "if (refreshAccessPromise) return refreshAccessPromise" in asset.text
     assert "rejectChangedIdentity(actualUser)" in asset.text
+    live_asset = client.get("/assets/live.js")
+    assert live_asset.status_code == 200
+    assert "REAL FUNDS" in live_asset.text
+    assert 'href="/live" data-panel-target="live"' in client.get("/").text
     assert docs.status_code == 200
     assert api_missing.status_code == 404
     assert api_missing.json() == {"detail": "Not Found"}

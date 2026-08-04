@@ -4,6 +4,7 @@ import copy
 import json
 import math
 from bisect import bisect_right
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,11 +13,13 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from .market_data_client import fetch_klines_range
 from .strategy_runtime import (
     StrategyMarketDataError,
     StrategySpecError,
     evaluate_strategy,
     full_strategy_parameter_schema,
+    strategy_required_bars,
     validate_strategy_spec,
 )
 
@@ -40,6 +43,7 @@ MAX_BARS = 50_000
 MAX_EQUITY_POINTS = 1_500
 MAX_RETURNED_TRADES = 5_000
 MAINTENANCE_MARGIN_RATE = 0.005
+SUPPORTED_BACKTEST_TIMEFRAMES = ("15m", "1h", "4h")
 
 
 STRATEGY_TEMPLATES: tuple[dict[str, Any], ...] = (
@@ -234,7 +238,13 @@ class _Candle:
 class BacktestRepository:
     """Read-only historical-data repository and deterministic backtest engine."""
 
-    def __init__(self, engine: Engine, symbols_config: Path):
+    def __init__(
+        self,
+        engine: Engine,
+        symbols_config: Path,
+        *,
+        kline_fetcher: Callable[[str, str, int, int], list[tuple]] | None = None,
+    ):
         if engine.dialect.name not in {"mysql", "mariadb"}:
             raise BacktestUnavailable("backtest market data requires MySQL")
         self.engine = engine
@@ -264,6 +274,7 @@ class BacktestRepository:
             raise BacktestUnavailable("backtest symbols config contains no symbols")
         self.symbols = [item["symbol"] for item in self.symbols_meta]
         self.symbol_set = set(self.symbols)
+        self.kline_fetcher = kline_fetcher or fetch_klines_range
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         try:
@@ -299,7 +310,7 @@ class BacktestRepository:
 
         symbols = []
         bounds: dict[str, dict[str, dict[str, int | str]]] = {}
-        timeframe_names: set[str] = set()
+        timeframe_names: set[str] = set(SUPPORTED_BACKTEST_TIMEFRAMES)
         for metadata in self.symbols_meta:
             symbol = metadata["symbol"]
             timeframes = sorted(
@@ -344,6 +355,12 @@ class BacktestRepository:
         validated = self._validate_config(config)
         if validated["strategy_id"] == "strategy_dsl":
             raise BacktestUnavailable("full strategy backtest requires an immutable strategy spec")
+        fetched = self._ensure_klines_if_missing(
+            validated["symbol"],
+            validated["timeframe"],
+            validated["start_ts"],
+            validated["end_ts"],
+        )
         series = self._series_info(validated["symbol"], validated["timeframe"])
         scale = series["scale"]
         start_raw = validated["start_ts"] * scale
@@ -372,6 +389,8 @@ class BacktestRepository:
         if len(candles) < 2:
             raise BacktestUnavailable("at least two valid klines are required")
 
+        if fetched:
+            quality["on_demand_fetches"] = [fetched]
         result = _run_engine(candles, validated)
         return _finalize_result(result, candles, validated, raw_count, quality)
 
@@ -388,7 +407,14 @@ class BacktestRepository:
             raise BacktestUnavailable(f"invalid full strategy spec: {exc}") from None
         config_with_engine = dict(config)
         config_with_engine["strategy_id"] = "strategy_dsl"
+        dynamic_parameters = dict(config_with_engine.get("params", {}))
+        if spec["strategy_type"] == "indicator_composite":
+            # Generic account settings are still validated by the shared engine
+            # boundary; composite parameters are validated against their DSL below.
+            config_with_engine["params"] = {}
         validated = self._validate_config(config_with_engine)
+        if spec["strategy_type"] == "indicator_composite":
+            validated["params"] = dynamic_parameters
         spec["parameters"].update(validated["params"])
         try:
             spec = validate_strategy_spec(spec)
@@ -410,6 +436,24 @@ class BacktestRepository:
         quality_by_timeframe: dict[str, dict[str, Any]] = {}
         raw_counts: dict[str, int] = {}
         window_sizes = _strategy_window_sizes(spec)
+        on_demand_fetches: list[dict[str, Any]] = []
+        for timeframe in set(spec["timeframes"].values()):
+            interval = _timeframe_seconds(timeframe)
+            if interval is None:
+                raise BacktestUnavailable(f"unsupported strategy timeframe: {timeframe}")
+            required_warmup = max(
+                window_sizes[role]
+                for role, role_timeframe in spec["timeframes"].items()
+                if role_timeframe == timeframe
+            )
+            fetched = self._ensure_klines_if_missing(
+                validated["symbol"],
+                timeframe,
+                max(0, validated["start_ts"] - interval * required_warmup),
+                validated["end_ts"],
+            )
+            if fetched:
+                on_demand_fetches.append(fetched)
         for role, timeframe in spec["timeframes"].items():
             series = self._series_info(validated["symbol"], timeframe)
             interval = _timeframe_seconds(timeframe)
@@ -490,6 +534,7 @@ class BacktestRepository:
                 "timeframes": quality_by_timeframe,
                 "raw_bars_by_timeframe": raw_counts,
                 "decision_counts": decision_counts,
+                "on_demand_fetches": on_demand_fetches,
             }
         )
         return _finalize_result(
@@ -503,6 +548,90 @@ class BacktestRepository:
                 "完整策略入场后的止损和止盈使用信号时生成的 ATR 风险距离",
             ],
         )
+
+    def _ensure_klines_if_missing(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_ts: int,
+        end_ts: int,
+    ) -> dict[str, Any] | None:
+        """Fetch and persist Binance closed bars only when the local range is empty."""
+
+        if symbol not in self.symbol_set or timeframe not in SUPPORTED_BACKTEST_TIMEFRAMES:
+            raise BacktestUnavailable("unsupported on-demand market data request")
+        series_rows = self._query(
+            """
+            SELECT COUNT(*) AS bars, MAX(open_time) AS end_time
+            FROM klines WHERE symbol=? AND tf=?
+            """,
+            (symbol, timeframe),
+        )
+        scale = (
+            _timestamp_scale(series_rows[0]["end_time"])
+            if series_rows and series_rows[0].get("end_time") is not None
+            else 1_000
+        )
+        local_rows = self._query(
+            """
+            SELECT COUNT(*) AS bars FROM klines
+            WHERE symbol=? AND tf=? AND open_time>=? AND open_time<=?
+            """,
+            (symbol, timeframe, start_ts * scale, end_ts * scale + scale - 1),
+        )
+        if local_rows and int(local_rows[0]["bars"] or 0) > 0:
+            return None
+        try:
+            rows = self.kline_fetcher(symbol, timeframe, start_ts * 1_000, end_ts * 1_000)
+        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            raise BacktestUnavailable(
+                f"Binance historical data fetch failed for {symbol} {timeframe}: {exc}"
+            ) from None
+        if not rows:
+            raise BacktestUnavailable(
+                f"Binance returned no closed klines for {symbol} {timeframe} in the requested range"
+            )
+        self._upsert_binance_klines(symbol, timeframe, rows)
+        return {
+            "source": "binance_fapi",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "requested_start_ts": start_ts,
+            "requested_end_ts": end_ts,
+            "bars_fetched": len(rows),
+        }
+
+    def _upsert_binance_klines(
+        self, symbol: str, timeframe: str, rows: list[tuple]
+    ) -> None:
+        statement = text(
+            """
+            INSERT INTO klines(symbol,tf,open_time,open,high,low,close,volume)
+            VALUES(:symbol,:tf,:open_time,:open,:high,:low,:close,:volume)
+            ON DUPLICATE KEY UPDATE open=VALUES(open),high=VALUES(high),low=VALUES(low),
+                                    close=VALUES(close),volume=VALUES(volume)
+            """
+        )
+        values = [
+            {
+                "symbol": symbol,
+                "tf": timeframe,
+                "open_time": int(row[0]),
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": float(row[5]),
+            }
+            for row in rows
+        ]
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(statement, values)
+        except SQLAlchemyError as exc:
+            raise BacktestUnavailable(
+                "Binance historical data could not be saved to MySQL"
+            ) from exc
 
     def _series_info(self, symbol: str, timeframe: str) -> dict[str, int]:
         rows = self._query(
@@ -747,6 +876,11 @@ def _clean_candles(
 
 
 def _strategy_window_sizes(spec: dict[str, Any]) -> dict[str, int]:
+    if spec["strategy_type"] == "indicator_composite":
+        return {
+            role: required + 10
+            for role, required in strategy_required_bars(spec).items()
+        }
     parameters = spec["parameters"]
     return {
         "regime": max(

@@ -568,8 +568,60 @@ class PaperAccountStatusUpdate(BaseModel):
     status: Literal["active", "paused", "archived"]
 
 
+class LiveAccountCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    strategy_id: str = Field(min_length=36, max_length=36)
+    symbols: list[str] = Field(min_length=1, max_length=5)
+    leverage: int = Field(default=3, ge=1, le=20)
+    max_positions: int = Field(default=1, ge=1, le=5)
+    position_size_pct: float = Field(default=2, gt=0, le=10)
+    margin_cap: float = Field(default=0.20, gt=0, le=0.50)
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize_symbols(cls, value: list[str]) -> list[str]:
+        symbols: list[str] = []
+        for raw in value:
+            symbol = str(raw).strip().upper()
+            if not re.fullmatch(r"[A-Z0-9]{3,32}", symbol):
+                raise ValueError("invalid Binance futures symbol")
+            if symbol not in symbols:
+                symbols.append(symbol)
+        if not symbols:
+            raise ValueError("at least one symbol is required")
+        return symbols
+
+
+class LiveAccountStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["paused", "archived"]
+
+
+class LiveAccountArmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    confirmation_name: str = Field(min_length=1, max_length=100)
+    acknowledge_real_funds: Literal[True]
+
+
+class StrategyIndicatorSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    key: str = Field(min_length=2, max_length=32, pattern=r"^[a-z][a-z0-9_]{1,31}$")
+    weight: float = Field(default=1, ge=0.1, le=5)
+    parameters: dict[str, int | float] = Field(default_factory=dict, max_length=8)
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameters(cls, value: dict[str, int | float]) -> dict[str, int | float]:
+        return _bounded_numeric_map(value, "indicator parameter")
+
+
 class StrategyCreateRequest(BaseModel):
-    """Create one user-owned strategy from an approved system template."""
+    """Create one user-owned template copy or executable indicator composition."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -584,6 +636,15 @@ class StrategyCreateRequest(BaseModel):
     )
     parameters: dict[str, int | float] | None = Field(default=None, max_length=32)
     risk_defaults: dict[str, int | float] | None = Field(default=None, max_length=16)
+    indicators: list[StrategyIndicatorSelection] | None = Field(
+        default=None, min_length=2, max_length=8
+    )
+    timeframe: Literal["15m", "1h", "4h"] = "1h"
+    directions: list[Literal["long", "short"]] = Field(
+        default_factory=lambda: ["long", "short"], min_length=1, max_length=2
+    )
+    confirmation_threshold: float = Field(default=60, ge=1, le=100)
+    signal_valid_bars: int = Field(default=2, ge=1, le=10)
 
     @field_validator("parameters")
     @classmethod
@@ -598,6 +659,17 @@ class StrategyCreateRequest(BaseModel):
         cls, value: dict[str, int | float] | None
     ) -> dict[str, int | float] | None:
         return _bounded_numeric_map(value, "risk default") if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_creation_mode(self) -> Self:
+        if self.indicators is not None:
+            keys = [item.key for item in self.indicators]
+            if len(set(keys)) != len(keys):
+                raise ValueError("indicator selections must be unique")
+            if self.template_key is not None:
+                raise ValueError("template_key and indicators cannot be used together")
+        self.directions = list(dict.fromkeys(self.directions))
+        return self
 
 
 class StrategyUpdateRequest(BaseModel):

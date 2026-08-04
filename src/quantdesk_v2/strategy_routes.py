@@ -48,7 +48,13 @@ from .strategy_catalog import (
     strategy_snapshot,
     validate_strategy_parameters,
 )
-from .strategy_runtime import INDICATOR_CATALOG, strategy_spec_hash, validate_strategy_spec
+from .strategy_runtime import (
+    INDICATOR_BY_KEY,
+    INDICATOR_CATALOG,
+    build_indicator_composite_spec,
+    strategy_spec_hash,
+    validate_strategy_spec,
+)
 
 router = APIRouter(prefix="/api/v2/strategies", tags=["strategies"])
 MAX_ACTIVE_STRATEGIES = 100
@@ -144,6 +150,172 @@ def _normalize_risk_defaults(
     return normalized
 
 
+def _normalize_schema_parameters(
+    schema: list[dict[str, Any]], values: Mapping[str, Any]
+) -> dict[str, int | float]:
+    if not isinstance(values, Mapping):
+        raise ValueError("策略参数必须是对象")
+    definitions = {str(item["key"]): item for item in schema}
+    unknown = sorted(set(values) - set(definitions))
+    missing = sorted(set(definitions) - set(values))
+    if unknown:
+        raise ValueError(f"未知策略参数：{', '.join(unknown)}")
+    if missing:
+        raise ValueError(f"缺少策略参数：{', '.join(missing)}")
+    normalized: dict[str, int | float] = {}
+    for key, definition in definitions.items():
+        raw = values[key]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(f"策略参数 {key} 必须是数字")
+        numeric = float(raw)
+        if not math.isfinite(numeric):
+            raise ValueError(f"策略参数 {key} 必须是有限数字")
+        if definition.get("type") == "integer":
+            if not numeric.is_integer():
+                raise ValueError(f"策略参数 {key} 必须是整数")
+            value: int | float = int(numeric)
+        else:
+            value = int(numeric) if numeric.is_integer() else numeric
+        if value < definition["min"] or value > definition["max"]:
+            raise ValueError(
+                f"策略参数 {key} 必须在 {definition['min']} 到 {definition['max']} 之间"
+            )
+        normalized[key] = value
+    return normalized
+
+
+def _indicator_ai_snapshot() -> dict[str, Any]:
+    parameters: dict[str, int | float] = {
+        "confirmation_threshold": 60,
+        "signal_valid_bars": 2,
+        "timeframe_minutes": 60,
+        "allow_long": 1,
+        "allow_short": 1,
+    }
+    default_keys = {"ema", "adx", "volume_ratio"}
+    for indicator in INDICATOR_CATALOG:
+        key = indicator["key"]
+        parameters[f"{key}_weight"] = 1 if key in default_keys else 0
+        for definition in indicator["parameters"]:
+            parameters[f"{key}_{definition['key']}"] = definition["default"]
+    return {
+        "name": "AI 指标组合策略",
+        "description": "由多个标准指标形成方向共识，并经过风险参数约束。",
+        "category": "指标组合",
+        "version": 1,
+        "parameters": parameters,
+        "risk_defaults": copy.deepcopy(DEFAULT_RISK),
+    }
+
+
+def _indicator_model_prompt(prompt: str) -> str:
+    catalog_note = "；".join(
+        f"{item['key']}={item['name']}（{item['role']}）" for item in INDICATOR_CATALOG
+    )
+    return (
+        f"可选指标：{catalog_note}。"
+        "请通过每个 指标key_weight 选择指标：0 表示不选，0.1 到 5 表示选择及权重；"
+        "至少选择两个且至少一个 directional。timeframe_minutes 只能是 15、60 或 240；"
+        "allow_long 和 allow_short 只能是 0 或 1。根据需求自动调整所选指标参数和风险参数。"
+        f"\n用户需求：{prompt}"
+    )
+
+
+def _local_indicator_selection(parameters: dict[str, int | float], prompt: str) -> None:
+    keywords = {
+        "ema": ("ema", "均线"),
+        "macd": ("macd", "动量"),
+        "rsi": ("rsi", "超买", "超卖"),
+        "bollinger": ("boll", "布林"),
+        "adx": ("adx", "趋势强度"),
+        "donchian": ("donchian", "唐奇安", "通道突破"),
+        "volume_ratio": ("成交量", "量比", "放量"),
+        "atr": ("atr", "波动率"),
+    }
+    normalized = prompt.lower()
+    compact = "".join(normalized.split())
+    selected = {
+        key for key, words in keywords.items() if any(word in normalized for word in words)
+    }
+    if selected:
+        for key in INDICATOR_BY_KEY:
+            parameters[f"{key}_weight"] = 1 if key in selected else 0
+    if "15m" in compact or "15分钟" in compact:
+        parameters["timeframe_minutes"] = 15
+    elif "4h" in compact or "4小时" in compact:
+        parameters["timeframe_minutes"] = 240
+    elif "1h" in compact or "1小时" in compact:
+        parameters["timeframe_minutes"] = 60
+    wants_long = any(word in normalized for word in ("只做多", "仅做多", "多头策略"))
+    wants_short = any(word in normalized for word in ("只做空", "仅做空", "空头策略"))
+    if wants_long != wants_short:
+        parameters["allow_long"] = int(wants_long)
+        parameters["allow_short"] = int(wants_short)
+
+
+def _indicator_draft_from_proposed(
+    proposed: Mapping[str, Any], *, prompt: str, local: bool
+) -> dict[str, Any]:
+    raw_parameters = proposed.get("parameters")
+    if not isinstance(raw_parameters, Mapping):
+        raise StrategyAiError("invalid_output")
+    parameters = dict(raw_parameters)
+    if local:
+        _local_indicator_selection(parameters, prompt)
+    selected_keys = [
+        key
+        for key in INDICATOR_BY_KEY
+        if float(parameters.get(f"{key}_weight", 0)) >= 0.1
+    ]
+    if not any(INDICATOR_BY_KEY[key]["role"] == "directional" for key in selected_keys):
+        selected_keys.insert(0, "ema")
+    if len(selected_keys) < 2:
+        selected_keys.append("volume_ratio" if "volume_ratio" not in selected_keys else "adx")
+    selected_keys = list(dict.fromkeys(selected_keys))[:8]
+    selections = []
+    for key in selected_keys:
+        indicator = INDICATOR_BY_KEY[key]
+        raw_weight = float(parameters.get(f"{key}_weight", 1))
+        weight = min(5.0, max(0.1, raw_weight))
+        indicator_parameters: dict[str, int | float] = {}
+        for definition in indicator["parameters"]:
+            raw = parameters.get(f"{key}_{definition['key']}", definition["default"])
+            value = min(float(definition["max"]), max(float(definition["min"]), float(raw)))
+            if definition["type"] == "integer":
+                value = int(round(value))
+            elif value.is_integer():
+                value = int(value)
+            indicator_parameters[definition["key"]] = value
+        selections.append({"key": key, "weight": weight, "parameters": indicator_parameters})
+    timeframe_value = int(round(float(parameters.get("timeframe_minutes", 60))))
+    timeframe = {15: "15m", 60: "1h", 240: "4h"}.get(timeframe_value, "1h")
+    directions = []
+    if float(parameters.get("allow_long", 1)) >= 0.5:
+        directions.append("long")
+    if float(parameters.get("allow_short", 1)) >= 0.5:
+        directions.append("short")
+    if not directions:
+        directions = ["long", "short"]
+    risk_defaults = _normalize_risk_defaults(
+        proposed.get("risk_defaults"), base=DEFAULT_RISK, require_same_keys=True
+    )
+    return {
+        "name": str(proposed.get("name") or "AI 指标组合策略")[:80],
+        "description": str(proposed.get("description") or "")[:600],
+        "category": str(proposed.get("category") or "指标组合")[:32],
+        "timeframe": timeframe,
+        "directions": directions,
+        "confirmation_threshold": min(
+            100.0, max(1.0, float(parameters.get("confirmation_threshold", 60)))
+        ),
+        "signal_valid_bars": min(
+            10, max(1, int(round(float(parameters.get("signal_valid_bars", 2)))))
+        ),
+        "indicators": selections,
+        "risk_defaults": risk_defaults,
+    }
+
+
 def _locked_user_strategy(db: Session, user_id: int, public_id: str) -> UserStrategy | None:
     return db.scalar(
         select(UserStrategy)
@@ -204,10 +376,17 @@ def _apply_edit(
             },
         )
     try:
-        parameters = validate_strategy_parameters(
-            strategy.engine_key,
-            editable["parameters"],
-        )
+        current_spec = strategy.spec_json if isinstance(strategy.spec_json, dict) else {}
+        if current_spec.get("strategy_type") == "indicator_composite":
+            parameters = _normalize_schema_parameters(
+                strategy.parameter_schema_json,
+                editable["parameters"],
+            )
+        else:
+            parameters = validate_strategy_parameters(
+                strategy.engine_key,
+                editable["parameters"],
+            )
         risks = _normalize_risk_defaults(
             editable["risk_defaults"],
             base=strategy.risk_defaults_json,
@@ -266,7 +445,125 @@ def list_strategies(
 
 @router.get("/indicators/catalog")
 def list_indicator_catalog(_: User = Depends(get_current_user)) -> dict[str, Any]:
-    return {"items": copy.deepcopy(list(INDICATOR_CATALOG)), "engine": "strategy_runtime_v1"}
+    return {
+        "items": copy.deepcopy(list(INDICATOR_CATALOG)),
+        "engine": "strategy_runtime_v1",
+        "defaults": {
+            "timeframe": "1h",
+            "directions": ["long", "short"],
+            "confirmation_threshold": 60,
+            "signal_valid_bars": 2,
+            "risk_defaults": copy.deepcopy(DEFAULT_RISK),
+        },
+    }
+
+
+@router.post("/compose/ai-preview")
+def preview_indicator_composition(
+    payload: StrategyAiPreviewRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    settings = request.app.state.settings
+    user_model = db.scalar(
+        select(AiModelConfig)
+        .where(
+            AiModelConfig.user_id == user.id,
+            AiModelConfig.is_enabled.is_(True),
+            AiModelConfig.is_default.is_(True),
+        )
+        .order_by(AiModelConfig.updated_at.desc(), AiModelConfig.id.desc())
+        .limit(1)
+    )
+    user_model_runtime: tuple[str, str, str] | None = None
+    if user_model is not None:
+        try:
+            api_key = CredentialCipher(
+                settings.credential_master_key.get_secret_value()
+            ).decrypt(user_model.api_key_encrypted)
+        except SecurityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail={"message": "AI strategy preview failed", "category": "not_configured"},
+            ) from None
+        user_model_runtime = (user_model.provider_code, user_model.model_name, api_key)
+    db.rollback()
+    model_prompt = _indicator_model_prompt(payload.prompt)
+    snapshot = _indicator_ai_snapshot()
+    safety_identifier = (
+        "qd_"
+        + hmac.new(
+            settings.jwt_secret.get_secret_value().encode("utf-8"),
+            f"strategy-compose-user:{user.id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()[:32]
+    )
+    try:
+        if user_model_runtime is not None:
+            provider_code, model_name, api_key = user_model_runtime
+            preview = generate_user_model_strategy_preview(
+                snapshot,
+                model_prompt,
+                provider_code=provider_code,
+                api_key=api_key,
+                model_name=model_name,
+                timeout_seconds=settings.openai_strategy_timeout_seconds,
+            )
+        else:
+            preview = generate_strategy_preview(
+                snapshot,
+                model_prompt,
+                settings.openai_api_key.get_secret_value(),
+                settings.openai_strategy_model,
+                settings.openai_strategy_timeout_seconds,
+                safety_identifier,
+            )
+        proposed = preview.get("proposed")
+        if not isinstance(proposed, Mapping):
+            raise StrategyAiError("invalid_output")
+        draft = _indicator_draft_from_proposed(
+            proposed,
+            prompt=payload.prompt,
+            local=preview.get("provider") == "local_semantic",
+        )
+        # Run the same executable DSL validator used by save, backtest and paper.
+        build_indicator_composite_spec(
+            draft["indicators"],
+            timeframe=draft["timeframe"],
+            directions=draft["directions"],
+            confirmation_threshold=draft["confirmation_threshold"],
+            signal_valid_bars=draft["signal_valid_bars"],
+        )
+    except StrategyAiError as exc:
+        status_by_category = {
+            "not_configured": 503,
+            "timeout": 504,
+            "upstream": 502,
+            "invalid_output": 502,
+        }
+        raise HTTPException(
+            status_code=status_by_category[exc.category],
+            detail={"message": "AI strategy preview failed", "category": exc.category},
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"AI 指标方案校验失败：{exc}") from None
+    indicator_names = [INDICATOR_BY_KEY[item["key"]]["name"] for item in draft["indicators"]]
+    return {
+        "provider": preview["provider"],
+        "summary": preview.get("summary") or "AI 已生成受约束的指标组合。",
+        "changes": [
+            {"path": "indicators", "before": "未选择", "after": " + ".join(indicator_names)},
+            {"path": "timeframe", "before": "1h", "after": draft["timeframe"]},
+            {
+                "path": "confirmation_threshold",
+                "before": 60,
+                "after": draft["confirmation_threshold"],
+            },
+        ],
+        "draft": draft,
+    }
 
 
 @router.get("/deployments")
@@ -432,35 +729,67 @@ def create_strategy(
     if int(active_count or 0) >= MAX_ACTIVE_STRATEGIES:
         raise HTTPException(status_code=409, detail="active strategy limit reached")
 
-    template_key = payload.template_key or "trend_pullback_continuation_v1"
-    template = db.scalar(
-        select(StrategyTemplate).where(
-            StrategyTemplate.template_key == template_key,
-            StrategyTemplate.is_active.is_(True),
-        )
-    )
-    if template is None:
-        raise HTTPException(status_code=422, detail="unknown strategy template")
-    try:
-        parameters = validate_strategy_parameters(
-            template.engine_key,
-            payload.parameters if payload.parameters is not None else template.parameters_json,
-        )
-        risks = _normalize_risk_defaults(
-            payload.risk_defaults,
-            base=template.risk_defaults_json,
-        )
-    except (StrategyParameterError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
-
     now = utcnow()
-    strategy_spec = copy.deepcopy(template.spec_json)
-    if strategy_spec is not None:
-        strategy_spec["parameters"] = copy.deepcopy(parameters)
+    if payload.indicators is not None:
         try:
+            risks = _normalize_risk_defaults(payload.risk_defaults, base=DEFAULT_RISK)
+            strategy_spec, parameter_schema, parameters = build_indicator_composite_spec(
+                [item.model_dump() for item in payload.indicators],
+                timeframe=payload.timeframe,
+                directions=payload.directions,
+                confirmation_threshold=payload.confirmation_threshold,
+                signal_valid_bars=payload.signal_valid_bars,
+            )
+            strategy_spec["risk"]["max_leverage"] = int(risks["leverage"])
+            strategy_spec["exit"]["max_holding_bars"] = max(
+                1, int(risks["max_holding_bars"])
+            )
+            stop_loss = float(risks["stop_loss_pct"])
+            take_profit = float(risks["take_profit_pct"])
+            if stop_loss > 0 and take_profit > 0:
+                strategy_spec["exit"]["take_profit_r"] = min(
+                    20.0, max(0.1, take_profit / stop_loss)
+                )
             strategy_spec = validate_strategy_spec(strategy_spec)
-        except ValueError as exc:
+        except (StrategyParameterError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+        engine_key = "strategy_dsl"
+        strategy_kind = "full_strategy"
+    else:
+        template_key = payload.template_key or "trend_pullback_continuation_v1"
+        template = db.scalar(
+            select(StrategyTemplate).where(
+                StrategyTemplate.template_key == template_key,
+                StrategyTemplate.is_active.is_(True),
+            )
+        )
+        if template is None:
+            raise HTTPException(status_code=422, detail="unknown strategy template")
+        try:
+            parameters = validate_strategy_parameters(
+                template.engine_key,
+                payload.parameters
+                if payload.parameters is not None
+                else template.parameters_json,
+            )
+            risks = _normalize_risk_defaults(
+                payload.risk_defaults,
+                base=template.risk_defaults_json,
+            )
+        except (StrategyParameterError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        strategy_spec = copy.deepcopy(template.spec_json)
+        if strategy_spec is not None:
+            strategy_spec["parameters"] = copy.deepcopy(parameters)
+            try:
+                strategy_spec = validate_strategy_spec(strategy_spec)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from None
+        parameter_schema = copy.deepcopy(template.parameter_schema_json)
+        engine_key = template.engine_key
+        strategy_kind = (
+            "full_strategy" if template.template_kind == "strategy" else "legacy_signal"
+        )
     strategy = UserStrategy(
         public_id=str(uuid.uuid4()),
         user_id=user.id,
@@ -471,16 +800,14 @@ def create_strategy(
         category=payload.category,
         status="active",
         version=1,
-        engine_key=template.engine_key,
-        strategy_kind=(
-            "full_strategy" if template.template_kind == "strategy" else "legacy_signal"
-        ),
+        engine_key=engine_key,
+        strategy_kind=strategy_kind,
         lifecycle_status="published",
         spec_schema_version=(int(strategy_spec["schema_version"]) if strategy_spec else None),
         spec_json=strategy_spec,
         spec_hash=strategy_spec_hash(strategy_spec) if strategy_spec else None,
         risk_level="medium",
-        parameter_schema_json=copy.deepcopy(template.parameter_schema_json),
+        parameter_schema_json=parameter_schema,
         parameters_json=parameters,
         risk_defaults_json=risks,
         created_via="manual",

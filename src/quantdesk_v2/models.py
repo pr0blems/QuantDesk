@@ -159,6 +159,9 @@ class User(Base):
     paper_accounts: Mapped[list[PaperAccount]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
+    live_accounts: Mapped[list[LiveTradingAccount]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
     ai_model_configs: Mapped[list[AiModelConfig]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -1267,3 +1270,168 @@ class PaperAccount(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="paper_accounts")
+
+
+class LiveTradingAccount(Base):
+    __tablename__ = "live_trading_accounts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('paused', 'active', 'archived', 'error')", name="valid_status"
+        ),
+        ForeignKeyConstraint(
+            ["strategy_id", "user_id"],
+            ["user_strategies.id", "user_strategies.user_id"],
+            name="fk_live_accounts_strategy_tenant",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("public_id", name="uq_live_accounts_public_id"),
+        UniqueConstraint("id", "user_id", name="uq_live_accounts_id_user_id"),
+        UniqueConstraint("user_id", "name", name="uq_live_accounts_user_name"),
+        Index("ix_live_accounts_user_status_updated", "user_id", "status", "updated_at"),
+        {
+            "comment": "用户隔离的 Binance 实盘策略部署；资金与仓位以交易所为准",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="实盘账户内部主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="实盘账户公开 UUID"
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属用户 ID",
+    )
+    strategy_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="同一用户拥有的策略 ID"
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False, comment="实盘部署显示名称")
+    status: Mapped[str] = mapped_column(
+        String(16), default="paused", nullable=False, comment="暂停、运行、归档或错误"
+    )
+    config_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="实盘标的、杠杆、仓位和保护单风控配置"
+    )
+    strategy_snapshot_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="创建实盘部署时冻结的完整策略快照"
+    )
+    credential_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="启用时绑定的 Binance 凭据版本"
+    )
+    armed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="用户明确确认启用实盘的时间（UTC）"
+    )
+    last_tick_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="最后一次实盘策略检查时间（UTC）"
+    )
+    last_error_code: Mapped[str | None] = mapped_column(
+        String(64), comment="最后一次脱敏执行错误代码"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="实盘部署创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="实盘部署最后更新时间（UTC）",
+    )
+
+    user: Mapped[User] = relationship(back_populates="live_accounts")
+
+
+class LiveOrderIntent(Base):
+    __tablename__ = "live_order_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('open', 'close', 'stop', 'take_profit')", name="valid_action"
+        ),
+        CheckConstraint("side IN ('BUY', 'SELL')", name="valid_side"),
+        CheckConstraint(
+            "status IN ('created', 'submitted', 'filled', 'canceled', 'rejected', 'unknown')",
+            name="valid_status",
+        ),
+        ForeignKeyConstraint(
+            ["live_account_id", "user_id"],
+            ["live_trading_accounts.id", "live_trading_accounts.user_id"],
+            name="fk_live_order_intents_account_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["deployment_id", "user_id"],
+            ["strategy_deployments.id", "strategy_deployments.user_id"],
+            name="fk_live_order_intents_deployment_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("public_id", name="uq_live_order_intents_public_id"),
+        UniqueConstraint("signal_key", name="uq_live_order_intents_signal_key"),
+        UniqueConstraint("client_order_id", name="uq_live_order_intents_client_order_id"),
+        Index("ix_live_order_intents_user_created", "user_id", "created_at"),
+        Index("ix_live_order_intents_account_symbol", "live_account_id", "symbol", "status"),
+        {
+            "comment": "Binance 实盘订单的幂等意图、脱敏响应与审计状态",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="订单意图内部主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="订单意图公开 UUID"
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="所属用户 ID")
+    live_account_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="所属实盘部署账户 ID"
+    )
+    deployment_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="固定策略修订的部署 ID"
+    )
+    signal_key: Mapped[str] = mapped_column(
+        String(191), nullable=False, comment="策略信号与订单动作的全局幂等键"
+    )
+    client_order_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, comment="发送给 Binance 的幂等客户端订单号"
+    )
+    binance_order_id: Mapped[str | None] = mapped_column(
+        String(64), comment="Binance 订单 ID，按字符串保存避免精度丢失"
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="USD-M 合约代码")
+    action: Mapped[str] = mapped_column(String(16), nullable=False, comment="开仓、平仓或保护单")
+    side: Mapped[str] = mapped_column(String(4), nullable=False, comment="BUY 或 SELL")
+    order_type: Mapped[str] = mapped_column(String(32), nullable=False, comment="Binance 订单类型")
+    quantity: Mapped[Decimal | None] = mapped_column(
+        Numeric(30, 18), comment="下单数量；closePosition 保护单可为空"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="created", nullable=False, comment="订单意图生命周期状态"
+    )
+    request_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False, comment="不含密钥与签名的订单参数"
+    )
+    response_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="经过字段白名单裁剪的 Binance 响应"
+    )
+    error_code: Mapped[str | None] = mapped_column(
+        String(64), comment="脱敏错误类别"
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="首次发往 Binance 的时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="订单意图创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="订单意图最后更新时间（UTC）",
+    )

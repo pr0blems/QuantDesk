@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from quantdesk_v2 import strategy_ai
+from quantdesk_v2 import strategy_ai, strategy_routes
 from quantdesk_v2.ai_providers import AI_PROVIDER_PRESETS
 from quantdesk_v2.strategy_ai import (
     StrategyAiError,
@@ -129,6 +129,30 @@ def test_no_key_uses_honest_local_semantic_preview_without_protected_fields() ->
         "version",
     }.intersection(preview["proposed"])
     assert current["parameters"]["fast_period"] == 5
+
+
+def test_local_ai_composer_selects_indicators_timeframe_and_direction() -> None:
+    prompt = "使用 RSI、布林带和 ATR 做 15 分钟反转策略，只做多"
+    preview = generate_strategy_preview(
+        strategy_routes._indicator_ai_snapshot(),
+        strategy_routes._indicator_model_prompt(prompt),
+        api_key="",
+        model="unused",
+    )
+    draft = strategy_routes._indicator_draft_from_proposed(
+        preview["proposed"],
+        prompt=prompt,
+        local=True,
+    )
+
+    assert preview["provider"] == "local_semantic"
+    assert draft["timeframe"] == "15m"
+    assert draft["directions"] == ["long"]
+    assert {item["key"] for item in draft["indicators"]} == {
+        "rsi",
+        "bollinger",
+        "atr",
+    }
 
 
 def test_local_period_description_and_unknown_prompt_are_safe() -> None:

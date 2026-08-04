@@ -8,7 +8,7 @@ import pytest
 from defusedxml.common import EntitiesForbidden
 from sqlalchemy import Computed
 
-from quantdesk import news
+from quantdesk_v2 import news
 from quantdesk_v2.models import News
 
 

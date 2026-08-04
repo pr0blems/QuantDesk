@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from quantdesk import config_loader
+from quantdesk_v2 import market_config as config_loader
 
 
 def test_market_collector_uses_the_single_non_secret_config_directory() -> None:

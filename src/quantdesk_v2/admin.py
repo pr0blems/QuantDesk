@@ -11,9 +11,8 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from quantdesk import config_loader
-from quantdesk import news as market_news
-
+from . import market_config as config_loader
+from . import news as market_news
 from .database import get_db
 from .dependencies import require_admin, require_admin_write
 from .models import (
