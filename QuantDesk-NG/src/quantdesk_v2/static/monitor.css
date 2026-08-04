@@ -71,6 +71,7 @@ button { cursor: pointer; }
 .panel-title { min-height: 38px; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--m-border); font-weight: 700; }
 .panel-title em { color: var(--m-dim); font-style: normal; font-weight: 400; }
 .filters { display: flex; gap: 5px; }
+.filters .import-watchlist { min-width: 116px; color: var(--m-gold); white-space: nowrap; }
 .filters input, .filters select { min-height: 28px; width: 96px; padding: 3px 7px; border: 1px solid var(--m-border); border-radius: 2px; outline: none; background: var(--m-bg); color: var(--m-text); }
 .filters input:focus, .filters select:focus { border-color: var(--m-gold); }
 .breadth { padding: 6px 11px; border-bottom: 1px solid var(--m-border); color: var(--m-neutral); font-weight: 700; }
@@ -94,9 +95,14 @@ button { cursor: pointer; }
 .contract-card.alert-long { box-shadow: inset 0 0 0 1px var(--m-up); }
 .contract-card.alert-short { box-shadow: inset 0 0 0 1px var(--m-down); }
 .contract-card.alert-neutral { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .45); }
+.contract-card.is-watch { border-color: color-mix(in srgb, var(--m-gold) 70%, var(--m-border)); }
+.contract-card.is-watch::before { content: ""; position: absolute; inset: 7px auto 7px 0; width: 3px; border-radius: 0 3px 3px 0; background: var(--m-gold); }
 .band-card-head { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
 .contract-card .symbol { min-width: 0; overflow: hidden; font-size: 14px; font-weight: 800; letter-spacing: .02em; text-overflow: ellipsis; white-space: nowrap; }
 .contract-card .tags { margin-left: 4px; font-size: 11px; }
+.card-watch { width: 23px; height: 23px; flex: 0 0 23px; display: inline-grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 50%; background: transparent; color: var(--m-dim); font-size: 16px; line-height: 1; cursor: pointer; }
+.card-watch:hover { border-color: var(--m-gold); color: var(--m-gold); }
+.card-watch.on { color: var(--m-gold); }
 .signal.strong-up, .score.strong-up { color: var(--m-up); }
 .signal.strong-down, .score.strong-down { color: var(--m-down); }
 .signal.mild-up, .score.mild-up { color: var(--m-up); }
@@ -180,6 +186,18 @@ button { cursor: pointer; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
 .modal-symbol { margin-right: 10px; font-size: 17px; }
 .modal-price { margin-right: 8px; font-size: 16px; font-weight: 800; }
+.watchlist-import-box { width: min(640px, 96vw); }
+.watchlist-import-note { margin: 0 0 12px; color: var(--m-dim); line-height: 1.7; }
+.watchlist-import-note b { color: var(--m-text); }
+.watchlist-import-field { display: block; margin-bottom: 5px; color: var(--m-text); font-weight: 700; }
+.watchlist-import-box textarea { width: 100%; resize: vertical; padding: 10px 11px; border: 1px solid var(--m-border); border-radius: 3px; outline: none; background: var(--m-bg); color: var(--m-text); font: 13px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.watchlist-import-box textarea:focus { border-color: var(--m-gold); }
+.watchlist-import-preview { min-height: 52px; margin-top: 9px; padding: 8px 10px; border: 1px solid var(--m-border); background: var(--m-card); color: var(--m-dim); line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.watchlist-import-message { min-height: 20px; margin: 7px 0; color: var(--m-down); }
+.watchlist-import-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.watchlist-import-actions button { min-height: 32px; padding: 5px 12px; border: 1px solid var(--m-border); border-radius: 3px; background: var(--m-bg); color: var(--m-text); cursor: pointer; }
+.watchlist-import-actions button:hover { border-color: var(--m-gold); }
+.watchlist-import-actions button.primary { border-color: var(--m-gold); background: color-mix(in srgb, var(--m-gold) 14%, var(--m-bg)); color: var(--m-gold); font-weight: 700; }
 .tf-switch { display: inline-flex; gap: 4px; margin-right: 7px; }
 .tf-switch button.on, .watch.on { color: var(--m-gold); border-color: var(--m-gold); }
 .chart { width: 100%; display: block; border-radius: 7px; background: #0d1117; }
@@ -269,7 +287,7 @@ button { cursor: pointer; }
   .monitor-actions { justify-content: flex-start; }
   .intelligence-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .filters { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
-  .filters input { grid-column: 1 / -1; width: 100%; }
+  .filters .import-watchlist, .filters input { grid-column: 1 / -1; width: 100%; }
   .filters select { width: 100%; }
   .panel-title { align-items: flex-start; flex-wrap: wrap; }
   .grid-panel { min-height: 75vh; }

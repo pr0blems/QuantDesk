@@ -50,4 +50,25 @@ def test_contract_cards_use_force_band_layout() -> None:
     assert 'style="width:' not in script
     assert "@container (min-width: 270px)" in stylesheet
     assert "@container (min-width: 340px)" in stylesheet
-    assert "monitor.js?v=20260804-13" in index
+    assert "monitor.js?v=20260804-14" in index
+
+
+def test_watchlist_import_and_pinning_are_visible_and_persistent() -> None:
+    script = (STATIC / "monitor.js").read_text(encoding="utf-8")
+    stylesheet = (STATIC / "monitor.css").read_text(encoding="utf-8")
+
+    assert 'id="btn-import-watchlist"' in script
+    assert 'id="watchlist-import-input"' in script
+    assert 'id="watchlist-import-merge"' in script
+    assert 'id="watchlist-import-replace"' in script
+    assert 'aliases.set(symbol.slice(0, -4), symbol)' in script
+    assert '.split(/[\\s,;]+/)' in script
+    assert 'method: "PUT"' in script
+    assert 'this.state.watchlist = new Set(Array.isArray(saved)' in script
+    assert 'if (left.watch !== right.watch) return right.watch ? 1 : -1' in script
+    assert 'class="card-watch ${item.watch ? "on" : ""}"' in script
+    assert 'event.stopPropagation()' in script
+    assert '暂无本地自选合约' in script
+    assert ".contract-card.is-watch" in stylesheet
+    assert ".card-watch.on" in stylesheet
+    assert ".watchlist-import-box" in stylesheet

@@ -28,7 +28,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-13">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-14">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -53,6 +53,7 @@ class ContractMonitor extends HTMLElement {
             <div class="panel-title">
               <span>合约监控 <em id="sym-count"></em></span>
               <div class="filters">
+                <button id="btn-import-watchlist" class="import-watchlist" type="button">导入币安自选</button>
                 <input id="search" aria-label="搜索合约" placeholder="搜索…">
                 <select id="filter" aria-label="筛选合约">
                   <option value="all">全部</option>
@@ -110,6 +111,23 @@ class ContractMonitor extends HTMLElement {
           <div class="factor-title">因子明细（当前周期）</div>
           <div id="factors" class="factors"></div>
         </div>
+      </div>
+      <div id="watchlist-import" class="modal hidden">
+        <div class="modal-box watchlist-import-box" role="dialog" aria-modal="true" aria-labelledby="watchlist-import-title">
+          <div class="modal-head">
+            <div><strong id="watchlist-import-title" class="modal-symbol">导入币安自选</strong></div>
+            <button id="watchlist-import-close" type="button">关闭</button>
+          </div>
+          <p class="watchlist-import-note">币安官方 API 不开放账户自选读取。请从币安自选中复制合约代码粘贴到这里，支持代码、空格、逗号或换行分隔；输入 <b>AAPL</b> 和 <b>AAPLUSDT</b> 均可。</p>
+          <label class="watchlist-import-field" for="watchlist-import-input">合约代码</label>
+          <textarea id="watchlist-import-input" rows="8" spellcheck="false" placeholder="例如：&#10;AAPL&#10;TSLAUSDT&#10;NVDA, SNOW"></textarea>
+          <div id="watchlist-import-preview" class="watchlist-import-preview"></div>
+          <p id="watchlist-import-message" class="watchlist-import-message" aria-live="polite"></p>
+          <div class="watchlist-import-actions">
+            <button id="watchlist-import-merge" class="primary" type="button">追加导入并置顶</button>
+            <button id="watchlist-import-replace" type="button">用输入内容覆盖</button>
+          </div>
+        </div>
       </div>`;
   }
 
@@ -156,6 +174,7 @@ class ContractMonitor extends HTMLElement {
       this.q(`#${id}`).addEventListener("input", () => this.renderGrid());
     });
     this.q("#btn-refresh").addEventListener("click", () => this.refreshAll());
+    this.q("#btn-import-watchlist").addEventListener("click", () => this.openWatchlistImport());
     this.q("#btn-sound").addEventListener("click", (event) => {
       this.state.sound = !this.state.sound;
       event.currentTarget.classList.toggle("on", this.state.sound);
@@ -182,6 +201,13 @@ class ContractMonitor extends HTMLElement {
       });
     });
     this.q("#modal-watch").addEventListener("click", () => this.toggleWatchlist());
+    this.q("#watchlist-import-close").addEventListener("click", () => this.closeWatchlistImport());
+    this.q("#watchlist-import").addEventListener("click", (event) => {
+      if (event.target === this.q("#watchlist-import")) this.closeWatchlistImport();
+    });
+    this.q("#watchlist-import-input").addEventListener("input", () => this.renderWatchlistImportPreview());
+    this.q("#watchlist-import-merge").addEventListener("click", () => this.importWatchlist("merge"));
+    this.q("#watchlist-import-replace").addEventListener("click", () => this.importWatchlist("replace"));
     this.q("#opportunity-detail").addEventListener("click", (event) => {
       const button = event.target.closest("[data-opportunity-action]");
       if (!button) return;
@@ -206,6 +232,91 @@ class ContractMonitor extends HTMLElement {
       return ["http:", "https:"].includes(url.protocol) ? url.href : "#";
     } catch (_) {
       return "#";
+    }
+  }
+
+  parseWatchlistInput(value) {
+    const aliases = new Map();
+    this.state.overview.forEach((item) => {
+      const symbol = String(item.symbol || "").trim().toUpperCase();
+      if (!symbol) return;
+      aliases.set(symbol, symbol);
+      if (symbol.endsWith("USDT")) aliases.set(symbol.slice(0, -4), symbol);
+    });
+    const tokens = String(value || "")
+      .toUpperCase()
+      .replace(/[，；、]/g, ",")
+      .split(/[\s,;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const symbols = [];
+    const invalid = [];
+    tokens.forEach((token) => {
+      const symbol = aliases.get(token);
+      if (!symbol) invalid.push(token);
+      else if (!symbols.includes(symbol)) symbols.push(symbol);
+    });
+    return { symbols, invalid: [...new Set(invalid)] };
+  }
+
+  updateWatchlistUi() {
+    const button = this.q("#btn-import-watchlist");
+    if (button) button.textContent = `导入币安自选 · ${this.state.watchlist.size}`;
+  }
+
+  openWatchlistImport() {
+    this.q("#watchlist-import-input").value = "";
+    this.q("#watchlist-import-message").textContent = "";
+    this.q("#watchlist-import").classList.remove("hidden");
+    this.renderWatchlistImportPreview();
+    this.q("#watchlist-import-input").focus();
+  }
+
+  closeWatchlistImport() {
+    this.q("#watchlist-import").classList.add("hidden");
+  }
+
+  renderWatchlistImportPreview() {
+    const parsed = this.parseWatchlistInput(this.q("#watchlist-import-input").value);
+    const current = [...this.state.watchlist].sort();
+    const inputText = parsed.symbols.length ? `识别 ${parsed.symbols.length} 个：${parsed.symbols.join("、")}` : "尚未识别输入合约";
+    const invalidText = parsed.invalid.length ? `；未识别：${parsed.invalid.join("、")}` : "";
+    const currentText = current.length ? `当前自选 ${current.length} 个：${current.join("、")}` : "当前本地自选为空";
+    this.q("#watchlist-import-preview").textContent = `${inputText}${invalidText}\n${currentText}`;
+  }
+
+  async saveWatchlist(symbols) {
+    const saved = await this.api("/watchlist", {
+      method: "PUT",
+      body: JSON.stringify({ symbols: [...symbols] }),
+    });
+    this.state.watchlist = new Set(Array.isArray(saved) ? saved : [...symbols]);
+    this.state.overview.forEach((item) => { item.watch = this.state.watchlist.has(item.symbol); });
+    this.updateWatchlistUi();
+    this.renderGrid();
+  }
+
+  async importWatchlist(mode) {
+    const message = this.q("#watchlist-import-message");
+    const parsed = this.parseWatchlistInput(this.q("#watchlist-import-input").value);
+    if (!parsed.symbols.length) {
+      message.textContent = "没有识别到可导入的监控合约。";
+      return;
+    }
+    if (parsed.invalid.length) {
+      message.textContent = `请先修正未识别代码：${parsed.invalid.join("、")}`;
+      return;
+    }
+    const next = mode === "replace"
+      ? new Set(parsed.symbols)
+      : new Set([...this.state.watchlist, ...parsed.symbols]);
+    message.textContent = "正在保存…";
+    try {
+      await this.saveWatchlist(next);
+      this.showError("");
+      this.closeWatchlistImport();
+    } catch (error) {
+      message.textContent = `自选保存失败：${error.message || "请稍后重试"}`;
     }
   }
 
@@ -313,7 +424,7 @@ class ContractMonitor extends HTMLElement {
       const direction = opportunity?.direction;
       const alertClass = direction === "long" ? "alert-long" : direction === "short" ? "alert-short" : direction === "neutral" ? "alert-neutral" : "";
       const pctClass = item.pct_24h == null ? "dim" : item.pct_24h > 0 ? "up" : item.pct_24h < 0 ? "down" : "flat";
-      const tags = `${item.watch ? "★" : ""}${item.trending ? "🔥" : ""}`;
+      const tags = item.trending ? "🔥" : "";
       const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
       const moveMark = item.priceMove === "up" ? '<i class="price-move" aria-hidden="true">↑</i>' : item.priceMove === "down" ? '<i class="price-move" aria-hidden="true">↓</i>' : "";
       const longForce = Math.max(0, Number(item.green_flashes_30m) || 0);
@@ -339,9 +450,10 @@ class ContractMonitor extends HTMLElement {
             : `中${Number(battle.neutral).toFixed(0)}`
         : "待采集";
       const battleConfidence = battleReady ? this.escape(battle.confidence || "低") : "--";
-      return `<article class="contract-card ${alertClass} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
+      return `<article class="contract-card ${item.watch ? "is-watch" : ""} ${alertClass} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
         <header class="band-card-head">
           <div class="symbol">${this.escape(item.symbol.replace("USDT", ""))}<span class="tags">${tags}</span></div>
+          <button class="card-watch ${item.watch ? "on" : ""}" type="button" data-watch-symbol="${this.escape(item.symbol)}" aria-label="${item.watch ? "取消自选" : "加入自选并置顶"}" title="${item.watch ? "取消自选" : "加入自选并置顶"}">${item.watch ? "★" : "☆"}</button>
           <div class="price">${this.formatPrice(item.price)}${moveMark}</div>
           <div class="pct ${pctClass}">${this.formatPercent(item.pct_24h)}</div>
         </header>
@@ -355,7 +467,11 @@ class ContractMonitor extends HTMLElement {
           <span><em>置信</em><b>${battleConfidence}</b></span>
         </footer>
       </article>`;
-    }).join("") || '<div class="empty">没有符合条件的合约</div>';
+    }).join("") || `<div class="empty">${filter === "mine" ? "暂无本地自选合约。点击“导入币安自选”，或点击合约卡片上的 ☆ 添加并置顶。" : "没有符合条件的合约"}</div>`;
+    this.qa(".card-watch").forEach((button) => button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await this.toggleSymbolWatchlist(button.dataset.watchSymbol);
+    }));
     this.qa(".contract-card").forEach((card) => card.addEventListener("click", () => this.openModal(card.dataset.symbol)));
     items.forEach((item) => { item.priceMove = null; });
   }
@@ -378,6 +494,7 @@ class ContractMonitor extends HTMLElement {
       });
       this.state.watchlist = new Set(watchlist);
       this.state.overview.forEach((item) => { item.watch = this.state.watchlist.has(item.symbol); });
+      this.updateWatchlistUi();
       this.renderGrid();
       const breadthElement = this.q("#breadth");
       const conclusion = String(breadth.conclusion || "数据收集中…");
@@ -695,16 +812,22 @@ class ContractMonitor extends HTMLElement {
     }).join("") : '<div class="empty">该周期评分尚未生成</div>';
   }
 
+  async toggleSymbolWatchlist(symbol) {
+    if (!symbol) return;
+    const next = new Set(this.state.watchlist);
+    if (next.has(symbol)) next.delete(symbol);
+    else next.add(symbol);
+    try {
+      await this.saveWatchlist(next);
+      this.showError("");
+    } catch (error) {
+      this.showError(`自选保存失败：${error.message || "请稍后重试"}`);
+    }
+  }
+
   async toggleWatchlist() {
     const symbol = this.state.modal.symbol;
-    if (!symbol) return;
-    if (this.state.watchlist.has(symbol)) this.state.watchlist.delete(symbol);
-    else this.state.watchlist.add(symbol);
-    await this.api("/watchlist", {
-      method: "PUT",
-      body: JSON.stringify({ symbols: [...this.state.watchlist] }),
-    });
-    await this.pollOverview();
+    await this.toggleSymbolWatchlist(symbol);
     const selected = this.state.overview.find((item) => item.symbol === symbol);
     this.q("#modal-watch").textContent = selected?.watch ? "★" : "☆";
     this.q("#modal-watch").classList.toggle("on", Boolean(selected?.watch));
