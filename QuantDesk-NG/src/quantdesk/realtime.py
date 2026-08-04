@@ -193,6 +193,28 @@ class _RealtimeState:
 
 
 _STATE = _RealtimeState()
+_LAST_FLUSH_PRICES: dict[str, float] = {}
+
+
+def _price_move_rows(rows: list[tuple], now: int) -> list[tuple[str, int, int, int]]:
+    """Count one direction change per persisted five-second market snapshot."""
+
+    bucket_ts = now - now % 60
+    movements: list[tuple[str, int, int, int]] = []
+    for row in rows:
+        symbol = str(row[0])
+        try:
+            current = float(row[5])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(current) or current <= 0:
+            continue
+        previous = _LAST_FLUSH_PRICES.get(symbol)
+        _LAST_FLUSH_PRICES[symbol] = current
+        if previous is None or current == previous:
+            continue
+        movements.append((symbol, bucket_ts, int(current > previous), int(current < previous)))
+    return movements
 
 
 def _quality_event(stream_key: str, event_type: str, details: dict[str, Any]) -> None:
@@ -282,6 +304,7 @@ def market_stream_loop(stop_event: threading.Event | None = None) -> None:
     ]
     for thread in threads:
         thread.start()
+    last_cleanup_bucket = 0
     while not stop.wait(FLUSH_SECONDS):
         try:
             rows = _STATE.snapshots(symbol_set)
@@ -309,6 +332,24 @@ def market_stream_loop(stop_event: threading.Event | None = None) -> None:
                            quality_json=VALUES(quality_json),updated_at=VALUES(updated_at)""",
                     rows,
                 )
+                now = int(time.time())
+                movement_rows = _price_move_rows(rows, now)
+                if movement_rows:
+                    store.executemany(
+                        """INSERT INTO contract_price_move_buckets(
+                               symbol,bucket_ts,up_count,down_count
+                           ) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE
+                               up_count=up_count+VALUES(up_count),
+                               down_count=down_count+VALUES(down_count)""",
+                        movement_rows,
+                    )
+                current_bucket = now - now % 60
+                if current_bucket != last_cleanup_bucket:
+                    store.execute(
+                        "DELETE FROM contract_price_move_buckets WHERE bucket_ts<?",
+                        (now - 31 * 60,),
+                    )
+                    last_cleanup_bucket = current_bucket
             store.collector_report("market_stream", success=True, items=len(rows))
         except Exception as exc:
             store.collector_report("market_stream", success=False, error=str(exc))

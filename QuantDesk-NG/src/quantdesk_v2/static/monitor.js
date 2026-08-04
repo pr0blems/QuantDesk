@@ -28,7 +28,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-6">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-7">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -296,6 +296,7 @@ class ContractMonitor extends HTMLElement {
         <div class="signal ${opportunity ? this.opportunityTone(direction) : this.signalTone(score)}">${opportunity ? `${this.opportunityLabel(direction)} ${Number(opportunity.quality_score).toFixed(0)}` : this.signalLabel(score)}</div>
         <div class="price">${this.formatPrice(item.price)}${moveMark}</div>
         <div class="pct ${pctClass}">${this.formatPercent(item.pct_24h)} ${score == null ? "" : `<span class="score ${this.signalTone(score)}">(${score > 0 ? "+" : ""}${score})</span>`}</div>
+        <div class="flash-stats" title="最近 30 分钟价格方向高亮次数"><span class="green-flashes">绿 ${Number(item.green_flashes_30m) || 0}</span><span class="red-flashes">红 ${Number(item.red_flashes_30m) || 0}</span><em>30m</em></div>
         <div class="scorebar"><i data-score="${score ?? ""}"></i></div>
       </article>`;
     }).join("") || '<div class="empty">没有符合条件的合约</div>';

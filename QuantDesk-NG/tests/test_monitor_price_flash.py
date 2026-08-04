@@ -1,5 +1,6 @@
-from pathlib import Path
+from __future__ import annotations
 
+from pathlib import Path
 
 STATIC = Path(__file__).parents[1] / "src" / "quantdesk_v2" / "static"
 
@@ -13,4 +14,8 @@ def test_contract_cards_flash_in_the_price_move_direction() -> None:
     assert 'item.priceMove === "down" ? "tick-down"' in script
     assert ".contract-card.tick-up::after { color: var(--m-up); }" in stylesheet
     assert ".contract-card.tick-down::after { color: var(--m-down); }" in stylesheet
+    assert "contract-price-pulse 1.5s" in stylesheet
+    assert "price-move-fade 1.5s" in stylesheet
+    assert "green_flashes_30m" in script
+    assert "red_flashes_30m" in script
     assert "prefers-reduced-motion: reduce" in stylesheet

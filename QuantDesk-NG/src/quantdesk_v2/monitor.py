@@ -112,6 +112,12 @@ class MonitorRepository:
 
     def overview(self, watchlist: list[str]) -> dict[str, Any]:
         tickers = {row["symbol"]: row for row in self._query("SELECT * FROM ticker")}
+        movement_rows = self._query(
+            """SELECT symbol,SUM(up_count) AS up_count,SUM(down_count) AS down_count
+               FROM contract_price_move_buckets WHERE bucket_ts>=? GROUP BY symbol""",
+            (int(time.time()) - 30 * 60,),
+        )
+        movements = {row["symbol"]: row for row in movement_rows}
         score_rows = self._query(
             """
             SELECT s.symbol, s.tf, s.score FROM scores s
@@ -176,6 +182,8 @@ class MonitorRepository:
                     "position": None,
                     "trending": base in trending,
                     "opportunity": opportunities.get(symbol),
+                    "green_flashes_30m": int(movements.get(symbol, {}).get("up_count") or 0),
+                    "red_flashes_30m": int(movements.get(symbol, {}).get("down_count") or 0),
                 }
             )
         return {

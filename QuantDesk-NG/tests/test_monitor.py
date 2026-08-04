@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -60,6 +61,14 @@ def build_monitor_fixture(engine: Engine, tmp_path) -> tuple[MonitorRepository, 
                 "quote_volume": 5_000,
                 "ts": 2_000_000_000,
             },
+        )
+        connection.execute(
+            text(
+                """INSERT INTO contract_price_move_buckets(
+                       symbol,bucket_ts,up_count,down_count
+                   ) VALUES('TESTUSDT',:bucket_ts,7,4)"""
+            ),
+            {"bucket_ts": int(time.time()) - 60},
         )
         connection.execute(
             text(
@@ -134,6 +143,8 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) ->
     assert overview["items"][0]["score"] == 62
     assert overview["items"][0]["opportunity"]["direction"] == "long"
     assert overview["items"][0]["opportunity"]["quality_score"] == 88.5
+    assert overview["items"][0]["green_flashes_30m"] == 7
+    assert overview["items"][0]["red_flashes_30m"] == 4
     assert repository.breadth()["bull"] == 1
     assert repository.alerts(user_id, 10)[0]["read"] is False
     repository.mark_alerts_read(user_id)
