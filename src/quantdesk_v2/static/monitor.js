@@ -6,7 +6,7 @@ class ContractMonitor extends HTMLElement {
       overview: [],
       watchlist: new Set(),
       lastAlertId: 0,
-      modal: { symbol: null, tf: "1h" },
+      modal: { symbol: null, tf: "1h", opportunity: null },
       sound: true,
       notifyOn: false,
     };
@@ -27,7 +27,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-1">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-2">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -49,10 +49,12 @@ class ContractMonitor extends HTMLElement {
                 <select id="filter" aria-label="筛选合约">
                   <option value="all">全部</option>
                   <option value="mine">自选</option>
-                  <option value="long">偏多 ≥60</option>
-                  <option value="short">偏空 ≤-60</option>
+                  <option value="long">多头机会</option>
+                  <option value="short">空头机会</option>
+                  <option value="neutral">中性观察</option>
                 </select>
                 <select id="sort" aria-label="合约排序">
+                  <option value="opportunity">按机会质量</option>
                   <option value="score">按|评分|</option>
                   <option value="pct">按涨跌幅</option>
                   <option value="alpha">按代码</option>
@@ -93,6 +95,7 @@ class ContractMonitor extends HTMLElement {
             </div>
           </div>
           <canvas id="chart" class="chart" width="960" height="380"></canvas>
+          <div id="opportunity-detail" class="opportunity-detail"></div>
           <div id="score-summary" class="score-summary"></div>
           <div id="report" class="report"></div>
           <div class="factor-title">因子明细（当前周期）</div>
@@ -167,6 +170,10 @@ class ContractMonitor extends HTMLElement {
       });
     });
     this.q("#modal-watch").addEventListener("click", () => this.toggleWatchlist());
+    this.q("#opportunity-detail").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-opportunity-action]");
+      if (button) this.setOpportunityPreference(button.dataset.opportunityAction);
+    });
   }
 
   updateClock() {
@@ -200,6 +207,20 @@ class ContractMonitor extends HTMLElement {
 
   timeString(timestamp) {
     return new Date(timestamp * 1000).toLocaleString("zh-CN", { hour12: false });
+  }
+
+  barTimeString(timestamp) {
+    if (!timestamp) return "--";
+    const milliseconds = Number(timestamp) >= 100000000000 ? Number(timestamp) : Number(timestamp) * 1000;
+    return new Date(milliseconds).toLocaleString("zh-CN", { hour12: false });
+  }
+
+  opportunityTone(direction) {
+    return direction === "long" ? "strong-up" : direction === "short" ? "strong-down" : "neutral";
+  }
+
+  opportunityLabel(direction) {
+    return { long: "多头机会", short: "空头机会", neutral: "中性观察" }[direction] || "暂无机会";
   }
 
   tone(score) {
@@ -237,23 +258,27 @@ class ContractMonitor extends HTMLElement {
     const sort = this.q("#sort").value;
     let items = this.state.overview.filter((item) => !keyword || item.symbol.includes(keyword));
     if (filter === "mine") items = items.filter((item) => item.watch);
-    if (filter === "long") items = items.filter((item) => item.score != null && item.score >= 60);
-    if (filter === "short") items = items.filter((item) => item.score != null && item.score <= -60);
+    if (["long", "short", "neutral"].includes(filter)) {
+      items = items.filter((item) => item.opportunity?.direction === filter);
+    }
     items.sort((left, right) => {
       if (left.watch !== right.watch) return right.watch ? 1 : -1;
       if (sort === "pct") return (right.pct_24h ?? -999) - (left.pct_24h ?? -999);
       if (sort === "alpha") return left.symbol.localeCompare(right.symbol);
+      if (sort === "opportunity") return (right.opportunity?.quality_score ?? -1) - (left.opportunity?.quality_score ?? -1);
       return Math.abs(right.score ?? 0) - Math.abs(left.score ?? 0);
     });
     this.q("#sym-count").textContent = `${items.length}/${this.state.overview.length}`;
     this.q("#contract-grid").innerHTML = items.map((item) => {
       const score = item.score;
-      const alertClass = score >= 60 ? "alert-long" : score <= -60 ? "alert-short" : "";
+      const opportunity = item.opportunity;
+      const direction = opportunity?.direction;
+      const alertClass = direction === "long" ? "alert-long" : direction === "short" ? "alert-short" : direction === "neutral" ? "alert-neutral" : "";
       const pctClass = item.pct_24h == null ? "dim" : item.pct_24h > 0 ? "up" : item.pct_24h < 0 ? "down" : "flat";
       const tags = `${item.watch ? "★" : ""}${item.trending ? "🔥" : ""}`;
       return `<article class="contract-card ${alertClass}" data-symbol="${this.escape(item.symbol)}">
         <div class="symbol">${this.escape(item.symbol.replace("USDT", ""))}<span class="tags">${tags}</span></div>
-        <div class="signal ${this.signalTone(score)}">${this.signalLabel(score)}</div>
+        <div class="signal ${opportunity ? this.opportunityTone(direction) : this.signalTone(score)}">${opportunity ? `${this.opportunityLabel(direction)} ${Number(opportunity.quality_score).toFixed(0)}` : this.signalLabel(score)}</div>
         <div class="price">${this.formatPrice(item.price)}</div>
         <div class="pct ${pctClass}">${this.formatPercent(item.pct_24h)} ${score == null ? "" : `<span class="score ${this.signalTone(score)}">(${score > 0 ? "+" : ""}${score})</span>`}</div>
         <div class="scorebar"><i data-score="${score ?? ""}"></i></div>
@@ -408,17 +433,66 @@ class ContractMonitor extends HTMLElement {
     this.qa(".tf-switch button").forEach((button) => button.classList.toggle("on", button.dataset.tf === timeframe));
     try {
       const encoded = encodeURIComponent(symbol);
-      const [klines, scores, report] = await Promise.all([
+      const [klines, scores, report, opportunities] = await Promise.all([
         this.api(`/klines?symbol=${encoded}&tf=${timeframe}&limit=120`),
         this.api(`/score?symbol=${encoded}`),
         this.api(`/report?symbol=${encoded}`),
+        this.api(`/opportunities?symbol=${encoded}&limit=1&include_ignored=true`),
       ]);
+      this.state.modal.opportunity = opportunities.items?.[0] || null;
       this.drawChart(this.q("#chart"), klines);
+      this.renderOpportunity(this.state.modal.opportunity);
       this.renderScoreSummary(scores, report);
       this.renderReport(report);
       this.renderFactors(scores[timeframe]);
     } catch (error) {
       this.q("#report").innerHTML = `<div class="error-banner">${this.escape(error.message || "详情加载失败")}</div>`;
+    }
+  }
+
+  renderOpportunity(opportunity) {
+    const container = this.q("#opportunity-detail");
+    if (!opportunity) {
+      container.innerHTML = '<div class="opportunity-empty">当前没有有效的市场机会，旧评分仅作指标参考。</div>';
+      return;
+    }
+    const direction = opportunity.direction;
+    const reasons = (opportunity.reason_codes || []).map((code) => `<span class="chip">${this.escape(code)}</span>`).join("");
+    const conditions = Object.entries(opportunity.conditions || {}).map(([name, passed]) =>
+      `<span class="condition ${passed ? "passed" : "pending"}">${passed ? "✓" : "○"} ${this.escape(name)}</span>`
+    ).join("");
+    const strategies = (opportunity.matched_strategies || []).map((strategy) =>
+      `<span class="strategy-match">${this.escape(strategy.name)} · v${Number(strategy.version) || 1}</span>`
+    ).join("") || '<span class="dim">当前用户没有匹配此方向的已发布完整策略</span>';
+    const state = opportunity.user_state;
+    container.innerHTML = `<section class="opportunity-card ${this.escape(direction)}">
+      <div class="opportunity-head">
+        <div><span class="opportunity-direction ${this.opportunityTone(direction)}">${this.opportunityLabel(direction)}</span><strong>质量 ${Number(opportunity.quality_score).toFixed(1)}</strong><span class="chip">${this.escape(opportunity.status)}</span></div>
+        <div class="opportunity-actions">
+          <button type="button" data-opportunity-action="watch" class="${state === "watching" ? "on" : ""}">关注并提醒</button>
+          <button type="button" data-opportunity-action="ignore" class="${state === "ignored" ? "on" : ""}">忽略</button>
+          ${state ? '<button type="button" data-opportunity-action="clear">清除偏好</button>' : ""}
+        </div>
+      </div>
+      <div class="opportunity-summary">${this.escape(opportunity.summary || "可解释市场机会")}</div>
+      <div class="opportunity-meta"><span>发现：${this.barTimeString(opportunity.detected_bar_time)}</span><span>有效至：${this.barTimeString(opportunity.expires_bar_time)}</span></div>
+      <div class="condition-list">${conditions}</div>
+      <div class="reason-list">${reasons}</div>
+      <div class="strategy-list"><strong>匹配完整策略</strong>${strategies}</div>
+    </section>`;
+  }
+
+  async setOpportunityPreference(action) {
+    const opportunity = this.state.modal.opportunity;
+    if (!opportunity || !["watch", "ignore", "clear"].includes(action)) return;
+    try {
+      await this.api(`/opportunities/${encodeURIComponent(opportunity.id)}/preference`, {
+        method: "POST",
+        body: JSON.stringify({ action, notify_enabled: action === "watch" }),
+      });
+      await Promise.all([this.refreshModal(), this.pollAlerts()]);
+    } catch (error) {
+      this.showError(error.message || "机会偏好保存失败");
     }
   }
 

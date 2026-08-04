@@ -31,6 +31,48 @@ def _bind_params(sql: str, params: tuple[Any, ...]):
 _REPORT_LOCK = threading.Lock()
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _opportunity_out(row: dict[str, Any], *, compact: bool = False) -> dict[str, Any]:
+    evidence = _json_object(row.get("evidence_json"))
+    result = {
+        "id": row.get("public_id"),
+        "symbol": row.get("symbol"),
+        "direction": row.get("direction"),
+        "status": row.get("status"),
+        "quality_score": _finite_number(row.get("quality_score")),
+        "primary_timeframe": row.get("primary_timeframe"),
+        "detected_bar_time": row.get("detected_bar_time"),
+        "expires_bar_time": row.get("expires_bar_time"),
+        "summary": evidence.get("summary"),
+        "reason_codes": evidence.get("reason_codes") or [],
+        "conditions": evidence.get("conditions") or {},
+    }
+    if not compact:
+        result.update(
+            {
+                "scanner_key": row.get("scanner_key"),
+                "scanner_version": row.get("scanner_version"),
+                "evidence": evidence,
+                "user_state": row.get("user_state"),
+                "notify_enabled": bool(row.get("notify_enabled")),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+            }
+        )
+    return result
+
+
 class MonitorRepository:
     def __init__(self, engine: Engine, symbols_config: Path):
         if engine.dialect.name not in {"mysql", "mariadb"}:
@@ -80,6 +122,24 @@ class MonitorRepository:
         for row in score_rows:
             scores.setdefault(row["symbol"], {})[row["tf"]] = row["score"]
 
+        opportunity_rows = self._query(
+            """
+            SELECT o.* FROM market_opportunities o
+            JOIN (
+                SELECT symbol, MAX(detected_bar_time) AS latest_bar
+                FROM market_opportunities
+                WHERE status IN ('detected','watching','confirmed')
+                GROUP BY symbol
+            ) latest
+              ON latest.symbol=o.symbol AND latest.latest_bar=o.detected_bar_time
+            WHERE o.status IN ('detected','watching','confirmed')
+            """
+        )
+        opportunities = {
+            row["symbol"]: _opportunity_out(row, compact=True)
+            for row in opportunity_rows
+        }
+
         trending_rows = self._query("SELECT v FROM system_state WHERE k='st_trending'")
         try:
             trending = (
@@ -115,6 +175,7 @@ class MonitorRepository:
                     "watch": symbol in selected,
                     "position": None,
                     "trending": base in trending,
+                    "opportunity": opportunities.get(symbol),
                 }
             )
         return {
@@ -122,6 +183,49 @@ class MonitorRepository:
             "updated_at": latest,
             "stale": not latest or time.time() - latest > 30,
         }
+
+    def opportunities(
+        self,
+        user_id: int,
+        limit: int,
+        *,
+        symbol: str | None = None,
+        direction: str | None = None,
+        include_expired: bool = False,
+        include_ignored: bool = False,
+    ) -> list[dict[str, Any]]:
+        normalized_symbol = self._validate_symbol(symbol) if symbol else None
+        normalized_direction = None
+        if direction:
+            normalized_direction = direction.strip().lower()
+            if normalized_direction not in {"long", "short", "neutral"}:
+                raise MonitorUnavailable("unknown opportunity direction")
+        rows = self._query(
+            """
+            SELECT o.*,uos.state AS user_state,uos.notify_enabled
+            FROM market_opportunities o
+            LEFT JOIN user_opportunity_states uos
+              ON uos.opportunity_id=o.id AND uos.user_id=?
+            WHERE (?=1 OR o.status IN ('detected','watching','confirmed'))
+              AND (? IS NULL OR o.symbol=?)
+              AND (? IS NULL OR o.direction=?)
+              AND (?=1 OR uos.state IS NULL OR uos.state<>'ignored')
+            ORDER BY CASE o.status WHEN 'confirmed' THEN 0 WHEN 'watching' THEN 1 ELSE 2 END,
+                     o.quality_score DESC,o.detected_bar_time DESC,o.id DESC
+            LIMIT ?
+            """,
+            (
+                user_id,
+                int(include_expired),
+                normalized_symbol,
+                normalized_symbol,
+                normalized_direction,
+                normalized_direction,
+                int(include_ignored),
+                limit,
+            ),
+        )
+        return [_opportunity_out(row) for row in rows]
 
     def breadth(self) -> dict[str, Any]:
         rows = self._query(

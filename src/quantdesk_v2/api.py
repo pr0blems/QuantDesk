@@ -32,11 +32,14 @@ from .models import (
     AuditLog,
     BacktestRun,
     BacktestTrade,
+    MarketOpportunity,
     PaperAccount,
     StrategyDeployment,
     StrategyRevision,
     User,
+    UserOpportunityState,
     UserSession,
+    UserStrategy,
     utcnow,
 )
 from .monitor import MonitorRepository, MonitorUnavailable
@@ -57,6 +60,7 @@ from .schemas import (
     LogoutRequest,
     MessageOut,
     MonitorWatchlistUpdate,
+    OpportunityPreferenceUpdate,
     PaperAccountCreateRequest,
     PaperAccountStatusUpdate,
     RefreshRequest,
@@ -1273,6 +1277,146 @@ def monitor_breadth(
     _: User = Depends(get_current_user),
 ) -> dict:
     return _monitor(request).breadth()
+
+
+def _matching_strategies(db: Session, user_id: int) -> dict[str, list[dict[str, Any]]]:
+    matches: dict[str, list[dict[str, Any]]] = {"long": [], "short": [], "neutral": []}
+    strategies = db.scalars(
+        select(UserStrategy).where(
+            UserStrategy.user_id == user_id,
+            UserStrategy.status == "active",
+            UserStrategy.strategy_kind == "full_strategy",
+            UserStrategy.lifecycle_status == "published",
+        )
+    ).all()
+    for strategy in strategies:
+        spec = strategy.spec_json if isinstance(strategy.spec_json, dict) else {}
+        directions = spec.get("directions")
+        if not isinstance(directions, list):
+            continue
+        summary = {
+            "id": strategy.public_id,
+            "name": strategy.name,
+            "version": strategy.version,
+            "risk_level": strategy.risk_level,
+        }
+        for direction in {"long", "short"}.intersection(directions):
+            matches[direction].append(summary)
+    return matches
+
+
+@router.get("/monitor/opportunities")
+def monitor_opportunities(
+    request: Request,
+    limit: int = Query(default=80, ge=1, le=200),
+    symbol: str | None = None,
+    direction: str | None = Query(default=None, pattern="^(long|short|neutral)$"),
+    include_expired: bool = False,
+    include_ignored: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    items = _monitor(request).opportunities(
+        user.id,
+        limit,
+        symbol=symbol,
+        direction=direction,
+        include_expired=include_expired,
+        include_ignored=include_ignored,
+    )
+    matches = _matching_strategies(db, user.id)
+    for item in items:
+        item["matched_strategies"] = matches.get(item["direction"], [])
+    return {"items": items}
+
+
+@router.post("/monitor/opportunities/{opportunity_public_id}/preference")
+def update_monitor_opportunity_preference(
+    opportunity_public_id: str,
+    payload: OpportunityPreferenceUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_expected_user(request, user)
+    opportunity = db.scalar(
+        select(MarketOpportunity).where(MarketOpportunity.public_id == opportunity_public_id)
+    )
+    if opportunity is None:
+        raise HTTPException(status_code=404, detail="market opportunity not found")
+    state = db.scalar(
+        select(UserOpportunityState).where(
+            UserOpportunityState.user_id == user.id,
+            UserOpportunityState.opportunity_id == opportunity.id,
+        )
+    )
+    if payload.action == "clear":
+        if state is not None:
+            db.delete(state)
+        result_state = None
+        notify_enabled = False
+    else:
+        new_state = "watching" if payload.action == "watch" else "ignored"
+        should_alert = new_state == "watching" and payload.notify_enabled and (
+            state is None or state.state != "watching" or not state.notify_enabled
+        )
+        if state is None:
+            state = UserOpportunityState(
+                user_id=user.id,
+                opportunity_id=opportunity.id,
+                state=new_state,
+                notify_enabled=payload.notify_enabled,
+                last_viewed_at=utcnow(),
+                created_at=utcnow(),
+                updated_at=utcnow(),
+            )
+            db.add(state)
+        else:
+            state.state = new_state
+            state.notify_enabled = payload.notify_enabled
+            state.last_viewed_at = utcnow()
+            state.updated_at = utcnow()
+        result_state = new_state
+        notify_enabled = payload.notify_enabled
+        if should_alert:
+            db.execute(
+                text(
+                    """INSERT INTO alerts(
+                           user_id,ts,symbol,kind,direction,score,message,detail,`read`
+                       ) VALUES(:user_id,:ts,:symbol,'opportunity',:direction,:score,
+                                :message,:detail,0)"""
+                ),
+                {
+                    "user_id": user.id,
+                    "ts": int(datetime.now(UTC).timestamp()),
+                    "symbol": opportunity.symbol,
+                    "direction": opportunity.direction,
+                    "score": float(opportunity.quality_score),
+                    "message": f"已关注 {opportunity.symbol} {opportunity.direction} 市场机会",
+                    "detail": json.dumps(
+                        {
+                            "opportunity_id": opportunity.public_id,
+                            "status": opportunity.status,
+                            "expires_bar_time": opportunity.expires_bar_time,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+    _audit(
+        db,
+        request,
+        f"monitor.opportunity.{payload.action}",
+        user.id,
+        "market_opportunity",
+        opportunity.public_id,
+    )
+    db.commit()
+    return {
+        "id": opportunity.public_id,
+        "user_state": result_state,
+        "notify_enabled": notify_enabled,
+    }
 
 
 @router.get("/monitor/alerts")

@@ -302,6 +302,27 @@ def _record_full_strategy_decision(
         f"paper:{deployment['id']}:{deployment['strategy_revision_id']}:"
         f"{symbol}:{timeframe}:{decision.signal_time}:{decision.decision}"
     )
+    opportunity_direction = {
+        "LONG_ENTRY": "long",
+        "SHORT_ENTRY": "short",
+    }.get(decision.decision)
+    opportunity_id = None
+    if opportunity_direction:
+        opportunities = store.query(
+            """SELECT id FROM market_opportunities
+               WHERE symbol=? AND direction=?
+                 AND status IN ('detected','watching','confirmed')
+                 AND detected_bar_time<=? AND expires_bar_time>=?
+               ORDER BY quality_score DESC,detected_bar_time DESC,id DESC LIMIT 1""",
+            (
+                symbol,
+                opportunity_direction,
+                decision.signal_time,
+                decision.signal_time,
+            ),
+        )
+        if opportunities:
+            opportunity_id = opportunities[0]["id"]
     valid_until = decision.valid_until
     if valid_until is not None and int(valid_until) >= 100_000_000_000:
         valid_until = int(valid_until) // 1_000
@@ -311,12 +332,13 @@ def _record_full_strategy_decision(
                    public_id,user_id,deployment_id,strategy_revision_id,opportunity_id,
                    symbol,timeframe,signal_bar_time,decision,confidence,status,valid_until,
                    reason_codes_json,evidence_json,risk_decision_json,idempotency_key,created_at
-               ) VALUES(?,?,?,?,NULL,?,?,?,?,?,'approved',FROM_UNIXTIME(?),?,?,?,?,CURRENT_TIMESTAMP)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,'approved',FROM_UNIXTIME(?),?,?,?,?,CURRENT_TIMESTAMP)""",
             (
                 str(uuid.uuid4()),
                 account["user_id"],
                 deployment["id"],
                 deployment["strategy_revision_id"],
+                opportunity_id,
                 symbol,
                 timeframe,
                 decision.signal_time,

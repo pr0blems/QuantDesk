@@ -130,11 +130,15 @@ def test_full_strategy_signal_persistence_is_tenant_scoped_and_idempotent(
 ) -> None:
     account = _account()
     writes: list[tuple[str, tuple]] = []
-    monkeypatch.setattr(
-        paper.store,
-        "query",
-        lambda sql, params=(): [{"id": 51, "strategy_revision_id": 61}],
-    )
+    def query(sql: str, params: tuple = ()) -> list[dict]:
+        del params
+        if "strategy_deployments" in sql:
+            return [{"id": 51, "strategy_revision_id": 61}]
+        if "market_opportunities" in sql:
+            return [{"id": 71}]
+        return []
+
+    monkeypatch.setattr(paper.store, "query", query)
     monkeypatch.setattr(
         paper.store,
         "execute",
@@ -158,7 +162,8 @@ def test_full_strategy_signal_persistence_is_tenant_scoped_and_idempotent(
     insert_sql, insert_params = writes[0]
     assert "INSERT IGNORE INTO strategy_signals" in insert_sql
     assert insert_params[1:4] == (account["user_id"], 51, 61)
-    assert insert_params[9] == 1_700_001_800
+    assert insert_params[4] == 71
+    assert insert_params[10] == 1_700_001_800
     assert insert_params[-1].startswith("paper:51:61:TESTUSDT:15m:")
     assert writes[1][1] == (decision.signal_time, 51, account["user_id"])
 

@@ -543,6 +543,13 @@ class MonitorWatchlistUpdate(BaseModel):
         return sorted({symbol.strip().upper() for symbol in value if symbol.strip()})
 
 
+class OpportunityPreferenceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["watch", "ignore", "clear"]
+    notify_enabled: bool = True
+
+
 class PaperAccountCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

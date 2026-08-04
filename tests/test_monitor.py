@@ -101,6 +101,30 @@ def build_monitor_fixture(
                 """
             )
         )
+        connection.execute(
+            text(
+                """
+                INSERT INTO market_opportunities(
+                    public_id,scanner_key,scanner_version,symbol,primary_timeframe,
+                    direction,status,quality_score,detected_bar_time,expires_bar_time,
+                    evidence_json,dedup_key,created_at,updated_at
+                ) VALUES(
+                    '11111111-1111-1111-1111-111111111111','test-scanner',1,
+                    'TESTUSDT','15m','long','confirmed',88.5,1000,2800,
+                    :evidence,'test-opportunity',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {
+                "evidence": json.dumps(
+                    {
+                        "summary": "测试多头机会",
+                        "reason_codes": ["REGIME_TRENDING", "STRUCTURE_BREAKOUT"],
+                        "conditions": {"trigger_aligned": True},
+                    }
+                )
+            },
+        )
     return MonitorRepository(engine, symbols), user_id, account_id
 
 
@@ -110,6 +134,8 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) ->
     assert len(overview["items"]) == 1
     assert overview["items"][0]["watch"] is True
     assert overview["items"][0]["score"] == 62
+    assert overview["items"][0]["opportunity"]["direction"] == "long"
+    assert overview["items"][0]["opportunity"]["quality_score"] == 88.5
     assert repository.breadth()["bull"] == 1
     assert repository.alerts(user_id, 10)[0]["read"] is False
     repository.mark_alerts_read(user_id)
@@ -121,6 +147,41 @@ def test_monitor_detail_queries(mysql_test_engine, tmp_path) -> None:
     repository, _, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
     assert repository.klines("testusdt", "1h", 120)[0]["close"] == 101.5
     assert repository.score_detail("TESTUSDT")["1h"]["score"] == 80
+
+
+def test_opportunity_preferences_are_isolated_by_user(mysql_test_engine, tmp_path) -> None:
+    repository, user_id, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
+    with Session(mysql_test_engine) as db:
+        other = User(
+            username="other-monitor-user",
+            password_hash="test-only-hash",  # noqa: S106 - isolated test fixture
+        )
+        db.add(other)
+        db.commit()
+        other_user_id = other.id
+    with mysql_test_engine.begin() as connection:
+        opportunity_id = connection.execute(
+            text(
+                "SELECT id FROM market_opportunities "
+                "WHERE public_id='11111111-1111-1111-1111-111111111111'"
+            )
+        ).scalar_one()
+        connection.execute(
+            text(
+                """INSERT INTO user_opportunity_states(
+                       user_id,opportunity_id,state,notify_enabled,last_viewed_at,
+                       created_at,updated_at
+                   ) VALUES(:user_id,:opportunity_id,'ignored',1,CURRENT_TIMESTAMP,
+                            CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"""
+            ),
+            {"user_id": user_id, "opportunity_id": opportunity_id},
+        )
+
+    assert repository.opportunities(user_id, 10) == []
+    ignored = repository.opportunities(user_id, 10, include_ignored=True)
+    assert ignored[0]["user_state"] == "ignored"
+    visible_to_other = repository.opportunities(other_user_id, 10)
+    assert visible_to_other[0]["user_state"] is None
 
 
 def test_paper_account_uses_shared_mysql_engine(mysql_test_engine, tmp_path) -> None:

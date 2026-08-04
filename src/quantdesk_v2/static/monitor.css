@@ -81,6 +81,7 @@ button { cursor: pointer; }
 .contract-card:hover { border-color: var(--m-gold); }
 .contract-card.alert-long { box-shadow: inset 0 0 0 1px var(--m-up); }
 .contract-card.alert-short { box-shadow: inset 0 0 0 1px var(--m-down); }
+.contract-card.alert-neutral { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .45); }
 .contract-card .symbol { font-size: 12px; font-weight: 800; }
 .contract-card .tags { margin-left: 4px; font-size: 10px; }
 .contract-card .signal { position: absolute; right: 8px; top: 7px; font-size: 11px; font-weight: 700; }
@@ -121,6 +122,27 @@ button { cursor: pointer; }
 .tf-switch { display: inline-flex; gap: 4px; margin-right: 7px; }
 .tf-switch button.on, .watch.on { color: var(--m-gold); border-color: var(--m-gold); }
 .chart { width: 100%; display: block; border-radius: 7px; background: #0d1117; }
+.opportunity-detail { margin-top: 8px; }
+.opportunity-empty { padding: 10px 12px; border: 1px dashed var(--m-border); border-radius: 7px; color: var(--m-neutral); }
+.opportunity-card { padding: 10px 12px; border-left: 4px solid var(--m-neutral); border-radius: 7px; background: var(--m-card); }
+.opportunity-card.long { border-left-color: var(--m-up); }
+.opportunity-card.short { border-left-color: var(--m-down); }
+.opportunity-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.opportunity-head > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.opportunity-direction { font-size: 16px; font-weight: 900; }
+.opportunity-direction.strong-up { color: var(--m-up); }
+.opportunity-direction.strong-down { color: var(--m-down); }
+.opportunity-direction.neutral { color: var(--m-neutral); }
+.opportunity-actions button { padding: 4px 9px; border: 1px solid var(--m-border); border-radius: 6px; background: #1b222c; color: var(--m-text); }
+.opportunity-actions button:hover, .opportunity-actions button.on { border-color: var(--m-gold); color: var(--m-gold); }
+.opportunity-summary { margin-top: 6px; color: var(--m-neutral); font-weight: 700; }
+.opportunity-meta, .condition-list, .reason-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
+.opportunity-meta { color: var(--m-dim); font-size: 11px; }
+.condition { padding: 2px 7px; border-radius: 9px; background: #1e2530; }
+.condition.passed { color: var(--m-up); }
+.condition.pending { color: var(--m-neutral); }
+.strategy-list { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--m-border); }
+.strategy-match { padding: 2px 8px; border: 1px solid rgba(46, 189, 133, .35); border-radius: 9px; color: var(--m-up); }
 .score-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 3px; }
 .score-big { font-size: 23px; font-weight: 900; }
 .chip { padding: 3px 9px; border-radius: 11px; background: #1e2530; }
@@ -172,6 +194,7 @@ button { cursor: pointer; }
   .modal { align-items: flex-start; padding: 6px; }
   .modal-box { width: 100%; max-height: 98vh; padding: 10px; }
   .modal-head { align-items: flex-start; }
+  .opportunity-head { display: grid; }
   .factor { grid-template-columns: 78px 40px 1fr; font-size: 11px; }
 }
 
