@@ -81,7 +81,7 @@ button { cursor: pointer; }
 .breadth-breakdown strong { font-weight: 800; }
 .breadth-breakdown i { margin: 0 5px; color: rgba(255, 255, 255, .72); font-style: normal; }
 .contract-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 5px; align-content: start; padding: 7px; }
-.contract-card { min-height: 99px; position: relative; isolation: isolate; padding: 7px 9px; border: 1px solid var(--m-border); border-radius: 2px; background: var(--m-card); cursor: pointer; transition: border-color .15s; }
+.contract-card { min-height: 121px; position: relative; isolation: isolate; padding: 7px 9px; border: 1px solid var(--m-border); border-radius: 2px; background: var(--m-card); cursor: pointer; transition: border-color .15s; }
 .contract-card:hover { border-color: var(--m-gold); }
 .contract-card.tick-up::after, .contract-card.tick-down::after { content: ""; position: absolute; z-index: 2; inset: -1px; pointer-events: none; border: 1px solid currentColor; border-radius: 2px; animation: contract-price-pulse 1.5s cubic-bezier(.2, .8, .2, 1) both; }
 .contract-card.tick-up::after { color: var(--m-up); }
@@ -104,10 +104,12 @@ button { cursor: pointer; }
 .signal.neutral, .score.neutral { color: var(--m-neutral); }
 .contract-card .price { margin-top: 4px; }
 .contract-card .pct { font-size: 11px; }
-.flash-stats { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.flash-stats { display: grid; grid-template-columns: 1fr; gap: 1px; margin-top: 4px; font-size: 10px; font-variant-numeric: tabular-nums; }
 .flash-stats .green-flashes { color: var(--m-up); }
 .flash-stats .red-flashes { color: var(--m-down); }
-.flash-stats em { margin-left: auto; color: var(--m-dim); font-style: normal; }
+.flash-stats span { display: flex; justify-content: space-between; gap: 8px; }
+.flash-stats b { font-weight: 800; }
+.flash-stats em { color: var(--m-dim); font-style: normal; }
 .scorebar { height: 3px; position: relative; overflow: hidden; margin-top: 5px; border-radius: 0; background: #292d27; }
 .scorebar i { position: absolute; top: 0; bottom: 0; }
 @media (prefers-reduced-motion: reduce) {

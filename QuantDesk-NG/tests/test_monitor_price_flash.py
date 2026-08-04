@@ -18,4 +18,6 @@ def test_contract_cards_flash_in_the_price_move_direction() -> None:
     assert "price-move-fade 1.5s" in stylesheet
     assert "green_flashes_30m" in script
     assert "red_flashes_30m" in script
+    assert "多头力量" in script
+    assert "空头力量" in script
     assert "prefers-reduced-motion: reduce" in stylesheet
