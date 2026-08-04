@@ -201,6 +201,19 @@ def _ticker_rows(data: Any, timestamp: int) -> tuple[list[tuple], int]:
     return rows, invalid_rows
 
 
+def _deliver_rows(
+    on_rows: Callable[[list[tuple]], None], rows: list[tuple]
+) -> bool:
+    """Keep the market stream alive when a downstream database write fails."""
+
+    try:
+        on_rows(rows)
+    except Exception as exc:
+        print(f"[ws] ticker consumer failed ({str(exc)[:120]}); keeping stream open")
+        return False
+    return True
+
+
 def ws_loop(on_rows: Callable[[list[tuple]], None]) -> None:
     """Continuously pass ``(symbol, price, pct_24h, quote_volume, ts)`` rows to a callback."""
 
@@ -234,7 +247,7 @@ def ws_loop(on_rows: Callable[[list[tuple]], None]) -> None:
                 rows, invalid_rows = _ticker_rows(data, int(time.time()))
                 if invalid_rows:
                     print(f"[ws] ignored {invalid_rows} invalid mini-ticker rows")
-                on_rows(rows)
+                _deliver_rows(on_rows, rows)
         except Exception as exc:
             print(
                 f"[ws] stream disconnected ({str(exc)[:80]}); retrying in {backoff}s "

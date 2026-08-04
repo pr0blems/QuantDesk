@@ -14,6 +14,13 @@ from http.client import HTTPSConnection
 from typing import Any, Literal
 from urllib.parse import urlencode, urlsplit
 
+from .binance_rate_limit import (
+    REST_RATE_LIMITER,
+    BinanceRestRateLimit,
+    rest_request_weight,
+    unpack_transport_response,
+)
+
 MAX_RESPONSE_BYTES = 512 * 1024
 FUTURES_ACCOUNT_PATH = "/fapi/v3/account"
 PORTFOLIO_ACCOUNT_PATH = "/papi/v1/account"
@@ -33,7 +40,10 @@ INCOME_PAGE_LIMIT = 1_000
 # 150 weight in a multi-user deployment and expose complete=False if truncated.
 MAX_INCOME_PAGES = 5
 
-Transport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
+Transport = Callable[
+    [str, dict[str, str], float],
+    tuple[int, bytes] | tuple[int, bytes, Any],
+]
 AccountType = Literal["UM_FUTURE", "PORTFOLIO_MARGIN"]
 
 
@@ -100,11 +110,25 @@ def _account_positions(value: Any, fallback_ms: int) -> tuple[dict[str, Any], ..
         break_even_price = _decimal_first(item, ("breakEvenPrice",), required=False)
         liquidation_price = _decimal_first(item, ("liquidationPrice",), required=False)
         notional = _decimal_first(item, ("notional",), required=False)
+        initial_margin = _decimal_first(
+            item, ("positionInitialMargin", "initialMargin"), required=False
+        )
+        maintenance_margin = _decimal_first(item, ("maintMargin",), required=False)
         unrealized_pnl = _decimal_first(
             item,
             ("unrealizedProfit", "unRealizedProfit", "crossUnPnl"),
             required=False,
         )
+        raw_margin_type = str(item.get("marginType") or "").strip().lower()
+        if raw_margin_type not in {"isolated", "cross"}:
+            raw_isolated = item.get("isolated")
+            raw_margin_type = (
+                "isolated"
+                if raw_isolated is True
+                else "cross"
+                if raw_isolated is False
+                else None
+            )
         output.append(
             {
                 "symbol": item["symbol"].strip().upper()[:32],
@@ -120,6 +144,16 @@ def _account_positions(value: Any, fallback_ms: int) -> tuple[dict[str, Any], ..
                     float(liquidation_price) if liquidation_price is not None else None
                 ),
                 "notional": float(abs(notional)) if notional is not None else None,
+                "initial_margin": (
+                    float(initial_margin) if initial_margin is not None else None
+                ),
+                "maintenance_margin": (
+                    float(maintenance_margin) if maintenance_margin is not None else None
+                ),
+                "margin_type": raw_margin_type,
+                "isolated": (
+                    raw_margin_type == "isolated" if raw_margin_type is not None else None
+                ),
                 "upnl": float(unrealized_pnl) if unrealized_pnl is not None else None,
                 "leverage": _position_leverage(item),
                 "ts": int(_positive_int(item.get("updateTime")) or fallback_ms),
@@ -281,7 +315,9 @@ def signed_query(
     return f"{query}&signature={signature}"
 
 
-def _http_transport(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
+def _http_transport(
+    url: str, headers: dict[str, str], timeout: float
+) -> tuple[int, bytes, dict[str, str]]:
     parsed = urlsplit(url)
     connection = HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
     path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
@@ -291,7 +327,7 @@ def _http_transport(url: str, headers: dict[str, str], timeout: float) -> tuple[
         body = response.read(MAX_RESPONSE_BYTES + 1)
         if len(body) > MAX_RESPONSE_BYTES:
             raise BinanceAccountClientError("invalid_response")
-        return response.status, body
+        return response.status, body, dict(response.getheaders())
     finally:
         connection.close()
 
@@ -662,11 +698,17 @@ class BinanceAccountClient:
             )
             url = f"{base_url}{path}?{query}"
             try:
-                status_code, body = self.transport(
-                    url,
-                    {"X-MBX-APIKEY": api_key, "Accept": "application/json"},
-                    self.timeout_seconds,
+                REST_RATE_LIMITER.before_request(rest_request_weight("GET", url))
+                status_code, body, response_headers = unpack_transport_response(
+                    self.transport(
+                        url,
+                        {"X-MBX-APIKEY": api_key, "Accept": "application/json"},
+                        self.timeout_seconds,
+                    )
                 )
+                REST_RATE_LIMITER.observe(status_code, response_headers, body)
+            except BinanceRestRateLimit:
+                raise BinanceAccountClientError("rate_limit", code=-1003) from None
             except BinanceAccountClientError:
                 raise
             except TimeoutError:
@@ -703,12 +745,19 @@ class BinanceAccountClient:
             else FUTURES_TIME_PATH
         )
         started_ms = current_time_ms()
+        url = f"{base_url}{path}"
         try:
-            status_code, body = self.transport(
-                f"{base_url}{path}",
-                {"Accept": "application/json"},
-                self.timeout_seconds,
+            REST_RATE_LIMITER.before_request(rest_request_weight("GET", url))
+            status_code, body, response_headers = unpack_transport_response(
+                self.transport(
+                    url,
+                    {"Accept": "application/json"},
+                    self.timeout_seconds,
+                )
             )
+            REST_RATE_LIMITER.observe(status_code, response_headers, body)
+        except BinanceRestRateLimit:
+            raise BinanceAccountClientError("rate_limit", code=-1003) from None
         except BinanceAccountClientError:
             raise
         except TimeoutError:

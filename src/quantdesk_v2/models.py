@@ -1376,6 +1376,7 @@ class LiveOrderIntent(Base):
         UniqueConstraint("signal_key", name="uq_live_order_intents_signal_key"),
         UniqueConstraint("client_order_id", name="uq_live_order_intents_client_order_id"),
         Index("ix_live_order_intents_user_created", "user_id", "created_at"),
+        Index("ix_live_order_intents_strategy_signal", "strategy_signal_id"),
         Index(
             "ix_live_order_intents_account_symbol",
             "live_account_id",
@@ -1403,6 +1404,11 @@ class LiveOrderIntent(Base):
     deployment_id: Mapped[int] = mapped_column(
         BigInteger, nullable=False, comment="固定策略修订的部署 ID"
     )
+    strategy_signal_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("strategy_signals.id", ondelete="SET NULL"),
+        comment="Strategy signal that caused this order intent",
+    )
     signal_key: Mapped[str] = mapped_column(
         String(191), nullable=False, comment="策略信号与订单动作的全局幂等键"
     )
@@ -1427,6 +1433,9 @@ class LiveOrderIntent(Base):
     )
     request_json: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False, comment="不含密钥与签名的订单参数"
+    )
+    entry_basis_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="Immutable strategy, signal, market and risk evidence captured at entry"
     )
     response_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, comment="经过字段白名单裁剪的 Binance 响应"

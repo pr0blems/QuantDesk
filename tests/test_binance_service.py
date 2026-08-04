@@ -24,11 +24,19 @@ def _snapshot() -> BinanceAccountSnapshot:
 class _Client:
     def __init__(self) -> None:
         self.account_calls = 0
+        self.open_orders_calls = 0
 
     def account(self, _api_key: str, _api_secret: str) -> BinanceAccountSnapshot:
         self.account_calls += 1
         time.sleep(0.02)
         return _snapshot()
+
+    def open_orders(
+        self, _api_key: str, _api_secret: str, *, account_type: str
+    ) -> tuple[dict, ...]:
+        self.open_orders_calls += 1
+        time.sleep(0.02)
+        return ({"account_type": account_type},)
 
 
 def test_concurrent_account_reads_are_coalesced() -> None:
@@ -71,3 +79,35 @@ def test_force_refresh_bypasses_recent_account_cache() -> None:
     service.account("key", "secret", force_refresh=True)
 
     assert client.account_calls == 2
+
+
+def test_open_order_reads_are_cached_and_force_refreshable() -> None:
+    client = _Client()
+    service = BinanceAccountService(  # type: ignore[arg-type]
+        client,
+        open_orders_cache_seconds=30,
+    )
+
+    first = service.open_orders("key", "secret", account_type="UM_FUTURE")
+    second = service.open_orders("key", "secret", account_type="UM_FUTURE")
+    refreshed = service.open_orders(
+        "key", "secret", account_type="UM_FUTURE", force_refresh=True
+    )
+
+    assert first is second
+    assert refreshed == first
+    assert client.open_orders_calls == 2
+
+
+def test_invalidate_clears_account_and_open_order_caches() -> None:
+    client = _Client()
+    service = BinanceAccountService(client)  # type: ignore[arg-type]
+
+    service.account("key", "secret")
+    service.open_orders("key", "secret", account_type="UM_FUTURE")
+    service.invalidate("key", "secret")
+    service.account("key", "secret")
+    service.open_orders("key", "secret", account_type="UM_FUTURE")
+
+    assert client.account_calls == 2
+    assert client.open_orders_calls == 2

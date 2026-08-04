@@ -25,6 +25,7 @@ from .binance_performance import (
     history_status_for_month,
     month_window_ms,
 )
+from .binance_rate_limit import REST_RATE_LIMITER
 from .database import get_db
 from .dependencies import get_current_user
 from .market_config import TRADFI_UNIVERSE_KEY, tradfi_symbols
@@ -61,8 +62,8 @@ from .schemas import (
     HealthOut,
     LiveAccountArmRequest,
     LiveAccountCreateRequest,
-    LiveAccountStrategyUpdate,
     LiveAccountStatusUpdate,
+    LiveAccountStrategyUpdate,
     LoginRequest,
     LogoutRequest,
     MessageOut,
@@ -1572,10 +1573,122 @@ def _live_account_out(account: LiveTradingAccount, *, enabled: bool) -> dict[str
     }
 
 
+_LIVE_RISK_DEFAULTS: dict[str, Any] = {
+    "risk_per_trade_pct": 0.5,
+    "max_total_risk_pct": 4,
+    "max_cluster_positions": 2,
+    "risk_max_leverage": 10,
+    "liquidation_buffer_pct": 1.5,
+    "daily_loss_limit_pct": 2,
+    "max_drawdown_pct": 6,
+    "short_risk_multiplier": 0.5,
+    "max_ticker_age_seconds": 120,
+    "max_signal_age_seconds": 18_000,
+    "block_high_risk_products": True,
+    "round_trip_cost_bps": 16,
+    "max_high_risk_positions": 1,
+    "high_risk_multiplier": 0.5,
+    "signal_valid_bars": 1,
+}
+
+
+def _live_risk_config(
+    payload: LiveAccountCreateRequest | LiveAccountStrategyUpdate,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the execution risk envelope stored with every live snapshot."""
+
+    config = {
+        "leverage": payload.leverage,
+        "max_positions": payload.max_positions,
+        # Retained as a hard margin ceiling for compatibility. Position size is
+        # now further reduced by risk_per_trade_pct and the actual stop distance.
+        "position_size_pct": payload.position_size_pct,
+        "margin_cap": payload.margin_cap,
+    }
+    previous = existing or {}
+    for key, default in _LIVE_RISK_DEFAULTS.items():
+        submitted = getattr(payload, key, None)
+        config[key] = submitted if submitted is not None else previous.get(key, default)
+    return config
+
+
 def _binance_permissions_include_trade(user: User) -> bool:
     permissions = user.binance_permissions or {}
     requested = permissions.get("requested") if isinstance(permissions, dict) else None
     return isinstance(requested, list) and "TRADE" in requested
+
+
+def _lock_and_revalidate_live_arm(
+    db: Session,
+    *,
+    user_id: int,
+    account_id: str,
+    confirmation_name: str,
+    credential_version: int,
+    encrypted_key: str,
+    encrypted_secret: str,
+) -> LiveTradingAccount:
+    """Serialize arming and recheck mutable state after the Binance preflight."""
+
+    locked_user = db.scalar(select(User).where(User.id == user_id).with_for_update())
+    if locked_user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    if (
+        not locked_user.binance_credentials_configured
+        or not _binance_permissions_include_trade(locked_user)
+        or locked_user.binance_key_version != credential_version
+        or locked_user.binance_api_key_encrypted != encrypted_key
+        or locked_user.binance_api_secret_encrypted != encrypted_secret
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Binance credentials changed during preflight; retry arming",
+        )
+
+    account = db.scalar(
+        select(LiveTradingAccount)
+        .where(
+            LiveTradingAccount.user_id == user_id,
+            LiveTradingAccount.public_id == account_id,
+            LiveTradingAccount.status != "archived",
+        )
+        .with_for_update()
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="live account not found")
+    if account.name != confirmation_name:
+        raise HTTPException(
+            status_code=409,
+            detail="live-trading confirmation did not match",
+        )
+
+    active = db.scalar(
+        select(LiveTradingAccount.id)
+        .where(
+            LiveTradingAccount.user_id == user_id,
+            LiveTradingAccount.status == "active",
+            LiveTradingAccount.id != account.id,
+        )
+        .limit(1)
+    )
+    if active is not None:
+        raise HTTPException(status_code=409, detail="pause the other live deployment first")
+    unresolved = db.scalar(
+        select(LiveOrderIntent.id)
+        .where(
+            LiveOrderIntent.user_id == user_id,
+            LiveOrderIntent.live_account_id == account.id,
+            LiveOrderIntent.status == "unknown",
+        )
+        .limit(1)
+    )
+    if unresolved is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="resolve unknown Binance order states before arming",
+        )
+    return account
 
 
 @router.get("/paper/accounts")
@@ -1863,14 +1976,12 @@ def create_live_account(
     if not universe:
         raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
     risk = dict(strategy.risk_defaults_json or {})
+    risk_config = _live_risk_config(payload)
     config = {
         "symbols": universe,
         "universe_key": TRADFI_UNIVERSE_KEY,
         "universe_count": len(universe),
-        "leverage": payload.leverage,
-        "max_positions": payload.max_positions,
-        "position_size_pct": payload.position_size_pct,
-        "margin_cap": payload.margin_cap,
+        **risk_config,
         "stop_loss_pct": max(0.1, min(float(risk.get("stop_loss_pct", 3)), 20)),
         "take_profit_pct": max(0.1, min(float(risk.get("take_profit_pct", 5)), 50)),
         "max_holding_bars": max(0, min(int(risk.get("max_holding_bars", 12)), 1_000)),
@@ -1915,12 +2026,7 @@ def create_live_account(
                 "universe_key": TRADFI_UNIVERSE_KEY,
                 "symbols": universe,
             },
-            risk_override_json={
-                "leverage": payload.leverage,
-                "max_positions": payload.max_positions,
-                "position_size_pct": payload.position_size_pct,
-                "margin_cap": payload.margin_cap,
-            },
+            risk_override_json=risk_config,
             runtime_state_json={},
         )
     )
@@ -2024,9 +2130,15 @@ def arm_live_account(
         raise HTTPException(
             status_code=409, detail=f"实盘启用失败：{reason}。"
         ) from None
-    account = _live_account_record(db, user.id, account_id)
-    if account is None:
-        raise HTTPException(status_code=404, detail="live account not found")
+    account = _lock_and_revalidate_live_arm(
+        db,
+        user_id=user.id,
+        account_id=account_id,
+        confirmation_name=payload.confirmation_name,
+        credential_version=credential_version,
+        encrypted_key=encrypted_key,
+        encrypted_secret=encrypted_secret,
+    )
     account.status = "active"
     account_config = dict(account.config_json or {})
     account_config.update(
@@ -2045,11 +2157,13 @@ def arm_live_account(
     account.armed_at = utcnow()
     account.last_error_code = None
     deployment = db.scalar(
-        select(StrategyDeployment).where(
+        select(StrategyDeployment)
+        .where(
             StrategyDeployment.user_id == user.id,
             StrategyDeployment.mode == "live",
             StrategyDeployment.target_account_id == account.id,
         )
+        .with_for_update()
     )
     if deployment is None:
         raise HTTPException(status_code=409, detail="live deployment is unavailable")
@@ -2177,15 +2291,13 @@ def update_live_account_strategy(
 
     risk = dict(strategy.risk_defaults_json or {})
     config = dict(account.config_json or {})
+    risk_config = _live_risk_config(payload, config)
     config.update(
         {
             "symbols": universe,
             "universe_key": TRADFI_UNIVERSE_KEY,
             "universe_count": len(universe),
-            "leverage": payload.leverage,
-            "max_positions": payload.max_positions,
-            "position_size_pct": payload.position_size_pct,
-            "margin_cap": payload.margin_cap,
+            **risk_config,
             "stop_loss_pct": max(0.1, min(float(risk.get("stop_loss_pct", 3)), 20)),
             "take_profit_pct": max(0.1, min(float(risk.get("take_profit_pct", 5)), 50)),
             "max_holding_bars": max(
@@ -2234,13 +2346,9 @@ def update_live_account_strategy(
         "universe_key": TRADFI_UNIVERSE_KEY,
         "symbols": universe,
     }
-    deployment.risk_override_json = {
-        "leverage": payload.leverage,
-        "max_positions": payload.max_positions,
-        "position_size_pct": payload.position_size_pct,
-        "margin_cap": payload.margin_cap,
-    }
-    deployment.runtime_state_json = {}
+    deployment.risk_override_json = risk_config
+    # Strategy edits must not reset the account's daily-loss/high-watermark
+    # circuit-breaker baseline. A reset is a separate, explicit account action.
     deployment.last_evaluated_bar_time = None
     deployment.last_error_code = None
     deployment.started_at = None
@@ -2297,6 +2405,8 @@ def live_trading_dashboard(
             "quantity": float(item.quantity) if item.quantity is not None else None,
             "status": item.status,
             "error_code": item.error_code,
+            "strategy_signal_id": item.strategy_signal_id,
+            "entry_basis": item.entry_basis_json or {},
             "request": item.request_json or {},
             "response": item.response_json or {},
             "submitted_at": item.submitted_at,
@@ -2304,6 +2414,39 @@ def live_trading_dashboard(
         }
         for item in intents
     ]
+
+    latest_filled: dict[tuple[str, str], LiveOrderIntent] = {}
+    for item in intents:
+        key = (item.symbol, item.position_side or "BOTH")
+        if item.status == "filled" and item.action in {"open", "close"}:
+            latest_filled.setdefault(key, item)
+
+    def positions_with_entry_basis(raw_positions: Any) -> list[dict[str, Any]]:
+        result = []
+        for raw_position in raw_positions:
+            position = dict(raw_position)
+            key = (
+                str(position.get("symbol") or ""),
+                str(position.get("position_side") or "BOTH"),
+            )
+            managed = latest_filled.get(key)
+            if managed is not None and managed.action == "open":
+                basis = managed.entry_basis_json or {
+                    "schema_version": 1,
+                    "availability": "legacy_missing",
+                    "reasons": ["该实盘仓位早于开仓依据修复，历史证据不可用"],
+                }
+                position["entry_basis"] = basis
+                position["managed_by_strategy"] = True
+            else:
+                position["entry_basis"] = {
+                    "schema_version": 1,
+                    "availability": "external_position",
+                    "reasons": ["未找到本系统对应的策略开仓订单，可能是人工或外部仓位"],
+                }
+                position["managed_by_strategy"] = False
+            result.append(position)
+        return result
     if not user.binance_credentials_configured:
         return {
             "live_account": account_out,
@@ -2340,13 +2483,32 @@ def live_trading_dashboard(
                 "updated_at": snapshot.updated_at,
                 "error_category": None,
             },
-            "positions": list(snapshot.positions),
+            "positions": positions_with_entry_basis(snapshot.positions),
             "open_orders": list(open_orders),
             "order_intents": intent_items,
         }
+    binance_error: dict[str, Any] = {
+        "configured": True,
+        "connected": False,
+        "error_category": category,
+    }
+    if category == "rate_limit":
+        rate_limit = REST_RATE_LIMITER.snapshot()
+        binance_error.update(
+            {
+                "retry_at": (
+                    datetime.fromtimestamp(rate_limit.retry_at, UTC)
+                    if rate_limit.retry_at is not None
+                    else None
+                ),
+                "retry_after_seconds": math.ceil(rate_limit.retry_after_seconds),
+                "used_weight": rate_limit.used_weight,
+                "weight_limit": rate_limit.weight_limit,
+            }
+        )
     return {
         "live_account": account_out,
-        "binance": {"configured": True, "connected": False, "error_category": category},
+        "binance": binance_error,
         "positions": [],
         "open_orders": [],
         "order_intents": intent_items,

@@ -627,6 +627,10 @@ class PaperDashboard extends HTMLElement {
     const rows = trades.map((trade) => {
       const netPnl = Number(trade.pnl || 0) - Number(trade.fee || 0);
       const sideClass = Number(trade.side) > 0 ? "positive" : "negative";
+      const basis = trade.entry_basis || {};
+      const reasons = Array.isArray(basis.reasons) ? basis.reasons : [];
+      const basisText = reasons.join(" · ") || "开仓依据不可用";
+      const score = basis.signal?.score;
       return `<tr>
         <td class="muted"><small>${this.escape(this.time(trade.closed_ts))}</small></td>
         <td><strong>${this.escape(this.symbol(trade.symbol))}</strong></td>
@@ -634,10 +638,11 @@ class PaperDashboard extends HTMLElement {
         <td class="muted"><small>${this.price(trade.entry_price)} → ${this.price(trade.exit_price)}</small></td>
         <td class="${this.tone(netPnl)}"><strong>${this.signed(netPnl)} U</strong></td>
         <td class="muted">${this.escape(trade.reason || "--")}</td>
+        <td class="basis"><small>${score == null ? "历史快照" : `实际评分 ${this.signed(score, 0)}`}</small><span title="${this.escape(basisText)}">${this.escape(basisText)}</span></td>
       </tr>`;
     }).join("");
     this.q("#paper-trades").innerHTML = `<table class="trades-table">
-      <thead><tr><th>时间</th><th>合约</th><th>方向</th><th>开 → 平</th><th>盈亏</th><th>平仓原因</th></tr></thead>
+      <thead><tr><th>时间</th><th>合约</th><th>方向</th><th>开 → 平</th><th>盈亏</th><th>平仓原因</th><th>开仓依据</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   }

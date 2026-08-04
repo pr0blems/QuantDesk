@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # Process-wide kill switch.  A user must still explicitly arm one paused
     # deployment before any signed TRADE request can be emitted.
     binance_live_trading_enabled: bool = False
-    binance_live_trading_interval_seconds: int = 15
+    binance_live_trading_interval_seconds: int = 30
 
     # Strategy edits are requested server-side only. The browser never receives
     # this credential and the client uses a fixed OpenAI HTTPS origin.

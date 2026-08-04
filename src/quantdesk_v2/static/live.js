@@ -111,10 +111,21 @@ class LiveDashboard extends HTMLElement {
               <label class="form-field form-field-wide"><span>已发布策略</span><select id="live-strategy" required></select><small>保存为独立策略快照。</small></label>
               <label id="live-name-field" class="form-field form-field-wide"><span>部署名称</span><input id="live-name" maxlength="100" required></label>
               <div class="live-universe form-field-wide"><strong>交易品种</strong><span>与模拟盘完全相同的 Binance TradFi 股票及传统资产合约池（当前 <b id="live-universe-count">--</b> 个）</span></div>
-              <label class="form-field"><span>杠杆倍数（1–20x）</span><input id="live-leverage" type="number" min="1" max="20" step="1" value="3" required></label>
+              <label class="form-field"><span>请求杠杆（1–20x）</span><input id="live-leverage" type="number" min="1" max="20" step="1" value="10" required></label>
               <label class="form-field"><span>最大持仓数（1–20）</span><input id="live-max-positions" type="number" min="1" max="20" step="1" value="1" required></label>
-              <label class="form-field"><span>单笔保证金占权益（≤10%）</span><input id="live-size" type="number" min="0.1" max="10" step="0.1" value="2" required></label>
-              <label class="form-field"><span>总保证金上限（≤50%）</span><input id="live-cap" type="number" min="0.01" max="0.5" step="0.01" value="0.2" required></label>
+              <label class="form-field"><span>单笔保证金上限（≤10%）</span><input id="live-size" type="number" min="0.1" max="10" step="0.1" value="2" required></label>
+              <label class="form-field"><span>总保证金上限（%权益）</span><input id="live-cap" type="number" min="1" max="50" step="1" value="20" required></label>
+              <label class="form-field"><span>单笔止损风险（%权益）</span><input id="live-risk-per-trade" type="number" min="0.05" max="1" step="0.05" value="0.5" required></label>
+              <label class="form-field"><span>组合开放风险上限（%权益）</span><input id="live-total-risk" type="number" min="0.25" max="8" step="0.25" value="4" required></label>
+              <label class="form-field"><span>风控杠杆上限（1–20x）</span><input id="live-risk-leverage" type="number" min="1" max="20" step="1" value="10" required></label>
+              <label class="form-field"><span>止损距强平最小缓冲（%）</span><input id="live-liq-buffer" type="number" min="0.5" max="10" step="0.1" value="1.5" required></label>
+              <label class="form-field"><span>同风险组最多持仓</span><input id="live-cluster-cap" type="number" min="1" max="20" step="1" value="2" required></label>
+              <label class="form-field"><span>当日亏损熔断（%）</span><input id="live-daily-loss" type="number" min="0.25" max="20" step="0.25" value="2" required></label>
+              <label class="form-field"><span>最大回撤熔断（%）</span><input id="live-max-drawdown" type="number" min="1" max="30" step="0.5" value="6" required></label>
+              <label class="form-field"><span>空头风险系数（0–1）</span><input id="live-short-risk" type="number" min="0" max="1" step="0.1" value="0.5" required></label>
+              <label class="form-field"><span>行情最长延迟（秒）</span><input id="live-ticker-age" type="number" min="30" max="900" step="10" value="120" required></label>
+              <label class="form-field"><span>信号最长年龄（分钟）</span><input id="live-signal-age" type="number" min="5" max="2880" step="5" value="300" required></label>
+              <label class="live-check form-field-wide"><input id="live-block-high-risk" type="checkbox" checked><span>禁止杠杆/反向 ETF、波动率和未正式上市参考产品</span></label>
               <label class="live-check form-field-wide"><input id="live-ack" type="checkbox" required><span id="live-ack-text">我理解这是实盘部署；创建后仍保持暂停，只有再次确认才会开始真实交易。</span></label>
               <p id="live-form-error" class="form-error hidden" role="alert"></p>
               <footer class="modal-actions"><button class="action-button" type="button" data-close>取消</button><button id="live-submit" class="create-account-button live-create" type="submit">创建为暂停</button></footer>
@@ -148,7 +159,10 @@ class LiveDashboard extends HTMLElement {
     if (this.running) return;
     this.running = true;
     this.loadAccounts().then(() => this.load()).catch((error) => this.banner(`实盘页面加载失败：${error.message}`, "error"));
-    this.timer = window.setInterval(() => this.load(), 10000);
+    // Binance's all-symbol normal/algo order endpoints are high-weight. The
+    // backend also runs the execution/reconciliation loop, so a dashboard poll
+    // every 30 seconds is responsive without multiplying request weight per tab.
+    this.timer = window.setInterval(() => this.load(), 30000);
   }
 
   pause() { this.running = false; if (this.timer) window.clearInterval(this.timer); this.timer = null; }
@@ -203,7 +217,11 @@ class LiveDashboard extends HTMLElement {
     const orders = Array.isArray(data.open_orders) ? data.open_orders : [];
     const intents = Array.isArray(data.order_intents) ? data.order_intents : [];
     const equity = Number(binance.wallet_balance || 0) + Number(binance.unrealized_pnl || 0);
-    const usedMargin = positions.reduce((sum, item) => sum + Number(item.notional || 0) / Math.max(Number(item.leverage || 1), 1), 0);
+    const usedMargin = positions.reduce((sum, item) => {
+      const leverage = Number(item.leverage || 0);
+      const fallback = leverage > 0 ? Number(item.notional || 0) / leverage : 0;
+      return sum + Number(item.initial_margin ?? fallback);
+    }, 0);
     const curve = binance.connected ? this.recordEquity(account.id, equity) : this.readCurve(account.id);
     const curveStart = curve[0]?.[1] ?? equity;
     const maxDrawdown = this.maxDrawdown(curve);
@@ -248,7 +266,7 @@ class LiveDashboard extends HTMLElement {
       const entry = Number(open.response?.avgPrice || 0); const exit = Number(item.response?.avgPrice || 0);
       const qty = Number(item.response?.executedQty || item.quantity || open.quantity || 0);
       const side = (open.position_side === "SHORT" || open.side === "SELL") ? -1 : 1;
-      trades.push({ symbol: item.symbol, side, entry, exit, pnl: entry && exit ? (exit - entry) * qty * side : null, time: item.submitted_at || item.created_at, reason: item.request?.reason || "策略平仓" });
+      trades.push({ symbol: item.symbol, side, entry, exit, pnl: entry && exit ? (exit - entry) * qty * side : null, time: item.submitted_at || item.created_at, reason: item.request?.reason || "策略平仓", entryBasis: open.entry_basis || item.entry_basis || {} });
       openByKey.delete(key);
     });
     return trades.reverse().slice(0, 50);
@@ -260,7 +278,7 @@ class LiveDashboard extends HTMLElement {
     const config = account.config || {}; const count = Number(config.universe_count || this.universeCount || 0);
     this.q("#live-subtitle").textContent = `${account.name || "实盘策略"} · ${account.strategy_name || "独立策略"} · ${count || "--"} 个 TradFi 品种 · Binance ${this.accountType(binance.account_type)}`;
     const mode = config.position_mode === "hedge" ? "双向持仓" : config.position_mode === "one_way" ? "单向持仓" : "自动识别持仓模式";
-    this.q("#live-rules").textContent = `${config.leverage || "--"}x 杠杆 ｜ 单笔 ${config.position_size_pct || "--"}% ｜ 最大 ${config.max_positions || "--"} 个仓位 ｜ ${mode} ｜ 总保证金上限 ${this.number(Number(config.margin_cap || 0) * 100, 0)}%`;
+    this.q("#live-rules").textContent = `${config.leverage || "--"}x 请求 / ${config.risk_max_leverage || 10}x 风控上限 ｜ 单笔止损风险 ${config.risk_per_trade_pct || 0.5}% ｜ 组合风险 ${config.max_total_risk_pct || 4}% ｜ 总保证金 ${this.number(Number(config.margin_cap || 0.2) * 100, 0)}% ｜ 最大 ${config.max_positions || "--"} 仓 ｜ ${mode}`;
     const ret = data.curveStart ? (data.equity - data.curveStart) * 100 / data.curveStart : 0;
     this.metric("equity", binance.connected ? `${this.number(data.equity)} U` : "--", `曲线期收益率 ${this.signed(ret)}%`, this.tone(ret));
     this.metric("balance", binance.connected ? `${this.number(binance.available_balance)} U` : "--", `占用保证金 ${this.number(data.usedMargin)} U（${data.equity ? this.number(data.usedMargin * 100 / data.equity, 1) : "--"}%）`, "neutral");
@@ -274,8 +292,25 @@ class LiveDashboard extends HTMLElement {
     this.q("#live-delete").disabled = false;
     this.q("#live-rename").disabled = false;
     this.q("#live-adjust").disabled = account.status !== "paused";
-    this.state(binance.connected ? (account.status === "active" ? "实盘运行中" : "Binance 已连接") : "Binance 未连接", binance.connected ? (account.status === "active" ? "success" : "paused") : "error");
-    if (account.last_error_code) this.banner(`部署已停止：${account.last_error_code}。请先核对 Binance 状态。`, "error"); else if (binance.connected && this.systemEnabled) this.banner("", "");
+    const rateLimited = binance.error_category === "rate_limit" || account.last_error_code === "rate_limit";
+    const riskReview = account.last_error_code === "risk_review_required";
+    const auditPending = account.last_error_code === "filled_audit_pending";
+    this.state(
+      binance.connected ? (riskReview ? "实盘待人工复核" : account.status === "active" ? "实盘运行中" : "Binance 已连接") : rateLimited ? "Binance 限频冷却" : "Binance 未连接",
+      binance.connected ? (riskReview ? "paused" : account.status === "active" ? "success" : "paused") : rateLimited ? "paused" : "error",
+    );
+    if (account.status === "error") {
+      this.banner(`部署已停止：${account.last_error_code || "internal_error"}。`, "error");
+    } else if (riskReview) {
+      this.banner("历史/人工仓位沿用原保护，新开仓暂停，需人工复核。", "warning");
+    } else if (auditPending) {
+      this.banner("交易所已确认成交；保护动作优先执行，本地成交审计正在自动恢复。恢复前暂停新开仓。", "warning");
+    } else if (rateLimited) {
+      const retryAt = binance.retry_at ? this.time(binance.retry_at) : "等待 Binance 放行";
+      this.banner(`Binance IP 正在限频冷却（预计 ${retryAt}）。部署仍保持启用，但恢复前不会执行新的策略动作。`, "warning");
+    } else if (account.last_error_code) {
+      this.banner(`Binance 连接暂时降级：${account.last_error_code}。部署仍保持启用并自动重试。`, "warning");
+    } else if (binance.connected && this.systemEnabled) this.banner("", "");
     requestAnimationFrame(() => this.drawCurve(data.curve, data.curveStart));
   }
 
@@ -285,11 +320,12 @@ class LiveDashboard extends HTMLElement {
     this.q("#live-pos-count").textContent = `${items.length} 个`;
     if (!items.length) { this.q("#live-positions").innerHTML = '<div class="empty-state"><strong>暂无持仓</strong><span>启用后等待策略信号；人工仓位也会只读显示在这里</span></div>'; return; }
     const rows = items.map((item) => {
-      const lev = Number(item.leverage || account.config?.leverage || 1); const margin = Number(item.notional || 0) / Math.max(lev, 1); const pnlPct = margin ? Number(item.upnl || 0) * 100 / margin : 0;
+      const lev = Number(item.leverage || 0); const margin = Number(item.initial_margin ?? (lev > 0 ? Number(item.notional || 0) / lev : 0)); const pnlPct = margin ? Number(item.upnl || 0) * 100 / margin : 0;
       const matching = orders.filter((order) => order.symbol === item.symbol && (!order.position_side || order.position_side === "BOTH" || order.position_side === item.position_side));
       const stop = matching.find((order) => /STOP/.test(order.type) && !/TAKE_PROFIT/.test(order.type)); const target = matching.find((order) => /TAKE_PROFIT/.test(order.type));
       const liq = Number(item.liquidation_price || 0); const distance = liq && item.mark_price ? Math.abs(Number(item.mark_price) - liq) * 100 / Number(item.mark_price) : null;
-      return `<tr><td><strong>${this.escape(this.symbol(item.symbol))}</strong></td><td class="${item.side === "long" ? "positive" : "negative"}">${item.side === "long" ? "多" : "空"} ${this.number(lev, 0)}x</td><td>${this.number(item.amt, 4)}</td><td>${this.price(item.entry_price)}</td><td>${this.price(item.mark_price)}</td><td>${this.number(margin)}</td><td class="${this.tone(item.upnl)}"><strong>${this.signed(item.upnl)}</strong><small>${this.signed(pnlPct, 1)}%</small></td><td class="muted"><small>止 ${stop ? this.price(stop.stop_price) : "--"}</small><small>目 ${target ? this.price(target.stop_price) : "--"}</small></td><td class="${distance != null && distance < 3 ? "negative" : "muted"}"><small>${liq ? this.price(liq) : "--"}</small><small>${distance == null ? "" : `距 ${this.number(distance)}%`}</small></td><td class="muted">--</td><td class="basis"><small>${item.position_side === "BOTH" ? "单向持仓" : item.position_side}</small><span>Binance 实盘仓位</span></td></tr>`;
+      const basis = item.entry_basis || {}; const basisText = (Array.isArray(basis.reasons) ? basis.reasons : []).join(" · ") || "开仓依据不可用"; const score = basis.signal?.score;
+      return `<tr><td><strong>${this.escape(this.symbol(item.symbol))}</strong></td><td class="${item.side === "long" ? "positive" : "negative"}">${item.side === "long" ? "多" : "空"} ${lev > 0 ? `${this.number(lev, 0)}x` : "--"}</td><td>${this.number(item.amt, 4)}</td><td>${this.price(item.entry_price)}</td><td>${this.price(item.mark_price)}</td><td>${this.number(margin)}</td><td class="${this.tone(item.upnl)}"><strong>${this.signed(item.upnl)}</strong><small>${this.signed(pnlPct, 1)}%</small></td><td class="muted"><small>止 ${stop ? this.price(stop.stop_price) : "--"}</small><small>目 ${target ? this.price(target.stop_price) : "--"}</small></td><td class="${distance != null && distance < 3 ? "negative" : "muted"}"><small>${liq ? this.price(liq) : "--"}</small><small>${distance == null ? "" : `距 ${this.number(distance)}%`}</small></td><td class="muted">--</td><td class="basis"><small>${score == null ? (item.managed_by_strategy ? "策略仓位" : "外部仓位") : `实际评分 ${this.signed(score, 0)}`}</small><span title="${this.escape(basisText)}">${this.escape(basisText)}</span></td></tr>`;
     }).join("");
     this.q("#live-positions").innerHTML = `<table class="positions-table"><thead><tr><th>合约</th><th>方向</th><th>数量</th><th>均价</th><th>现价</th><th>保证金</th><th>浮盈</th><th>止损/目标</th><th>强平价</th><th>持仓</th><th>开仓依据</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
@@ -297,8 +333,8 @@ class LiveDashboard extends HTMLElement {
   renderTrades(items) {
     this.q("#live-trade-count").textContent = `${items.length} 笔`;
     if (!items.length) { this.q("#live-trades").innerHTML = '<div class="empty-state"><strong>暂无策略平仓记录</strong><span>实盘策略完成一次平仓后显示在这里</span></div>'; return; }
-    const rows = items.map((item) => `<tr><td class="muted"><small>${this.time(item.time)}</small></td><td><strong>${this.escape(this.symbol(item.symbol))}</strong></td><td class="${item.side > 0 ? "positive" : "negative"}">${item.side > 0 ? "多" : "空"}</td><td class="muted"><small>${this.price(item.entry)} → ${this.price(item.exit)}</small></td><td class="${this.tone(item.pnl)}"><strong>${item.pnl == null ? "--" : `${this.signed(item.pnl)} U`}</strong></td><td class="muted">${this.escape(item.reason)}</td></tr>`).join("");
-    this.q("#live-trades").innerHTML = `<table class="trades-table"><thead><tr><th>时间</th><th>合约</th><th>方向</th><th>开 → 平</th><th>盈亏</th><th>平仓原因</th></tr></thead><tbody>${rows}</tbody></table>`;
+    const rows = items.map((item) => { const basisText = (Array.isArray(item.entryBasis?.reasons) ? item.entryBasis.reasons : []).join(" · ") || "开仓依据不可用"; return `<tr><td class="muted"><small>${this.time(item.time)}</small></td><td><strong>${this.escape(this.symbol(item.symbol))}</strong></td><td class="${item.side > 0 ? "positive" : "negative"}">${item.side > 0 ? "多" : "空"}</td><td class="muted"><small>${this.price(item.entry)} → ${this.price(item.exit)}</small></td><td class="${this.tone(item.pnl)}"><strong>${item.pnl == null ? "--" : `${this.signed(item.pnl)} U`}</strong></td><td class="muted">${this.escape(item.reason)}</td><td class="basis"><span title="${this.escape(basisText)}">${this.escape(basisText)}</span></td></tr>`; }).join("");
+    this.q("#live-trades").innerHTML = `<table class="trades-table"><thead><tr><th>时间</th><th>合约</th><th>方向</th><th>开 → 平</th><th>盈亏</th><th>平仓原因</th><th>开仓依据</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
 
   renderOrders(items) {
@@ -379,7 +415,18 @@ class LiveDashboard extends HTMLElement {
       this.q("#live-leverage").value = String(config.leverage || 3);
       this.q("#live-max-positions").value = String(Math.min(Number(config.max_positions || 1), 20));
       this.q("#live-size").value = String(config.position_size_pct || 2);
-      this.q("#live-cap").value = String(config.margin_cap || 0.2);
+      this.q("#live-cap").value = String(Number(config.margin_cap || 0.2) * 100);
+      this.q("#live-risk-per-trade").value = String(Math.max(0.05, Math.min(Number(config.risk_per_trade_pct || 0.5), 1)));
+      this.q("#live-total-risk").value = String(Math.max(0.25, Math.min(Number(config.max_total_risk_pct || 4), 8)));
+      this.q("#live-risk-leverage").value = String(config.risk_max_leverage || 10);
+      this.q("#live-liq-buffer").value = String(config.liquidation_buffer_pct || 1.5);
+      this.q("#live-cluster-cap").value = String(config.max_cluster_positions || 2);
+      this.q("#live-daily-loss").value = String(config.daily_loss_limit_pct || 2);
+      this.q("#live-max-drawdown").value = String(Math.max(1, Math.min(Number(config.max_drawdown_pct || 6), 30)));
+      this.q("#live-short-risk").value = String(config.short_risk_multiplier ?? 0.5);
+      this.q("#live-ticker-age").value = String(config.max_ticker_age_seconds || 120);
+      this.q("#live-signal-age").value = String((config.max_signal_age_seconds || 18000) / 60);
+      this.q("#live-block-high-risk").checked = config.block_high_risk_products !== false;
       this.q("#live-ack-text").textContent = "我确认当前实盘策略已暂停，并理解保存不会处理 Binance 已有仓位或挂单。";
       this.q("#live-submit").textContent = "保存调整";
       this.showStrategyModal();
@@ -400,7 +447,18 @@ class LiveDashboard extends HTMLElement {
     this.q("#live-leverage").value = String(Math.max(1, Math.min(Number(risk.leverage || 3), 20)));
     this.q("#live-max-positions").value = String(Math.max(1, Math.min(Number(risk.max_positions || 1), 20)));
     this.q("#live-size").value = String(Math.max(0.1, Math.min(Number(risk.position_size_pct || 2), 10)));
-    this.q("#live-cap").value = String(Math.max(0.01, Math.min(Number(risk.margin_cap || 0.2), 0.5)));
+    this.q("#live-cap").value = String(Math.max(1, Math.min(Number(risk.margin_cap || 0.2) * 100, 50)));
+    this.q("#live-risk-per-trade").value = String(Math.max(0.05, Math.min(Number(risk.risk_per_trade_pct || 0.5), 1)));
+    this.q("#live-total-risk").value = String(Math.max(0.25, Math.min(Number(risk.max_total_risk_pct || 4), 8)));
+    this.q("#live-risk-leverage").value = String(Math.max(1, Math.min(Number(risk.risk_max_leverage || 10), 20)));
+    this.q("#live-liq-buffer").value = String(Math.max(0.5, Math.min(Number(risk.liquidation_buffer_pct || 1.5), 10)));
+    this.q("#live-cluster-cap").value = String(Math.max(1, Math.min(Number(risk.max_cluster_positions || 2), 20)));
+    this.q("#live-daily-loss").value = String(Math.max(0.25, Math.min(Number(risk.daily_loss_limit_pct || 2), 20)));
+    this.q("#live-max-drawdown").value = String(Math.max(1, Math.min(Number(risk.max_drawdown_pct || 6), 30)));
+    this.q("#live-short-risk").value = String(Math.max(0, Math.min(Number(risk.short_risk_multiplier ?? 0.5), 1)));
+    this.q("#live-ticker-age").value = String(Math.max(30, Math.min(Number(risk.max_ticker_age_seconds || 120), 900)));
+    this.q("#live-signal-age").value = String(Math.max(5, Math.min(Number(risk.max_signal_age_seconds || 18000) / 60, 2880)));
+    this.q("#live-block-high-risk").checked = risk.block_high_risk_products !== false;
   }
 
   async create(event) {
@@ -410,7 +468,18 @@ class LiveDashboard extends HTMLElement {
       leverage: Number(this.q("#live-leverage").value),
       max_positions: Number(this.q("#live-max-positions").value),
       position_size_pct: Number(this.q("#live-size").value),
-      margin_cap: Number(this.q("#live-cap").value),
+      margin_cap: Number(this.q("#live-cap").value) / 100,
+      risk_per_trade_pct: Number(this.q("#live-risk-per-trade").value),
+      max_total_risk_pct: Number(this.q("#live-total-risk").value),
+      max_cluster_positions: Number(this.q("#live-cluster-cap").value),
+      risk_max_leverage: Number(this.q("#live-risk-leverage").value),
+      liquidation_buffer_pct: Number(this.q("#live-liq-buffer").value),
+      daily_loss_limit_pct: Number(this.q("#live-daily-loss").value),
+      max_drawdown_pct: Number(this.q("#live-max-drawdown").value),
+      short_risk_multiplier: Number(this.q("#live-short-risk").value),
+      max_ticker_age_seconds: Number(this.q("#live-ticker-age").value),
+      max_signal_age_seconds: Number(this.q("#live-signal-age").value) * 60,
+      block_high_risk_products: this.q("#live-block-high-risk").checked,
     };
     const editingId = this.editingAccountId;
     if (!editingId) payload.name = this.q("#live-name").value.trim();

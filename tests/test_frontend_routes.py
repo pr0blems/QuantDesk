@@ -100,6 +100,8 @@ def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     assert "BTCUSDT" not in live_asset.text
     assert 'id="live-delete"' in live_asset.text
     assert 'id="live-rename"' in live_asset.text
+    assert 'account.last_error_code === "risk_review_required"' in live_asset.text
+    assert "历史/人工仓位沿用原保护，新开仓暂停，需人工复核" in live_asset.text
     paper_asset = client.get("/assets/paper.js")
     assert paper_asset.status_code == 200
     assert 'id="paper-delete"' in paper_asset.text

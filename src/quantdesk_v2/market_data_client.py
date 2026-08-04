@@ -10,12 +10,56 @@ import urllib.request
 from collections.abc import Mapping
 from typing import Any
 
+from .binance_rate_limit import (
+    REST_RATE_LIMITER,
+    BinanceRestRateLimit,
+    rest_request_weight,
+)
+
 FAPI = "https://fapi.binance.com"
 _ALLOWED_BINANCE_HOSTS = frozenset({"fapi.binance.com"})
 UA = {"User-Agent": "Mozilla/5.0 (quantdesk-local)"}
 _KLINE_INTERVAL_MS = {"15m": 15 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000}
 _BINANCE_KLINE_PAGE_SIZE = 1_500
 _MAX_ON_DEMAND_KLINES = 50_000
+# Preserve the existing public exception name for callers and tests.
+BinancePublicRateLimit = BinanceRestRateLimit
+
+
+class BinancePublicRequestError(RuntimeError):
+    """A public REST failure classified for resumable market collection."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        status: int | None = None,
+    ) -> None:
+        self.retryable = bool(retryable)
+        self.status = status
+        super().__init__(message)
+
+
+def public_rest_retry_after() -> float:
+    """Return seconds remaining on the process-wide public REST circuit."""
+    return REST_RATE_LIMITER.snapshot().retry_after_seconds
+
+
+def public_rest_blocked_until() -> float:
+    """Return the active process-wide REST deadline, or zero when available."""
+
+    return REST_RATE_LIMITER.snapshot().retry_at or 0.0
+
+
+def restore_public_rest_circuit(blocked_until: Any) -> bool:
+    """Restore a previously persisted process-wide REST circuit deadline."""
+
+    return REST_RATE_LIMITER.restore_blocked_until(blocked_until)
+
+
+def public_rest_available() -> bool:
+    return public_rest_retry_after() <= 0
 
 
 def _validate_binance_url(url: str) -> str:
@@ -91,8 +135,10 @@ def _get(
     request_headers = dict(UA)
     request_headers.update(headers or {})
     last_error = "request did not run"
+    last_status: int | None = None
     for attempt in range(retries):
         try:
+            REST_RATE_LIMITER.before_request(rest_request_weight("GET", target))
             # Safe because target was restricted to exact Binance HTTPS origins above.
             request = urllib.request.Request(  # noqa: S310
                 target,
@@ -100,14 +146,55 @@ def _get(
                 method="GET",
             )
             with _BINANCE_OPENER.open(request, timeout=timeout) as response:  # noqa: S310
-                return json.loads(response.read().decode("utf-8"))
+                raw = response.read()
+                REST_RATE_LIMITER.observe(
+                    int(getattr(response, "status", 200)),
+                    getattr(response, "headers", {}),
+                    raw,
+                )
+                payload = json.loads(raw.decode("utf-8"))
+            if isinstance(payload, dict):
+                try:
+                    payload_code = int(payload.get("code"))
+                except (TypeError, ValueError):
+                    payload_code = None
+                if payload_code == -1003:
+                    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    REST_RATE_LIMITER.observe(429, {}, raw)
+                    snapshot = REST_RATE_LIMITER.snapshot()
+                    raise BinancePublicRateLimit(snapshot.retry_at or time.time() + 60, status=429)
+            return payload
+        except BinancePublicRateLimit:
+            raise
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[:200]
-            last_error = f"HTTP {exc.code}: {body}"
-            if exc.code not in {418, 429}:
-                break
-            if attempt + 1 < retries:
-                time.sleep(backoff * (attempt + 2))
+            body = exc.read().decode("utf-8", errors="replace")[:65_536]
+            last_error = f"HTTP {exc.code}: {body[:200]}"
+            last_status = int(exc.code)
+            try:
+                payload = json.loads(body)
+                payload_code = int(payload.get("code")) if isinstance(payload, dict) else None
+            except (json.JSONDecodeError, TypeError, ValueError):
+                payload_code = None
+            REST_RATE_LIMITER.observe(exc.code, exc.headers, body)
+            if exc.code in {418, 429} or payload_code == -1003:
+                snapshot = REST_RATE_LIMITER.snapshot()
+                raise BinancePublicRateLimit(
+                    snapshot.retry_at or time.time() + 60, status=exc.code
+                ) from None
+            if 500 <= exc.code < 600:
+                if attempt + 1 < retries:
+                    time.sleep(backoff * (attempt + 1))
+                    continue
+                raise BinancePublicRequestError(
+                    f"GET {_safe_endpoint(target)} failed: {last_error}",
+                    retryable=True,
+                    status=exc.code,
+                ) from None
+            raise BinancePublicRequestError(
+                f"GET {_safe_endpoint(target)} failed: {last_error}",
+                retryable=False,
+                status=exc.code,
+            ) from None
         except (
             json.JSONDecodeError,
             OSError,
@@ -118,7 +205,11 @@ def _get(
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt + 1 < retries:
                 time.sleep(backoff * (attempt + 1))
-    raise RuntimeError(f"GET {_safe_endpoint(target)} failed: {last_error}") from None
+    raise BinancePublicRequestError(
+        f"GET {_safe_endpoint(target)} failed: {last_error}",
+        retryable=True,
+        status=last_status,
+    ) from None
 
 
 def fetch_exchange_info() -> Any:

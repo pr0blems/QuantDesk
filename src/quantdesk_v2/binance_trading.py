@@ -24,8 +24,17 @@ from .binance_client import (
     current_time_ms,
     signed_query,
 )
+from .binance_rate_limit import (
+    REST_RATE_LIMITER,
+    BinanceRestRateLimit,
+    rest_request_weight,
+    unpack_transport_response,
+)
 
-TradeTransport = Callable[[str, str, dict[str, str], float], tuple[int, bytes]]
+TradeTransport = Callable[
+    [str, str, dict[str, str], float],
+    tuple[int, bytes] | tuple[int, bytes, Any],
+]
 OrderSide = Literal["BUY", "SELL"]
 PositionSide = Literal["BOTH", "LONG", "SHORT"]
 MAX_EXCHANGE_INFO_BYTES = 2 * 1024 * 1024
@@ -67,7 +76,7 @@ class FuturesSymbolRules:
 
 def _trade_transport(
     method: str, url: str, headers: dict[str, str], timeout: float
-) -> tuple[int, bytes]:
+) -> tuple[int, bytes, dict[str, str]]:
     parsed = urlsplit(url)
     connection = HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
     path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
@@ -78,7 +87,7 @@ def _trade_transport(
         body = response.read(response_limit + 1)
         if len(body) > response_limit:
             raise BinanceAccountClientError("invalid_response")
-        return response.status, body
+        return response.status, body, dict(response.getheaders())
     finally:
         connection.close()
 
@@ -366,7 +375,13 @@ class BinanceUsdMTradingClient:
     ) -> dict[str, Any] | list[Any]:
         request_headers = {"Accept": "application/json", **headers}
         try:
-            status, body = self.transport(method, url, request_headers, self.timeout_seconds)
+            REST_RATE_LIMITER.before_request(rest_request_weight(method, url))
+            status, body, response_headers = unpack_transport_response(
+                self.transport(method, url, request_headers, self.timeout_seconds)
+            )
+            REST_RATE_LIMITER.observe(status, response_headers, body)
+        except BinanceRestRateLimit:
+            raise BinanceAccountClientError("rate_limit", code=-1003) from None
         except BinanceAccountClientError:
             raise
         except TimeoutError:

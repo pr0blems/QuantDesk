@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
@@ -27,6 +28,7 @@ def _account() -> dict:
             "position_size_pct": 10,
             "fee_bps": 5,
             "slippage_bps": 3,
+            "funding_rate_8h_bps": 1,
             "stop_loss_pct": 3,
             "take_profit_pct": 5,
             "max_holding_bars": 12,
@@ -43,6 +45,47 @@ def _account() -> dict:
             },
         },
     }
+
+
+def _fresh_prices(symbol: str, price: float, timestamp: int) -> paper._PriceSnapshot:
+    snapshot = paper._PriceSnapshot()
+    snapshot[symbol] = price
+    snapshot.timestamps[symbol] = timestamp
+    return snapshot
+
+
+def _mock_open_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    account: dict,
+    writes: list[tuple[str, tuple]],
+    *,
+    fail_on_insert: bool = False,
+) -> dict[str, bool]:
+    state = {"rolled_back": False}
+
+    class FakeTransaction:
+        def query(self, sql: str, params=()):
+            assert "FOR UPDATE" in sql
+            assert tuple(params) == (account["id"], account["user_id"])
+            return [{"balance": account["balance"]}]
+
+        def execute(self, sql: str, params=()):
+            writes.append((sql, tuple(params)))
+            if fail_on_insert and "INSERT INTO paper_positions" in sql:
+                raise RuntimeError("simulated position insert failure")
+            return 1
+
+    @contextmanager
+    def transaction():
+        try:
+            yield FakeTransaction()
+        except Exception:
+            state["rolled_back"] = True
+            raise
+
+    monkeypatch.setattr(paper.store, "transaction", transaction)
+    monkeypatch.setattr(paper.store, "add_alert", lambda *args, **kwargs: None)
+    return state
 
 
 @pytest.mark.parametrize(
@@ -69,6 +112,65 @@ def test_exit_levels_fall_back_to_configured_percentages_without_atr() -> None:
 
     assert stop == pytest.approx(97)
     assert target == pytest.approx(105)
+
+
+@pytest.mark.parametrize(("side", "expected"), [(1, 0.04), (-1, -0.04)])
+def test_estimated_funding_accrues_on_utc_boundaries_once(
+    monkeypatch: pytest.MonkeyPatch, side: int, expected: float
+) -> None:
+    account = _account()
+    position = {
+        "id": 21,
+        "paper_account_id": account["id"],
+        "user_id": account["user_id"],
+        "symbol": "TESTUSDT",
+        "side": side,
+        "qty": 2.0,
+        "avg_entry": 100.0,
+        "opened_ts": 1,
+        "funding_acc": 0.0,
+        "funding_ts": 0,
+    }
+    writes: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(
+        paper.store,
+        "execute",
+        lambda sql, params=(): writes.append((sql, tuple(params))) or 1,
+    )
+
+    delta = paper._accrue_estimated_funding(
+        account, position, 100.0, 2 * paper.FUNDING_INTERVAL_SECONDS, paper._config(account)
+    )
+    duplicate = paper._accrue_estimated_funding(
+        account, position, 100.0, 2 * paper.FUNDING_INTERVAL_SECONDS, paper._config(account)
+    )
+
+    assert delta == pytest.approx(expected)
+    assert duplicate == 0
+    assert position["funding_acc"] == pytest.approx(expected)
+    assert position["funding_ts"] == 2 * paper.FUNDING_INTERVAL_SECONDS
+    assert len(writes) == 1
+    assert writes[0][1] == pytest.approx(
+        (expected, 2 * paper.FUNDING_INTERVAL_SECONDS, 21, 11, 7, 0)
+    )
+
+
+def test_open_equity_includes_accrued_funding_cost() -> None:
+    account = _account()
+    account["balance"] = 9_900
+    position = {
+        "symbol": "TESTUSDT",
+        "side": 1,
+        "qty": 1,
+        "avg_entry": 100,
+        "margin": 100,
+        "funding_acc": 2,
+    }
+
+    equity, unrealized = paper._equity(account, {"TESTUSDT": 105}, [position])
+
+    assert unrealized == pytest.approx(3)
+    assert equity == pytest.approx(10_003)
 
 
 def test_full_strategy_signal_reads_declared_timeframes(
@@ -110,7 +212,9 @@ def test_full_strategy_signal_reads_declared_timeframes(
         ),
     )
 
-    direction, atr, basis, signal_time = paper._strategy_signal(account, "TESTUSDT")
+    direction, atr, basis, signal_time, evidence = paper._strategy_signal(
+        account, "TESTUSDT"
+    )
 
     assert set(requested) == {
         ("TESTUSDT", "4h", 600),
@@ -122,6 +226,8 @@ def test_full_strategy_signal_reads_declared_timeframes(
     assert signal_time == 100
     assert "类型：完整策略" in basis
     assert "依据：REGIME_UP / BREAKOUT_UP" in basis
+    assert evidence["reason_codes"] == ["REGIME_UP", "BREAKOUT_UP"]
+    assert evidence["valid_until"] == 200
     assert recorded == [("TESTUSDT", "LONG_ENTRY")]
 
 
@@ -190,16 +296,7 @@ def test_open_position_always_persists_take_profit(
     monkeypatch.setattr(
         paper, "_equity", lambda account, prices, positions: (10_000.0, 0.0)
     )
-    monkeypatch.setattr(
-        paper,
-        "_set_balance",
-        lambda account, balance: account.update(balance=balance),
-    )
-    monkeypatch.setattr(
-        paper.store,
-        "execute",
-        lambda sql, params=(): writes.append((sql, tuple(params))),
-    )
+    _mock_open_transaction(monkeypatch, account, writes)
 
     opened = paper._open_position(
         account, "TESTUSDT", side, 100.0, 2.0, ["4h signal"], [], 1_000
@@ -211,6 +308,46 @@ def test_open_position_always_persists_take_profit(
     assert (entry - stop) * side > 0
     assert (target - entry) * side > 0
     assert target == pytest.approx(entry + side * 5)
+    assert insert_params[15] == 1_000
+    entry_basis = json.loads(insert_params[13])
+    assert entry_basis["availability"] == "captured"
+    assert entry_basis["reasons"] == ["4h signal"]
+    assert entry_basis["execution"]["entry_price"] == pytest.approx(entry)
+
+
+def test_open_position_balance_and_insert_share_one_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    initial_balance = account["balance"]
+    writes: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(paper, "_prices", lambda: {"TESTUSDT": 100.0})
+    monkeypatch.setattr(
+        paper, "_equity", lambda account, prices, positions: (10_000.0, 0.0)
+    )
+    state = _mock_open_transaction(
+        monkeypatch,
+        account,
+        writes,
+        fail_on_insert=True,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated position insert failure"):
+        paper._open_position(
+            account,
+            "TESTUSDT",
+            1,
+            100.0,
+            2.0,
+            ["4h signal"],
+            [],
+            1_000,
+        )
+
+    assert state["rolled_back"] is True
+    assert account["balance"] == initial_balance
+    assert "UPDATE paper_accounts" in writes[0][0]
+    assert "INSERT INTO paper_positions" in writes[1][0]
 
 
 @pytest.mark.parametrize(
@@ -345,6 +482,105 @@ def test_take_profit_does_not_reopen_the_same_symbol_on_the_same_tick(
     assert state == {"closed": True, "open_calls": 0}
 
 
+def test_max_holding_exit_includes_funding_accrued_on_the_same_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    now = 6 * paper.FUNDING_INTERVAL_SECONDS
+    position = {
+        "id": 35,
+        "paper_account_id": account["id"],
+        "user_id": account["user_id"],
+        "symbol": "TESTUSDT",
+        "side": 1,
+        "qty": 10,
+        "avg_entry": 100,
+        "margin": 50,
+        "stop": None,
+        "target": None,
+        "atr_entry": None,
+        "liq_price": None,
+        "funding_acc": 0,
+        "funding_ts": 0,
+        "opened_ts": 0,
+    }
+    closes: list[tuple[str, float]] = []
+    monkeypatch.setattr(paper, "_positions", lambda account: [position])
+    monkeypatch.setattr(
+        paper, "_strategy_signal", lambda account, symbol: (0, None, [], now)
+    )
+    monkeypatch.setattr(paper, "tradfi_symbols", lambda: [])
+    monkeypatch.setattr(paper.store, "execute", lambda sql, params=(): 1)
+    monkeypatch.setattr(paper, "_record_equity", lambda *args: None)
+    monkeypatch.setattr(
+        paper,
+        "_close_position",
+        lambda account, position, price, reason, now: closes.append(
+            (reason, position["funding_acc"])
+        )
+        or True,
+    )
+
+    paper._tick_account(account, {"TESTUSDT": 100}, now)
+
+    assert closes == [("max_holding_bars", pytest.approx(0.6))]
+
+
+def test_close_position_deducts_accrued_funding_from_balance_and_trade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["balance"] = 9_950
+    account["config_json"]["fee_bps"] = 0
+    account["config_json"]["slippage_bps"] = 0
+    position = {
+        "id": 36,
+        "symbol": "TESTUSDT",
+        "side": 1,
+        "qty": 1,
+        "avg_entry": 100,
+        "margin": 50,
+        "funding_acc": 2,
+        "open_score": 100,
+        "basis": '{"schema_version":1,"reasons":["entry signal"]}',
+        "opened_ts": 900,
+    }
+    statements: list[tuple[str, tuple]] = []
+
+    class Transaction:
+        @staticmethod
+        def query(sql, params=()):
+            return [{"balance": 9_950}]
+
+        @staticmethod
+        def execute(sql, params=()):
+            statements.append((sql, tuple(params)))
+            return 1
+
+    @contextmanager
+    def transaction():
+        yield Transaction()
+
+    monkeypatch.setattr(paper.store, "transaction", transaction)
+    monkeypatch.setattr(paper.store, "add_alert", lambda *args, **kwargs: None)
+
+    closed = paper._close_position(account, position, 100, "max_holding_bars", 1_000)
+
+    assert closed is True
+    balance_params = next(
+        params for sql, params in statements if "UPDATE paper_accounts SET balance" in sql
+    )
+    trade_params = next(
+        params for sql, params in statements if "INSERT INTO paper_trades" in sql
+    )
+    assert balance_params[0] == pytest.approx(9_998)
+    assert trade_params[8] == pytest.approx(-2)
+    assert trade_params[9] == 0
+    assert trade_params[10] == 2
+    assert trade_params[15] == position["basis"]
+    assert account["balance"] == pytest.approx(9_998)
+
+
 def test_close_position_requires_atomic_row_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -398,7 +634,7 @@ def test_system_default_contains_the_fixed_paper_strategy() -> None:
     )
 
     assert strategy["name"] == "AI 模拟盘 ATR 趋势"
-    assert strategy["version"] == 2
+    assert strategy["version"] == 3
     threshold = next(
         item for item in strategy["parameter_schema_json"] if item["key"] == "threshold"
     )
@@ -417,6 +653,7 @@ def test_api_rules_publish_atr_take_profit(monkeypatch: pytest.MonkeyPatch) -> N
     data = paper.api_data(account["user_id"], account["id"])
 
     assert "2.5×ATR 止盈" in data["rules"]["exits"]
+    assert "资金费率估算 1.0 bps/8h" in data["rules"]["costs"]
 
 
 def test_today_pnl_uses_tenant_account_equity_before_local_midnight(
@@ -485,3 +722,371 @@ def test_paused_accounts_keep_recording_equity_without_running_strategy(
 
     assert ticked == [11]
     assert recorded == [12]
+
+
+def test_paper_max_positions_is_hard_capped_at_twenty() -> None:
+    account = _account()
+    account["config_json"]["max_positions"] = 50
+
+    assert paper._config(account)["max_positions"] == 20
+
+
+def test_legacy_signal_requires_a_closed_recent_four_hour_bar() -> None:
+    account = _account()
+    policy = paper._paper_risk_policy(account)
+    bar_open = 1_700_000_000
+
+    assert not paper._signal_is_fresh(
+        account, bar_open, {}, bar_open + 4 * 3600 - 1, policy
+    )
+    assert paper._signal_is_fresh(
+        account, bar_open, {}, bar_open + 4 * 3600 + 30 * 60, policy
+    )
+    assert not paper._signal_is_fresh(
+        account, bar_open, {}, bar_open + 5 * 3600 + 1, policy
+    )
+
+
+def test_full_strategy_signal_honors_its_valid_until() -> None:
+    account = _account()
+    account["strategy_snapshot_json"]["strategy_kind"] = "full_strategy"
+    policy = paper._paper_risk_policy(account)
+    now = 1_700_010_000
+
+    assert paper._signal_is_fresh(
+        account,
+        now - 60,
+        {"valid_until": (now + 1) * 1000},
+        now,
+        policy,
+    )
+    assert not paper._signal_is_fresh(
+        account,
+        now - 60,
+        {"valid_until": (now - 1) * 1000},
+        now,
+        policy,
+    )
+    assert not paper._signal_is_fresh(account, now - 60, {}, now, policy)
+
+
+def test_full_strategy_risk_proposal_can_only_tighten_account_policy() -> None:
+    account = _account()
+    account["strategy_snapshot_json"]["strategy_kind"] = "full_strategy"
+    base = paper._paper_risk_policy(account)
+
+    looser = paper._paper_risk_policy(
+        account,
+        {
+            "risk_proposal": {
+                "risk_per_trade_pct": 5,
+                "max_margin_pct": 100,
+                "max_leverage": 20,
+            }
+        },
+    )
+    tighter = paper._paper_risk_policy(
+        account,
+        {
+            "risk_proposal": {
+                "risk_per_trade_pct": 0.2,
+                "max_margin_pct": 1,
+                "max_leverage": 3,
+            }
+        },
+    )
+
+    assert looser.risk_per_trade_pct == base.risk_per_trade_pct
+    assert looser.max_margin_per_trade_pct == base.max_margin_per_trade_pct
+    assert looser.max_leverage == base.max_leverage
+    assert tighter.risk_per_trade_pct == paper.Decimal("0.2")
+    assert tighter.max_margin_per_trade_pct == paper.Decimal("1")
+    assert tighter.max_leverage == 3
+
+
+def test_full_strategy_uses_its_fixed_stop_and_target_distances() -> None:
+    config = paper._config(_account())
+    evidence = {
+        "risk_proposal": {
+            "stop_distance": 7.5,
+            "take_profit_distance": 12.5,
+        }
+    }
+
+    assert paper._signal_exit_levels(100, 1, 2, config, evidence) == (92.5, 112.5)
+    assert paper._signal_exit_levels(100, -1, 2, config, evidence) == (107.5, 87.5)
+
+
+def test_incomplete_full_strategy_risk_proposal_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["strategy_snapshot_json"]["strategy_kind"] = "full_strategy"
+    monkeypatch.setattr(
+        paper,
+        "_prices",
+        lambda: pytest.fail("invalid proposal must fail before market sizing"),
+    )
+
+    assert not paper._open_position(
+        account,
+        "AAPLUSDT",
+        1,
+        100,
+        2,
+        ["full strategy"],
+        [],
+        1_700_020_000,
+        signal_evidence={"risk_proposal": {"max_leverage": 3}},
+    )
+
+
+def test_stale_ticker_blocks_a_new_paper_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _account()
+    now = 1_700_030_000
+    prices = _fresh_prices("AAPLUSDT", 100, now - 121)
+    signal_calls: list[str] = []
+    monkeypatch.setattr(paper, "_positions", lambda account: [])
+    monkeypatch.setattr(paper, "tradfi_symbols", lambda: ["AAPLUSDT"])
+    monkeypatch.setattr(paper, "_entry_loss_guard", lambda *args: True)
+    monkeypatch.setattr(paper, "_record_equity", lambda *args: None)
+    monkeypatch.setattr(
+        paper,
+        "_strategy_signal",
+        lambda account, symbol: signal_calls.append(symbol),
+    )
+
+    paper._tick_account(account, prices, now)
+
+    assert signal_calls == []
+
+
+@pytest.mark.parametrize("symbol", ["UVXYUSDT", "TQQQUSDT"])
+def test_high_risk_product_is_rejected_before_signal_evaluation(
+    monkeypatch: pytest.MonkeyPatch, symbol: str
+) -> None:
+    account = _account()
+    now = 1_700_040_000
+    prices = _fresh_prices(symbol, 100, now)
+    monkeypatch.setattr(paper, "_positions", lambda account: [])
+    monkeypatch.setattr(paper, "tradfi_symbols", lambda: [symbol])
+    monkeypatch.setattr(paper, "_entry_loss_guard", lambda *args: True)
+    monkeypatch.setattr(paper, "_record_equity", lambda *args: None)
+    monkeypatch.setattr(
+        paper,
+        "_strategy_signal",
+        lambda *args: pytest.fail("blocked product must not evaluate a signal"),
+    )
+
+    paper._tick_account(account, prices, now)
+
+
+def test_correlated_group_cap_is_applied_to_paper_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    now = 1_700_050_000
+    positions = [
+        {
+            "id": index,
+            "paper_account_id": account["id"],
+            "user_id": account["user_id"],
+            "symbol": symbol,
+            "side": 1,
+            "qty": 1,
+            "avg_entry": 100,
+            "margin": 10,
+            "stop": 97,
+            "target": 105,
+            "funding_acc": 0,
+            "funding_ts": now,
+            "opened_ts": now,
+        }
+        for index, symbol in enumerate(("AMDUSDT", "NVDAUSDT"), start=1)
+    ]
+    prices = _fresh_prices("QCOMUSDT", 100, now)
+    monkeypatch.setattr(paper, "_positions", lambda account: positions)
+    monkeypatch.setattr(paper, "tradfi_symbols", lambda: ["QCOMUSDT"])
+    monkeypatch.setattr(paper, "_entry_loss_guard", lambda *args: True)
+    monkeypatch.setattr(paper, "_record_equity", lambda *args: None)
+    monkeypatch.setattr(
+        paper,
+        "_strategy_signal",
+        lambda *args: pytest.fail("third correlated position must be blocked"),
+    )
+
+    paper._tick_account(account, prices, now)
+
+
+def test_atr_risk_sizing_reduces_leverage_and_fixed_margin_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["config_json"].update({"fee_bps": 0, "slippage_bps": 0})
+    writes: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(paper, "_prices", lambda: {"AAPLUSDT": 100.0})
+    monkeypatch.setattr(
+        paper, "_equity", lambda account, prices, positions: (10_000.0, 0.0)
+    )
+    _mock_open_transaction(monkeypatch, account, writes)
+
+    opened = paper._open_position(
+        account, "AAPLUSDT", 1, 100, 10, ["closed 4h signal"], [], 1_700_060_000
+    )
+
+    assert opened is True
+    params = next(params for sql, params in writes if "INSERT INTO paper_positions" in sql)
+    quantity, margin, leverage, stop = params[4], params[6], params[7], params[8]
+    assert leverage == 5
+    assert stop == pytest.approx(85)
+    assert quantity * (100 - stop) == pytest.approx(50)
+    assert margin == pytest.approx(66.6666667)
+    assert margin < 10_000 * 0.10
+
+
+def test_existing_position_risk_consumes_portfolio_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["config_json"].update({"fee_bps": 0, "slippage_bps": 0})
+    existing = {
+        "symbol": "MUUUSDT",
+        "side": -1,
+        "qty": 100,
+        "avg_entry": 100,
+        "margin": 500,
+        "stop": 110,
+        "atr_entry": 6.6666667,
+    }
+    monkeypatch.setattr(paper, "_prices", lambda: {"AAPLUSDT": 100.0})
+    monkeypatch.setattr(
+        paper, "_equity", lambda account, prices, positions: (10_000.0, 0.0)
+    )
+    monkeypatch.setattr(
+        paper.store,
+        "execute",
+        lambda *args, **kwargs: pytest.fail("risk cap must block the insert"),
+    )
+
+    opened = paper._open_position(
+        account, "AAPLUSDT", 1, 100, 2, ["closed 4h signal"], [existing], 1_700_070_000
+    )
+
+    assert opened is False
+
+
+@pytest.mark.parametrize(
+    ("current_equity", "day_start", "high_watermark"),
+    [(9_700, 10_000, 10_000), (9_300, 9_300, 10_000)],
+)
+def test_daily_loss_or_drawdown_blocks_new_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    current_equity: float,
+    day_start: float,
+    high_watermark: float,
+) -> None:
+    account = _account()
+
+    def query(sql: str, params=()):
+        if "MAX(equity)" in sql:
+            return [{"high_watermark": high_watermark}]
+        return [{"equity": day_start}]
+
+    monkeypatch.setattr(paper.store, "query", query)
+
+    assert not paper._entry_loss_guard(
+        account,
+        current_equity,
+        1_700_080_000,
+        paper._paper_risk_policy(account),
+    )
+
+
+def test_signal_is_consumed_only_after_position_open_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    now = 1_700_090_000
+    bar_open = now - 4 * 3600 - 30 * 60
+    prices = _fresh_prices("AAPLUSDT", 100, now)
+    consumed: list[tuple[int, str, int]] = []
+    monkeypatch.setattr(paper, "_positions", lambda account: [])
+    monkeypatch.setattr(paper, "tradfi_symbols", lambda: ["AAPLUSDT"])
+    monkeypatch.setattr(paper, "_entry_loss_guard", lambda *args: True)
+    monkeypatch.setattr(paper, "_record_equity", lambda *args: None)
+    monkeypatch.setattr(
+        paper,
+        "_strategy_signal",
+        lambda *args: (1, 2.0, ["closed"], bar_open, {}),
+    )
+    monkeypatch.setattr(paper.store, "user_state_get", lambda *args: None)
+    monkeypatch.setattr(
+        paper.store,
+        "user_state_set",
+        lambda user_id, key, value: consumed.append((user_id, key, value)),
+    )
+    monkeypatch.setattr(paper, "_open_position", lambda *args: False)
+
+    paper._tick_account(account, prices, now)
+    assert consumed == []
+
+    monkeypatch.setattr(paper, "_open_position", lambda *args: True)
+    paper._tick_account(account, prices, now)
+    assert consumed == [
+        (account["user_id"], f"paper:{account['id']}:signal:AAPLUSDT", bar_open)
+    ]
+
+
+def test_api_trade_statistics_use_net_pnl_after_funding_and_both_fees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    trades = [
+        {
+            "id": 1,
+            "qty": 10,
+            "entry_price": 100,
+            "exit_price": 101,
+            "side": 1,
+            "margin": 1_000,
+            "pnl": 8,
+            "fee": 0.505,
+            "funding": 2,
+            "entry_basis_json": None,
+        },
+        {
+            "id": 2,
+            "qty": 1,
+            "entry_price": 100,
+            "exit_price": 100.05,
+            "side": 1,
+            "margin": 100,
+            "pnl": 0.05,
+            "fee": 0.050025,
+            "funding": 0,
+            "entry_basis_json": None,
+        },
+    ]
+    monkeypatch.setattr(paper, "_account", lambda *args: account)
+    monkeypatch.setattr(paper, "_prices", lambda: {})
+    monkeypatch.setattr(paper, "_positions", lambda account: [])
+    monkeypatch.setattr(paper, "_today_pnl", lambda *args: 0)
+
+    def query(sql: str, params=()):
+        return trades if "FROM paper_trades" in sql else []
+
+    monkeypatch.setattr(paper.store, "query", query)
+
+    data = paper.api_data(account["user_id"], account["id"])
+
+    first, second = data["trades"]
+    assert first["entry_fee"] == pytest.approx(0.5)
+    assert first["exit_fee"] == pytest.approx(0.505)
+    assert first["fee"] == pytest.approx(1.005)
+    assert first["net_pnl"] == pytest.approx(6.995)
+    assert second["pnl"] > 0
+    assert second["net_pnl"] < 0
+    assert data["stats"]["wins"] == 1
+    assert data["stats"]["losses"] == 1
+    assert data["stats"]["win_rate"] == 50
+    assert data["stats"]["realized"] == pytest.approx(6.94)

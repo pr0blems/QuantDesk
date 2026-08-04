@@ -584,6 +584,17 @@ class LiveAccountCreateRequest(BaseModel):
     max_positions: int = Field(default=1, ge=1, le=20)
     position_size_pct: float = Field(default=2, gt=0, le=10)
     margin_cap: float = Field(default=0.20, gt=0, le=0.50)
+    risk_per_trade_pct: float = Field(default=0.5, gt=0, le=1)
+    max_total_risk_pct: float = Field(default=4, gt=0, le=8)
+    max_cluster_positions: int = Field(default=2, ge=1, le=20)
+    risk_max_leverage: int = Field(default=10, ge=1, le=20)
+    liquidation_buffer_pct: float = Field(default=1.5, ge=0.5, le=10)
+    daily_loss_limit_pct: float = Field(default=2, gt=0, le=20)
+    max_drawdown_pct: float = Field(default=6, gt=0, le=30)
+    short_risk_multiplier: float = Field(default=0.5, ge=0, le=1)
+    max_ticker_age_seconds: int = Field(default=120, ge=30, le=900)
+    max_signal_age_seconds: int = Field(default=18_000, ge=300, le=172_800)
+    block_high_risk_products: bool = True
 
 
 class LiveAccountStrategyUpdate(BaseModel):
@@ -594,6 +605,17 @@ class LiveAccountStrategyUpdate(BaseModel):
     max_positions: int = Field(ge=1, le=20)
     position_size_pct: float = Field(gt=0, le=10)
     margin_cap: float = Field(gt=0, le=0.50)
+    risk_per_trade_pct: float | None = Field(default=None, gt=0, le=1)
+    max_total_risk_pct: float | None = Field(default=None, gt=0, le=8)
+    max_cluster_positions: int | None = Field(default=None, ge=1, le=20)
+    risk_max_leverage: int | None = Field(default=None, ge=1, le=20)
+    liquidation_buffer_pct: float | None = Field(default=None, ge=0.5, le=10)
+    daily_loss_limit_pct: float | None = Field(default=None, gt=0, le=20)
+    max_drawdown_pct: float | None = Field(default=None, gt=0, le=30)
+    short_risk_multiplier: float | None = Field(default=None, ge=0, le=1)
+    max_ticker_age_seconds: int | None = Field(default=None, ge=30, le=900)
+    max_signal_age_seconds: int | None = Field(default=None, ge=300, le=172_800)
+    block_high_risk_products: bool | None = None
 
 
 class LiveAccountStatusUpdate(BaseModel):

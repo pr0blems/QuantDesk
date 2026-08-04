@@ -373,16 +373,30 @@ SYSTEM_STRATEGY_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "模拟盘",
         (
             "系统模拟盘默认策略：在 4h 周期综合 MA20/MA50、MACD、RSI 与布林带，"
-            "评分达到 3 时入场；默认使用 10% 保证金、20x 杠杆，"
+            "评分达到 3 时入场；默认使用 2% 保证金上限、10x 风控杠杆，"
             "1.5×ATR 止损、2.5×ATR 止盈，策略反转或持仓 48 小时退出。"
         ),
         "multi_factor",
         {"fast_period": 20, "slow_period": 50, "rsi_period": 14, "threshold": 3},
         {
-            "position_size_pct": 10,
-            "leverage": 20,
+            "position_size_pct": 2,
+            "leverage": 10,
+            "max_positions": 8,
+            "margin_cap": 0.20,
+            "risk_per_trade_pct": 0.5,
+            "max_total_risk_pct": 4,
+            "max_cluster_positions": 2,
+            "risk_max_leverage": 10,
+            "liquidation_buffer_pct": 1.5,
+            "daily_loss_limit_pct": 2,
+            "max_drawdown_pct": 6,
+            "short_risk_multiplier": 0.5,
+            "max_ticker_age_seconds": 120,
+            "max_signal_age_seconds": 18_000,
+            "block_high_risk_products": True,
             "fee_bps": 5,
             "slippage_bps": 3,
+            "funding_rate_8h_bps": 1,
             "stop_loss_pct": 3,
             "take_profit_pct": 5,
             "max_holding_bars": 12,
@@ -394,7 +408,7 @@ SYSTEM_STRATEGY_DEFINITIONS: tuple[dict[str, Any], ...] = (
             }
             for item in ENGINE_PARAMETER_SCHEMAS["multi_factor"]
         ],
-        version=2,
+        version=3,
     ),
 )
 
