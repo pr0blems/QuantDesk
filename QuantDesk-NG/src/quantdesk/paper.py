@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from datetime import UTC
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from typing import Any
 
 from quantdesk_v2.backtest import _build_signals, _Candle
@@ -18,8 +19,8 @@ from quantdesk_v2.strategy_runtime import (
     validate_strategy_spec,
 )
 
+from . import exchange_sync, store
 from . import indicators as ind
-from . import store
 from .config_loader import tradfi_symbols
 
 DEFAULT_INITIAL_BALANCE = 10_000.0
@@ -101,6 +102,9 @@ def _config(account: dict[str, Any]) -> dict[str, float | int | bool | None]:
         "position_size_pct": max(0.1, min(float(raw.get("position_size_pct", 10)), 100)),
         "fee_bps": max(0.0, min(float(raw.get("fee_bps", DEFAULT_FEE_BPS)), 100)),
         "slippage_bps": max(0.0, min(float(raw.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)), 100)),
+        "max_slippage_bps": max(
+            0.0, min(float(raw.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)), 100)
+        ),
         "stop_loss_pct": max(
             0.01, min(float(raw.get("stop_loss_pct", DEFAULT_STOP_LOSS_PCT)), 99.9)
         ),
@@ -132,6 +136,10 @@ def _config(account: dict[str, Any]) -> dict[str, float | int | bool | None]:
     config["take_profit_r"] = float(exit_config["take_profit_r"])
     config["max_holding_bars"] = int(exit_config["max_holding_bars"])
     config["exit_on_regime_break"] = bool(exit_config["exit_on_regime_break"])
+    execution = spec.get("execution") or {}
+    config["max_slippage_bps"] = float(
+        execution.get("max_slippage_bps", config["max_slippage_bps"])
+    )
     return config
 
 
@@ -146,10 +154,37 @@ def _positions(account: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _prices() -> dict[str, float]:
-    return {
+    prices = {
         row["symbol"]: float(row["price"])
         for row in store.query("SELECT symbol,price FROM ticker WHERE price IS NOT NULL")
     }
+    prices.update(exchange_sync.mark_prices(fresh_only=True))
+    return prices
+
+
+def _book_quotes(now_ms: int) -> dict[str, dict[str, float]]:
+    rows = store.query(
+        """SELECT symbol,bid_price,ask_price,bid_qty,ask_qty,received_at
+           FROM market_microstructure WHERE received_at>=?""",
+        (now_ms - 15_000,),
+    )
+    result: dict[str, dict[str, float]] = {}
+    for row in rows:
+        try:
+            bid = float(row["bid_price"])
+            ask = float(row["ask_price"])
+            if bid <= 0 or ask <= 0 or bid > ask:
+                continue
+            result[str(row["symbol"])] = {
+                "bid": bid,
+                "ask": ask,
+                "bid_qty": float(row.get("bid_qty") or 0),
+                "ask_qty": float(row.get("ask_qty") or 0),
+                "received_at": float(row["received_at"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+    return result
 
 
 def _market_extremes(now_ms: int) -> dict[str, dict[str, float | int | None]]:
@@ -197,6 +232,7 @@ def _equity(
 ) -> tuple[float, float]:
     unrealized = sum(
         _upnl(position, prices.get(position["symbol"], float(position["avg_entry"])))
+        - float(position.get("funding_acc") or 0)
         for position in positions
     )
     return float(account["balance"]) + _used_margin(positions) + unrealized, unrealized
@@ -420,6 +456,63 @@ def _execution_price(price: float, side: int, opening: bool, slippage_bps: float
     return price + adjustment if adverse else price - adjustment
 
 
+def _decimal(value: Any) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+    return result if result.is_finite() else Decimal("0")
+
+
+def _floor_step(value: float, step: Any) -> float:
+    amount = _decimal(value)
+    increment = _decimal(step)
+    if amount <= 0 or increment <= 0:
+        return 0.0
+    return float((amount / increment).to_integral_value(rounding=ROUND_FLOOR) * increment)
+
+
+def _round_tick(value: float | None, tick: Any, *, upward: bool) -> float | None:
+    if value is None:
+        return None
+    amount = _decimal(value)
+    increment = _decimal(tick)
+    if amount <= 0 or increment <= 0:
+        return None
+    rounding = ROUND_CEILING if upward else ROUND_FLOOR
+    return float((amount / increment).to_integral_value(rounding=rounding) * increment)
+
+
+def _bracket_for_notional(brackets: list[dict[str, Any]], notional: float) -> dict[str, Any] | None:
+    for bracket in brackets:
+        floor = float(bracket.get("notional_floor") or 0)
+        cap = float(bracket.get("notional_cap") or math.inf)
+        if floor <= notional <= cap:
+            return bracket
+    return brackets[-1] if brackets else None
+
+
+def _isolated_liquidation_price(
+    entry: float,
+    quantity: float,
+    margin: float,
+    side: int,
+    bracket: dict[str, Any],
+    funding_paid: float = 0.0,
+) -> float | None:
+    if entry <= 0 or quantity <= 0 or margin <= 0 or side not in {-1, 1}:
+        return None
+    mmr = float(bracket.get("maint_margin_ratio") or 0)
+    cum = float(bracket.get("cum") or 0)
+    if side > 0 and mmr < 1:
+        result = (quantity * entry - margin + funding_paid - cum) / (quantity * (1 - mmr))
+    elif side < 0:
+        result = (margin - funding_paid + quantity * entry + cum) / (quantity * (1 + mmr))
+    else:
+        return None
+    return result if math.isfinite(result) and result > 0 else None
+
+
 def _exit_levels(
     entry: float,
     side: int,
@@ -504,19 +597,73 @@ def _open_position(
     basis: list[str],
     positions: list[dict[str, Any]],
     now: int,
+    quotes: dict[str, dict[str, float]] | None = None,
 ) -> bool:
     config = _config(account)
     equity, _ = _equity(account, _prices(), positions)
+    exact_environment = quotes is not None
+    if exact_environment:
+        environment, blocked_reason = exchange_sync.execution_readiness(
+            account["user_id"], symbol
+        )
+        if environment is None:
+            store.user_state_set(
+                account["user_id"],
+                f"paper:{account['id']}:environment",
+                {"ready": False, "reason": blocked_reason, "symbol": symbol, "checked_at": now},
+            )
+            return False
+        rule = environment["rule"]
+        commission = environment["commission"]
+        brackets = environment["brackets"]
+        quote = quotes.get(symbol)
+        if quote is None:
+            return False
+        execution = float(quote["ask"] if side > 0 else quote["bid"])
+        if not math.isfinite(execution) or execution <= 0:
+            return False
+        reference = float(rule.get("mark_price") or price)
+        adverse_slippage_bps = max((execution / reference - 1) * side * 10_000, 0.0)
+        if adverse_slippage_bps > float(config["max_slippage_bps"]):
+            return False
+    else:
+        # Compatibility path for direct engine callers predating the synchronized
+        # quote argument. The runtime always supplies a quote dictionary.
+        execution = _execution_price(price, side, True, float(config["slippage_bps"]))
+        adverse_slippage_bps = float(config["slippage_bps"])
+        rule = {
+            "tick_size": "0.00000001",
+            "market_step_size": "0.000000000001",
+            "market_min_qty": 0,
+            "min_notional": 0,
+            "rule_updated_at_ms": 0,
+        }
+        commission = {"taker_rate": float(config["fee_bps"]) / 10_000}
+        brackets = [
+            {
+                "initial_leverage": int(config["leverage"]),
+                "notional_floor": 0,
+                "notional_cap": math.inf,
+                "maint_margin_ratio": 0.005,
+                "cum": 0,
+            }
+        ]
+        quote = {"bid_qty": math.inf, "ask_qty": math.inf}
     available_margin = min(
         float(account["balance"]),
         equity * float(config["margin_cap"]) - _used_margin(positions),
     )
-    leverage = int(config["leverage"])
-    execution = _execution_price(price, side, True, float(config["slippage_bps"]))
+    first_bracket = brackets[0] if brackets else None
+    if first_bracket is None:
+        return False
+    leverage = min(int(config["leverage"]), int(first_bracket["initial_leverage"]))
     stop, target = _exit_levels(execution, side, atr, config)
+    tick_size = rule["tick_size"]
+    stop = _round_tick(stop, tick_size, upward=side > 0)
+    target = _round_tick(target, tick_size, upward=side < 0)
     if stop is None or target is None:
         return False
-    fee_rate = float(config["fee_bps"]) / 10_000
+    fee_rate = float(commission["taker_rate"])
     max_notional = max(available_margin, 0.0) * leverage
     max_notional = min(
         max_notional,
@@ -532,21 +679,40 @@ def _open_position(
         max_notional = min(max_notional, risk_budget / stop_distance * execution)
     if not math.isfinite(max_notional) or max_notional <= 0:
         return False
-    margin = max_notional / leverage
-    if margin <= 5:
+    bracket = _bracket_for_notional(brackets, max_notional)
+    if bracket is None:
         return False
-    notional = max_notional
-    quantity = notional / execution
+    leverage = min(leverage, int(bracket["initial_leverage"]))
+    max_notional = min(max_notional, max(available_margin, 0.0) * leverage)
+    quantity = _floor_step(max_notional / execution, rule["market_step_size"])
+    available_book_qty = float(quote["ask_qty"] if side > 0 else quote["bid_qty"])
+    if quantity <= 0 or quantity > available_book_qty:
+        return False
+    notional = quantity * execution
+    if quantity < float(rule["market_min_qty"]) or notional < float(rule["min_notional"]):
+        return False
+    bracket = _bracket_for_notional(brackets, notional)
+    if bracket is None or leverage > int(bracket["initial_leverage"]):
+        return False
+    margin = notional / leverage
     fee = notional * fee_rate
-    liquidation = execution * (1 - side * (1 / leverage - 0.005))
+    if margin + fee > float(account["balance"]):
+        return False
+    liquidation = _isolated_liquidation_price(
+        execution, quantity, margin, side, bracket
+    )
+    liquidation = _round_tick(liquidation, tick_size, upward=side > 0)
+    if liquidation is None:
+        return False
     _set_balance(account, float(account["balance"]) - margin - fee)
     protection_started_at_ms = int(time.time() * 1000)
     store.execute(
         """INSERT INTO paper_positions(
                paper_account_id,user_id,symbol,side,qty,avg_entry,margin,leverage,stop,target,
                adds,opened_ts,protection_started_at_ms,last_add_ts,open_score,basis,funding_acc,
-               liq_price,funding_ts,atr_entry,peak_price,tp_done
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,0,?,0,?,?,0)""",
+               liq_price,funding_ts,atr_entry,peak_price,tp_done,execution_model,open_fee,
+               fee_rate_open,rule_updated_at_ms
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,0,?,0,?,?,0,?,?,?,?)""",
         (
             account["id"],
             account["user_id"],
@@ -562,12 +728,33 @@ def _open_position(
             protection_started_at_ms,
             now,
             side * 100,
-            json.dumps({"reasons": basis}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "reasons": basis,
+                    "execution": {
+                        "source": "binance_book_ticker_ioc",
+                        "reference": "mark_price",
+                        "slippage_bps": adverse_slippage_bps,
+                        "fee_source": "binance_user_commission_rate",
+                    },
+                },
+                ensure_ascii=False,
+            ),
             liquidation,
             atr,
             execution,
+            "binance_synced_v2" if exact_environment else "legacy_fixed_v1",
+            fee,
+            fee_rate,
+            rule["rule_updated_at_ms"],
         ),
     )
+    if exact_environment:
+        store.user_state_set(
+            account["user_id"],
+            f"paper:{account['id']}:environment",
+            {"ready": True, "reason": None, "symbol": symbol, "checked_at": now},
+        )
     direction = "long" if side > 0 else "short"
     store.add_alert(
         symbol,
@@ -591,14 +778,42 @@ def _close_position(
     account: dict[str, Any], position: dict[str, Any], price: float, reason: str, now: int
 ) -> bool:
     config = _config(account)
-    execution = _execution_price(price, int(position["side"]), False, float(config["slippage_bps"]))
-    quantity = float(position["qty"])
-    fee = quantity * execution * float(config["fee_bps"]) / 10_000
-    pnl = (execution - float(position["avg_entry"])) * quantity * int(position["side"]) - float(
-        position.get("funding_acc") or 0
+    exact = position.get("execution_model") in {
+        "binance_synced_v2",
+        "binance_transition_v2",
+    }
+    execution = (
+        float(price)
+        if exact
+        else _execution_price(price, int(position["side"]), False, float(config["slippage_bps"]))
     )
+    quantity = float(position["qty"])
+    fee_rate = float(config["fee_bps"]) / 10_000
+    if exact:
+        rates = store.query(
+            """SELECT taker_rate FROM binance_user_commission_rates
+               WHERE user_id=? AND symbol=? ORDER BY synced_at_ms DESC LIMIT 1""",
+            (account["user_id"], position["symbol"]),
+        )
+        fee_rate = (
+            float(rates[0]["taker_rate"])
+            if rates
+            else float(position.get("fee_rate_open") or 0)
+        )
+    close_fee = quantity * execution * fee_rate
+    liquidation_fee = 0.0
+    if exact and reason == "liquidation":
+        rule = exchange_sync.contract_rule(position["symbol"])
+        liquidation_fee = quantity * execution * float(
+            rule.get("liquidation_fee_rate") if rule else 0
+        )
+    funding = float(position.get("funding_acc") or 0)
+    gross_pnl = (execution - float(position["avg_entry"])) * quantity * int(position["side"])
+    pnl = gross_pnl - funding
     margin = float(position["margin"])
-    returned = max(margin + pnl - fee, 0.0)
+    returned = max(margin + pnl - close_fee - liquidation_fee, 0.0)
+    open_fee = float(position.get("open_fee") or 0)
+    total_fee = open_fee + close_fee + liquidation_fee
     with store.transaction() as transaction:
         ownership = transaction.query(
             """SELECT a.balance FROM paper_positions p
@@ -623,8 +838,9 @@ def _close_position(
         transaction.execute(
             """INSERT INTO paper_trades(
                    paper_account_id,user_id,symbol,side,qty,entry_price,exit_price,margin,pnl,
-                   fee,funding,reason,open_score,opened_ts,closed_ts
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   fee,funding,reason,open_score,opened_ts,closed_ts,open_fee,close_fee,
+                   liquidation_fee,execution_model
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 account["id"],
                 account["user_id"],
@@ -635,12 +851,16 @@ def _close_position(
                 execution,
                 margin,
                 max(pnl, -margin),
-                fee,
-                position.get("funding_acc") or 0,
+                total_fee,
+                funding,
                 reason,
                 position.get("open_score"),
                 position["opened_ts"],
                 now,
+                open_fee,
+                close_fee,
+                liquidation_fee,
+                position.get("execution_model") or "legacy_fixed_v1",
             ),
         )
     account["balance"] = new_balance
@@ -651,13 +871,13 @@ def _close_position(
         direction,
         None,
         f"模拟盘【{account['name']}】{position['symbol']} {direction} 平仓"
-        f" @ {execution:.8g}，盈亏 {pnl - fee:+.2f} USDT（{reason}）",
+        f" @ {execution:.8g}，盈亏 {pnl - total_fee:+.2f} USDT（{reason}）",
         {
             "paper_account_id": account["public_id"],
             "paper_account_name": account["name"],
             "strategy_name": account["strategy_snapshot_json"].get("name"),
             "price": execution,
-            "pnl": pnl - fee,
+            "pnl": pnl - total_fee,
             "reason": reason,
         },
         user_id=account["user_id"],
@@ -792,11 +1012,123 @@ def _full_strategy_regime_broken(account: dict[str, Any], symbol: str, side: int
     return fast >= slow or slope >= 0 or minus_di <= plus_di
 
 
+def _sync_funding_and_liquidation(
+    account: dict[str, Any], position: dict[str, Any], mark_price: float, now: int
+) -> None:
+    """Apply published funding settlements and refresh isolated liquidation price."""
+
+    last_funding_ms = max(
+        int(position.get("funding_ts") or 0), int(position["opened_ts"]) * 1000
+    )
+    events = store.query(
+        """SELECT funding_time,funding_rate,mark_price FROM binance_funding_events
+           WHERE symbol=? AND funding_time>? AND funding_time<=? ORDER BY funding_time""",
+        (position["symbol"], last_funding_ms, now * 1000),
+    )
+    funding_paid = float(position.get("funding_acc") or 0)
+    for event in events:
+        settlement_mark = float(event.get("mark_price") or mark_price)
+        funding_paid += (
+            float(position["qty"])
+            * settlement_mark
+            * float(event["funding_rate"])
+            * int(position["side"])
+        )
+        last_funding_ms = int(event["funding_time"])
+
+    brackets = store.query(
+        """SELECT * FROM binance_user_leverage_brackets
+           WHERE user_id=? AND symbol=? ORDER BY bracket""",
+        (account["user_id"], position["symbol"]),
+    )
+    liquidation = position.get("liq_price")
+    bracket = _bracket_for_notional(
+        [dict(row) for row in brackets], float(position["qty"]) * mark_price
+    )
+    if bracket is not None:
+        liquidation = _isolated_liquidation_price(
+            float(position["avg_entry"]),
+            float(position["qty"]),
+            float(position["margin"]),
+            int(position["side"]),
+            bracket,
+            funding_paid,
+        )
+        rule = exchange_sync.contract_rule(position["symbol"])
+        if rule is not None:
+            liquidation = _round_tick(
+                liquidation, rule["tick_size"], upward=int(position["side"]) > 0
+            )
+    if events or (liquidation is not None and liquidation != position.get("liq_price")):
+        store.execute(
+            """UPDATE paper_positions SET funding_acc=?,funding_ts=?,liq_price=?
+               WHERE id=? AND paper_account_id=? AND user_id=?""",
+            (
+                funding_paid,
+                last_funding_ms,
+                liquidation,
+                position["id"],
+                account["id"],
+                account["user_id"],
+            ),
+        )
+        position["funding_acc"] = funding_paid
+        position["funding_ts"] = last_funding_ms
+        position["liq_price"] = liquidation
+
+
+def _transition_legacy_position(account: dict[str, Any], position: dict[str, Any]) -> bool:
+    """Move an existing paper position to live rules without rewriting its fill."""
+
+    if position.get("execution_model") != "legacy_fixed_v1":
+        return True
+    rule = exchange_sync.contract_rule(position["symbol"])
+    if rule is None:
+        return False
+    profile, _ = exchange_sync.ensure_user_profile(account["user_id"], position["symbol"])
+    if profile is None:
+        return False
+    historical_rate = float(_config(account)["fee_bps"]) / 10_000
+    historical_open_fee = (
+        float(position["qty"]) * float(position["avg_entry"]) * historical_rate
+    )
+    store.execute(
+        """UPDATE paper_positions SET execution_model='binance_transition_v2',open_fee=?,
+               fee_rate_open=?,rule_updated_at_ms=?
+           WHERE id=? AND paper_account_id=? AND user_id=? AND execution_model='legacy_fixed_v1'""",
+        (
+            historical_open_fee,
+            historical_rate,
+            rule["rule_updated_at_ms"],
+            position["id"],
+            account["id"],
+            account["user_id"],
+        ),
+    )
+    position["execution_model"] = "binance_transition_v2"
+    position["open_fee"] = historical_open_fee
+    position["fee_rate_open"] = historical_rate
+    position["rule_updated_at_ms"] = rule["rule_updated_at_ms"]
+    store.user_state_set(
+        account["user_id"],
+        f"paper:{account['id']}:environment",
+        {
+            "ready": True,
+            "reason": None,
+            "symbol": position["symbol"],
+            "checked_at": int(time.time()),
+            "position_transition": True,
+        },
+    )
+    return True
+
+
 def _tick_account(
     account: dict[str, Any],
     prices: dict[str, float],
     now: int,
     extremes: dict[str, dict[str, float | int | None]] | None = None,
+    quotes: dict[str, dict[str, float]] | None = None,
     *,
     allow_entries: bool = True,
 ) -> None:
@@ -811,6 +1143,12 @@ def _tick_account(
         if side not in {-1, 1}:
             print(f"[paper] invalid side skipped: position={position.get('id')}")
             continue
+        _transition_legacy_position(account, position)
+        if position.get("execution_model") in {
+            "binance_synced_v2",
+            "binance_transition_v2",
+        }:
+            _sync_funding_and_liquidation(account, position, float(price), now)
         # Stored exchange-risk levels must remain effective even when indicator
         # calculation or historical market data is temporarily unavailable.
         _repair_missing_target(account, position, None, config)
@@ -838,7 +1176,9 @@ def _tick_account(
             positions = _positions(account)
 
     if allow_entries and len(positions) < int(config["max_positions"]):
-        for symbol in tradfi_symbols():
+        entry_symbols = tradfi_symbols()
+        entry_quotes = quotes
+        for symbol in entry_symbols:
             if len(positions) >= int(config["max_positions"]):
                 break
             if symbol in closed_symbols:
@@ -854,8 +1194,12 @@ def _tick_account(
             state_key = f"paper:{account['id']}:signal:{symbol}"
             if store.user_state_get(account["user_id"], state_key) == signal_time:
                 continue
-            store.user_state_set(account["user_id"], state_key, signal_time)
-            if _open_position(account, symbol, direction, price, atr, basis, positions, now):
+            if entry_quotes is None:
+                entry_quotes = _book_quotes(now * 1000)
+            if _open_position(
+                account, symbol, direction, price, atr, basis, positions, now, entry_quotes
+            ):
+                store.user_state_set(account["user_id"], state_key, signal_time)
                 positions = _positions(account)
 
     _record_equity(account, prices, positions, now)
@@ -1015,6 +1359,36 @@ def api_data(user_id: int, account_id: int, timezone_offset_minutes: int = 0) ->
         if peak:
             drawdown = max(drawdown, (peak - float(value)) / peak * 100)
     strategy = account["strategy_snapshot_json"]
+    environment_state = store.user_state_get(
+        user_id,
+        f"paper:{account_id}:environment",
+        {"ready": False, "reason": "environment_not_checked"},
+    )
+    credential_rows = store.query(
+        """SELECT binance_api_key_encrypted IS NOT NULL AND
+                  binance_api_secret_encrypted IS NOT NULL AS configured
+           FROM users WHERE id=?""",
+        (user_id,),
+    )
+    credentials_configured = bool(credential_rows and credential_rows[0]["configured"])
+    if isinstance(environment_state, dict):
+        environment_state = {
+            **environment_state,
+            "credentials_configured": credentials_configured,
+        }
+        if not credentials_configured:
+            environment_state["ready"] = False
+            environment_state["reason"] = "binance_credentials_required"
+    freshness_now_ms = int(time.time() * 1000)
+    public_rule_rows = store.query(
+        """SELECT COUNT(*) AS n FROM binance_contract_rules
+           WHERE status='TRADING' AND rule_updated_at_ms>=? AND mark_updated_at_ms>=?""",
+        (
+            freshness_now_ms - exchange_sync.RULE_MAX_AGE_MS,
+            freshness_now_ms - exchange_sync.MARK_MAX_AGE_MS,
+        ),
+    )
+    public_rule_count = int(public_rule_rows[0]["n"]) if public_rule_rows else 0
     return {
         "paper_account": {
             "id": account["public_id"],
@@ -1040,6 +1414,9 @@ def api_data(user_id: int, account_id: int, timezone_offset_minutes: int = 0) ->
             if config["risk_per_trade_pct"] is not None
             else None,
             "protective_exit_source": "binance_websocket_15s_extrema",
+            "valuation_source": "binance_mark_price",
+            "execution_environment": environment_state,
+            "synced_tradfi_symbols": public_rule_count,
             "legacy_risk_mismatch_count": sum(
                 not item["risk_policy_compliant"] for item in output_positions
             ),
@@ -1067,7 +1444,7 @@ def api_data(user_id: int, account_id: int, timezone_offset_minutes: int = 0) ->
             "exits": f"{config['initial_stop_atr']}×ATR 初始止损 / "
             f"{float(config['initial_stop_atr']) * float(config['take_profit_r']):g}×ATR 止盈 "
             f"({config['take_profit_r']}R) / 趋势失效 / 策略反转 / 最大持仓周期 / 强平",
-            "costs": f"手续费 {config['fee_bps']} bps + 滑点 {config['slippage_bps']} bps",
+            "costs": "Binance 账户级 maker/taker 费率 + 实时盘口 IOC 成交；不再使用固定费率或固定滑点",
             "limits": f"逐仓 {config['leverage']}x / 最多 {config['max_positions']} 仓",
         },
         "disclaimer": "模拟交易仅用于策略验证与学习，不构成投资建议。",

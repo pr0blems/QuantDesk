@@ -28,7 +28,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-5">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-6">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -289,10 +289,12 @@ class ContractMonitor extends HTMLElement {
       const alertClass = direction === "long" ? "alert-long" : direction === "short" ? "alert-short" : direction === "neutral" ? "alert-neutral" : "";
       const pctClass = item.pct_24h == null ? "dim" : item.pct_24h > 0 ? "up" : item.pct_24h < 0 ? "down" : "flat";
       const tags = `${item.watch ? "★" : ""}${item.trending ? "🔥" : ""}`;
-      return `<article class="contract-card ${alertClass}" data-symbol="${this.escape(item.symbol)}">
+      const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
+      const moveMark = item.priceMove === "up" ? '<i class="price-move" aria-hidden="true">↑</i>' : item.priceMove === "down" ? '<i class="price-move" aria-hidden="true">↓</i>' : "";
+      return `<article class="contract-card ${alertClass} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
         <div class="symbol">${this.escape(item.symbol.replace("USDT", ""))}<span class="tags">${tags}</span></div>
         <div class="signal ${opportunity ? this.opportunityTone(direction) : this.signalTone(score)}">${opportunity ? `${this.opportunityLabel(direction)} ${Number(opportunity.quality_score).toFixed(0)}` : this.signalLabel(score)}</div>
-        <div class="price">${this.formatPrice(item.price)}</div>
+        <div class="price">${this.formatPrice(item.price)}${moveMark}</div>
         <div class="pct ${pctClass}">${this.formatPercent(item.pct_24h)} ${score == null ? "" : `<span class="score ${this.signalTone(score)}">(${score > 0 ? "+" : ""}${score})</span>`}</div>
         <div class="scorebar"><i data-score="${score ?? ""}"></i></div>
       </article>`;
@@ -307,6 +309,7 @@ class ContractMonitor extends HTMLElement {
       if (score >= 0) bar.style.left = "50%";
       else bar.style.right = "50%";
     });
+    items.forEach((item) => { item.priceMove = null; });
   }
 
   async pollOverview() {
@@ -314,7 +317,17 @@ class ContractMonitor extends HTMLElement {
       const [overview, breadth, watchlist] = await Promise.all([
         this.api("/overview"), this.api("/breadth"), this.api("/watchlist"),
       ]);
-      this.state.overview = overview.items;
+      const previousPrices = new Map(
+        this.state.overview.map((item) => [item.symbol, Number(item.price)]),
+      );
+      this.state.overview = Array.isArray(overview.items) ? overview.items : [];
+      this.state.overview.forEach((item) => {
+        const previous = previousPrices.get(item.symbol);
+        const current = Number(item.price);
+        if (Number.isFinite(previous) && Number.isFinite(current) && current !== previous) {
+          item.priceMove = current > previous ? "up" : "down";
+        }
+      });
       this.state.watchlist = new Set(watchlist);
       this.state.overview.forEach((item) => { item.watch = this.state.watchlist.has(item.symbol); });
       this.renderGrid();

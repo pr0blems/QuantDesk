@@ -179,6 +179,7 @@ input, select { font: inherit; }
 }
 .paper-banner.error { color: #ff8a9a; border-color: rgba(246, 70, 93, .38); background: rgba(246, 70, 93, .07); }
 .paper-banner.success { color: var(--paper-green); border-color: rgba(43, 215, 163, .3); background: rgba(43, 215, 163, .06); }
+.paper-banner.warning { color: var(--paper-yellow); border-color: rgba(240, 185, 11, .34); background: rgba(240, 185, 11, .07); }
 .paper-banner.empty { color: #8dbdff; border-color: rgba(47, 140, 255, .28); background: rgba(47, 140, 255, .055); }
 
 .paper-cards { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }

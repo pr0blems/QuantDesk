@@ -184,6 +184,8 @@ class _RealtimeState:
                         low_event[0] if low_event else None,
                         high_event[1] if high_event else None,
                         high_event[0] if high_event else None,
+                        bid_qty,
+                        ask_qty,
                         json.dumps(quality, ensure_ascii=False),
                     )
                 )
@@ -290,10 +292,11 @@ def market_stream_loop(stop_event: threading.Event | None = None) -> None:
                            book_imbalance,aggressive_buy_ratio,trade_count_60s,quote_volume_60s,
                            realized_volatility_60s,price_velocity_bps_60s,window_low_price,
                            window_low_event_time,window_high_price,window_high_event_time,
-                           quality_json,updated_at
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                           bid_qty,ask_qty,quality_json,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
                        ON DUPLICATE KEY UPDATE event_time=VALUES(event_time),received_at=VALUES(received_at),
                            bid_price=VALUES(bid_price),ask_price=VALUES(ask_price),mid_price=VALUES(mid_price),
+                           bid_qty=VALUES(bid_qty),ask_qty=VALUES(ask_qty),
                            spread_bps=VALUES(spread_bps),book_imbalance=VALUES(book_imbalance),
                            aggressive_buy_ratio=VALUES(aggressive_buy_ratio),
                            trade_count_60s=VALUES(trade_count_60s),quote_volume_60s=VALUES(quote_volume_60s),

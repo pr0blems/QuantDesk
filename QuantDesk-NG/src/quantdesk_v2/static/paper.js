@@ -37,7 +37,7 @@ class PaperDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/paper.css?v=20260804-4">
+      <link rel="stylesheet" href="/assets/paper.css?v=20260804-5">
       <main class="paper-dashboard">
         <nav class="account-switcher" aria-label="模拟盘切换">
           <div id="paper-account-tabs" class="account-tabs" role="tablist" aria-label="我的模拟盘">
@@ -232,7 +232,23 @@ class PaperDashboard extends HTMLElement {
       if (requestId !== this.loadSequence || accountId !== this.selectedAccountId) return;
       this.data = data;
       this.renderData(data);
-      this.showBanner("");
+      const environment = data.account?.execution_environment || {};
+      const environmentMessages = {
+        binance_credentials_required: "高保真模拟已阻止新开仓：请先在系统设置中配置 Binance API，只读权限即可同步账户真实费率与杠杆档位。",
+        binance_private_sync_failed: "高保真模拟已阻止新开仓：Binance 账户费率或杠杆档位同步失败，请检查 API 权限与网络。",
+        binance_profile_incomplete: "高保真模拟已阻止新开仓：Binance 返回的账户交易参数不完整。",
+        binance_contract_rules_stale: "高保真模拟已阻止新开仓：Binance 合约规则快照已过期。",
+        binance_mark_price_stale: "高保真模拟已阻止新开仓：Binance Mark Price 快照已过期。",
+        binance_session_closed_or_stale: "当前 TradFi 市场休市，或交易时段快照已过期；系统不会新开仓。",
+        binance_symbol_not_trading: "目标合约当前不是 Binance TRADING 状态，系统不会新开仓。",
+      };
+      if (!environment.ready && environmentMessages[environment.reason]) {
+        this.showBanner(environmentMessages[environment.reason], "warning");
+      } else if (Number(data.account?.synced_tradfi_symbols || 0) === 0) {
+        this.showBanner("Binance 实盘环境尚未完成同步，系统已安全阻止新开仓。", "warning");
+      } else {
+        this.showBanner("");
+      }
       const status = data.paper_account?.status;
       this.setConnectionState(status === "paused" ? "已暂停" : "运行中", status === "paused" ? "paused" : "success");
       this.q("#paper-updated").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });

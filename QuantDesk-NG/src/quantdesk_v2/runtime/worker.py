@@ -5,7 +5,7 @@ import threading
 from collections.abc import Callable
 
 from quantdesk import engine as market_engine
-from quantdesk import news, outcomes, paper, realtime, social, store
+from quantdesk import exchange_sync, news, outcomes, paper, realtime, social, store
 
 from ..admin import initialize_admin_runtime
 from ..config import get_settings
@@ -17,6 +17,7 @@ WorkerTarget = Callable[[threading.Event], None]
 
 WORKER_ROLES: dict[str, tuple[tuple[str, WorkerTarget], ...]] = {
     "market": (
+        ("binance-environment", exchange_sync.public_sync_loop),
         ("market-stream", realtime.market_stream_loop),
         ("price", market_engine.price_loop),
         ("ticker", market_engine.ticker_loop),

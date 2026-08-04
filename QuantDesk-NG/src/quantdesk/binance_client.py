@@ -126,6 +126,23 @@ def fetch_exchange_info() -> Any:
     return _get(f"{FAPI}/fapi/v1/exchangeInfo", timeout=30)
 
 
+def fetch_mark_prices() -> Any:
+    return _get(f"{FAPI}/fapi/v1/premiumIndex", timeout=20)
+
+
+def fetch_funding_info() -> Any:
+    return _get(f"{FAPI}/fapi/v1/fundingInfo", timeout=20)
+
+
+def fetch_funding_rates(start_time_ms: int, limit: int = 1000) -> Any:
+    query = urllib.parse.urlencode({"startTime": int(start_time_ms), "limit": int(limit)})
+    return _get(f"{FAPI}/fapi/v1/fundingRate?{query}", timeout=30)
+
+
+def fetch_trading_schedule() -> Any:
+    return _get(f"{FAPI}/fapi/v1/tradingSchedule", timeout=20)
+
+
 def fetch_tickers() -> Any:
     """Return all futures 24-hour ticker rows in one request."""
 
@@ -154,6 +171,7 @@ def _signed_get(
     path: str,
     api_key: str,
     secret: str,
+    params: Mapping[str, str | int] | None = None,
     timeout: float = 25,
 ) -> Any:
     if base not in {FAPI, PAPI}:
@@ -167,8 +185,9 @@ def _signed_get(
         or parsed_path.fragment
     ):
         raise ValueError("signed Binance request path is invalid")
-    params = {"timestamp": int(time.time() * 1_000), "recvWindow": 10_000}
-    query = urllib.parse.urlencode(params)
+    signed_params = dict(params or {})
+    signed_params.update({"timestamp": int(time.time() * 1_000), "recvWindow": 10_000})
+    query = urllib.parse.urlencode(signed_params)
     signature = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
     url = f"{base}{path}?{query}&signature={signature}"
     return _get(
@@ -177,6 +196,28 @@ def _signed_get(
         timeout=timeout,
         retries=3,
     )
+
+
+def fetch_commission_rate(symbol: str, api_key: str, secret: str) -> dict[str, Any]:
+    data = _signed_get(
+        FAPI,
+        "/fapi/v1/commissionRate",
+        api_key,
+        secret,
+        {"symbol": symbol.upper()},
+    )
+    if not isinstance(data, dict):
+        raise RuntimeError("Binance commission response is invalid")
+    return data
+
+
+def fetch_leverage_brackets(api_key: str, secret: str) -> list[dict[str, Any]]:
+    data = _signed_get(FAPI, "/fapi/v1/leverageBracket", api_key, secret)
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise RuntimeError("Binance leverage bracket response is invalid")
+    return [row for row in data if isinstance(row, dict)]
 
 
 def fetch_positions(api_key: str, secret: str) -> list[dict[str, Any]]:
