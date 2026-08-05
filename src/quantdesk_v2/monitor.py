@@ -315,6 +315,94 @@ class MonitorRepository:
             "color": color,
         }
 
+    def intelligence(self) -> dict[str, Any]:
+        """Return monitor feedback from the intelligence data available in V2."""
+        now_seconds = int(time.time())
+        ticker_rows = self._query(
+            """SELECT COUNT(*) total,
+                      SUM(CASE WHEN ts>=? THEN 1 ELSE 0 END) fresh
+               FROM ticker""",
+            (now_seconds - 300,),
+        )
+        lifecycle_rows = self._query(
+            """SELECT COUNT(*) active,
+                      SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END) confirmed,
+                      COUNT(DISTINCT scanner_key) scanners
+               FROM market_opportunities
+               WHERE status IN ('detected','watching','confirmed')"""
+        )
+        outcome_rows = self._query(
+            """SELECT COUNT(*) total,
+                      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,
+                      SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending,
+                      AVG(CASE WHEN status='completed' THEN directional_return_bps END)
+                          avg_return_bps,
+                      AVG(CASE WHEN status='completed' AND directional_return_bps>0 THEN 1
+                               WHEN status='completed' THEN 0 ELSE NULL END) hit_rate
+               FROM prediction_outcomes"""
+        )
+        scanner_rows = self._query(
+            """SELECT p.model_key AS scanner_key,p.horizon_seconds,COUNT(*) samples,
+                      AVG(o.directional_return_bps) avg_return_bps,
+                      AVG(CASE WHEN o.directional_return_bps>0 THEN 1 ELSE 0 END) hit_rate,
+                      AVG(o.max_favorable_bps) avg_mfe_bps,
+                      AVG(o.max_adverse_bps) avg_mae_bps
+               FROM prediction_outcomes o
+               JOIN battle_predictions p ON p.id=o.prediction_id
+               WHERE o.status='completed'
+               GROUP BY p.model_key,p.horizon_seconds
+               ORDER BY p.horizon_seconds,p.model_key"""
+        )
+        ticker = ticker_rows[0] if ticker_rows else {}
+        lifecycle = lifecycle_rows[0] if lifecycle_rows else {}
+        outcomes = outcome_rows[0] if outcome_rows else {}
+        total_symbols = len(self.symbols)
+        fresh = int(ticker.get("fresh") or 0)
+        return {
+            "market_data": {
+                "symbols": total_symbols,
+                "fresh_microstructure": fresh,
+                "coverage_pct": round(fresh / total_symbols * 100, 2)
+                if total_symbols
+                else 0,
+                "avg_spread_bps": None,
+                "quality_events_24h": 0,
+            },
+            "opportunities": {
+                "active": int(lifecycle.get("active") or 0),
+                "confirmed": int(lifecycle.get("confirmed") or 0),
+                "scanners": int(lifecycle.get("scanners") or 0),
+            },
+            "outcomes": {
+                "total": int(outcomes.get("total") or 0),
+                "completed": int(outcomes.get("completed") or 0),
+                "pending": int(outcomes.get("pending") or 0),
+                "avg_return_bps": _finite_number(outcomes.get("avg_return_bps")),
+                "hit_rate": _finite_number(outcomes.get("hit_rate")),
+            },
+            "scanner_metrics": [
+                {
+                    **row,
+                    "avg_return_bps": _finite_number(row.get("avg_return_bps")),
+                    "hit_rate": _finite_number(row.get("hit_rate")),
+                    "avg_mfe_bps": _finite_number(row.get("avg_mfe_bps")),
+                    "avg_mae_bps": _finite_number(row.get("avg_mae_bps")),
+                }
+                for row in scanner_rows
+            ],
+            "shadow_execution": {
+                "intents": 0,
+                "filled": 0,
+                "rejected": 0,
+                "live_locked": True,
+            },
+            "targets": {
+                "market_coverage_pct": 99.0,
+                "candidate_label_coverage_pct": 100.0,
+                "notice": "指标为工程验收目标，不代表收益承诺。",
+            },
+        }
+
     def alerts(self, user_id: int, limit: int) -> list[dict[str, Any]]:
         rows = self._query(
             "SELECT * FROM alerts WHERE user_id=? ORDER BY ts DESC LIMIT ?",

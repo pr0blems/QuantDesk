@@ -137,6 +137,15 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) ->
     assert overview["items"][0]["opportunity"]["direction"] == "long"
     assert overview["items"][0]["opportunity"]["quality_score"] == 88.5
     assert repository.breadth()["bull"] == 1
+    intelligence = repository.intelligence()
+    assert intelligence["market_data"]["coverage_pct"] == 100
+    assert intelligence["opportunities"] == {
+        "active": 1,
+        "confirmed": 1,
+        "scanners": 1,
+    }
+    assert intelligence["outcomes"]["total"] == 0
+    assert intelligence["shadow_execution"]["live_locked"] is True
     assert repository.alerts(user_id, 10)[0]["read"] is False
     repository.mark_alerts_read(user_id)
     assert repository.alerts(user_id, 10)[0]["read"] is True

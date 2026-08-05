@@ -1413,6 +1413,14 @@ def monitor_breadth(
     return _monitor(request).breadth()
 
 
+@router.get("/monitor/intelligence")
+def monitor_intelligence(
+    request: Request,
+    _: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return _monitor(request).intelligence()
+
+
 def _matching_strategies(db: Session, user_id: int) -> dict[str, list[dict[str, Any]]]:
     matches: dict[str, list[dict[str, Any]]] = {"long": [], "short": [], "neutral": []}
     strategies = db.scalars(

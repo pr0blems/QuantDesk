@@ -33,7 +33,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-11">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-12">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -57,7 +57,7 @@ class ContractMonitor extends HTMLElement {
         </nav>
         <div id="binance-market-view" class="market-view">
         <section id="intelligence-strip" class="intelligence-strip" aria-label="机会引擎反馈">
-          <article><span>实时数据覆盖</span><strong id="intel-coverage">--</strong><small>盘口与逐笔成交</small></article>
+          <article><span>实时数据覆盖</span><strong id="intel-coverage">--</strong><small>行情与战局预测</small></article>
           <article><span>活跃扫描器</span><strong id="intel-scanners">--</strong><small id="intel-opportunities">等待数据</small></article>
           <article><span>结果标签</span><strong id="intel-labels">--</strong><small id="intel-pending">等待校准</small></article>
           <article><span>方向命中率</span><strong id="intel-hit-rate">--</strong><small id="intel-return">完成样本后显示</small></article>
@@ -847,7 +847,8 @@ class ContractMonitor extends HTMLElement {
         ? "--" : `${(Number(outcomes.hit_rate) * 100).toFixed(1)}%`;
       this.q("#intel-return").textContent = outcomes.avg_return_bps == null
         ? "完成样本后显示" : `成本后均值 ${Number(outcomes.avg_return_bps).toFixed(1)} bps`;
-      this.q("#intel-shadow").textContent = `${Number(shadow.filled || 0)} FILLED`;
+      this.q("#intel-shadow").textContent = shadow.live_locked
+        ? "LOCKED" : `${Number(shadow.filled || 0)} FILLED`;
     } catch (_) {}
   }
 
@@ -1032,11 +1033,14 @@ class ContractMonitor extends HTMLElement {
       `<span class="strategy-match">${this.escape(strategy.name)} · v${Number(strategy.version) || 1}</span>`
     ).join("") || '<span class="dim">当前用户没有匹配此方向的已发布完整策略</span>';
     const state = opportunity.user_state;
+    const shadowLocked = this.state.intelligence?.shadow_execution?.live_locked !== false;
     container.innerHTML = `<section class="opportunity-card ${this.escape(direction)}">
       <div class="opportunity-head">
         <div><span class="opportunity-direction ${this.opportunityTone(direction)}">${this.opportunityLabel(direction)}</span><strong>质量 ${Number(opportunity.quality_score).toFixed(1)}</strong><span class="chip">${this.escape(opportunity.status)}</span></div>
         <div class="opportunity-actions">
-          ${direction === "neutral" ? "" : '<button type="button" data-opportunity-action="shadow">Shadow验证</button>'}
+          ${direction === "neutral" ? "" : shadowLocked
+            ? '<button type="button" disabled title="Shadow 执行后端尚未启用">Shadow锁定</button>'
+            : '<button type="button" data-opportunity-action="shadow">Shadow验证</button>'}
           <button type="button" data-opportunity-action="watch" class="${state === "watching" ? "on" : ""}">关注并提醒</button>
           <button type="button" data-opportunity-action="ignore" class="${state === "ignored" ? "on" : ""}">忽略</button>
           ${state ? '<button type="button" data-opportunity-action="clear">清除偏好</button>' : ""}

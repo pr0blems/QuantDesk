@@ -315,6 +315,7 @@ button { cursor: pointer; }
 .opportunity-direction.neutral { color: var(--m-neutral); }
 .opportunity-actions button { padding: 4px 9px; border: 1px solid var(--m-border); border-radius: 6px; background: #19282b; color: var(--m-text); }
 .opportunity-actions button:hover, .opportunity-actions button.on { border-color: var(--m-gold); color: var(--m-gold); }
+.opportunity-actions button:disabled { cursor: not-allowed; opacity: .52; }
 .opportunity-summary { margin-top: 6px; color: var(--m-neutral); font-weight: 700; }
 .opportunity-meta, .condition-list, .reason-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
 .opportunity-meta { color: var(--m-dim); font-size: 11px; }
