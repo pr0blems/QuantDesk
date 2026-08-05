@@ -158,6 +158,91 @@ def test_monitor_detail_queries(mysql_test_engine, tmp_path) -> None:
     assert repository.score_detail("TESTUSDT")["1h"]["score"] == 80
 
 
+def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_path) -> None:
+    repository, _, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
+    with mysql_test_engine.begin() as connection:
+        feature_id = connection.execute(
+            text(
+                """INSERT INTO prediction_feature_snapshots(
+                       symbol,as_of_ms,feature_schema_version,features_json,
+                       quality_score,created_at
+                   ) VALUES('TESTUSDT',1000,4,'{}',0.9,CURRENT_TIMESTAMP)"""
+            )
+        ).lastrowid
+        prediction_id = connection.execute(
+            text(
+                """INSERT INTO battle_predictions(
+                       public_id,feature_snapshot_id,symbol,horizon_seconds,current_marker,
+                       prediction_state,result,battle_score,long_probability,
+                       short_probability,neutral_probability,confidence_score,
+                       confidence_label,gross_edge_bps,entry_price,spread_bps,target_bps,
+                       stop_bps,reason_codes_json,components_json,model_key,model_version,
+                       predicted_at_ms,valid_until_ms,created_at
+                   ) VALUES(
+                       '22222222-2222-2222-2222-222222222222',:feature_id,'TESTUSDT',300,NULL,
+                       'heuristic','long',0.4,0.6,0.2,0.2,0.55,
+                       'medium',12,100,2,15,10,'[]','{}','battle-ensemble',1,
+                       1000,2000,CURRENT_TIMESTAMP
+                   )"""
+            ),
+            {"feature_id": feature_id},
+        ).lastrowid
+        connection.execute(
+            text(
+                """INSERT INTO prediction_outcomes(
+                       prediction_id,status,actual_result,exit_price,raw_return_bps,
+                       directional_return_bps,max_favorable_bps,max_adverse_bps,
+                       hit_result,last_observed_price,last_observed_at_ms,cost_bps,
+                       due_at_ms,completed_at_ms,label_version,created_at,updated_at
+                   ) VALUES(
+                       :prediction_id,'completed','long',101,100,98,110,-20,
+                       'neither',101,2000,2,2000,2000,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+                   )"""
+            ),
+            {"prediction_id": prediction_id},
+        )
+
+    history = repository.prediction_history(page=99)
+
+    assert history["page"] == 1
+    assert history["page_size"] == 50
+    assert history["total"] == 1
+    assert history["items"][0] == {
+        "public_id": "22222222-2222-2222-2222-222222222222",
+        "symbol": "TESTUSDT",
+        "horizon_seconds": 300,
+        "prediction_state": "heuristic",
+        "prediction_result": "long",
+        "battle_score": 0.4,
+        "long_probability": 0.6,
+        "short_probability": 0.2,
+        "neutral_probability": 0.2,
+        "confidence_score": 0.55,
+        "confidence_label": "medium",
+        "gross_edge_bps": 12.0,
+        "entry_price": 100.0,
+        "spread_bps": 2.0,
+        "target_bps": 15.0,
+        "stop_bps": 10.0,
+        "model_key": "battle-ensemble",
+        "model_version": 1,
+        "predicted_at_ms": 1000,
+        "valid_until_ms": 2000,
+        "status": "completed",
+        "actual_result": "long",
+        "exit_price": 101.0,
+        "raw_return_bps": 100.0,
+        "directional_return_bps": 98.0,
+        "max_favorable_bps": 110.0,
+        "max_adverse_bps": -20.0,
+        "hit_result": "neither",
+        "cost_bps": 2.0,
+        "due_at_ms": 2000,
+        "completed_at_ms": 2000,
+        "direction_hit": True,
+    }
+
+
 def test_opportunity_preferences_are_isolated_by_user(mysql_test_engine, tmp_path) -> None:
     repository, user_id, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
     with Session(mysql_test_engine) as db:

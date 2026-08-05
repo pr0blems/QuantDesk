@@ -406,6 +406,70 @@ class MonitorRepository:
             },
         }
 
+    def prediction_history(self, page: int, page_size: int = 50) -> dict[str, Any]:
+        """Return one newest-first page of battle predictions and their labels."""
+        total_rows = self._query("SELECT COUNT(*) total FROM battle_predictions")
+        total = int(total_rows[0].get("total") or 0) if total_rows else 0
+        pages = max(1, math.ceil(total / page_size))
+        current_page = min(max(1, page), pages)
+        offset = (current_page - 1) * page_size
+        rows = self._query(
+            """SELECT p.public_id,p.symbol,p.horizon_seconds,p.prediction_state,
+                      p.result AS prediction_result,p.battle_score,p.long_probability,
+                      p.short_probability,p.neutral_probability,p.confidence_score,
+                      p.confidence_label,p.gross_edge_bps,p.entry_price,p.spread_bps,
+                      p.target_bps,p.stop_bps,p.model_key,p.model_version,
+                      p.predicted_at_ms,p.valid_until_ms,
+                      o.status,o.actual_result,o.exit_price,o.raw_return_bps,
+                      o.directional_return_bps,o.max_favorable_bps,o.max_adverse_bps,
+                      o.hit_result,o.cost_bps,o.due_at_ms,o.completed_at_ms
+               FROM battle_predictions p
+               JOIN prediction_outcomes o ON o.prediction_id=p.id
+               ORDER BY p.predicted_at_ms DESC,p.id DESC
+               LIMIT ? OFFSET ?""",
+            (page_size, offset),
+        )
+        numeric_fields = (
+            "battle_score",
+            "long_probability",
+            "short_probability",
+            "neutral_probability",
+            "confidence_score",
+            "gross_edge_bps",
+            "entry_price",
+            "spread_bps",
+            "target_bps",
+            "stop_bps",
+            "exit_price",
+            "raw_return_bps",
+            "directional_return_bps",
+            "max_favorable_bps",
+            "max_adverse_bps",
+            "cost_bps",
+        )
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for field in numeric_fields:
+                item[field] = None if item.get(field) is None else _finite_number(item[field])
+            direction = str(item.get("prediction_result") or "neutral")
+            directional_return = item.get("directional_return_bps")
+            item["direction_hit"] = (
+                directional_return > 0
+                if item.get("status") == "completed"
+                and direction in {"long", "short"}
+                and directional_return is not None
+                else None
+            )
+            items.append(item)
+        return {
+            "items": items,
+            "page": current_page,
+            "page_size": page_size,
+            "pages": pages,
+            "total": total,
+        }
+
     def alerts(self, user_id: int, limit: int) -> list[dict[str, Any]]:
         rows = self._query(
             "SELECT * FROM alerts WHERE user_id=? ORDER BY ts DESC LIMIT ?",

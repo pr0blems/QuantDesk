@@ -1421,6 +1421,15 @@ def monitor_intelligence(
     return _monitor(request).intelligence()
 
 
+@router.get("/monitor/prediction-history")
+def monitor_prediction_history(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    _: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return _monitor(request).prediction_history(page, page_size=50)
+
+
 def _matching_strategies(db: Session, user_id: int) -> dict[str, list[dict[str, Any]]]:
     matches: dict[str, list[dict[str, Any]]] = {"long": [], "short": [], "neutral": []}
     strategies = db.scalars(

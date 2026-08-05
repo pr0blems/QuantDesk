@@ -12,6 +12,7 @@ class ContractMonitor extends HTMLElement {
       watchlist: new Set(),
       lastAlertId: 0,
       modal: { symbol: null, tf: "1h", opportunity: null },
+      history: { page: 1, pages: 1, total: 0, loading: false },
       matrixSort: { key: "ai", direction: "desc" },
       sound: true,
       notifyOn: false,
@@ -33,7 +34,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-15">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-16">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -59,7 +60,7 @@ class ContractMonitor extends HTMLElement {
         <section id="intelligence-strip" class="intelligence-strip" aria-label="机会引擎反馈">
           <article><span>实时数据覆盖</span><strong id="intel-coverage">--</strong><small>行情与战局预测</small></article>
           <article><span>活跃扫描器</span><strong id="intel-scanners">--</strong><small id="intel-opportunities">等待数据</small></article>
-          <article><span class="intel-heading">结果标签 <button class="intel-help" type="button" aria-label="结果标签说明" data-tip="每轮会为每个合约生成 5m、15m、1h 三种预测。已完成表示观察窗口结束并取得有效价格后已经标注；待完成表示仍在等待窗口到期或标注处理。到期后仍无有效价格的样本会标为不可用，不计入已完成数和命中率。它们是评估样本，不是订单、持仓或待交易数量。">?</button></span><strong id="intel-labels">--</strong><small id="intel-pending">等待校准</small></article>
+          <article class="intel-result-card"><span class="intel-heading">结果标签 <button class="intel-help" type="button" aria-label="结果标签说明" data-tip="每轮会为每个合约生成 5m、15m、1h 三种预测。已完成表示观察窗口结束并取得有效价格后已经标注；待完成表示仍在等待窗口到期或标注处理。到期后仍无有效价格的样本会标为不可用，不计入已完成数和命中率。它们是评估样本，不是订单、持仓或待交易数量。">?</button></span><strong id="intel-labels">--</strong><small id="intel-pending">等待校准</small><button id="btn-prediction-history" class="intel-history-open" type="button">查看历史预测</button></article>
           <article><span class="intel-heading">方向命中率 <button class="intel-help" type="button" aria-label="方向命中率说明" data-tip="仅统计已经完成的看多/看空预测：看多后成本后价格上涨，或看空后成本后价格下跌，记为命中。中性预测不进入方向命中率分母。这是启发式模型的历史标注结果，不是实盘胜率或收益承诺。">?</button></span><strong id="intel-hit-rate">--</strong><small id="intel-return">完成样本后显示</small></article>
           <article><span>Shadow执行</span><strong id="intel-shadow">LOCKED</strong><small>实盘保持锁定</small></article>
         </section>
@@ -139,6 +140,37 @@ class ContractMonitor extends HTMLElement {
           <div id="report" class="report"></div>
           <div class="factor-title">因子明细（当前周期）</div>
           <div id="factors" class="factors"></div>
+        </div>
+      </div>
+      <div id="prediction-history-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-box prediction-history-box" role="dialog" aria-modal="true" aria-labelledby="prediction-history-title">
+          <div class="modal-head prediction-history-head">
+            <div>
+              <strong id="prediction-history-title" class="modal-symbol">历史预测</strong>
+              <span class="dim">按判断时间倒序 · 每页固定 50 条</span>
+            </div>
+            <button id="prediction-history-close" type="button">关闭</button>
+          </div>
+          <div class="prediction-history-table-wrap">
+            <table class="prediction-history-table">
+              <thead><tr>
+                <th>判断时间</th><th>合约 / 周期</th><th>开盘价格</th><th>预测方向 / 评分</th>
+                <th>多 / 空 / 中概率</th><th>置信度</th><th>结算时间</th><th>结算价格</th>
+                <th>结算标签 / 状态</th><th>方向命中 / 成本后收益</th><th>最大有利 / 不利</th>
+              </tr></thead>
+              <tbody id="prediction-history-body"><tr><td colspan="11" class="history-empty">点击后加载历史记录</td></tr></tbody>
+            </table>
+          </div>
+          <footer class="prediction-history-footer">
+            <span id="prediction-history-summary">共 0 条 · 每页 50 条</span>
+            <div class="prediction-history-pages">
+              <button type="button" data-history-page="first">首页</button>
+              <button type="button" data-history-page="prev">上一页</button>
+              <strong id="prediction-history-page">第 1 / 1 页</strong>
+              <button type="button" data-history-page="next">下一页</button>
+              <button type="button" data-history-page="last">末页</button>
+            </div>
+          </footer>
         </div>
       </div>
       <div id="watchlist-import" class="modal hidden">
@@ -380,6 +412,7 @@ class ContractMonitor extends HTMLElement {
       this.renderGrid();
     });
     this.q("#btn-refresh").addEventListener("click", () => this.refreshAll());
+    this.q("#btn-prediction-history").addEventListener("click", () => this.openPredictionHistory());
     this.q("#btn-import-watchlist").addEventListener("click", () => this.openWatchlistImport());
     this.q("#btn-clear-watchlist").addEventListener("click", () => this.clearWatchlist());
     this.q("#btn-sync-positions").addEventListener("click", () => this.syncPositionsToMonitor());
@@ -409,6 +442,13 @@ class ContractMonitor extends HTMLElement {
       });
     });
     this.q("#modal-watch").addEventListener("click", () => this.toggleWatchlist());
+    this.q("#prediction-history-close").addEventListener("click", () => this.closePredictionHistory());
+    this.q("#prediction-history-modal").addEventListener("click", (event) => {
+      if (event.target === this.q("#prediction-history-modal")) this.closePredictionHistory();
+    });
+    this.qa("[data-history-page]").forEach((button) => {
+      button.addEventListener("click", () => this.changePredictionHistoryPage(button.dataset.historyPage));
+    });
     this.q("#watchlist-import-close").addEventListener("click", () => this.closeWatchlistImport());
     this.q("#watchlist-import").addEventListener("click", (event) => {
       if (event.target === this.q("#watchlist-import")) this.closeWatchlistImport();
@@ -963,6 +1003,93 @@ class ContractMonitor extends HTMLElement {
 
   closeModal() {
     this.q("#modal").classList.add("hidden");
+  }
+
+  async openPredictionHistory() {
+    const modal = this.q("#prediction-history-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    await this.loadPredictionHistory(1);
+  }
+
+  closePredictionHistory() {
+    const modal = this.q("#prediction-history-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  async changePredictionHistoryPage(action) {
+    if (this.state.history.loading) return;
+    const current = this.state.history.page;
+    const pages = this.state.history.pages;
+    const target = action === "first" ? 1
+      : action === "last" ? pages
+        : action === "prev" ? current - 1 : current + 1;
+    if (target < 1 || target > pages || target === current) return;
+    await this.loadPredictionHistory(target);
+  }
+
+  async loadPredictionHistory(page) {
+    const body = this.q("#prediction-history-body");
+    this.state.history.loading = true;
+    body.innerHTML = '<tr><td colspan="11" class="history-empty">正在加载历史预测…</td></tr>';
+    try {
+      const data = await this.api(`/prediction-history?page=${Math.max(1, Number(page) || 1)}`);
+      this.state.history.page = Number(data.page) || 1;
+      this.state.history.pages = Number(data.pages) || 1;
+      this.state.history.total = Number(data.total) || 0;
+      this.renderPredictionHistory(data.items || []);
+    } catch (error) {
+      body.innerHTML = `<tr><td colspan="11" class="history-empty history-error">${this.escape(error.message || "历史预测加载失败")}</td></tr>`;
+    } finally {
+      this.state.history.loading = false;
+      this.renderPredictionHistoryPager();
+    }
+  }
+
+  renderPredictionHistory(items) {
+    const body = this.q("#prediction-history-body");
+    if (!items.length) {
+      body.innerHTML = '<tr><td colspan="11" class="history-empty">暂无历史预测记录</td></tr>';
+      return;
+    }
+    const directionLabel = (value) => ({ long: "看多", short: "看空", neutral: "中性" })[value] || "--";
+    const statusLabel = (value) => ({ completed: "已完成", pending: "待完成", unavailable: "不可用" })[value] || "--";
+    const barrierLabel = (value) => ({ target: "触及止盈", stop: "触及止损", neither: "未触及边界" })[value] || "--";
+    const confidenceLabel = (value) => ({ low: "低", medium: "中", high: "高" })[value] || "--";
+    const stateLabel = (value) => ({ heuristic: "启发式", calibrated: "已校准", data_insufficient: "数据不足" })[value] || "--";
+    const bps = (value) => value == null ? "--" : `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)} bps`;
+    const probability = (value) => value == null ? "--" : `${(Number(value) * 100).toFixed(1)}%`;
+    body.innerHTML = items.map((item) => {
+      const direction = item.prediction_result || "neutral";
+      const directionClass = direction === "long" ? "history-long" : direction === "short" ? "history-short" : "history-neutral";
+      const hit = item.direction_hit == null ? (direction === "neutral" && item.status === "completed" ? "中性不计" : "--") : item.direction_hit ? "命中" : "未命中";
+      const hitClass = item.direction_hit == null ? "history-neutral" : item.direction_hit ? "history-hit" : "history-miss";
+      const settled = item.status === "completed";
+      return `<tr>
+        <td>${this.barTimeString(item.predicted_at_ms)}</td>
+        <td><strong>${this.escape(item.symbol)}</strong><small>${this.escape({ 300: "5m", 900: "15m", 3600: "1h" }[item.horizon_seconds] || `${item.horizon_seconds}s`)}</small></td>
+        <td>${this.formatPrice(item.entry_price)}</td>
+        <td><strong class="${directionClass}">${directionLabel(direction)}</strong><small>${item.battle_score == null ? "--" : `${Number(item.battle_score) >= 0 ? "+" : ""}${Number(item.battle_score).toFixed(3)}`}</small></td>
+        <td><span class="history-long">${probability(item.long_probability)}</span><span class="history-short">${probability(item.short_probability)}</span><span>${probability(item.neutral_probability)}</span></td>
+        <td>${item.confidence_score == null ? "--" : probability(item.confidence_score)}<small>${confidenceLabel(item.confidence_label)} · ${stateLabel(item.prediction_state)}</small></td>
+        <td>${settled ? this.barTimeString(item.completed_at_ms) : "--"}<small>${this.barTimeString(item.due_at_ms)}</small></td>
+        <td>${settled ? this.formatPrice(item.exit_price) : "--"}<small>${settled ? bps(item.raw_return_bps) : "--"}</small></td>
+        <td><strong>${settled ? directionLabel(item.actual_result) : "--"}</strong><small>${statusLabel(item.status)} · ${settled ? barrierLabel(item.hit_result) : "等待结算"}</small></td>
+        <td><strong class="${hitClass}">${hit}</strong><small>${bps(item.directional_return_bps)}</small></td>
+        <td><span>${bps(item.max_favorable_bps)}</span><small>${bps(item.max_adverse_bps)}</small></td>
+      </tr>`;
+    }).join("");
+  }
+
+  renderPredictionHistoryPager() {
+    const { page, pages, total, loading } = this.state.history;
+    this.q("#prediction-history-summary").textContent = `共 ${total.toLocaleString("zh-CN")} 条 · 每页 50 条`;
+    this.q("#prediction-history-page").textContent = `第 ${page} / ${pages} 页`;
+    this.qa("[data-history-page]").forEach((button) => {
+      const action = button.dataset.historyPage;
+      button.disabled = loading || ((action === "first" || action === "prev") ? page <= 1 : page >= pages);
+    });
   }
 
   async refreshModal() {
