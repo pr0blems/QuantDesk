@@ -33,7 +33,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-12">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-14">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>

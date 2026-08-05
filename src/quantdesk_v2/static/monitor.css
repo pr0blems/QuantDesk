@@ -107,8 +107,8 @@ button { cursor: pointer; }
 .filters input, .filters select { min-height: 28px; width: 96px; padding: 3px 7px; border: 1px solid var(--m-border); border-radius: 2px; outline: none; background: var(--m-bg); color: var(--m-text); }
 .filters input:focus, .filters select:focus { border-color: var(--m-gold); }
 .breadth { padding: 6px 11px; border-bottom: 1px solid var(--m-border); color: var(--m-neutral); font-weight: 700; }
-.breadth-summary.bull, .breadth-breakdown .bull { color: var(--m-up); }
-.breadth-summary.bear, .breadth-breakdown .bear { color: var(--m-down); }
+.breadth-summary.bull, .breadth-breakdown .bull { color: var(--m-down); }
+.breadth-summary.bear, .breadth-breakdown .bear { color: var(--m-up); }
 .breadth-summary.neutral, .breadth-breakdown .neutral { color: var(--m-neutral); }
 .breadth-breakdown { color: var(--m-neutral); white-space: nowrap; }
 .breadth-breakdown strong { font-weight: 800; }
@@ -153,12 +153,12 @@ button { cursor: pointer; }
 .matrix-book small { color: var(--m-dim); }
 .matrix-book b { font-weight: 700; }
 .matrix-book svg { display: block; width: 104px; height: 4px; margin: 2px 0 0 auto; overflow: hidden; border-radius: 1px; background: var(--m-border); }
-.matrix-book rect.long { fill: var(--m-up); }
-.matrix-book rect.short { fill: var(--m-down); }
+.matrix-book rect.long { fill: var(--m-down); }
+.matrix-book rect.short { fill: var(--m-up); }
 .matrix-force { min-width: 87px; }
 .matrix-force svg { width: 52px; height: 6px; margin-right: 4px; vertical-align: middle; overflow: hidden; border-radius: 1px; background: var(--m-border); }
-.matrix-force rect.long { fill: var(--m-up); }
-.matrix-force rect.short { fill: var(--m-down); }
+.matrix-force rect.long { fill: var(--m-down); }
+.matrix-force rect.short { fill: var(--m-up); }
 .matrix-force b { font-weight: 700; }
 .matrix-opportunity { font-weight: 700; }
 .matrix-opportunity.none { opacity: .58; }
@@ -174,8 +174,8 @@ button { cursor: pointer; }
 .price-move { display: inline-block; margin-left: 5px; font-size: 11px; font-style: normal; font-weight: 900; animation: price-move-fade 1.5s ease-out both; }
 @keyframes contract-price-pulse { 0% { opacity: 1; box-shadow: 0 0 0 1px currentColor, 0 0 18px currentColor; } 58% { opacity: .56; } 100% { opacity: 0; box-shadow: 0 0 0 5px transparent, 0 0 0 transparent; } }
 @keyframes price-move-fade { 0% { opacity: 1; transform: translateY(2px) scale(1.15); } 100% { opacity: 0; transform: translateY(-3px) scale(.9); } }
-.contract-card.alert-long { box-shadow: inset 0 0 0 1px var(--m-up); }
-.contract-card.alert-short { box-shadow: inset 0 0 0 1px var(--m-down); }
+.contract-card.alert-long { box-shadow: inset 0 0 0 1px var(--m-down); }
+.contract-card.alert-short { box-shadow: inset 0 0 0 1px var(--m-up); }
 .contract-card.alert-neutral { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .45); }
 .contract-card.is-watch { border-color: color-mix(in srgb, var(--m-gold) 70%, var(--m-border)); }
 .contract-card.is-watch::before { content: ""; position: absolute; inset: 7px auto 7px 0; width: 3px; border-radius: 0 3px 3px 0; background: var(--m-gold); }
@@ -194,23 +194,23 @@ button { cursor: pointer; }
 .contract-card .pct { flex: 0 0 auto; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .force-band { margin-top: 18px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .force-bar { width: 100%; height: 9px; display: block; overflow: hidden; border-radius: 99px; background: var(--m-border); }
-.force-bar rect.long { fill: var(--m-up); }
-.force-bar rect.short { fill: var(--m-down); }
+.force-bar rect.long { fill: var(--m-down); }
+.force-bar rect.short { fill: var(--m-up); }
 .force-labels { display: flex; align-items: center; justify-content: space-between; gap: 7px; margin-top: 7px; color: var(--m-dim); }
 .force-labels strong { color: var(--m-neutral); font-size: 12px; }
-.force-band.long .force-labels strong, .force-labels span:first-child { color: var(--m-up); }
-.force-band.short .force-labels strong, .force-labels span:last-child { color: var(--m-down); }
+.force-band.long .force-labels strong, .force-labels span:first-child { color: var(--m-down); }
+.force-band.short .force-labels strong, .force-labels span:last-child { color: var(--m-up); }
 .band-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 14px; }
 .band-meta span { min-width: 0; display: grid; gap: 3px; padding: 7px 8px; background: var(--m-bg); }
 .band-meta em { color: var(--m-dim); font-size: 10px; font-style: normal; }
 .band-meta b { overflow: hidden; color: var(--m-text); font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-.band-meta b.long { color: var(--m-up); }
-.band-meta b.short { color: var(--m-down); }
+.band-meta b.long { color: var(--m-down); }
+.band-meta b.short { color: var(--m-up); }
 .band-meta b.pending { color: var(--m-dim); font-weight: 400; }
 .battle-bar { width: 100%; height: 4px; display: block; overflow: hidden; margin-top: 3px; background: var(--m-border); }
-.battle-bar rect.long { fill: var(--m-up); }
+.battle-bar rect.long { fill: var(--m-down); }
 .battle-bar rect.neutral { fill: var(--m-neutral); opacity: .35; }
-.battle-bar rect.short { fill: var(--m-down); }
+.battle-bar rect.short { fill: var(--m-up); }
 .battle-values { display: flex; justify-content: space-between; margin-top: 1px; color: var(--m-dim); font-size: 9px; font-variant-numeric: tabular-nums; }
 @container (min-width: 270px) {
   .contract-card .symbol { font-size: 15px; }
@@ -240,8 +240,8 @@ button { cursor: pointer; }
 .monitor-side .grow { flex: 1; }
 .alerts, .news { overflow-y: auto; padding: 5px; }
 .alert-item { margin-bottom: 4px; padding: 7px 8px; border-left: 2px solid var(--m-dim); border-radius: 0; background: var(--m-card); cursor: pointer; }
-.alert-item.long { border-left-color: var(--m-up); }
-.alert-item.short { border-left-color: var(--m-down); }
+.alert-item.long { border-left-color: var(--m-down); }
+.alert-item.short { border-left-color: var(--m-up); }
 .alert-item.unread { background: #192b31; }
 .alert-item .time, .news-item .time { color: var(--m-dim); font-size: 10px; }
 .news-item { padding: 7px 8px; border-bottom: 1px solid var(--m-border); }
@@ -254,11 +254,11 @@ button { cursor: pointer; }
 .verification.pending { color: var(--m-gold); }
 .news-assessment { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 4px 6px; border-left: 2px solid var(--m-border); background: color-mix(in srgb, var(--m-text) 3%, transparent); color: var(--m-dim); font-size: 9px; }
 .news-assessment strong { color: var(--m-text); font-size: 9px; white-space: nowrap; }
-.news-assessment.bull { border-left-color: var(--m-up); }
-.news-assessment.bear { border-left-color: var(--m-down); }
+.news-assessment.bull { border-left-color: var(--m-down); }
+.news-assessment.bear { border-left-color: var(--m-up); }
 .sentiment { margin-left: 6px; padding: 0 5px; border-radius: 7px; font-size: 10px; }
-.sentiment.bull { color: var(--m-up); background: rgba(88, 169, 154, .14); }
-.sentiment.bear { color: var(--m-down); background: rgba(204, 129, 122, .14); }
+.sentiment.bull { color: var(--m-down); background: rgba(204, 129, 122, .14); }
+.sentiment.bear { color: var(--m-up); background: rgba(88, 169, 154, .14); }
 .sentiment.neutral { color: var(--m-neutral); background: #1d2b2e; }
 .news-title { margin-top: 2px; }
 .empty { padding: 12px; color: var(--m-dim); }
@@ -290,28 +290,28 @@ button { cursor: pointer; }
 .battle-title span { color: var(--m-dim); font-size: 10px; }
 .battle-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
 .battle-horizon { padding: 8px 9px; border-top: 2px solid var(--m-neutral); background: var(--m-card); }
-.battle-horizon.long { border-top-color: var(--m-up); }
-.battle-horizon.short { border-top-color: var(--m-down); }
+.battle-horizon.long { border-top-color: var(--m-down); }
+.battle-horizon.short { border-top-color: var(--m-up); }
 .battle-horizon-head { display: flex; align-items: center; gap: 7px; }
 .battle-horizon-head strong { color: var(--m-gold); }
-.battle-horizon.long .battle-horizon-head b { color: var(--m-up); }
-.battle-horizon.short .battle-horizon-head b { color: var(--m-down); }
+.battle-horizon.long .battle-horizon-head b { color: var(--m-down); }
+.battle-horizon.short .battle-horizon-head b { color: var(--m-up); }
 .battle-horizon-head em { margin-left: auto; color: var(--m-dim); font-size: 9px; font-style: normal; }
 .battle-probabilities, .battle-meta { display: flex; justify-content: space-between; gap: 7px; margin-top: 6px; color: var(--m-dim); font-size: 10px; }
-.battle-probabilities .long { color: var(--m-up); }
-.battle-probabilities .short { color: var(--m-down); }
+.battle-probabilities .long { color: var(--m-down); }
+.battle-probabilities .short { color: var(--m-up); }
 .battle-bar.large { height: 6px; margin-top: 4px; }
 .battle-reasons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
 .battle-reasons span { padding: 1px 5px; border: 1px solid var(--m-border); color: var(--m-dim); font-size: 9px; }
 .opportunity-empty { padding: 10px 12px; border: 1px dashed var(--m-border); border-radius: 7px; color: var(--m-neutral); }
 .opportunity-card { padding: 10px 12px; border-left: 4px solid var(--m-neutral); border-radius: 7px; background: var(--m-card); }
-.opportunity-card.long { border-left-color: var(--m-up); }
-.opportunity-card.short { border-left-color: var(--m-down); }
+.opportunity-card.long { border-left-color: var(--m-down); }
+.opportunity-card.short { border-left-color: var(--m-up); }
 .opportunity-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
 .opportunity-head > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .opportunity-direction { font-size: 16px; font-weight: 900; }
-.opportunity-direction.strong-up { color: var(--m-up); }
-.opportunity-direction.strong-down { color: var(--m-down); }
+.opportunity-direction.strong-up { color: var(--m-down); }
+.opportunity-direction.strong-down { color: var(--m-up); }
 .opportunity-direction.neutral { color: var(--m-neutral); }
 .opportunity-actions button { padding: 4px 9px; border: 1px solid var(--m-border); border-radius: 6px; background: #19282b; color: var(--m-text); }
 .opportunity-actions button:hover, .opportunity-actions button.on { border-color: var(--m-gold); color: var(--m-gold); }
