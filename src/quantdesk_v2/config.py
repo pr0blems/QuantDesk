@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     openai_strategy_model: str = "gpt-5.6-luna"
     openai_strategy_timeout_seconds: float = 20.0
 
+    # Finnhub is called only by the server. Never expose this token to static
+    # JavaScript or accept an arbitrary upstream URL from a request.
+    finnhub_api_key: SecretStr = SecretStr("")
+    finnhub_base_url: str = "https://finnhub.io"
+    finnhub_timeout_seconds: float = 5.0
+    finnhub_market_status_cache_seconds: int = 30
+    finnhub_market_status_stale_seconds: int = 900
+
     monitor_symbols_config: Path = Path("config/tradfi_symbols.json")
 
     @property
@@ -91,6 +99,7 @@ class Settings(BaseSettings):
             raise RuntimeError("Wildcard CORS origins are forbidden")
         self._validate_binance_futures_settings()
         self._validate_openai_settings()
+        self._validate_finnhub_settings()
         if self.app_env.lower() == "production":
             if not self.db_ssl_required:
                 raise RuntimeError("Production database connections must require TLS")
@@ -137,6 +146,36 @@ class Settings(BaseSettings):
             raise RuntimeError("OPENAI_STRATEGY_MODEL must be an approved GPT-5.6 model")
         if not 2 <= self.openai_strategy_timeout_seconds <= 30:
             raise RuntimeError("OPENAI_STRATEGY_TIMEOUT_SECONDS must be between 2 and 30")
+
+    def _validate_finnhub_settings(self) -> None:
+        parsed = urlparse(self.finnhub_base_url)
+        try:
+            port = parsed.port
+        except ValueError:
+            port = -1
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.hostname != "finnhub.io"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise RuntimeError("FINNHUB_BASE_URL must be the official Finnhub HTTPS origin")
+        if not 1 <= self.finnhub_timeout_seconds <= 10:
+            raise RuntimeError("FINNHUB_TIMEOUT_SECONDS must be between 1 and 10")
+        if not 5 <= self.finnhub_market_status_cache_seconds <= 300:
+            raise RuntimeError(
+                "FINNHUB_MARKET_STATUS_CACHE_SECONDS must be between 5 and 300"
+            )
+        if not self.finnhub_market_status_cache_seconds <= (
+            self.finnhub_market_status_stale_seconds
+        ) <= 3_600:
+            raise RuntimeError(
+                "FINNHUB_MARKET_STATUS_STALE_SECONDS must be between the cache TTL and 3600"
+            )
 
     @staticmethod
     def _validate_binance_origin(name: str, value: str, allowed_hosts: set[str]) -> None:

@@ -35,6 +35,7 @@ BacktestTimeframe = Literal[
 BacktestRunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 BacktestTradeSide = Literal["long", "short"]
 AiProviderCode = Literal["openai", "deepseek", "doubao", "qwen", "kimi", "minimax"]
+MarketSession = Literal["pre-market", "regular", "post-market"]
 
 
 def _bounded_numeric_map(value: dict[str, int | float], field_name: str) -> dict[str, int | float]:
@@ -96,6 +97,21 @@ class UserOut(BaseModel):
     binance_key_fingerprint: str | None
     binance_key_updated_at: datetime | None
     created_at: datetime
+
+
+class UsMarketStatusOut(BaseModel):
+    configured: bool
+    available: bool
+    exchange: Literal["US"] = "US"
+    holiday: str | None = None
+    is_open: bool | None = None
+    session: MarketSession | None = None
+    timezone: str | None = None
+    source_timestamp: int | None = None
+    fetched_at: datetime | None = None
+    cached: bool = False
+    stale: bool = False
+    error_category: str | None = None
 
 
 class AdminAlertRulesUpdate(BaseModel):

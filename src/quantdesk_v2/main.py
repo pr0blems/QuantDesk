@@ -21,6 +21,7 @@ from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings, get_settings
 from .database import build_engine, engine
+from .finnhub import FinnhubClient, FinnhubMarketStatusService
 from .strategy_routes import router as strategy_router
 
 FRONTEND_ROUTES = (
@@ -165,6 +166,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runtime_settings.binance_futures_base_url,
         recv_window_ms=runtime_settings.binance_futures_recv_window_ms,
         timeout_seconds=runtime_settings.binance_futures_timeout_seconds,
+    )
+    app.state.finnhub_market_status_service = FinnhubMarketStatusService(
+        FinnhubClient(
+            runtime_settings.finnhub_base_url,
+            runtime_settings.finnhub_api_key.get_secret_value(),
+            timeout_seconds=runtime_settings.finnhub_timeout_seconds,
+        ),
+        cache_seconds=runtime_settings.finnhub_market_status_cache_seconds,
+        stale_seconds=runtime_settings.finnhub_market_status_stale_seconds,
     )
     app.add_exception_handler(RequestValidationError, _safe_request_validation_error)
     app.add_middleware(

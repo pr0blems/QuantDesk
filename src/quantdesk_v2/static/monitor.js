@@ -34,6 +34,7 @@ class ContractMonitor extends HTMLElement {
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
           <div class="monitor-actions">
             <span class="clock" id="monitor-clock"></span>
+            <span id="us-market-state" class="badge">美股状态…</span>
             <span id="engine-state" class="badge">连接中…</span>
             <button id="btn-refresh" type="button">刷新</button>
             <button id="btn-notify" type="button">通知</button>
@@ -152,6 +153,7 @@ class ContractMonitor extends HTMLElement {
     this.timers.push(setInterval(() => this.pollAlerts(), 5000));
     this.timers.push(setInterval(() => this.pollNews(), 30000));
     this.timers.push(setInterval(() => this.pollIntelligence(), 15000));
+    this.timers.push(setInterval(() => this.pollUsMarketStatus(), 30000));
     this.timers.push(setInterval(() => this.updateClock(), 1000));
     this.updateClock();
   }
@@ -166,7 +168,43 @@ class ContractMonitor extends HTMLElement {
   async refreshAll() {
     await Promise.allSettled([
       this.pollOverview(), this.pollAlerts(), this.pollNews(), this.pollIntelligence(),
+      this.pollUsMarketStatus(),
     ]);
+  }
+
+  async pollUsMarketStatus() {
+    const badge = this.q("#us-market-state");
+    try {
+      if (typeof window.quantdeskApi !== "function") throw new Error("认证服务尚未就绪");
+      const status = await window.quantdeskApi("/api/v2/market/us/status");
+      if (!status.configured) {
+        badge.textContent = "美股状态未配置";
+        badge.className = "badge stale";
+        badge.title = "服务器尚未配置 Finnhub API Key";
+        return;
+      }
+      if (!status.available) {
+        badge.textContent = "美股状态异常";
+        badge.className = "badge err";
+        badge.title = `Finnhub：${status.error_category || "upstream"}`;
+        return;
+      }
+      const labels = {
+        "pre-market": "美股盘前",
+        regular: "美股开盘",
+        "post-market": "美股盘后",
+      };
+      const label = status.holiday
+        ? `美股休市 · ${status.holiday}`
+        : (labels[status.session] || "美股休市");
+      badge.textContent = `${label}${status.stale ? " · 延迟" : ""}`;
+      badge.className = status.stale ? "badge stale" : (status.session === "regular" ? "badge ok" : "badge");
+      badge.title = `Finnhub · ${status.timezone || "America/New_York"}`;
+    } catch (_) {
+      badge.textContent = "美股状态连接失败";
+      badge.className = "badge err";
+      badge.title = "无法读取服务器的美股市场状态";
+    }
   }
 
   bindEvents() {

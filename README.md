@@ -37,6 +37,9 @@
 - 用户、会话、Binance/AI 模型加密凭据、策略、回测、行情、提醒、实盘持仓快照和模拟盘数据全部存入 MySQL/MariaDB。
 - `config/settings.json` 只保存无密钥的行情采集参数。
 - `config/tradfi_symbols.json` 保存受支持合约的静态元数据。
+- 美股交易时段使用 Finnhub 官方 Market Status。将新生成的 Token 作为服务端环境变量
+  `FINNHUB_API_KEY` 注入后重启服务；浏览器通过已登录接口
+  `GET /api/v2/market/us/status` 读取盘前、正常交易、盘后或休市状态，Token 不会下发前端。
 - Binance API 密钥和当前用户的 AI 模型 API Key 统一在“系统设置 → API 凭证”录入；服务端加密保存且不会回显明文。
 - AI 模型配置按用户隔离，可分别维护 DeepSeek、豆包、千问、Kimi、MiniMax 与 OpenAI，并选择一个启用的默认模型供策略语义编辑使用。
 - 项目只使用 MySQL/MariaDB 持久化业务数据，不读取本地数据库或共享密钥文件。

@@ -5,6 +5,7 @@ import json
 import math
 import uuid
 from collections.abc import Mapping
+from dataclasses import asdict
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from threading import Lock
@@ -75,6 +76,7 @@ from .schemas import (
     RegisterRequest,
     TokenPair,
     UserOut,
+    UsMarketStatusOut,
 )
 from .security import (
     CredentialCipher,
@@ -790,6 +792,19 @@ def logout(
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)) -> UserOut:
     return _user_out(user)
+
+
+@router.get("/market/us/status", response_model=UsMarketStatusOut)
+def us_market_status(
+    request: Request,
+    response: Response,
+    _: User = Depends(get_current_user),
+) -> UsMarketStatusOut:
+    """Return Finnhub's official US trading-session state through our server."""
+
+    response.headers["Cache-Control"] = "private, no-store"
+    result = request.app.state.finnhub_market_status_service.status()
+    return UsMarketStatusOut(**asdict(result))
 
 
 @router.get("/me/binance-account", response_model=BinanceAccountSummary)
