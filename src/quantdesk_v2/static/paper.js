@@ -37,7 +37,7 @@ class PaperDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/paper.css?v=20260804-3">
+      <link rel="stylesheet" href="/assets/paper.css?v=20260804-5">
       <main class="paper-dashboard">
         <nav class="account-switcher" aria-label="模拟盘切换">
           <div id="paper-account-tabs" class="account-tabs" role="tablist" aria-label="我的模拟盘">
@@ -228,7 +228,6 @@ class PaperDashboard extends HTMLElement {
         this.q("#paper-reset").disabled = true;
         this.q("#paper-rename").disabled = true;
         this.q("#paper-delete").disabled = true;
-        this.renderEmptyAccount();
         return;
       }
       const query = new URLSearchParams({
@@ -239,7 +238,23 @@ class PaperDashboard extends HTMLElement {
       if (requestId !== this.loadSequence || accountId !== this.selectedAccountId) return;
       this.data = data;
       this.renderData(data);
-      this.showBanner("");
+      const environment = data.account?.execution_environment || {};
+      const environmentMessages = {
+        binance_credentials_required: "高保真模拟已阻止新开仓：请先在系统设置中配置 Binance API，只读权限即可同步账户真实费率与杠杆档位。",
+        binance_private_sync_failed: "高保真模拟已阻止新开仓：Binance 账户费率或杠杆档位同步失败，请检查 API 权限与网络。",
+        binance_profile_incomplete: "高保真模拟已阻止新开仓：Binance 返回的账户交易参数不完整。",
+        binance_contract_rules_stale: "高保真模拟已阻止新开仓：Binance 合约规则快照已过期。",
+        binance_mark_price_stale: "高保真模拟已阻止新开仓：Binance Mark Price 快照已过期。",
+        binance_session_closed_or_stale: "当前 TradFi 市场休市，或交易时段快照已过期；系统不会新开仓。",
+        binance_symbol_not_trading: "目标合约当前不是 Binance TRADING 状态，系统不会新开仓。",
+      };
+      if (!environment.ready && environmentMessages[environment.reason]) {
+        this.showBanner(environmentMessages[environment.reason], "warning");
+      } else if (Number(data.account?.synced_tradfi_symbols || 0) === 0) {
+        this.showBanner("Binance 实盘环境尚未完成同步，系统已安全阻止新开仓。", "warning");
+      } else {
+        this.showBanner("");
+      }
       const status = data.paper_account?.status;
       this.setConnectionState(status === "paused" ? "已暂停" : "运行中", status === "paused" ? "paused" : "success");
       this.q("#paper-updated").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -514,7 +529,9 @@ class PaperDashboard extends HTMLElement {
       return;
     }
     if (name === account.name) return;
-    const button = this.q("#paper-rename"); button.disabled = true; button.textContent = "保存中…";
+    const button = this.q("#paper-rename");
+    button.disabled = true;
+    button.textContent = "保存中…";
     try {
       const updated = await this.api(`/accounts/${encodeURIComponent(account.id)}`, {
         method: "PATCH",
@@ -529,16 +546,6 @@ class PaperDashboard extends HTMLElement {
       button.textContent = "修改名称";
       button.disabled = !this.selectedAccountId;
     }
-  }
-
-  renderEmptyAccount() {
-    this.q("#paper-subtitle").textContent = "创建模拟盘后，将在这里显示独立资金、持仓和成交。";
-    this.q("#paper-rules").textContent = "暂无运行中的模拟盘";
-    this.q("#curve-summary").textContent = "每分钟记录一次";
-    ["equity", "balance", "upnl", "realized", "win-rate", "drawdown"].forEach((name) => this.renderMetric(name, "--", "暂无数据", "neutral"));
-    this.renderPositions([]);
-    this.renderTrades([]);
-    window.requestAnimationFrame(() => this.drawCurve([], 10000));
   }
 
   renderData(data) {
@@ -570,7 +577,10 @@ class PaperDashboard extends HTMLElement {
     this.renderMetric("upnl", `${this.signed(account.upnl)} U`, `今日盈亏 ${this.signed(account.today_pnl)} U`, this.tone(account.upnl));
     this.renderMetric("realized", `${this.signed(stats.realized)} U`, `共 ${this.number(stats.trades, 0)} 笔（${this.number(stats.wins, 0)}胜/${this.number(stats.losses, 0)}负）`, this.tone(stats.realized));
     this.renderMetric("win-rate", Number(stats.trades) ? `${this.number(stats.win_rate, 1)}%` : "--", `盈亏比 ${stats.profit_factor ?? "--"}`, "warning");
-    this.renderMetric("drawdown", `${this.number(stats.max_drawdown)}%`, `仓位 ${positions.length}/${this.number(account.max_positions, 0)}`, Number(stats.max_drawdown) > 10 ? "negative" : "warning");
+    const riskSummary = account.risk_per_trade_pct != null
+      ? ` · 单笔风险 ${this.number(account.risk_per_trade_pct, 2)}%`
+      : "";
+    this.renderMetric("drawdown", `${this.number(stats.max_drawdown)}%`, `仓位 ${positions.length}/${this.number(account.max_positions, 0)}${riskSummary}`, Number(stats.max_drawdown) > 10 ? "negative" : "warning");
 
     this.renderPositions(positions);
     this.renderTrades(trades);
@@ -598,13 +608,17 @@ class PaperDashboard extends HTMLElement {
       const added = Number(position.adds) ? `<small class="tag">+${this.number(position.adds, 0)} 加</small>` : "";
       const partial = position.tp_done ? '<small class="tag profit-tag">已止盈</small>' : "";
       const liquidationClass = position.liq_dist != null && Number(position.liq_dist) < 3 ? "negative" : "muted";
+      const riskClass = position.risk_policy_compliant ? "muted" : "negative";
+      const riskText = position.risk_at_stop != null
+        ? `止损风险 ${this.number(position.risk_at_stop)} U · ${this.number(position.risk_pct, 2)}%`
+        : "止损风险 --";
       return `<tr>
         <td><strong>${this.escape(this.symbol(position.symbol))}</strong><div class="symbol-tags">${added}${partial}</div></td>
         <td class="${sideClass}">${Number(position.side) > 0 ? "多" : "空"} ${this.number(position.leverage, 0)}x</td>
         <td>${this.number(position.qty, 4)}</td>
         <td>${this.price(position.avg_entry)}</td>
         <td>${this.price(position.price)}</td>
-        <td>${this.number(position.margin)}</td>
+        <td><strong>${this.number(position.margin)}</strong><small class="${riskClass}">${riskText}</small></td>
         <td class="${this.tone(position.upnl)}"><strong>${this.signed(position.upnl)}</strong><small>${this.signed(position.pnl_pct, 1)}%</small></td>
         <td class="muted"><small>止 ${this.price(position.stop)}</small><small>目 ${Number(position.target) ? this.price(position.target) : "--"}</small></td>
         <td class="${liquidationClass}"><small>${position.liq_price ? this.price(position.liq_price) : "--"}</small><small>${position.liq_dist != null ? `距 ${this.number(position.liq_dist)}%` : ""}</small></td>
@@ -627,10 +641,6 @@ class PaperDashboard extends HTMLElement {
     const rows = trades.map((trade) => {
       const netPnl = Number(trade.pnl || 0) - Number(trade.fee || 0);
       const sideClass = Number(trade.side) > 0 ? "positive" : "negative";
-      const basis = trade.entry_basis || {};
-      const reasons = Array.isArray(basis.reasons) ? basis.reasons : [];
-      const basisText = reasons.join(" · ") || "开仓依据不可用";
-      const score = basis.signal?.score;
       return `<tr>
         <td class="muted"><small>${this.escape(this.time(trade.closed_ts))}</small></td>
         <td><strong>${this.escape(this.symbol(trade.symbol))}</strong></td>
@@ -638,11 +648,10 @@ class PaperDashboard extends HTMLElement {
         <td class="muted"><small>${this.price(trade.entry_price)} → ${this.price(trade.exit_price)}</small></td>
         <td class="${this.tone(netPnl)}"><strong>${this.signed(netPnl)} U</strong></td>
         <td class="muted">${this.escape(trade.reason || "--")}</td>
-        <td class="basis"><small>${score == null ? "历史快照" : `实际评分 ${this.signed(score, 0)}`}</small><span title="${this.escape(basisText)}">${this.escape(basisText)}</span></td>
       </tr>`;
     }).join("");
     this.q("#paper-trades").innerHTML = `<table class="trades-table">
-      <thead><tr><th>时间</th><th>合约</th><th>方向</th><th>开 → 平</th><th>盈亏</th><th>平仓原因</th><th>开仓依据</th></tr></thead>
+      <thead><tr><th>时间</th><th>合约</th><th>方向</th><th>开 → 平</th><th>盈亏</th><th>平仓原因</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   }

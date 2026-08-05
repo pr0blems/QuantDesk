@@ -87,6 +87,7 @@ from .security import (
     password_needs_rehash,
     verify_password,
 )
+from .strategy_ai import StrategyAiError, _chat_http_transport
 from .strategy_catalog import (
     ensure_user_default_strategies,
     get_user_strategy,
@@ -1223,6 +1224,59 @@ def update_ai_model_config(
         raise _ai_config_conflict(db) from None
     db.refresh(config)
     return _ai_model_config_out(config)
+
+
+@router.post(
+    "/me/ai-model-configs/{config_id}/test",
+    response_model=MessageOut,
+)
+def test_ai_model_config(
+    config_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> MessageOut:
+    """Verify a saved credential against its allowlisted model endpoint."""
+    _require_expected_user(request, user)
+    config = _get_owned_ai_model_config(db, user.id, str(config_id))
+    preset = get_ai_provider(config.provider_code)
+    if preset is None or not config.api_key_encrypted:
+        raise HTTPException(status_code=422, detail="模型服务配置不完整")
+
+    cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
+    try:
+        api_key = cipher.decrypt(config.api_key_encrypted)
+        body = json.dumps(
+            {
+                "model": config.model_name,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 1,
+                "stream": False,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        status_code, _ = _chat_http_transport(
+            preset,
+            body,
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            15.0,
+        )
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="连接模型服务超时") from None
+    except (StrategyAiError, OSError):
+        raise HTTPException(status_code=502, detail="无法连接模型服务") from None
+
+    if status_code in {401, 403}:
+        raise HTTPException(status_code=422, detail="API Key 无效或无权访问该模型")
+    if status_code in {408, 504}:
+        raise HTTPException(status_code=504, detail="连接模型服务超时")
+    if not 200 <= status_code < 300:
+        raise HTTPException(status_code=502, detail=f"模型服务返回错误（HTTP {status_code}）")
+    return MessageOut(message="API 测试成功，模型服务可正常使用")
 
 
 @router.delete(

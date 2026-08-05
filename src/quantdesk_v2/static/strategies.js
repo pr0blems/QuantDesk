@@ -8,8 +8,6 @@ class StrategyCenter extends HTMLElement {
     this.items = [];
     this.templates = [];
     this.indicators = [];
-    this.indicatorDefaults = {};
-    this.selectedIndicators = new Map();
     this.deployments = [];
     this.signals = [];
     this.section = "strategies";
@@ -30,7 +28,7 @@ class StrategyCenter extends HTMLElement {
           <div class="strategy-title-copy">
             <span class="strategy-kicker">STRATEGY LIBRARY</span>
             <div class="strategy-title-line"><span class="strategy-title-mark" aria-hidden="true">策</span><h1>策略中心</h1><span class="strategy-db-badge"><i></i>数据库同步</span></div>
-            <p>从指标库勾选多个指标，动态配置参数，并组合成可回测、可运行的完整策略。</p>
+            <p>完整策略负责市场环境、入场、退出与风控；指标只负责计算，旧版信号仅保留兼容运行。</p>
           </div>
           <button id="strategy-create" class="strategy-create-button" type="button"><span aria-hidden="true">＋</span>新增策略</button>
         </header>
@@ -41,13 +39,14 @@ class StrategyCenter extends HTMLElement {
           <button class="active" type="button" data-section="strategies" aria-pressed="true"><span>完整策略</span><strong id="strategy-tab-full">0</strong></button>
           <button type="button" data-section="indicators" aria-pressed="false"><span>指标库</span><strong id="strategy-tab-indicators">0</strong></button>
           <button type="button" data-section="deployments" aria-pressed="false"><span>运行部署</span><strong id="strategy-tab-deployments">0</strong></button>
+          <button type="button" data-section="legacy" aria-pressed="false"><span>旧版信号</span><strong id="strategy-tab-legacy">0</strong></button>
         </nav>
 
         <section class="strategy-overview" aria-label="策略统计">
           <article><span>完整策略</span><strong id="strategy-total">--</strong><small>具备入场、退出与风控</small></article>
           <article><span>运行中部署</span><strong id="strategy-active">--</strong><small>模拟盘按账户独立运行</small></article>
           <article><span>标准指标</span><strong id="strategy-defaults">--</strong><small>统一计算口径与版本</small></article>
-          <article><span>指标组合策略</span><strong id="strategy-latest">--</strong><small>由两个以上指标组成</small></article>
+          <article><span>旧版信号</span><strong id="strategy-latest">--</strong><small>兼容保留，不等同完整策略</small></article>
         </section>
 
         <section class="strategy-library-card">
@@ -76,16 +75,9 @@ class StrategyCenter extends HTMLElement {
             <form id="strategy-form" class="strategy-form" novalidate>
               <div id="strategy-version-strip" class="strategy-version-strip"><span>当前版本</span><strong id="strategy-editor-version">--</strong><small>乐观锁保护</small></div>
 
-              <div id="strategy-composer-block" class="strategy-form-block hidden">
-                <div class="strategy-section-heading"><div><span>01</span><strong>选择指标</strong></div><small>至少选择 2 个，参数会动态出现</small></div>
-                <div id="strategy-indicator-picker" class="strategy-indicator-picker"></div>
-                <div class="strategy-compose-settings">
-                  <label>运行周期<select id="strategy-timeframe"><option value="15m">15 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label>
-                  <label>确认阈值 (%)<input id="strategy-confirmation-threshold" type="number" min="1" max="100" step="1" value="60"></label>
-                  <label>信号有效 K 线<input id="strategy-signal-valid-bars" type="number" min="1" max="10" step="1" value="2"></label>
-                  <fieldset class="strategy-direction-picker"><legend>允许方向</legend><label><input id="strategy-direction-long" type="checkbox" checked>做多</label><label><input id="strategy-direction-short" type="checkbox" checked>做空</label></fieldset>
-                </div>
-                <div id="strategy-selected-indicators" class="strategy-selected-indicators"></div>
+              <div id="strategy-template-field" class="strategy-form-block hidden">
+                <div class="strategy-section-heading"><div><span>01</span><strong>创建方式</strong></div><small>可从系统默认模板复制</small></div>
+                <label>策略模板<select id="strategy-template"><option value="">空白策略</option></select></label>
               </div>
 
               <div class="strategy-form-block">
@@ -116,18 +108,18 @@ class StrategyCenter extends HTMLElement {
 
             <aside id="strategy-ai-panel" class="strategy-ai-panel">
               <header>
-                <div><span>AI STRATEGY COMPOSER</span><h3 id="strategy-ai-title">用自然语言修改策略</h3></div>
+                <div><span>AI SEMANTIC EDITOR</span><h3>用自然语言修改策略</h3></div>
                 <span class="strategy-ai-status"><i></i>受约束配置</span>
               </header>
-              <p id="strategy-ai-description">描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改，不会生成或执行任意代码。</p>
-              <label>自然语言要求<textarea id="strategy-ai-prompt" rows="5" maxlength="1200" placeholder="例如：做一个 1 小时趋势策略，用 EMA、MACD 和成交量确认，减少噪声并把止损控制在 3%。"></textarea></label>
+              <p>描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改，不会生成或执行任意代码。</p>
+              <label>修改要求<textarea id="strategy-ai-prompt" rows="5" maxlength="1200" placeholder="例如：把短期均线改为 12，长期均线改为 48，止损收紧到 3%，其他配置保持不变。"></textarea></label>
               <div class="strategy-ai-examples" aria-label="AI 编辑示例">
-                <button type="button" data-ai-example="创建 1 小时趋势策略，使用 EMA、MACD、ADX 和成交量确认，参数偏稳健。">趋势组合</button>
-                <button type="button" data-ai-example="创建 15 分钟反转策略，使用 RSI、布林带和 ATR 过滤，减少噪声。">反转组合</button>
-                <button type="button" data-ai-example="创建 4 小时突破策略，使用 Donchian、ADX 和成交量确认，只做多。">突破组合</button>
+                <button type="button" data-ai-example="把策略调整得更稳健：缩小单次仓位，并把止损收紧到 3%。">更稳健</button>
+                <button type="button" data-ai-example="减少噪声信号，适当增加确认周期，其他参数不变。">减少噪声</button>
+                <button type="button" data-ai-example="保持入场条件不变，把止盈调整为止损的两倍。">优化盈亏比</button>
               </div>
-              <button id="strategy-ai-preview-button" class="strategy-ai-preview-button" type="button"><span aria-hidden="true">✦</span><strong>AI 生成指标方案</strong></button>
-              <div class="strategy-safety-note"><span aria-hidden="true">!</span><p><strong>仅生成预览，不执行交易</strong>。采用方案后只会回填表单，点击“创建策略”才保存，之后仍需通过回测与模拟盘验证。</p></div>
+              <button id="strategy-ai-preview-button" class="strategy-ai-preview-button" type="button"><span aria-hidden="true">✦</span><strong>生成修改预览</strong></button>
+              <div class="strategy-safety-note"><span aria-hidden="true">!</span><p><strong>仅生成预览，不执行交易</strong>。确认应用后只会保存新策略版本，仍需通过回测与模拟盘验证。</p></div>
 
               <section id="strategy-ai-preview" class="strategy-ai-preview hidden" aria-live="polite">
                 <header><div><span id="strategy-ai-provider">--</span><strong>修改预览</strong></div><span id="strategy-ai-base-version">--</span></header>
@@ -180,6 +172,7 @@ class StrategyCenter extends HTMLElement {
       if (event.target === event.currentTarget) this.closeEditor();
     });
     this.querySelector("#strategy-form").addEventListener("submit", (event) => this.save(event));
+    this.querySelector("#strategy-template").addEventListener("change", (event) => this.applyTemplate(event.target.value));
     this.querySelector("#strategy-ai-preview-button").addEventListener("click", () => this.requestAiPreview());
     this.querySelector("#strategy-ai-discard").addEventListener("click", () => this.clearPreview());
     this.querySelector("#strategy-ai-apply").addEventListener("click", () => this.applyAiPreview());
@@ -216,8 +209,6 @@ class StrategyCenter extends HTMLElement {
     this.items = [];
     this.templates = [];
     this.indicators = [];
-    this.indicatorDefaults = {};
-    this.selectedIndicators = new Map();
     this.deployments = [];
     this.signals = [];
     this.section = "strategies";
@@ -263,7 +254,6 @@ class StrategyCenter extends HTMLElement {
       this.items = Array.isArray(payload?.items) ? payload.items.map((item) => this.normalizeItem(item)) : [];
       this.templates = Array.isArray(payload?.templates) ? payload.templates.map((item) => this.normalizeTemplate(item)) : [];
       this.indicators = Array.isArray(indicatorPayload?.items) ? indicatorPayload.items : [];
-      this.indicatorDefaults = this.plainObject(indicatorPayload?.defaults);
       this.deployments = Array.isArray(deploymentPayload?.items) ? deploymentPayload.items : [];
       this.signals = Array.isArray(signalPayload?.items) ? signalPayload.items : [];
       this.renderFilters();
@@ -365,20 +355,23 @@ class StrategyCenter extends HTMLElement {
 
   renderStats() {
     const full = this.items.filter((item) => item.strategy_kind === "full_strategy").length;
-    const composite = this.items.filter((item) => item.spec?.strategy_type === "indicator_composite").length;
+    const legacy = this.items.filter((item) => item.strategy_kind !== "full_strategy").length;
     const running = this.deployments.filter((item) => item.status === "running").length;
     this.querySelector("#strategy-total").textContent = String(full).padStart(2, "0");
     this.querySelector("#strategy-active").textContent = String(running).padStart(2, "0");
     this.querySelector("#strategy-defaults").textContent = String(this.indicators.length).padStart(2, "0");
-    this.querySelector("#strategy-latest").textContent = String(composite).padStart(2, "0");
+    this.querySelector("#strategy-latest").textContent = String(legacy).padStart(2, "0");
     this.querySelector("#strategy-tab-full").textContent = String(full);
     this.querySelector("#strategy-tab-indicators").textContent = String(this.indicators.length);
     this.querySelector("#strategy-tab-deployments").textContent = String(this.deployments.length);
+    this.querySelector("#strategy-tab-legacy").textContent = String(legacy);
   }
 
   filteredItems() {
     return this.items.filter((item) => {
-      const kindMatches = item.strategy_kind === "full_strategy";
+      const kindMatches = this.section === "legacy"
+        ? item.strategy_kind !== "full_strategy"
+        : item.strategy_kind === "full_strategy";
       const isDefault = Boolean(item.is_default || item.source_template_key);
       const statusMatches = this.statusFilter === "all"
         || (this.statusFilter === "default" && isDefault)
@@ -390,12 +383,13 @@ class StrategyCenter extends HTMLElement {
   }
 
   renderSection() {
-    const strategyView = this.section === "strategies";
+    const strategyView = ["strategies", "legacy"].includes(this.section);
     this.querySelector("#strategy-create").classList.toggle("hidden", this.section !== "strategies");
     this.querySelector("#strategy-status-filter").classList.toggle("hidden", !strategyView);
     this.querySelector("#strategy-category-filter").closest("label").classList.toggle("hidden", !strategyView);
     const placeholders = {
       strategies: "搜索完整策略名称、分类或说明",
+      legacy: "搜索旧版指标信号",
       indicators: "搜索指标名称、类别或输出",
       deployments: "搜索模拟盘或回测部署",
     };
@@ -427,7 +421,7 @@ class StrategyCenter extends HTMLElement {
       const empty = this.node("div", "strategy-grid-state");
       empty.append(this.node("span", "strategy-state-icon", this.items.length ? "⌕" : "策"));
       empty.append(this.node("strong", "", this.items.length ? "没有匹配的策略" : "还没有个人策略"));
-      empty.append(this.node("small", "", "从指标库选择多个指标后，可用于回测和独立模拟盘。"));
+      empty.append(this.node("small", "", this.section === "legacy" ? "旧版信号仅用于兼容，不建议继续新增。" : "从完整策略模板创建后，可用于多周期回测和独立模拟盘。"));
       const action = this.node("button", "strategy-create-button", this.items.length ? "清除筛选" : "新增策略");
       action.type = "button";
       action.addEventListener("click", () => {
@@ -459,22 +453,15 @@ class StrategyCenter extends HTMLElement {
     const head = this.node("header", "strategy-card-head");
     const icon = this.node("span", "strategy-card-icon", this.strategyInitial(item.name));
     const title = this.node("div", "strategy-card-title");
-    title.append(this.node("strong", "", item.name), this.node("small", "", `${item.category} · ${isFull ? "完整策略" : "指标策略"}`));
+    title.append(this.node("strong", "", item.name), this.node("small", "", `${item.category} · ${isFull ? "完整策略" : "旧版信号"}`));
     const state = this.node("span", `strategy-state ${item.status === "active" ? "active" : "draft"}`, item.status === "active" ? "已启用" : "草稿");
     head.append(icon, title, state);
 
     const description = this.node("p", "strategy-card-description", item.description || "尚未填写策略说明");
     const tags = this.node("div", "strategy-card-tags");
     const timeframes = this.plainObject(item.spec?.timeframes);
-    const compositeIndicators = Array.isArray(item.spec?.indicators) ? item.spec.indicators : [];
-    if (item.spec?.strategy_type === "indicator_composite") {
-      tags.append(this.node("span", "strategy-kind-tag", `指标组合 · ${timeframes.trigger || "1h"}`));
-      compositeIndicators.slice(0, 4).forEach((selection) => {
-        const indicator = this.indicators.find((candidate) => candidate.key === selection.key);
-        tags.append(this.node("span", "", indicator?.name || selection.key));
-      });
-    } else if (isFull) tags.append(this.node("span", "strategy-kind-tag", `多周期 ${timeframes.regime || "4h"}/${timeframes.setup || "1h"}/${timeframes.trigger || "15m"}`));
-    else tags.append(this.node("span", "strategy-legacy-tag", "系统指标策略"));
+    if (isFull) tags.append(this.node("span", "strategy-kind-tag", `多周期 ${timeframes.regime || "4h"}/${timeframes.setup || "1h"}/${timeframes.trigger || "15m"}`));
+    else tags.append(this.node("span", "strategy-legacy-tag", "兼容指标信号"));
     const schema = Array.isArray(item.parameter_schema) ? item.parameter_schema : [];
     schema.slice(0, 3).forEach((field) => {
       const key = String(field.key ?? "");
@@ -502,12 +489,12 @@ class StrategyCenter extends HTMLElement {
     const title = this.node("div", "strategy-card-title");
     title.append(this.node("strong", "", item.name || item.key), this.node("small", "", `${item.category || "标准指标"} · v${item.version || 1}`));
     head.append(this.node("span", "strategy-card-icon", "ƒ"), title, this.node("span", "strategy-state active", "统一口径"));
-    const description = this.node("p", "strategy-card-description", item.description || "标准化指标，可加入多指标组合策略。");
+    const description = this.node("p", "strategy-card-description", "仅计算市场特征，不直接决定开仓、平仓或仓位。");
     const tags = this.node("div", "strategy-card-tags");
     (item.outputs || []).forEach((output) => tags.append(this.node("span", "", `输出 ${output}`)));
     const meta = this.node("div", "strategy-card-meta");
     const identity = this.node("div");
-    identity.append(this.node("span", "", `${item.role === "filter" ? "过滤指标" : "方向指标"} · ${item.key}`), this.node("small", "", `${(item.parameters || []).length} 个可调参数`));
+    identity.append(this.node("span", "", `指标键 ${item.key}`), this.node("small", "", `${(item.parameters || []).length} 个参数定义`));
     meta.append(identity);
     card.append(head, description, tags, meta);
     return card;
@@ -563,34 +550,24 @@ class StrategyCenter extends HTMLElement {
     this.preview = null;
     this.querySelector("#strategy-editor-kicker").textContent = "CREATE STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = "新增策略";
-    this.querySelector("#strategy-editor-subtitle").textContent = "勾选多个标准指标并配置参数，保存为可执行的完整策略。";
+    this.querySelector("#strategy-editor-subtitle").textContent = "从受约束的完整策略模板创建；不会生成或执行任意代码。";
     this.querySelector("#strategy-version-strip").classList.add("hidden");
-    this.querySelector("#strategy-composer-block").classList.remove("hidden");
+    this.querySelector("#strategy-template-field").classList.remove("hidden");
     this.querySelector("#strategy-basic-index").textContent = "02";
-    this.querySelector("#strategy-parameters-index").textContent = "--";
-    this.querySelector("#strategy-risk-index").textContent = "03";
-    this.querySelector("#strategy-ai-panel").classList.remove("hidden");
-    this.querySelector("#strategy-ai-title").textContent = "用自然语言生成指标组合";
-    this.querySelector("#strategy-ai-description").textContent = "描述周期、风格和风险偏好。AI 会从指标库选择多个指标并调整参数，只生成结构化方案。";
-    this.querySelector("#strategy-ai-preview-button strong").textContent = "AI 生成指标方案";
+    this.querySelector("#strategy-parameters-index").textContent = "03";
+    this.querySelector("#strategy-risk-index").textContent = "04";
+    this.querySelector("#strategy-ai-panel").classList.add("hidden");
     this.querySelector("#strategy-save strong").textContent = "创建策略";
+    this.populateTemplateSelect();
     this.querySelector("#strategy-form").reset();
-    this.querySelector("#strategy-name").value = "多指标组合策略";
-    this.querySelector("#strategy-category").value = "指标组合";
-    this.querySelector("#strategy-description").value = "多个标准指标加权确认，并通过波动与成交量过滤。";
-    this.querySelector("#strategy-timeframe").value = String(this.indicatorDefaults.timeframe || "1h");
-    this.querySelector("#strategy-confirmation-threshold").value = String(this.indicatorDefaults.confirmation_threshold || 60);
-    this.querySelector("#strategy-signal-valid-bars").value = String(this.indicatorDefaults.signal_valid_bars || 2);
-    const directions = Array.isArray(this.indicatorDefaults.directions) ? this.indicatorDefaults.directions : ["long", "short"];
-    this.querySelector("#strategy-direction-long").checked = directions.includes("long");
-    this.querySelector("#strategy-direction-short").checked = directions.includes("short");
-    this.setSelectedIndicators(["ema", "adx", "volume_ratio"].filter((key) => this.indicators.some((item) => item.key === key)).map((key) => ({ key })));
+    const preferred = this.templates.find((item) => item.template_kind === "strategy");
+    this.querySelector("#strategy-template").value = preferred?.template_key || "";
+    this.querySelector("#strategy-name").value = preferred?.name || "";
+    this.querySelector("#strategy-category").value = preferred?.category || "自定义";
+    this.querySelector("#strategy-description").value = preferred?.description || "";
     this.renderParameterFields([], {});
-    this.renderRiskFields(this.plainObject(this.indicatorDefaults.risk_defaults));
-    this.querySelector("#strategy-ai-prompt").value = "";
-    this.clearPreview();
+    this.renderRiskFields({});
     this.showFormError("");
-    this.showAiError("");
     this.showEditor();
   }
 
@@ -603,14 +580,11 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-editor-subtitle").textContent = "保存后生成新版本；已完成的回测仍保留当时的策略快照。";
     this.querySelector("#strategy-version-strip").classList.remove("hidden");
     this.querySelector("#strategy-editor-version").textContent = `v${this.activeItem.version}`;
-    this.querySelector("#strategy-composer-block").classList.add("hidden");
+    this.querySelector("#strategy-template-field").classList.add("hidden");
     this.querySelector("#strategy-basic-index").textContent = "01";
     this.querySelector("#strategy-parameters-index").textContent = "02";
     this.querySelector("#strategy-risk-index").textContent = "03";
     this.querySelector("#strategy-ai-panel").classList.remove("hidden");
-    this.querySelector("#strategy-ai-title").textContent = "用自然语言修改策略";
-    this.querySelector("#strategy-ai-description").textContent = "描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改。";
-    this.querySelector("#strategy-ai-preview-button strong").textContent = "生成修改预览";
     this.querySelector("#strategy-save strong").textContent = "保存新版本";
     this.querySelector("#strategy-name").value = this.activeItem.name;
     this.querySelector("#strategy-category").value = this.activeItem.category;
@@ -642,102 +616,23 @@ class StrategyCenter extends HTMLElement {
     this.setButtonBusy(this.querySelector("#strategy-ai-apply"), false);
   }
 
-  setSelectedIndicators(selections) {
-    this.selectedIndicators = new Map();
-    (Array.isArray(selections) ? selections : []).forEach((selection) => {
-      const key = String(selection?.key || "");
-      const indicator = this.indicators.find((item) => item.key === key);
-      if (!indicator || this.selectedIndicators.has(key)) return;
-      const supplied = this.plainObject(selection.parameters);
-      const parameters = {};
-      (indicator.parameters || []).forEach((definition) => {
-        parameters[definition.key] = supplied[definition.key] ?? definition.default;
-      });
-      this.selectedIndicators.set(key, {
-        key,
-        weight: Number(selection.weight ?? 1),
-        parameters,
-      });
-    });
-    this.renderIndicatorComposer();
+  populateTemplateSelect() {
+    const select = this.querySelector("#strategy-template");
+    const ordered = [...this.templates].sort((a, b) => Number(b.template_kind === "strategy") - Number(a.template_kind === "strategy"));
+    select.replaceChildren(...ordered.map((template) => this.option(template.template_key, `${template.template_kind === "strategy" ? "完整策略" : "旧版信号"} · ${template.name}`)));
   }
 
-  renderIndicatorComposer() {
-    const picker = this.querySelector("#strategy-indicator-picker");
-    picker.replaceChildren(...this.indicators.map((indicator) => {
-      const label = this.node("label", `strategy-indicator-option ${this.selectedIndicators.has(indicator.key) ? "selected" : ""}`);
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = this.selectedIndicators.has(indicator.key);
-      checkbox.addEventListener("change", () => this.toggleIndicator(indicator.key, checkbox.checked));
-      const copy = this.node("span");
-      copy.append(this.node("strong", "", indicator.name), this.node("small", "", `${indicator.category} · ${indicator.role === "filter" ? "过滤" : "方向"}`));
-      label.append(checkbox, copy);
-      return label;
-    }));
-    const selected = this.querySelector("#strategy-selected-indicators");
-    if (!this.selectedIndicators.size) {
-      selected.replaceChildren(this.node("div", "strategy-selection-empty", "请从上方至少勾选两个指标。"));
+  applyTemplate(key) {
+    const template = this.templates.find((item) => item.template_key === String(key));
+    if (!template) {
+      this.querySelector("#strategy-name").value = "";
+      this.querySelector("#strategy-category").value = "自定义";
+      this.querySelector("#strategy-description").value = "";
       return;
     }
-    selected.replaceChildren(...[...this.selectedIndicators.values()].map((selection) => this.selectedIndicatorPanel(selection)));
-  }
-
-  toggleIndicator(key, enabled) {
-    this.syncSelectedIndicatorValues();
-    if (enabled) {
-      const indicator = this.indicators.find((item) => item.key === key);
-      if (indicator && !this.selectedIndicators.has(key)) {
-        this.selectedIndicators.set(key, {
-          key,
-          weight: 1,
-          parameters: Object.fromEntries((indicator.parameters || []).map((definition) => [definition.key, definition.default])),
-        });
-      }
-    } else this.selectedIndicators.delete(key);
-    this.renderIndicatorComposer();
-  }
-
-  selectedIndicatorPanel(selection) {
-    const indicator = this.indicators.find((item) => item.key === selection.key) || {};
-    const panel = this.node("section", "strategy-selected-indicator");
-    const header = this.node("header");
-    header.append(this.node("strong", "", indicator.name || selection.key), this.node("small", "", indicator.description || "标准指标参数"));
-    const fields = this.node("div", "strategy-field-grid two");
-    const definitions = [
-      { key: "weight", label: "组合权重", type: "number", min: 0.1, max: 5, step: 0.1, default: 1 },
-      ...(indicator.parameters || []),
-    ];
-    definitions.forEach((definition) => {
-      const current = definition.key === "weight" ? selection.weight : selection.parameters?.[definition.key];
-      const field = this.configField(definition, current, "indicator");
-      const input = field.querySelector("input, select");
-      input.dataset.indicatorKey = selection.key;
-      input.dataset.indicatorParam = definition.key;
-      fields.append(field);
-    });
-    panel.append(header, fields);
-    return panel;
-  }
-
-  syncSelectedIndicatorValues() {
-    this.querySelectorAll("[data-indicator-key][data-indicator-param]").forEach((input) => {
-      const selection = this.selectedIndicators.get(input.dataset.indicatorKey);
-      if (!selection) return;
-      const value = Number(input.value);
-      if (!Number.isFinite(value)) return;
-      if (input.dataset.indicatorParam === "weight") selection.weight = value;
-      else selection.parameters[input.dataset.indicatorParam] = input.dataset.configType === "integer" ? Math.trunc(value) : value;
-    });
-  }
-
-  collectIndicatorSelections() {
-    this.syncSelectedIndicatorValues();
-    return [...this.selectedIndicators.values()].map((selection) => ({
-      key: selection.key,
-      weight: selection.weight,
-      parameters: { ...selection.parameters },
-    }));
+    this.querySelector("#strategy-name").value = template.name;
+    this.querySelector("#strategy-category").value = template.category;
+    this.querySelector("#strategy-description").value = template.description;
   }
 
   renderParameterFields(schema, values) {
@@ -764,7 +659,7 @@ class StrategyCenter extends HTMLElement {
     Object.keys(source).filter((key) => !known.has(key) && ["number", "boolean", "string"].includes(typeof source[key])).forEach((key) => {
       definitions.push({ key, label: this.humanizeKey(key), type: typeof source[key] === "boolean" ? "boolean" : (typeof source[key] === "number" ? "number" : "string") });
     });
-    const available = definitions.filter((definition) => Object.prototype.hasOwnProperty.call(source, definition.key));
+    const available = this.editorMode === "create" ? [] : definitions.filter((definition) => Object.prototype.hasOwnProperty.call(source, definition.key));
     block.classList.toggle("hidden", !available.length);
     this.querySelector("#strategy-risk-fields").replaceChildren(...available.map((definition) => this.configField(definition, source[definition.key], "risk")));
   }
@@ -841,35 +736,15 @@ class StrategyCenter extends HTMLElement {
     const name = this.querySelector("#strategy-name").value.trim();
     const description = this.querySelector("#strategy-description").value.trim();
     const category = this.querySelector("#strategy-category").value.trim();
-    const indicatorSelections = this.editorMode === "create" ? this.collectIndicatorSelections() : [];
-    const directions = this.editorMode === "create"
-      ? [this.querySelector("#strategy-direction-long").checked ? "long" : null, this.querySelector("#strategy-direction-short").checked ? "short" : null].filter(Boolean)
-      : [];
-    if (this.editorMode === "create" && indicatorSelections.length < 2) {
-      this.showFormError("请至少选择两个指标，才能形成指标组合策略。");
-      return;
-    }
-    if (this.editorMode === "create" && !directions.length) {
-      this.showFormError("请至少选择一个允许交易方向。");
-      return;
-    }
     const button = this.querySelector("#strategy-save");
     this.setButtonBusy(button, true, this.editorMode === "create" ? "正在创建…" : "正在保存…");
     this.showFormError("");
     try {
       let result;
       if (this.editorMode === "create") {
-        const body = {
-          name,
-          description,
-          category,
-          indicators: indicatorSelections,
-          timeframe: this.querySelector("#strategy-timeframe").value,
-          directions,
-          confirmation_threshold: Number(this.querySelector("#strategy-confirmation-threshold").value),
-          signal_valid_bars: Number(this.querySelector("#strategy-signal-valid-bars").value),
-          risk_defaults: this.collectConfig("risk", this.plainObject(this.indicatorDefaults.risk_defaults)),
-        };
+        const templateKey = this.querySelector("#strategy-template").value;
+        const body = { name, description, category };
+        if (templateKey) body.template_key = templateKey;
         result = await this.api("", { method: "POST", body: JSON.stringify(body) });
       } else {
         const body = {
@@ -898,7 +773,7 @@ class StrategyCenter extends HTMLElement {
   }
 
   async requestAiPreview() {
-    if (this.editorMode !== "create" && !this.activeItem?.public_id) return;
+    if (!this.activeItem?.public_id) return;
     const prompt = this.querySelector("#strategy-ai-prompt").value.trim();
     if (prompt.length < 4) {
       this.showAiError("请先描述希望修改的参数或规则，至少输入 4 个字符。");
@@ -909,20 +784,16 @@ class StrategyCenter extends HTMLElement {
     this.showAiError("");
     this.clearPreview();
     try {
-      const path = this.editorMode === "create"
-        ? "/compose/ai-preview"
-        : `/${encodeURIComponent(this.activeItem.public_id)}/ai-preview`;
-      const result = await this.api(path, {
+      const result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}/ai-preview`, {
         method: "POST",
         body: JSON.stringify({ prompt }),
       });
       this.preview = {
-        base_version: Number(result?.base_version ?? this.activeItem?.version ?? 1),
+        base_version: Number(result?.base_version ?? this.activeItem.version),
         provider: String(result?.provider ?? "AI model"),
-        summary: String(result?.summary ?? "模型已生成受约束的指标组合建议。"),
+        summary: String(result?.summary ?? "模型已生成受约束的策略修改建议。"),
         changes: Array.isArray(result?.changes) ? result.changes : [],
         proposed: this.plainObject(result?.proposed),
-        draft: this.plainObject(result?.draft),
       };
       this.renderPreview();
     } catch (error) {
@@ -937,7 +808,7 @@ class StrategyCenter extends HTMLElement {
     const panel = this.querySelector("#strategy-ai-preview");
     panel.classList.remove("hidden");
     this.querySelector("#strategy-ai-provider").textContent = this.providerLabel(this.preview.provider);
-    this.querySelector("#strategy-ai-base-version").textContent = this.editorMode === "create" ? "新策略草案" : `基于 v${this.preview.base_version}`;
+    this.querySelector("#strategy-ai-base-version").textContent = `基于 v${this.preview.base_version}`;
     this.querySelector("#strategy-ai-summary").textContent = this.preview.summary;
     const changes = this.querySelector("#strategy-ai-changes");
     if (!this.preview.changes.length) {
@@ -966,12 +837,7 @@ class StrategyCenter extends HTMLElement {
   }
 
   async applyAiPreview() {
-    if (!this.preview) return;
-    if (this.editorMode === "create") {
-      this.applyCompositionDraft(this.preview.draft);
-      return;
-    }
-    if (!this.activeItem?.public_id) return;
+    if (!this.preview || !this.activeItem?.public_id) return;
     const button = this.querySelector("#strategy-ai-apply");
     this.setButtonBusy(button, true, "正在应用…");
     this.showAiError("");
@@ -1004,26 +870,6 @@ class StrategyCenter extends HTMLElement {
     }
   }
 
-  applyCompositionDraft(draft) {
-    if (!draft || !Array.isArray(draft.indicators)) {
-      this.showAiError("AI 返回的指标方案不完整，请重新生成。");
-      return;
-    }
-    this.querySelector("#strategy-name").value = String(draft.name || "AI 指标组合策略");
-    this.querySelector("#strategy-description").value = String(draft.description || "");
-    this.querySelector("#strategy-category").value = String(draft.category || "指标组合");
-    this.querySelector("#strategy-timeframe").value = String(draft.timeframe || "1h");
-    this.querySelector("#strategy-confirmation-threshold").value = String(draft.confirmation_threshold ?? 60);
-    this.querySelector("#strategy-signal-valid-bars").value = String(draft.signal_valid_bars ?? 2);
-    const directions = Array.isArray(draft.directions) ? draft.directions : ["long", "short"];
-    this.querySelector("#strategy-direction-long").checked = directions.includes("long");
-    this.querySelector("#strategy-direction-short").checked = directions.includes("short");
-    this.setSelectedIndicators(draft.indicators);
-    this.renderRiskFields(this.plainObject(draft.risk_defaults));
-    this.clearPreview();
-    this.showAiError("AI 指标方案已填入表单；请检查参数后点击“创建策略”。", "success");
-  }
-
   providerLabel(provider) {
     const value = String(provider || "AI model");
     if (value.toLowerCase().includes("local")) return "本地语义引擎";
@@ -1041,9 +887,6 @@ class StrategyCenter extends HTMLElement {
       category: "策略分类",
       parameters: "策略参数",
       risk_defaults: "风险默认值",
-      indicators: "指标组合",
-      timeframe: "运行周期",
-      confirmation_threshold: "确认阈值",
       stop_loss_pct: "止损 (%)",
       take_profit_pct: "止盈 (%)",
       position_size_pct: "单次仓位 (%)",

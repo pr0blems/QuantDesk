@@ -2,6 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => document.querySelectorAll(selector);
 const TAB_USER_ID_KEY = "quantdesk.tab-user-id";
 const TAB_USERNAME_KEY = "quantdesk.tab-username";
+const THEME_STORAGE_KEY = "quantdesk.theme";
 const AUTH_IDENTITY_CHANGED_MESSAGE = "检测到登录身份已变化。为防止数据写入其他用户，本次请求已中止，请重新登录。";
 let accessToken = "";
 let isAuthenticated = false;
@@ -22,6 +23,44 @@ let aiModelConfigs = [];
 let aiModelSettingsLoaded = false;
 let aiModelSettingsLoading = false;
 let aiModelSettingsRequestVersion = 0;
+
+function preferredTheme() {
+  try {
+    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+    if (savedTheme === "light" || savedTheme === "dark") return savedTheme;
+  } catch (_) {
+    // Storage can be unavailable in privacy-restricted browsers.
+  }
+  return "dark";
+}
+
+function applyTheme(theme, { persist = false, notify = false } = {}) {
+  const selected = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = selected;
+  document.documentElement.style.colorScheme = selected;
+  document.querySelectorAll("[data-theme-toggle]").forEach((toggle) => {
+    const isLight = selected === "light";
+    toggle.setAttribute("aria-pressed", String(isLight));
+    toggle.setAttribute("aria-label", isLight ? "切换深色主题" : "切换浅色主题");
+    toggle.setAttribute("title", isLight ? "切换深色主题" : "切换浅色主题");
+    const icon = toggle.querySelector("span");
+    const label = toggle.querySelector("b");
+    if (icon) icon.textContent = isLight ? "◐" : "☼";
+    if (label) label.textContent = isLight ? "深色" : "浅色";
+  });
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeMeta) themeMeta.setAttribute("content", selected === "light" ? "#f1f2ef" : "#0c0e0c");
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, selected);
+    } catch (_) {
+      // Theme remains active for this page even when storage is blocked.
+    }
+  }
+  if (notify) window.dispatchEvent(new CustomEvent("quantdesk:theme-change", { detail: { theme: selected } }));
+}
+
+applyTheme(preferredTheme());
 
 const AI_PROVIDER_FALLBACKS = Object.freeze([
   { code: "deepseek", name: "DeepSeek", base_url: "", default_model: "deepseek-v4-flash", models: ["deepseek-v4-flash", "deepseek-v4-pro"] },
@@ -471,6 +510,7 @@ function renderAiModelConfigs() {
     card.append(main);
 
     const actions = aiModelElement("div", "ai-model-config-actions");
+    actions.append(createAiModelAction("测试", "test", config.id));
     actions.append(createAiModelAction("编辑", "edit", config.id));
     actions.append(createAiModelAction(config.isEnabled ? "停用" : "启用", "toggle", config.id));
     if (!config.isDefault) actions.append(createAiModelAction("设为默认", "default", config.id));
@@ -649,8 +689,16 @@ async function runAiModelConfigAction(button) {
   if (action === "delete" && !window.confirm(`确定删除“${config.displayName || config.providerName}”模型配置？`)) return;
 
   button.disabled = true;
+  const previousLabel = button.textContent;
   try {
-    if (action === "delete") {
+    if (action === "test") {
+      button.textContent = "测试中…";
+      const result = await api(`/api/v2/me/ai-model-configs/${config.id}/test`, { method: "POST" });
+      setAiModelListStatus(result.message || "API 测试成功，模型服务可正常使用", "success");
+      button.textContent = previousLabel;
+      button.disabled = false;
+      return;
+    } else if (action === "delete") {
       await api(`/api/v2/me/ai-model-configs/${config.id}`, { method: "DELETE" });
     } else if (action === "toggle") {
       const enabled = !config.isEnabled;
@@ -669,7 +717,8 @@ async function runAiModelConfigAction(button) {
     aiModelSettingsLoaded = false;
     await loadAiModelSettings(true);
   } catch (error) {
-    setAiModelListStatus(error.message, "error");
+    setAiModelListStatus(action === "test" ? `API 测试失败：${error.message}` : error.message, "error");
+    button.textContent = previousLabel;
     button.disabled = false;
   }
 }
@@ -1937,6 +1986,11 @@ $("#logout").addEventListener("click", async () => {
   clearAuthenticatedUser();
   showLoginRoute({ preserveNext: false });
 });
+
+$$('[data-theme-toggle]').forEach((toggle) => toggle.addEventListener("click", () => {
+  const nextTheme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  applyTheme(nextTheme, { persist: true, notify: true });
+}));
 
 $("#menu-toggle").addEventListener("click", () => {
   const open = !$("#sidebar").classList.contains("open");

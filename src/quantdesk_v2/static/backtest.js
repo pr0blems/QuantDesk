@@ -36,7 +36,7 @@ class BacktestWorkbench extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/backtest.css?v=20260804-1">
+      <link rel="stylesheet" href="/assets/backtest.css?v=20260804-5">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -53,7 +53,7 @@ class BacktestWorkbench extends HTMLElement {
         <div class="workbench-layout">
           <form id="backtest-form" class="config-rail" novalidate>
             <section class="config-section strategy-section">
-              <div class="section-head"><div><span class="section-index">01</span><strong>选择完整策略</strong></div><small id="strategy-count">--</small></div>
+              <div class="section-head"><div><span class="section-index">01</span><strong>选择策略</strong></div><small id="strategy-count">--</small></div>
               <div id="category-filter" class="category-filter" aria-label="策略分类"></div>
               <div id="strategy-list" class="strategy-list"><div class="rail-loading">正在读取我的策略…</div></div>
               <p id="strategy-description" class="strategy-description">策略参数将随策略中心配置动态加载。</p>
@@ -63,7 +63,7 @@ class BacktestWorkbench extends HTMLElement {
               <div class="section-head"><div><span class="section-index">02</span><strong>市场与区间</strong></div><small id="data-bound">等候行情目录</small></div>
               <div class="field-grid two">
                 <label>交易品种<select id="symbol" name="symbol" required><option value="">加载中…</option></select></label>
-                <label>策略触发周期<select id="timeframe" name="timeframe" required><option value="">加载中…</option></select><small id="strategy-timeframe-note" class="field-help">选择策略后自动确定</small></label>
+                <label>数据周期<select id="timeframe" name="timeframe" required><option value="">加载中…</option></select></label>
               </div>
               <div class="field-grid two date-fields">
                 <label>开始日期<input id="start-date" name="start_date" type="date" required></label>
@@ -99,7 +99,7 @@ class BacktestWorkbench extends HTMLElement {
               <div id="strategy-params" class="field-grid two"></div>
             </section>
 
-            <div class="execution-note"><span>成交模型</span><strong>信号收盘确认 → 下一根开盘撮合</strong><small>本地所选区间没有 K 线时，将从 Binance 公共 API 按需补齐已收盘历史数据；手续费与双边滑点均计入。</small></div>
+            <div class="execution-note"><span>成交模型</span><strong>信号收盘确认 → 下一根开盘撮合</strong><small>手续费与双边滑点均计入；杠杆采用简化逐仓强平，不含资金费与阶梯保证金。</small></div>
             <button id="run-backtest" class="run-button" type="submit" disabled><span aria-hidden="true">▶</span><strong>运行回测</strong></button>
           </form>
 
@@ -220,9 +220,6 @@ class BacktestWorkbench extends HTMLElement {
       option.value = "";
       this.q(id).replaceChildren(option);
     }
-    this.q("#timeframe").disabled = false;
-    this.q("#strategy-timeframe-note").textContent = "选择策略后自动确定";
-    this.q("#strategy-timeframe-note").classList.remove("locked");
     for (const id of ["#start-date", "#end-date"]) {
       const input = this.q(id);
       input.value = "";
@@ -267,11 +264,7 @@ class BacktestWorkbench extends HTMLElement {
       return { ...item, value: String(value), label: String(item?.label ?? item?.name ?? value) };
     };
     return {
-      strategies: (Array.isArray(payload.strategies) ? payload.strategies : []).filter((item) => (
-        item?.strategy_kind === "full_strategy"
-        && item?.lifecycle_status === "published"
-        && item?.spec
-      )),
+      strategies: Array.isArray(payload.strategies) ? payload.strategies : [],
       symbols: (Array.isArray(payload.symbols) ? payload.symbols : []).map((item) => normalizeOption(item, "symbol")),
       timeframes: (Array.isArray(payload.timeframes) ? payload.timeframes : []).map((item) => normalizeOption(item, "timeframe")),
       bounds: payload.bounds || {},
@@ -297,7 +290,7 @@ class BacktestWorkbench extends HTMLElement {
       return button;
     }));
     const strategyList = this.catalog.strategies.filter((item) => this.category === "全部" || item.category === this.category);
-    this.q("#strategy-count").textContent = `${this.catalog.strategies.length} 个完整策略`;
+    this.q("#strategy-count").textContent = `${this.catalog.strategies.length} 个策略`;
     const list = this.q("#strategy-list");
     list.replaceChildren(...strategyList.map((strategy) => {
       const id = String(strategy.id ?? "");
@@ -306,16 +299,14 @@ class BacktestWorkbench extends HTMLElement {
       button.dataset.strategyId = id;
       button.setAttribute("aria-pressed", String(id === this.strategyId));
       const title = this.node("strong", "", strategy.name || id || "未命名策略");
-      const triggerTimeframe = strategy.spec?.timeframes?.trigger;
-      const strategyType = strategy.spec?.strategy_type === "indicator_composite" ? "指标组合" : "规则策略";
-      const category = this.node("span", "strategy-category", triggerTimeframe ? `${strategyType} · ${triggerTimeframe}` : strategyType);
+      const category = this.node("span", "strategy-category", strategy.category || "自定义");
       const summary = this.node("small", "", strategy.description || "使用当前策略参数开始验证");
       button.append(title, category, summary);
       button.addEventListener("click", () => this.selectStrategy(id));
       return button;
     }));
     if (!strategyList.length) {
-      const empty = this.node("div", "rail-loading", this.catalog.strategies.length ? "该分类暂无完整策略" : "策略中心还没有可回测的完整策略");
+      const empty = this.node("div", "rail-loading", this.catalog.strategies.length ? "该分类暂无策略" : "策略中心还没有可回测策略");
       if (!this.catalog.strategies.length) {
         const manage = this.node("button", "text-button manage-strategies", "去策略中心新增");
         manage.type = "button";
@@ -346,7 +337,7 @@ class BacktestWorkbench extends HTMLElement {
   }
 
   selectStrategy(id) {
-    const changed = this.strategyId !== id;
+    const changed = Boolean(this.strategyId && this.strategyId !== id);
     this.strategyId = id;
     this.qa(".strategy-card").forEach((card) => {
       const active = card.dataset.strategyId === id;
@@ -354,58 +345,12 @@ class BacktestWorkbench extends HTMLElement {
       card.setAttribute("aria-pressed", String(active));
     });
     const strategy = this.selectedStrategy();
-    if (!strategy) {
-      this.strategyId = "";
-      this.q("#strategy-description").textContent = "请从策略中心新增或发布完整策略。";
-      this.q("#strategy-params").replaceChildren();
-      this.q("#parameter-section").classList.add("hidden");
-      this.syncStrategyTimeframe(null);
-      return;
-    }
     this.q("#strategy-description").textContent = strategy?.description || "策略参数将随策略中心配置动态加载。";
     this.renderParameters(changed);
-    if (changed) this.applyStrategyDefaults(strategy);
-    this.syncStrategyTimeframe(strategy);
-    this.syncBounds();
   }
 
   selectedStrategy() {
     return this.catalog.strategies.find((item) => String(item.id ?? "") === this.strategyId) || null;
-  }
-
-  applyStrategyDefaults(strategy) {
-    const defaults = strategy?.risk_defaults;
-    if (!defaults || typeof defaults !== "object") return;
-    const fields = {
-      position_size_pct: "#position-size",
-      leverage: "#leverage",
-      fee_bps: "#fee",
-      slippage_bps: "#slippage",
-      stop_loss_pct: "#stop-loss",
-      take_profit_pct: "#take-profit",
-      max_holding_bars: "#max-holding",
-    };
-    Object.entries(fields).forEach(([key, selector]) => {
-      const value = Number(defaults[key]);
-      if (Number.isFinite(value)) this.q(selector).value = String(value);
-    });
-  }
-
-  syncStrategyTimeframe(strategy) {
-    const select = this.q("#timeframe");
-    const note = this.q("#strategy-timeframe-note");
-    const required = String(strategy?.spec?.timeframes?.trigger || "");
-    const available = [...select.options].some((option) => option.value === required);
-    if (required && available) {
-      select.value = required;
-      select.disabled = true;
-      note.textContent = `由策略固定为 ${required}`;
-      note.classList.add("locked");
-    } else {
-      select.disabled = false;
-      note.textContent = required ? `行情目录暂不支持 ${required}` : "选择策略后自动确定";
-      note.classList.remove("locked");
-    }
   }
 
   renderParameters(reset = false) {
@@ -436,7 +381,7 @@ class BacktestWorkbench extends HTMLElement {
         input.type = type === "integer" || type === "float" || type === "number" ? "number" : "text";
         if (param.min != null) input.min = String(param.min);
         if (param.max != null) input.max = String(param.max);
-        input.step = String(param.step ?? (type === "integer" ? 1 : "any"));
+        if (param.step != null) input.step = String(param.step);
       }
       input.dataset.paramKey = String(param.key || "");
       input.dataset.paramType = type;
@@ -470,31 +415,28 @@ class BacktestWorkbench extends HTMLElement {
     const { min, max } = this.resolveBounds();
     const start = this.q("#start-date");
     const end = this.q("#end-date");
-    const today = this.dateOnly(new Date());
-    const earliestAllowed = this.shiftMonths(today, -12);
-    start.min = earliestAllowed;
-    start.max = today;
-    end.min = earliestAllowed;
-    end.max = today;
+    start.min = min || "";
+    start.max = max || "";
+    end.min = min || "";
+    end.max = max || "";
     if (max) {
-      end.value = !end.value || end.value > today || end.value < earliestAllowed ? max : end.value;
+      end.value = !end.value || end.value > max || (min && end.value < min) ? max : end.value;
       const defaultStart = this.shiftMonths(max, -3);
-      const localDefaultStart = this.maxDate(min || earliestAllowed, defaultStart);
-      start.value = !start.value || start.value > end.value || start.value < earliestAllowed ? localDefaultStart : start.value;
-      this.q("#data-bound").textContent = min ? `本地 ${min} — ${max} · 缺失自动补齐` : `本地截至 ${max} · 缺失自动补齐`;
+      start.value = !start.value || start.value > end.value || (min && start.value < min) ? this.maxDate(min, defaultStart) : start.value;
+      this.q("#data-bound").textContent = min ? `可用 ${min} — ${max}` : `数据截至 ${max}`;
     } else {
+      const today = this.dateOnly(new Date());
       if (!end.value) end.value = today;
       if (!start.value) start.value = this.shiftMonths(today, -3);
-      this.q("#data-bound").textContent = "本地无数据 · 运行时从 Binance 补齐";
+      this.q("#data-bound").textContent = "按行情库存动态校验";
     }
   }
 
   applyRange(months) {
-    const { max } = this.resolveBounds();
-    const end = this.q("#end-date").value || max || this.dateOnly(new Date());
-    const earliestAllowed = this.shiftMonths(end, -12);
+    const { min, max } = this.resolveBounds();
+    const end = max || this.q("#end-date").value || this.dateOnly(new Date());
     this.q("#end-date").value = end;
-    this.q("#start-date").value = months === "all" ? earliestAllowed : this.maxDate(earliestAllowed, this.shiftMonths(end, -Number(months)));
+    this.q("#start-date").value = months === "all" ? this.maxDate(min, this.shiftMonths(end, -12)) : this.maxDate(min, this.shiftMonths(end, -Number(months)));
     this.qa("[data-months]").forEach((button) => button.classList.toggle("active", button.dataset.months === String(months)));
   }
 
@@ -558,8 +500,8 @@ class BacktestWorkbench extends HTMLElement {
     this.runningBacktest = true;
     this.showBanner("");
     this.setRunButton(true);
-    this.setStageStatus("检查数据", "loading");
-    this.q("#active-run-meta").textContent = `${this.q("#symbol").value} · ${this.q("#timeframe").value} · 缺失时从 Binance 补齐后回放`;
+    this.setStageStatus("计算中", "loading");
+    this.q("#active-run-meta").textContent = `${this.q("#symbol").value} · ${this.q("#timeframe").value} · 正在回放历史行情`;
     try {
       let detail = await this.api("", { method: "POST", body: JSON.stringify(this.payload()) });
       if (generation !== this.sessionGeneration) return;
@@ -719,11 +661,6 @@ class BacktestWorkbench extends HTMLElement {
     else messages.push("行情覆盖满足本次研究要求。");
     if (object.trades_truncated) {
       messages.push(`成交明细返回 ${this.integer(object.trades_returned)} / ${this.integer(object.trades_total)} 笔，汇总指标按全部成交计算。`);
-    }
-    const fetches = Array.isArray(object.on_demand_fetches) ? object.on_demand_fetches : [];
-    if (fetches.length) {
-      const summary = fetches.map((item) => `${item.timeframe || "--"} ${this.integer(item.bars_fetched)} 根`).join("、");
-      messages.push(`数据来源：本次从 Binance 公共 API 按需补齐 ${summary} 已收盘 K 线，并已写入本地行情库。`);
     }
     if (assumptions.length) messages.push(`模型假设：${assumptions.join("；")}`);
     this.q("#quality-message").textContent = messages.join("\n");

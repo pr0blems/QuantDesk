@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+.env
+.local
+QuantDesk-NG
+__pycache__
+*.pyc
+*.log
+reports
+tests

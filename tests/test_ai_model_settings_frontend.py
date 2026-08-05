@@ -51,6 +51,8 @@ def test_ai_model_frontend_uses_user_scoped_crud_contract_without_key_echo() -> 
     assert 'api("/api/v2/me/ai-model-configs")' in script
     assert 'method: configId ? "PUT" : "POST"' in script
     assert 'method: "DELETE"' in script
+    assert 'createAiModelAction("测试", "test", config.id)' in script
+    assert '`/api/v2/me/ai-model-configs/${config.id}/test`' in script
     assert 'if (apiKey) payload.api_key = apiKey;' in script
     assert "更换服务商时必须输入对应的新 API Key" in script
 
