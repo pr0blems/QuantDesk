@@ -40,6 +40,7 @@ class _RealtimeState:
         self.quotes: dict[str, deque[tuple[int, float, float]]] = defaultdict(deque)
         self.trades: dict[str, deque[tuple[int, float, float, bool]]] = defaultdict(deque)
         self.prices: dict[str, deque[tuple[int, float]]] = defaultdict(deque)
+        self.liquidations: deque[dict[str, Any]] = deque(maxlen=20_000)
         self.last_event_ms = 0
 
     def ingest(self, payload: Any) -> list[tuple]:
@@ -72,7 +73,37 @@ class _RealtimeState:
             symbol = str(payload.get("s") or "").upper()
             event_ms = int(payload.get("E") or payload.get("T") or now * 1000)
             self.last_event_ms = max(self.last_event_ms, event_ms)
-            if event == "bookTicker" and symbol:
+            if event == "forceOrder":
+                # The all-market stream wraps the order under ``o``; retain the
+                # raw payload so downstream analysis can audit every field.
+                order = payload.get("o") if isinstance(payload.get("o"), dict) else payload
+                order_symbol = str(order.get("s") or symbol).upper()
+                if order_symbol:
+                    try:
+                        price = float(order.get("p") or order.get("ap") or 0)
+                        average_price = float(order.get("ap") or order.get("p") or 0)
+                        quantity = float(order.get("q") or 0)
+                        event_id = str(order.get("i") or f"{order_symbol}:{event_ms}:{price}:{quantity}")
+                        self.liquidations.append(
+                            {
+                                "event_id": event_id[:96],
+                                "symbol": order_symbol,
+                                "event_time": event_ms,
+                                "trade_time": int(order.get("T") or event_ms),
+                                "side": str(order.get("S") or "").upper()[:8],
+                                "order_type": str(order.get("o") or "").upper()[:24],
+                                "time_in_force": str(order.get("f") or "").upper()[:8],
+                                "price": price,
+                                "average_price": average_price,
+                                "quantity": quantity,
+                                "notional": average_price * quantity,
+                                "source": "binance_websocket",
+                                "payload": payload,
+                            }
+                        )
+                    except (TypeError, ValueError):
+                        pass
+            elif event == "bookTicker" and symbol:
                 try:
                     bid = float(payload["b"])
                     ask = float(payload["a"])
@@ -111,6 +142,15 @@ class _RealtimeState:
                 except (KeyError, TypeError, ValueError):
                     pass
         return mini_rows
+
+    def drain_liquidations(self, limit: int = 2_000) -> list[dict[str, Any]]:
+        """Atomically return and remove buffered liquidation events."""
+
+        with self.lock:
+            rows: list[dict[str, Any]] = []
+            while self.liquidations and len(rows) < max(1, int(limit)):
+                rows.append(self.liquidations.popleft())
+            return rows
 
     @staticmethod
     def _depth_levels(
@@ -569,6 +609,147 @@ def _quality_event(stream_key: str, event_type: str, details: dict[str, Any]) ->
         return
 
 
+def _persist_liquidations(rows: list[dict[str, Any]]) -> int:
+    """Persist websocket liquidation events idempotently for later labelling."""
+
+    if not rows:
+        return 0
+    values = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper()
+        event_id = f"{symbol}:{row.get('event_id') or row.get('event_time')}"[:128]
+        values.append(
+            (
+                event_id,
+                symbol,
+                int(row.get("event_time") or 0),
+                int(row.get("trade_time") or row.get("event_time") or 0),
+                str(row.get("side") or "")[:8],
+                str(row.get("order_type") or "")[:24],
+                str(row.get("time_in_force") or "")[:8],
+                row.get("price"),
+                row.get("average_price"),
+                row.get("quantity"),
+                row.get("notional"),
+                str(row.get("source") or "binance_websocket")[:32],
+                json.dumps(row.get("payload") or {}, ensure_ascii=False),
+            )
+        )
+    try:
+        store.executemany(
+            """INSERT INTO binance_liquidation_events(
+                   event_id,symbol,event_time,trade_time,side,order_type,time_in_force,
+                   price,average_price,quantity,notional,source,payload_json,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+               ON DUPLICATE KEY UPDATE event_time=VALUES(event_time),trade_time=VALUES(trade_time),
+                   price=VALUES(price),average_price=VALUES(average_price),quantity=VALUES(quantity),
+                   notional=VALUES(notional),payload_json=VALUES(payload_json)""",
+            values,
+        )
+    except Exception as exc:
+        _quality_event(
+            "market_liquidations",
+            "persist_failed",
+            {"error": type(exc).__name__, "items": len(values)},
+        )
+        return 0
+    return len(values)
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _derivative_snapshot(symbol: str) -> tuple | None:
+    """Fetch one basis + ADL sample; failures are isolated per symbol."""
+
+    try:
+        basis_rows = binance_client.fetch_basis(symbol, period="5m", limit=1)
+        adl_rows = binance_client.fetch_adl_risk(symbol)
+        basis = basis_rows[-1] if basis_rows else {}
+        event_ms = int(
+            basis.get("timestamp")
+            or basis.get("time")
+            or basis.get("updateTime")
+            or time.time() * 1000
+        )
+        basis_value = _finite_number(basis.get("basis"))
+        annualized = _finite_number(
+            basis.get("annualizedBasisRate") or basis.get("annualizedBasis")
+        )
+        raw = {"basis": basis, "adl": adl_rows}
+        return (
+            symbol,
+            event_ms,
+            int(time.time() * 1000),
+            basis_value,
+            annualized,
+            json.dumps(adl_rows, ensure_ascii=False),
+            json.dumps(raw, ensure_ascii=False),
+        )
+    except Exception as exc:
+        _quality_event(
+            "binance_derivatives",
+            "snapshot_failed",
+            {"symbol": symbol, "error": type(exc).__name__},
+        )
+        return None
+
+
+def derivatives_snapshot_loop(stop_event: threading.Event | None = None) -> None:
+    """Periodically persist public Basis and ADL risk for monitored contracts.
+
+    This is intentionally a separate child of the market worker.  It runs at a
+    modest cadence, allowing the shared REST governor to protect websocket
+    recovery and other market calls from IP-level 429/418 bans.
+    """
+
+    stop = stop_event or threading.Event()
+    interval_seconds = 300
+    symbols: list[str] = []
+    first_run = True
+    while not stop.is_set():
+        try:
+            refreshed = monitor_symbols()
+            if refreshed:
+                symbols = refreshed
+            if first_run or symbols:
+                first_run = False
+                rows: list[tuple] = []
+                with ThreadPoolExecutor(max_workers=6) as executor:
+                    futures = [executor.submit(_derivative_snapshot, symbol) for symbol in symbols]
+                    for future in as_completed(futures):
+                        try:
+                            row = future.result()
+                        except Exception:
+                            row = None
+                        if row is not None:
+                            rows.append(row)
+                if rows:
+                    store.executemany(
+                        """INSERT INTO binance_derivative_snapshots(
+                               symbol,event_time,received_at,basis,basis_rate,adl_json,raw_json,created_at
+                           ) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                           ON DUPLICATE KEY UPDATE received_at=VALUES(received_at),basis=VALUES(basis),
+                               basis_rate=VALUES(basis_rate),adl_json=VALUES(adl_json),raw_json=VALUES(raw_json)""",
+                        rows,
+                    )
+                store.collector_report(
+                    "binance_derivatives",
+                    success=bool(rows),
+                    items=len(rows),
+                    details={"requested": len(symbols), "source": "public_rest"},
+                )
+        except Exception as exc:
+            store.collector_report("binance_derivatives", success=False, error=str(exc))
+        if stop.wait(interval_seconds):
+            return
+
+
 def _receiver(shard_id: int, symbols: list[str], stop_event: threading.Event) -> None:
     streams = [
         stream
@@ -577,6 +758,9 @@ def _receiver(shard_id: int, symbols: list[str], stop_event: threading.Event) ->
     ]
     if shard_id == 0:
         streams.append("!miniTicker@arr")
+        # Public all-market liquidation stream; REST is used only as a bounded
+        # recovery path when this websocket shard is reconnecting.
+        streams.append("!forceOrder@arr")
     backoff = 2
     while not stop_event.is_set():
         try:
@@ -649,6 +833,7 @@ def market_stream_loop(stop_event: threading.Event | None = None) -> None:
     if not stop.wait(1):
         _prime_depth_snapshots(symbols, stop)
     last_cleanup_bucket = 0
+    last_force_order_rest_ms = 0
     while not stop.wait(FLUSH_SECONDS):
         try:
             refreshed_symbols = monitor_symbols()
@@ -663,6 +848,50 @@ def market_stream_loop(stop_event: threading.Event | None = None) -> None:
                 _prime_depth_snapshots(symbols, stop)
             depth_recovered = _restore_missing_depth(symbol_set)
             rows = _STATE.snapshots(symbol_set)
+            liquidation_rows = _STATE.drain_liquidations()
+            persisted_liquidations = _persist_liquidations(liquidation_rows)
+            now_ms = int(time.time() * 1000)
+            # A bounded REST backfill covers websocket reconnect gaps without
+            # turning the high-frequency market loop into a REST poller.
+            if now_ms - last_force_order_rest_ms >= 60_000:
+                last_force_order_rest_ms = now_ms
+                try:
+                    rest_orders = binance_client.fetch_force_orders(
+                        start_time_ms=now_ms - 70_000,
+                        end_time_ms=now_ms,
+                        limit=100,
+                    )
+                    normalized = []
+                    for order in rest_orders:
+                        symbol_name = str(order.get("symbol") or "").upper()
+                        average_price = _finite_number(order.get("averagePrice") or order.get("ap")) or 0.0
+                        quantity = _finite_number(order.get("executedQty") or order.get("origQty") or order.get("q")) or 0.0
+                        price = _finite_number(order.get("price") or order.get("p")) or average_price
+                        event_time = int(order.get("updateTime") or order.get("time") or now_ms)
+                        normalized.append(
+                            {
+                                "event_id": str(order.get("orderId") or f"{symbol_name}:{event_time}:{price}"),
+                                "symbol": symbol_name,
+                                "event_time": event_time,
+                                "trade_time": event_time,
+                                "side": str(order.get("side") or "").upper(),
+                                "order_type": str(order.get("type") or "").upper(),
+                                "time_in_force": str(order.get("timeInForce") or "").upper(),
+                                "price": price,
+                                "average_price": average_price,
+                                "quantity": quantity,
+                                "notional": average_price * quantity,
+                                "source": "binance_rest_force_orders",
+                                "payload": order,
+                            }
+                        )
+                    persisted_liquidations += _persist_liquidations(normalized)
+                except Exception as exc:
+                    _quality_event(
+                        "market_liquidations",
+                        "rest_backfill_failed",
+                        {"error": type(exc).__name__},
+                    )
             if rows:
                 store.executemany(
                     """INSERT INTO market_microstructure(
@@ -714,7 +943,10 @@ def market_stream_loop(stop_event: threading.Event | None = None) -> None:
                 "market_stream",
                 success=True,
                 items=len(rows),
-                details={"depth_recovered": depth_recovered},
+                details={
+                    "depth_recovered": depth_recovered,
+                    "liquidations_persisted": persisted_liquidations,
+                },
             )
         except Exception as exc:
             store.collector_report("market_stream", success=False, error=str(exc))

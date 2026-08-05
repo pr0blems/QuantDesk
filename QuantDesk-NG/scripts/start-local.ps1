@@ -63,7 +63,22 @@ function Test-WorkerActive {
     )
 
     $escapedRole = [regex]::Escape("quantdesk-ng:$Role")
-    return ($StatusText -match "(?m)'worker_key': '$escapedRole'.*'status': 'active'")
+    if (-not ($StatusText -match "(?m)'worker_key': '$escapedRole'.*'status': 'active'")) {
+        return $false
+    }
+
+    # A lease can remain active for its TTL after a process was terminated.
+    # Do not treat that stale lease as a running worker; verify the exact
+    # QuantDesk command line as well so the launcher can recover automatically.
+    $processPattern = [regex]::Escape("worker --role $Role")
+    $process = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match "QuantDesk-NG" -and
+            $_.CommandLine -match $processPattern
+        } |
+        Select-Object -First 1
+    return ($null -ne $process)
 }
 
 function Show-LogTail {

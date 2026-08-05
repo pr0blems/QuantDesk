@@ -93,6 +93,48 @@
       "url": "https://www.ft.com/rss/home"
     },
     {
+      "name": "SEC Press Releases",
+      "lang": "en",
+      "url": "https://www.sec.gov/news/pressreleases.rss",
+      "official": true,
+      "event_domain": "regulatory"
+    },
+    {
+      "name": "Federal Reserve Press",
+      "lang": "en",
+      "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+      "official": true,
+      "event_domain": "monetary_policy"
+    },
+    {
+      "name": "BLS Latest Releases",
+      "lang": "en",
+      "url": "https://www.bls.gov/feed/bls_latest.rss",
+      "official": true,
+      "event_domain": "macro_release"
+    },
+    {
+      "name": "BEA News",
+      "lang": "en",
+      "url": "https://www.bea.gov/news/rss.xml",
+      "official": true,
+      "event_domain": "macro_release"
+    },
+    {
+      "name": "EIA Today in Energy",
+      "lang": "en",
+      "url": "https://www.eia.gov/rss/todayinenergy.xml",
+      "official": true,
+      "event_domain": "energy_release"
+    },
+    {
+      "name": "HKEX News",
+      "lang": "en",
+      "url": "https://www.hkex.com.hk/eng/newsconsul/hkexnews/rss.xml",
+      "official": true,
+      "event_domain": "regulatory"
+    },
+    {
       "name": "CryptoPotato",
       "lang": "en",
       "url": "https://cryptopotato.com/feed",

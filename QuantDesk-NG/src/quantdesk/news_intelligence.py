@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import store
+from .macro_events import extract_structured_event
 
 ASSESSOR = "deterministic-evidence-gate"
 ASSESSOR_VERSION = 1
@@ -502,6 +503,61 @@ def _find_or_create_event(title: str, published_at: int) -> int:
     return int(created[0]["id"])
 
 
+def _update_structured_event(
+    event_id: int,
+    event: Any,
+    *,
+    published_at: int,
+    provenance: float,
+    affected_symbols: list[str],
+) -> None:
+    """Persist structured fields without allowing weak headlines to overwrite facts.
+
+    A field is only replaced by a non-null value.  This means a later generic
+    syndicated headline cannot erase an official release's actual/consensus
+    values, while a newer official release can update them naturally.
+    """
+
+    fields = event.as_dict()
+    values = {
+        "event_type": fields["event_type"],
+        "scheduled_at": fields["scheduled_at"],
+        "actual_at": fields["actual_at"],
+        "actual_value": fields["actual_value"],
+        "consensus_value": fields["consensus_value"],
+        "surprise_value": fields["surprise_value"],
+        "event_unit": fields["unit"],
+        "affected_symbols_json": _json(sorted(set(affected_symbols))),
+        "source_quality_score": round(max(0.0, min(1.0, provenance)), 8),
+    }
+    # MySQL's COALESCE keeps existing structured values when this document is
+    # an ordinary follow-up article with no explicit release fields.
+    store.execute(
+        """UPDATE news_event_clusters SET
+               event_type=CASE WHEN ? <> 'other' THEN ? ELSE event_type END,
+               scheduled_at=COALESCE(?,scheduled_at), actual_at=COALESCE(?,actual_at),
+               actual_value=COALESCE(?,actual_value), consensus_value=COALESCE(?,consensus_value),
+               surprise_value=COALESCE(?,surprise_value), event_unit=COALESCE(?,event_unit),
+               affected_symbols_json=CASE WHEN ? <> '[]' THEN ? ELSE affected_symbols_json END,
+               source_quality_score=GREATEST(COALESCE(source_quality_score,0),?),
+               updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+        (
+            values["event_type"],
+            values["event_type"],
+            values["scheduled_at"],
+            values["actual_at"],
+            values["actual_value"],
+            values["consensus_value"],
+            values["surprise_value"],
+            values["event_unit"],
+            values["affected_symbols_json"],
+            values["affected_symbols_json"],
+            values["source_quality_score"],
+            event_id,
+        ),
+    )
+
+
 def _origin_key(title: str, domain: str, source: str) -> str:
     # An identical headline syndicated by many sites is one origin until its
     # lineage can prove otherwise. Different independently written headlines
@@ -543,11 +599,31 @@ def process_document(row: dict[str, Any], aliases: dict[str, list[str]] | None =
             published_at,
             now,
             provenance,
-            _json({"declared_source": row.get("source"), "canonical_domain": domain}),
+            _json(
+                {
+                    "declared_source": row.get("source"),
+                    "canonical_domain": domain,
+                    "source_tier": tier,
+                    "provenance_score": provenance,
+                }
+            ),
         ),
     )
     aliases = aliases or _instrument_aliases()
     entity_results = assess_entities(title, classify_event_type(title), aliases)
+    structured = extract_structured_event(
+        title,
+        published_at=published_at,
+        source=str(row.get("source") or ""),
+        affected_symbols=[item.symbol for item in entity_results],
+    )
+    _update_structured_event(
+        event_id,
+        structured,
+        published_at=published_at,
+        provenance=provenance,
+        affected_symbols=[item.symbol for item in entity_results],
+    )
     claim = extract_claim(title, [item.entity_name for item in entity_results])
     store.execute(
         """INSERT IGNORE INTO news_claims(
@@ -595,10 +671,29 @@ def process_document(row: dict[str, Any], aliases: dict[str, list[str]] | None =
         "UPDATE news_event_clusters SET last_seen_at=GREATEST(last_seen_at,?),updated_at=CURRENT_TIMESTAMP WHERE id=?",
         (published_at, event_id),
     )
+    # Keep a cheap, queryable confirmation count alongside the detailed
+    # evidence calculation.  The count is deliberately based on distinct
+    # source domains, not article count, so syndicated copies do not inflate
+    # confidence.
+    store.execute(
+        """UPDATE news_event_clusters c SET confirmation_count=(
+               SELECT COUNT(DISTINCT COALESCE(source_domain,origin_key))
+               FROM news_documents d WHERE d.event_id=c.id
+           ) WHERE c.id=?""",
+        (event_id,),
+    )
     return event_id
 
 
 def _event_evidence(event_id: int) -> dict[str, Any]:
+    cluster_rows = store.query(
+        """SELECT event_type,scheduled_at,actual_at,actual_value,consensus_value,
+                  surprise_value,event_unit,affected_symbols_json,source_quality_score,
+                  confirmation_count
+           FROM news_event_clusters WHERE id=?""",
+        (event_id,),
+    )
+    cluster = dict(cluster_rows[0]) if cluster_rows else {}
     documents = [
         dict(row)
         for row in store.query(
@@ -636,6 +731,7 @@ def _event_evidence(event_id: int) -> dict[str, Any]:
     if contradictions:
         truth *= 0.55
     return {
+        "structured": cluster,
         "documents": documents,
         "claims": claims,
         "entities": entities,
@@ -854,8 +950,16 @@ def assess_event(event_id: int, now: int | None = None) -> int:
         (_number(row.get("impact_confidence")) for row in evidence["entities"]), default=0.0
     )
     impact_ready = entity_ready and max_impact >= 0.65
+    structured = evidence.get("structured", {})
     has_numeric_claims = any(row.get("numeric_value") is not None for row in evidence["claims"])
-    numeric_validated = not has_numeric_claims or evidence["primary"] or evidence["origin_count"] >= 2
+    has_structured_release = (
+        structured.get("actual_value") is not None or structured.get("consensus_value") is not None
+    )
+    numeric_validated = (
+        not (has_numeric_claims or has_structured_release)
+        or evidence["primary"]
+        or evidence["origin_count"] >= 2
+    )
     fresh = now - int(event["last_seen_at"]) <= MAX_EVENT_AGE_SECONDS
 
     rounds = [
@@ -1054,7 +1158,14 @@ def assess_event(event_id: int, now: int | None = None) -> int:
         )
 
     _record_rounds(event_id, rounds, now)
-    quality = 0.35 * evidence["truth"] + 0.30 * max_impact + 0.20 * min(1.0, evidence["origin_count"] / 2) + 0.15 * (1.0 if fresh else 0.0)
+    source_quality = _number(structured.get("source_quality_score"), 0.0)
+    quality = (
+        0.30 * evidence["truth"]
+        + 0.25 * max_impact
+        + 0.20 * min(1.0, evidence["origin_count"] / 2)
+        + 0.10 * source_quality
+        + 0.15 * (1.0 if fresh else 0.0)
+    )
     store.execute(
         """UPDATE news_event_clusters SET state=?,revision=revision+1,
                independent_origins=?,contradiction_count=?,quality_score=?,updated_at=CURRENT_TIMESTAMP

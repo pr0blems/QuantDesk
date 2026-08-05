@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any
 
-from . import binance_client, news_intelligence, store
+from . import binance_client, data_quality, news_intelligence, store
 
 MODEL_KEY = "battle-ensemble"
 MODEL_VERSION = 1
@@ -51,6 +51,20 @@ def _latest(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return rows[-1] if rows else {}
 
 
+def _timestamp_ms(value: Any, reference_ms: int | None = None) -> int:
+    """Normalize API seconds/milliseconds without allowing future timestamps."""
+
+    parsed = _number(value)
+    if parsed <= 0:
+        return 0
+    # Production timestamps are epoch milliseconds. Synthetic/legacy fixtures
+    # can use a smaller millisecond clock, so only promote seconds when the
+    # reference clock is clearly a live epoch-millisecond value.
+    if parsed < 10**12 and (reference_ms or 0) >= 10**12:
+        return int(parsed * 1_000)
+    return int(parsed)
+
+
 def build_feature_vector(
     *,
     positioning: dict[str, Any],
@@ -86,9 +100,9 @@ def build_feature_vector(
         (int(up_count) - int(down_count)) / total_flashes if total_flashes else 0.0
     )
     flash_activity = min(1.0, total_flashes / 120.0)
-    received_at = int(micro.get("received_at") or 0)
+    received_at = _timestamp_ms(micro.get("received_at"), now_ms)
     micro_age_ms = max(0, now_ms - received_at) if received_at else 10**12
-    positioning_at = int(positioning.get("snapshot_at_ms") or 0)
+    positioning_at = _timestamp_ms(positioning.get("snapshot_at_ms"), now_ms)
     positioning_age_ms = max(0, now_ms - positioning_at) if positioning_at else 10**12
     depth_levels = max(0, int(micro.get("depth_levels") or 0))
 
@@ -102,6 +116,30 @@ def build_feature_vector(
     available_endpoints = sum(
         bool(endpoint_quality.get(name)) for name in ("open_interest", "account_ratio", "taker")
     )
+    micro_quality = micro.get("quality_json")
+    if isinstance(micro_quality, str):
+        try:
+            micro_quality = json.loads(micro_quality)
+        except (TypeError, ValueError):
+            micro_quality = {}
+    micro_quality = micro_quality if isinstance(micro_quality, dict) else {}
+    coverage_ratio = _number(micro_quality.get("coverage_ratio"), 0.0)
+    if not micro_quality:
+        # Legacy rows predate explicit coverage telemetry; retain their quality
+        # semantics while new snapshots carry a strict ratio.
+        coverage_ratio = 1.0
+    elif coverage_ratio <= 0:
+        coverage_ratio = sum(
+            micro.get(name) is not None
+            for name in ("mid_price", "spread_bps", "book_imbalance", "aggressive_buy_ratio")
+        ) / 4
+    micro_latency_ms = _optional_number(micro_quality.get("latency_ms"))
+    positioning_source_ms = _timestamp_ms(positioning.get("source_timestamp_ms"), now_ms)
+    positioning_latency_ms = (
+        max(0, positioning_at - positioning_source_ms)
+        if positioning_at and positioning_source_ms
+        else None
+    )
     quality_parts = [
         1.0 if micro_age_ms <= 15_000 else 0.0,
         available_endpoints / 3.0,
@@ -109,6 +147,8 @@ def build_feature_vector(
         1.0 if mark_price > 0 else 0.0,
         1.0 if depth_levels >= 5 else 0.0,
     ]
+    if micro_quality:
+        quality_parts.append(min(1.0, max(0.0, coverage_ratio)))
     quality = sum(quality_parts) / len(quality_parts)
 
     features = {
@@ -133,8 +173,12 @@ def build_feature_vector(
         "trend_1h": _clip(_number(scores.get("1h")) / 100.0),
         "trend_4h": _clip(_number(scores.get("4h")) / 100.0),
         "micro_age_ms": micro_age_ms,
+        "micro_latency_ms": micro_latency_ms,
+        "micro_coverage_ratio": round(coverage_ratio, 6),
         "positioning_age_ms": positioning_age_ms,
-        "source_timestamp_ms": int(positioning.get("source_timestamp_ms") or 0),
+        "positioning_latency_ms": positioning_latency_ms,
+        "positioning_coverage_ratio": round(available_endpoints / 3.0, 6),
+        "source_timestamp_ms": _timestamp_ms(positioning.get("source_timestamp_ms")),
         "data_quality": round(quality, 6),
     }
     return features, quality
@@ -193,8 +237,15 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
     raw_score = sum(contributions.values()) + crowding_penalty + funding_penalty
     score = _clip(raw_score)
 
+    gate_ok, gate_reason = data_quality.quality_gate(
+        quality,
+        age_ms=int(_number(features.get("micro_age_ms"), 10**12)),
+        max_age_ms=15_000,
+        coverage_ratio=_number(features.get("micro_coverage_ratio"), 1.0),
+        minimum_score=0.75,
+    )
     insufficient = (
-        quality < 0.70
+        not gate_ok
         or _number(features.get("micro_age_ms"), 10**12) > 15_000
         or _number(features.get("positioning_age_ms"), 10**12) > 10 * 60 * 1_000
     )
@@ -232,6 +283,7 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
         reason_codes.append("CROWDING_RISK")
     if insufficient:
         reason_codes.insert(0, "DATA_INSUFFICIENT")
+        reason_codes.insert(1, f"QUALITY_{gate_reason.upper()}")
     components = {
         **{name: round(value, 6) for name, value in contributions.items()},
         "account_crowding_penalty": round(crowding_penalty, 6),
@@ -313,6 +365,12 @@ def _positioning_snapshot(symbol: str, now_ms: int, mark_price: Any, funding: An
         top_position.get("longShortRatio")
     )
     quality["errors"] = errors
+    quality["coverage_ratio"] = round(
+        sum(bool(quality.get(name)) for name in ("open_interest", "account_ratio", "taker")) / 3,
+        6,
+    )
+    quality["source_age_ms"] = max(0, now_ms - source_timestamp) if source_timestamp else None
+    quality["latency_ms"] = 0
     return {
         "symbol": symbol,
         "snapshot_at_ms": now_ms - now_ms % (COLLECTION_SECONDS * 1_000),

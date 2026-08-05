@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from quantdesk import (
     battle,
+    data_quality,
     exchange_sync,
     news,
     news_intelligence,
@@ -32,6 +33,8 @@ WORKER_ROLES: dict[str, tuple[tuple[str, WorkerTarget], ...]] = {
         ("binance-environment", exchange_sync.public_sync_loop),
         ("battle-positioning", battle.positioning_loop),
         ("market-stream", realtime.market_stream_loop),
+        ("binance-derivatives", realtime.derivatives_snapshot_loop),
+        ("data-quality-archive", data_quality.archive_loop),
         ("price", market_engine.price_loop),
         ("ticker", market_engine.ticker_loop),
         ("kline", market_engine.kline_loop),

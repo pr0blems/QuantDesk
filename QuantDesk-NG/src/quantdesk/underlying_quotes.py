@@ -186,6 +186,10 @@ def parse_chart_payload(
         "received_at_ms": now_ms,
         "quality_json": {
             "age_ms": age_ms,
+            "latency_ms": max(0, now_ms - market_time_ms) if market_time_ms else None,
+            "coverage_ratio": sum(
+                value is not None for value in (price, previous_close, change_pct)
+            ) / 3,
             "timezone": meta.get("exchangeTimezoneName"),
             "data_granularity": meta.get("dataGranularity"),
             "price_source": "latest_chart_bar" if latest_price is not None else "regular_market",
@@ -336,6 +340,9 @@ def collect_quote_cycle(stop_event=None) -> dict[str, Any]:
             "quality_json": {
                 "error": errors.get(mapping.quote_symbol or ""),
                 "mapping_only": mapping.quote_symbol is None,
+                "age_ms": None,
+                "latency_ms": None,
+                "coverage_ratio": 0.0,
             },
         }
         quote = quotes.get(mapping.quote_symbol or "")

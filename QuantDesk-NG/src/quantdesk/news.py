@@ -47,6 +47,23 @@ RSS_ALLOWED_HOSTS = frozenset(
         "www.marketbeat.com",
         "www.newsbtc.com",
         "www.theblock.co",
+        # Official primary sources.  Keeping these in the RSS allowlist makes
+        # redirects and future admin-managed feeds subject to the same SSRF
+        # protection as commercial sources.
+        "sec.gov",
+        "www.sec.gov",
+        "federalreserve.gov",
+        "www.federalreserve.gov",
+        "bls.gov",
+        "www.bls.gov",
+        "bea.gov",
+        "www.bea.gov",
+        "eia.gov",
+        "www.eia.gov",
+        "hkex.com.hk",
+        "www.hkex.com.hk",
+        "hkexnews.hk",
+        "www.hkexnews.hk",
     }
 )
 TRANSLATION_ALLOWED_HOSTS = frozenset(

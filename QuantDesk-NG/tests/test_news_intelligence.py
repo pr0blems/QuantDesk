@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from quantdesk import battle, news, news_intelligence
+from quantdesk.macro_events import classify_official_event, extract_structured_event
 
 
 def test_legacy_sentiment_uses_token_boundaries() -> None:
@@ -69,6 +70,31 @@ def test_source_tiers_prefer_primary_evidence() -> None:
     assert news_intelligence.source_tier("SEC Filings", "https://www.sec.gov/a")[0] == "S"
     assert news_intelligence.source_tier("Reuters", "https://www.reuters.com/a")[0] == "A"
     assert news_intelligence.source_tier("Blog", "https://www.coindesk.com/a")[0] == "C"
+
+
+def test_structured_macro_event_requires_explicit_labels() -> None:
+    event = extract_structured_event(
+        "CPI release 2026-08-06 12:30 UTC actual: 3.1% consensus: 3.0%",
+        published_at=1_754_482_200,
+        source="BLS Latest Releases",
+        affected_symbols=["BTCUSDT", "btcusdt"],
+    )
+    assert event.event_type == "macro_release"
+    assert event.actual_value == 3.1
+    assert event.consensus_value == 3.0
+    assert event.surprise_value == pytest.approx(0.1)
+    assert event.actual_at == 1_754_482_200
+    assert event.scheduled_at is not None
+    assert event.affected_symbols == ("BTCUSDT",)
+
+    unlabeled = extract_structured_event("CPI rises 3.1%", source="BLS")
+    assert unlabeled.actual_value is None
+    assert unlabeled.consensus_value is None
+
+
+def test_official_event_classifier_distinguishes_energy_and_policy() -> None:
+    assert classify_official_event("FOMC statement: target range unchanged") == "monetary_policy"
+    assert classify_official_event("Petroleum Status Report", source="EIA") == "energy_release"
 
 
 def test_title_clustering_is_broad_but_not_unrelated() -> None:

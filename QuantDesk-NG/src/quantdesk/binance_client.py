@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
+from threading import Lock
 from typing import Any
 
 FAPI = "https://fapi.binance.com"
@@ -17,6 +19,93 @@ PAPI = "https://papi.binance.com"
 
 _ALLOWED_BINANCE_HOSTS = frozenset({"fapi.binance.com", "papi.binance.com"})
 UA = {"User-Agent": "Mozilla/5.0 (quantdesk-local)"}
+
+
+class _BinanceRestGovernor:
+    """Process-wide IP governor shared by every Binance REST caller.
+
+    Binance applies request weight and temporary bans at the IP level.  Keeping
+    this state in the client (rather than in each worker) prevents the market,
+    battle and recovery collectors from independently exhausting the quota.
+    The governor is deliberately conservative and honours Retry-After on 429
+    and 418 responses.
+    """
+
+    def __init__(self, rate_per_second: float = 24.0, burst: float = 48.0) -> None:
+        self.rate_per_second = max(1.0, float(rate_per_second))
+        self.capacity = max(1.0, float(burst))
+        self.tokens = self.capacity
+        self.updated_at = time.monotonic()
+        self.blocked_until = 0.0
+        self.consecutive_throttles = 0
+        self.last_used_weight: int | None = None
+        self.lock = Lock()
+
+    def acquire(self, weight: int = 1) -> None:
+        cost = max(1.0, float(weight))
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                elapsed = max(0.0, now - self.updated_at)
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate_per_second)
+                self.updated_at = now
+                wait_for = max(0.0, self.blocked_until - now)
+                if wait_for <= 0 and self.tokens >= cost:
+                    self.tokens -= cost
+                    return
+                if wait_for <= 0:
+                    wait_for = (cost - self.tokens) / self.rate_per_second
+            time.sleep(min(max(wait_for, 0.01), 60.0))
+
+    def response(self, headers: Mapping[str, Any] | None = None) -> None:
+        if not headers:
+            return
+        for key, value in headers.items():
+            if str(key).lower() == "x-mbx-used-weight-1m":
+                try:
+                    self.last_used_weight = int(value)
+                except (TypeError, ValueError):
+                    pass
+
+    @staticmethod
+    def retry_after(headers: Mapping[str, Any] | None) -> float | None:
+        if not headers:
+            return None
+        for key, value in headers.items():
+            if str(key).lower() == "retry-after":
+                try:
+                    return max(0.0, float(value))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def throttled(self, retry_after: float | None = None) -> None:
+        with self.lock:
+            self.consecutive_throttles += 1
+            delay = retry_after if retry_after is not None else min(
+                60.0, 2.0 ** min(self.consecutive_throttles, 6)
+            )
+            self.blocked_until = max(self.blocked_until, time.monotonic() + delay)
+
+    def recovered(self) -> None:
+        with self.lock:
+            self.consecutive_throttles = 0
+
+
+_REST_GOVERNOR = _BinanceRestGovernor()
+
+
+def _request_weight(url: str) -> int:
+    """Approximate Binance request weight for the endpoints used by QuantDesk."""
+
+    path = urllib.parse.urlsplit(url).path
+    if path.endswith("/depth"):
+        return 5
+    if "/futures/data/" in path or path.endswith("/allForceOrders"):
+        return 5
+    if path.endswith("/klines") or path.endswith("/ticker/24hr"):
+        return 2
+    return 1
 
 
 def _validate_binance_url(url: str) -> str:
@@ -93,6 +182,7 @@ def _get(
     request_headers.update(headers or {})
     last_error = "request did not run"
     for attempt in range(retries):
+        _REST_GOVERNOR.acquire(_request_weight(target))
         try:
             # Safe because target was restricted to exact Binance HTTPS origins above.
             request = urllib.request.Request(  # noqa: S310
@@ -101,14 +191,31 @@ def _get(
                 method="GET",
             )
             with _BINANCE_OPENER.open(request, timeout=timeout) as response:  # noqa: S310
+                _REST_GOVERNOR.response(getattr(response, "headers", None))
+                _REST_GOVERNOR.recovered()
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            _REST_GOVERNOR.response(exc.headers)
             body = exc.read().decode("utf-8", errors="replace")[:200]
             last_error = f"HTTP {exc.code}: {body}"
             if exc.code not in {418, 429}:
                 break
+            retry_after = _REST_GOVERNOR.retry_after(exc.headers)
+            # Some Binance gateways put the ban deadline only in the JSON
+            # body, not in Retry-After. Parse it so concurrent workers do not
+            # retry during the ban and extend the IP block.
+            if exc.code == 418:
+                match = re.search(r"banned\s+until\s+(\d{10,})", body, re.IGNORECASE)
+                if match:
+                    try:
+                        deadline_ms = int(match.group(1))
+                        body_delay = max(0.0, deadline_ms / 1_000.0 - time.time())
+                        retry_after = max(retry_after or 0.0, body_delay)
+                    except ValueError:
+                        pass
+            _REST_GOVERNOR.throttled(retry_after)
             if attempt + 1 < retries:
-                time.sleep(backoff * (attempt + 2))
+                time.sleep(max(backoff * (attempt + 2), retry_after or 0.0))
         except (
             json.JSONDecodeError,
             OSError,
@@ -147,6 +254,89 @@ def fetch_tickers() -> Any:
     """Return all futures 24-hour ticker rows in one request."""
 
     return _get(f"{FAPI}/fapi/v1/ticker/24hr", timeout=20)
+
+
+def fetch_basis(
+    symbol: str,
+    *,
+    period: str = "5m",
+    contract_type: str = "PERPETUAL",
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """Fetch the public USD-M basis curve for one contract.
+
+    The endpoint is intentionally kept public and unsigned so it can run in a
+    market worker without exposing account credentials.  Rows include Binance
+    ``basis`` and ``annualizedBasisRate`` fields when available.
+    """
+
+    if period not in {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}:
+        raise ValueError("unsupported Binance basis period")
+    query = urllib.parse.urlencode(
+        {
+            # The public Basis endpoint calls this field ``pair`` (unlike
+            # most per-contract futures endpoints which use ``symbol``).
+            "pair": symbol.upper(),
+            "contractType": contract_type.upper(),
+            "period": period,
+            "limit": min(500, max(1, int(limit))),
+        }
+    )
+    data = _get(f"{FAPI}/futures/data/basis?{query}", timeout=15, retries=2)
+    if not isinstance(data, list):
+        raise RuntimeError("Binance basis response is invalid")
+    return [row for row in data if isinstance(row, dict)]
+
+
+def fetch_adl_risk(symbol: str) -> list[dict[str, Any]]:
+    """Fetch the current public ADL risk rating for a contract.
+
+    ``symbolAdlRisk`` is the current Futures endpoint.  The older
+    ``adlQuantile`` route is retained as a compatibility fallback for regions
+    where the newer route has not been rolled out yet.
+    """
+
+    query = urllib.parse.urlencode({"symbol": symbol.upper()})
+    try:
+        data = _get(f"{FAPI}/fapi/v1/symbolAdlRisk?{query}", timeout=15, retries=2)
+    except RuntimeError as exc:
+        if "HTTP 404" not in str(exc):
+            raise
+        data = _get(f"{FAPI}/futures/data/adlQuantile?{query}", timeout=15, retries=2)
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise RuntimeError("Binance ADL risk response is invalid")
+    return [row for row in data if isinstance(row, dict)]
+
+
+def fetch_force_orders(
+    symbol: str | None = None,
+    *,
+    start_time_ms: int | None = None,
+    end_time_ms: int | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Fetch recent public liquidation orders (REST fallback for the stream)."""
+
+    parameters: dict[str, str | int] = {"limit": min(1000, max(1, int(limit)))}
+    if symbol:
+        parameters["symbol"] = symbol.upper()
+    if start_time_ms is not None:
+        parameters["startTime"] = int(start_time_ms)
+    if end_time_ms is not None:
+        parameters["endTime"] = int(end_time_ms)
+    query = urllib.parse.urlencode(parameters)
+    data = _get(f"{FAPI}/fapi/v1/allForceOrders?{query}", timeout=15, retries=2)
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise RuntimeError("Binance force-order response is invalid")
+    return [row for row in data if isinstance(row, dict)]
+
+
+# Name used by downstream collectors and older integrations.
+fetch_liquidation_orders = fetch_force_orders
 
 
 def fetch_open_interest(symbol: str) -> dict[str, Any]:

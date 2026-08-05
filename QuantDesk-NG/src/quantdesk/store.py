@@ -266,6 +266,56 @@ def collector_report(
         return
 
 
+def record_data_quality_event(
+    stream_key: str,
+    event_type: str,
+    *,
+    severity: str = "warning",
+    symbol: str | None = None,
+    event_time: int | None = None,
+    details: Mapping[str, Any] | None = None,
+) -> None:
+    """Best-effort append-only quality event used by all collectors.
+
+    ``event_time`` is bucketed to one minute and de-duplicated so a stale source
+    cannot flood the quality table on every polling cycle.
+    """
+
+    if severity not in {"info", "warning", "critical"}:
+        severity = "warning"
+    bucket = int(event_time or time.time())
+    if bucket > 10**12:
+        bucket //= 1_000
+    bucket -= bucket % 60
+    try:
+        execute(
+            """INSERT INTO market_data_quality_events(
+                       stream_key,symbol,event_type,severity,event_time,details_json,created_at)
+               SELECT ?,?,?,?,?,?,CURRENT_TIMESTAMP
+               WHERE NOT EXISTS(
+                 SELECT 1 FROM market_data_quality_events
+                  WHERE stream_key=? AND event_type=? AND severity=?
+                    AND ((symbol IS NULL AND ? IS NULL) OR symbol=?) AND event_time=?)""",
+            (
+                str(stream_key)[:64],
+                str(symbol)[:32] if symbol else None,
+                str(event_type)[:32],
+                severity,
+                bucket,
+                json.dumps(dict(details or {}), ensure_ascii=False),
+                str(stream_key)[:64],
+                str(event_type)[:32],
+                severity,
+                str(symbol)[:32] if symbol else None,
+                str(symbol)[:32] if symbol else None,
+                bucket,
+            ),
+        )
+    except Exception:
+        # Quality telemetry must never bring down a market collector.
+        return
+
+
 def admin_news_sources(default_sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Load enabled database-managed news sources, falling back before migration."""
 

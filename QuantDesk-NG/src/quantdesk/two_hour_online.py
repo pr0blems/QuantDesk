@@ -331,8 +331,11 @@ def compose_prediction(
     probability_up = min(1.0, max(0.0, float(probability_up)))
     event_probability = min(1.0, max(0.0, float(event_probability)))
     direction_confidence = max(probability_up, 1 - probability_up)
+    quality_score = min(1.0, max(0.0, float(quality_score)))
+    quality_ok = quality_score >= 0.75
     selected = (
         fresh
+        and quality_ok
         and event_candidate
         and event_probability >= selection.occurrence_threshold
         and direction_confidence >= selection.confidence_threshold
@@ -347,8 +350,8 @@ def compose_prediction(
         if selected
         else "neutral"
     )
-    state = "calibrated" if fresh else "data_insufficient"
-    if not fresh:
+    state = "calibrated" if fresh and quality_ok else "data_insufficient"
+    if not fresh or not quality_ok:
         long_probability, short_probability, neutral_probability = 0.1, 0.1, 0.8
     confidence = (
         min(direction_confidence, event_probability)
@@ -369,6 +372,8 @@ def compose_prediction(
     )
     if not fresh:
         reasons.insert(0, "DATA_INSUFFICIENT")
+    if not quality_ok:
+        reasons.insert(0, "QUALITY_GATE_ABSTAIN")
     barrier = min(500.0, max(20.0, float(barrier_bps)))
     return {
         "prediction_state": state,
@@ -389,7 +394,7 @@ def compose_prediction(
         "stop_bps": round(barrier, 6),
         "reason_codes": reasons,
         "selected": selected,
-        "quality_score": round(min(1.0, max(0.0, quality_score)), 6),
+        "quality_score": round(quality_score, 6),
     }
 
 
