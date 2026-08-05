@@ -1,0 +1,51 @@
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+*.egg-info/
+
+# Test and coverage output
+.codex-test-temp/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Build artifacts
+dist/
+build/
+*.exe
+
+# Runtime data and local credentials
+/config/*
+!/config/settings.json
+!/config/tradfi_symbols.json
+!/config/contract_annotations.json
+/data/*.db*
+/data/*.sqlite*
+/data/*.joblib
+/data/*.manifest.json
+/data/forward_eval/
+/src/data/
+reports/
+*.log
+*.tmp
+/config/api_keys.json
+
+# Machine-specific launchers and editor/OS metadata
+/autostart.vbs
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
