@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     # Finnhub is called only by the server. Never expose this token to static
     # JavaScript or accept an arbitrary upstream URL from a request.
     finnhub_api_key: SecretStr = SecretStr("")
+    finnhub_webhook_secret: SecretStr = SecretStr("")
     finnhub_base_url: str = "https://finnhub.io"
     finnhub_timeout_seconds: float = 5.0
     finnhub_market_status_cache_seconds: int = 30
@@ -176,6 +177,9 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "FINNHUB_MARKET_STATUS_STALE_SECONDS must be between the cache TTL and 3600"
             )
+        webhook_secret = self.finnhub_webhook_secret.get_secret_value()
+        if webhook_secret and not 16 <= len(webhook_secret) <= 256:
+            raise RuntimeError("FINNHUB_WEBHOOK_SECRET must contain 16 to 256 characters")
 
     @staticmethod
     def _validate_binance_origin(name: str, value: str, allowed_hosts: set[str]) -> None:

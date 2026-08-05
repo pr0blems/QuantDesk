@@ -11,7 +11,16 @@ from decimal import Decimal, InvalidOperation
 from threading import Lock
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -60,6 +69,8 @@ from .schemas import (
     BinancePerformanceOut,
     BinanceTradingState,
     DashboardPerformanceOut,
+    FinnhubWebhookAcceptedOut,
+    FinnhubWebhookStatusOut,
     HealthOut,
     LiveAccountArmRequest,
     LiveAccountCreateRequest,
@@ -798,13 +809,62 @@ def me(user: User = Depends(get_current_user)) -> UserOut:
 def us_market_status(
     request: Request,
     response: Response,
-    _: User = Depends(get_current_user),
 ) -> UsMarketStatusOut:
     """Return Finnhub's official US trading-session state through our server."""
 
-    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Cache-Control"] = "public, max-age=5, stale-if-error=60"
     result = request.app.state.finnhub_market_status_service.status()
     return UsMarketStatusOut(**asdict(result))
+
+
+@router.get(
+    "/integrations/finnhub/webhook",
+    response_model=FinnhubWebhookStatusOut,
+)
+def finnhub_webhook_status(request: Request, response: Response) -> FinnhubWebhookStatusOut:
+    """Public readiness probe; callbacks themselves must use authenticated POST."""
+
+    response.headers["Cache-Control"] = "no-store"
+    snapshot = request.app.state.finnhub_webhook_receiver.snapshot()
+    return FinnhubWebhookStatusOut(
+        status="ready" if snapshot.configured else "not_configured",
+        configured=snapshot.configured,
+        received_events=snapshot.received_events,
+        last_received_at=snapshot.last_received_at,
+    )
+
+
+@router.post(
+    "/integrations/finnhub/webhook",
+    response_model=FinnhubWebhookAcceptedOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def receive_finnhub_webhook(
+    request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
+) -> FinnhubWebhookAcceptedOut:
+    """Authenticate and acknowledge a Finnhub event before deferred processing."""
+
+    response.headers["Cache-Control"] = "no-store"
+    receiver = request.app.state.finnhub_webhook_receiver
+    if not receiver.configured:
+        raise HTTPException(status_code=503, detail="Finnhub webhook is not configured")
+    if not receiver.authenticated(request.headers.get("X-Finnhub-Secret")):
+        raise HTTPException(status_code=401, detail="invalid webhook authentication")
+    body = await request.body()
+    if len(body) > 64 * 1024:
+        raise HTTPException(status_code=413, detail="webhook body too large")
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="invalid webhook JSON") from None
+    if not isinstance(payload, (dict, list)):
+        raise HTTPException(status_code=400, detail="invalid webhook event")
+    if isinstance(payload, list) and len(payload) > 1_000:
+        raise HTTPException(status_code=413, detail="too many webhook events")
+    background_tasks.add_task(receiver.record, body)
+    return FinnhubWebhookAcceptedOut()
 
 
 @router.get("/me/binance-account", response_model=BinanceAccountSummary)

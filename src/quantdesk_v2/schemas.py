@@ -114,6 +114,18 @@ class UsMarketStatusOut(BaseModel):
     error_category: str | None = None
 
 
+class FinnhubWebhookStatusOut(BaseModel):
+    status: Literal["ready", "not_configured"]
+    configured: bool
+    method: Literal["POST"] = "POST"
+    received_events: int = 0
+    last_received_at: datetime | None = None
+
+
+class FinnhubWebhookAcceptedOut(BaseModel):
+    accepted: Literal[True] = True
+
+
 class AdminAlertRulesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

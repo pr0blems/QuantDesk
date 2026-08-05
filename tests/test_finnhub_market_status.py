@@ -10,7 +10,6 @@ from pydantic import SecretStr
 
 from quantdesk_v2 import finnhub
 from quantdesk_v2.config import Settings
-from quantdesk_v2.dependencies import get_current_user
 from quantdesk_v2.finnhub import (
     FinnhubClient,
     FinnhubClientError,
@@ -125,7 +124,7 @@ def test_unconfigured_service_never_calls_transport() -> None:
     assert result.error_category == "not_configured"
 
 
-def test_authenticated_us_market_status_route() -> None:
+def test_public_us_market_status_route() -> None:
     settings = Settings(
         _env_file=None,
         app_env="test",
@@ -137,7 +136,6 @@ def test_authenticated_us_market_status_route() -> None:
         app_allowed_origins="http://testserver",
     )
     app = create_app(settings)
-    app.dependency_overrides[get_current_user] = lambda: object()
 
     class FakeService:
         def status(self) -> FinnhubMarketStatusResult:
@@ -157,6 +155,73 @@ def test_authenticated_us_market_status_route() -> None:
         result = client.get("/api/v2/market/us/status")
 
     assert result.status_code == 200
-    assert result.headers["cache-control"] == "private, no-store"
+    assert result.headers["cache-control"] == "public, max-age=5, stale-if-error=60"
     assert result.json()["session"] == "regular"
     assert result.json()["is_open"] is True
+
+
+def test_finnhub_webhook_readiness_and_authenticated_post() -> None:
+    secret = "new-webhook-secret-at-least-16"
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        database_url="mysql+pymysql://test:test@127.0.0.1/quantdesk_test_unavailable",
+        jwt_secret=SecretStr("test-jwt-secret-that-is-long-enough-123456"),
+        credential_master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        app_cookie_secure=False,
+        app_allowed_hosts="testserver",
+        app_allowed_origins="http://testserver",
+        finnhub_webhook_secret=SecretStr(secret),
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        ready = client.get("/api/v2/integrations/finnhub/webhook")
+        missing = client.post(
+            "/api/v2/integrations/finnhub/webhook",
+            json={"type": "test"},
+        )
+        invalid = client.post(
+            "/api/v2/integrations/finnhub/webhook",
+            headers={"X-Finnhub-Secret": "incorrect-secret-value"},
+            json={"type": "test"},
+        )
+        accepted = client.post(
+            "/api/v2/integrations/finnhub/webhook",
+            headers={"X-Finnhub-Secret": secret},
+            json={"type": "test", "data": []},
+        )
+        after = client.get("/api/v2/integrations/finnhub/webhook")
+
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ready"
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+    assert accepted.status_code == 202
+    assert accepted.json() == {"accepted": True}
+    assert after.json()["received_events"] == 1
+    assert after.json()["last_received_at"] is not None
+
+
+def test_unconfigured_webhook_is_visible_but_rejects_posts() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        database_url="mysql+pymysql://test:test@127.0.0.1/quantdesk_test_unavailable",
+        jwt_secret=SecretStr("test-jwt-secret-that-is-long-enough-123456"),
+        credential_master_key=SecretStr(Fernet.generate_key().decode("ascii")),
+        app_cookie_secure=False,
+        app_allowed_hosts="testserver",
+        app_allowed_origins="http://testserver",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        ready = client.get("/api/v2/integrations/finnhub/webhook")
+        rejected = client.post(
+            "/api/v2/integrations/finnhub/webhook",
+            headers={"X-Finnhub-Secret": "some-long-secret-value"},
+            json={"type": "test"},
+        )
+
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "not_configured"
+    assert rejected.status_code == 503

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import time
 from collections.abc import Callable
@@ -11,6 +13,7 @@ from typing import Any, Literal
 from urllib.parse import urlencode, urlsplit
 
 MAX_RESPONSE_BYTES = 64 * 1024
+MAX_WEBHOOK_BYTES = 64 * 1024
 MARKET_STATUS_PATH = "/api/v1/stock/market-status"
 MarketSession = Literal["pre-market", "regular", "post-market"]
 Transport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
@@ -250,3 +253,50 @@ class FinnhubMarketStatusService:
             stale=stale,
             error_category=error_category,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class FinnhubWebhookSnapshot:
+    configured: bool
+    received_events: int
+    last_received_at: datetime | None
+
+
+class FinnhubWebhookReceiver:
+    """Authenticate Finnhub callbacks and retain only operational metadata."""
+
+    def __init__(self, secret: str) -> None:
+        self._secret = secret
+        self._lock = Lock()
+        self._received_events = 0
+        self._last_received_at: datetime | None = None
+        self._last_payload_hash: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._secret)
+
+    def authenticated(self, supplied: str | None) -> bool:
+        if not self.configured or supplied is None:
+            return False
+        return hmac.compare_digest(
+            self._secret.encode("utf-8"),
+            supplied.encode("utf-8"),
+        )
+
+    def record(self, body: bytes) -> None:
+        """Record no payload content; only count, time, and a one-way digest."""
+
+        digest = hashlib.sha256(body).hexdigest()
+        with self._lock:
+            self._received_events += 1
+            self._last_received_at = datetime.now(UTC)
+            self._last_payload_hash = digest
+
+    def snapshot(self) -> FinnhubWebhookSnapshot:
+        with self._lock:
+            return FinnhubWebhookSnapshot(
+                configured=self.configured,
+                received_events=self._received_events,
+                last_received_at=self._last_received_at,
+            )
