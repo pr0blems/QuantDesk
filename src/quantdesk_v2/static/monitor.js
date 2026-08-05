@@ -12,6 +12,7 @@ class ContractMonitor extends HTMLElement {
       watchlist: new Set(),
       lastAlertId: 0,
       modal: { symbol: null, tf: "1h", opportunity: null },
+      matrixSort: { key: "ai", direction: "desc" },
       sound: true,
       notifyOn: false,
     };
@@ -32,7 +33,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-2">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-11">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -67,7 +68,9 @@ class ContractMonitor extends HTMLElement {
             <div class="panel-title">
               <span>合约监控 <em id="sym-count"></em></span>
               <div class="filters">
-                <button id="btn-import-watchlist" class="import-watchlist" type="button">导入币安自选</button>
+                <button id="btn-import-watchlist" class="watchlist-action import-watchlist" type="button">维护自选</button>
+                <button id="btn-clear-watchlist" class="watchlist-action clear-watchlist" type="button">清除自选</button>
+                <button id="btn-sync-positions" class="watchlist-action sync-positions" type="button">同步持仓到监控</button>
                 <input id="search" aria-label="搜索合约" placeholder="搜索…">
                 <select id="filter" aria-label="筛选合约">
                   <option value="all">全部</option>
@@ -75,12 +78,6 @@ class ContractMonitor extends HTMLElement {
                   <option value="long">多头机会</option>
                   <option value="short">空头机会</option>
                   <option value="neutral">中性观察</option>
-                </select>
-                <select id="sort" aria-label="合约排序">
-                  <option value="opportunity">按机会质量</option>
-                  <option value="score">按|评分|</option>
-                  <option value="pct">按涨跌幅</option>
-                  <option value="alpha">按代码</option>
                 </select>
               </div>
             </div>
@@ -147,10 +144,10 @@ class ContractMonitor extends HTMLElement {
       <div id="watchlist-import" class="modal hidden">
         <div class="modal-box watchlist-import-box" role="dialog" aria-modal="true" aria-labelledby="watchlist-import-title">
           <div class="modal-head">
-            <div><strong id="watchlist-import-title" class="modal-symbol">导入币安自选</strong></div>
+            <div><strong id="watchlist-import-title" class="modal-symbol">维护本地自选</strong></div>
             <button id="watchlist-import-close" type="button">关闭</button>
           </div>
-          <p class="watchlist-import-note">币安官方 API 不开放账户自选读取。请从币安自选中复制合约代码粘贴到这里，支持代码、空格、逗号或换行分隔；输入 <b>AAPL</b> 和 <b>AAPLUSDT</b> 均可。</p>
+          <p class="watchlist-import-note">币安官方 API 不开放账户自选读取。已连接账户会在持仓或未成交订单刷新成功后，自动将相关合约加入本地自选并置顶；其他合约可从币安自选中复制代码粘贴到这里，支持代码、空格、逗号或换行分隔。</p>
           <label class="watchlist-import-field" for="watchlist-import-input">合约代码</label>
           <textarea id="watchlist-import-input" rows="8" spellcheck="false" placeholder="例如：&#10;AAPL&#10;TSLAUSDT&#10;NVDA, SNOW"></textarea>
           <div id="watchlist-import-preview" class="watchlist-import-preview"></div>
@@ -370,11 +367,22 @@ class ContractMonitor extends HTMLElement {
     ["us-search", "us-sort"].forEach((id) => {
       this.q(`#${id}`).addEventListener("input", () => this.renderUsGrid());
     });
-    ["search", "filter", "sort"].forEach((id) => {
+    ["search", "filter"].forEach((id) => {
       this.q(`#${id}`).addEventListener("input", () => this.renderGrid());
+    });
+    this.q("#contract-grid").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-matrix-sort]");
+      if (!button) return;
+      const key = button.dataset.matrixSort;
+      this.state.matrixSort.direction = this.state.matrixSort.key === key
+        && this.state.matrixSort.direction === "desc" ? "asc" : "desc";
+      this.state.matrixSort.key = key;
+      this.renderGrid();
     });
     this.q("#btn-refresh").addEventListener("click", () => this.refreshAll());
     this.q("#btn-import-watchlist").addEventListener("click", () => this.openWatchlistImport());
+    this.q("#btn-clear-watchlist").addEventListener("click", () => this.clearWatchlist());
+    this.q("#btn-sync-positions").addEventListener("click", () => this.syncPositionsToMonitor());
     this.q("#btn-sound").addEventListener("click", (event) => {
       this.state.sound = !this.state.sound;
       event.currentTarget.classList.toggle("on", this.state.sound);
@@ -460,8 +468,48 @@ class ContractMonitor extends HTMLElement {
   }
 
   updateWatchlistUi() {
-    const button = this.q("#btn-import-watchlist");
-    if (button) button.textContent = `导入币安自选 · ${this.state.watchlist.size}`;
+    const importButton = this.q("#btn-import-watchlist");
+    if (importButton) importButton.textContent = `维护自选 · ${this.state.watchlist.size}`;
+    const clearButton = this.q("#btn-clear-watchlist");
+    if (!clearButton) return;
+    clearButton.disabled = this.state.watchlist.size === 0;
+    clearButton.textContent = `清除自选 · ${this.state.watchlist.size}`;
+  }
+
+  async clearWatchlist() {
+    const count = this.state.watchlist.size;
+    if (!count || !window.confirm(`确认清除全部 ${count} 个自选合约？`)) return;
+    try {
+      await this.saveWatchlist(new Set());
+      this.showError("");
+    } catch (error) {
+      this.showError(error.message || "清除自选失败，请稍后重试");
+    }
+  }
+
+  async syncPositionsToMonitor() {
+    if (typeof window.quantdeskApi !== "function") return;
+    const button = this.q("#btn-sync-positions");
+    const initialLabel = "同步持仓到监控";
+    button.disabled = true;
+    button.textContent = "正在同步…";
+    try {
+      const account = await window.quantdeskApi("/api/v2/me/binance-account");
+      if (!account.configured) throw new Error("请先在账户页面连接币安 API");
+      if (!account.connected) throw new Error("币安账户连接失败，请检查 API 权限与网络");
+      const positions = Array.isArray(account.positions) ? account.positions : [];
+      await this.pollOverview();
+      button.textContent = positions.length ? `已同步 ${positions.length} 个持仓` : "当前无持仓";
+      this.showError("");
+      window.setTimeout(() => {
+        button.textContent = initialLabel;
+        button.disabled = false;
+      }, 2200);
+    } catch (error) {
+      button.textContent = initialLabel;
+      button.disabled = false;
+      this.showError(error.message || "持仓合约同步失败，请稍后重试");
+    }
   }
 
   openWatchlistImport() {
@@ -571,6 +619,63 @@ class ContractMonitor extends HTMLElement {
     return "中性观望";
   }
 
+  aiConclusion(item) {
+    const battle = item.battle?.["5m"];
+    if (!battle || battle.state === "data_insufficient" || battle.stale) {
+      return { tone: "neutral", label: "数据不足", confidence: null, rank: 0, edge: 0 };
+    }
+    const tone = ["long", "short"].includes(battle.result) ? battle.result : "neutral";
+    const confidence = Number(battle.confidence_score);
+    return {
+      tone,
+      label: { long: "看多", short: "看空", neutral: "观望" }[tone],
+      confidence: Number.isFinite(confidence) ? Math.round(Math.max(0, Math.min(1, confidence)) * 100) : null,
+      rank: { long: 3, neutral: 2, short: 1 }[tone],
+      edge: Number(battle.long || 0) - Number(battle.short || 0),
+    };
+  }
+
+  formatCompact(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "--";
+    if (number >= 1_000_000_000) return `${(number / 1_000_000_000).toFixed(2)}B`;
+    if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(2)}M`;
+    if (number >= 1_000) return `${(number / 1_000).toFixed(1)}K`;
+    return number.toFixed(0);
+  }
+
+  formatScore(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? `${number > 0 ? "+" : ""}${number.toFixed(0)}` : "--";
+  }
+
+  matrixSortMark(key) {
+    if (this.state.matrixSort.key !== key) return "↕";
+    return this.state.matrixSort.direction === "asc" ? "↑" : "↓";
+  }
+
+  matrixSortValue(item, key) {
+    const ai = this.aiConclusion(item);
+    if (key === "ai") return ai.rank;
+    if (key === "confidence") return ai.confidence ?? -1;
+    if (key === "watch") return item.watch ? 1 : 0;
+    if (key === "symbol") return item.symbol;
+    if (key === "price") return Number(item.price) || 0;
+    if (key === "pct2m") return Number(item.pct_2m) || 0;
+    if (key === "pct5m") return Number(item.pct_5m) || 0;
+    if (key === "pct10m") return Number(item.pct_10m) || 0;
+    if (key === "pct24h") return Number(item.pct_24h) || 0;
+    if (key === "score") return Number(item.score) || 0;
+    if (key === "battle") return ai.edge;
+    if (key === "book") return Number(item.book_imbalance) || 0;
+    if (key === "force") return Number(item.green_flashes_30m || 0) - Number(item.red_flashes_30m || 0);
+    if (key === "score15m") return Number(item.tf_scores?.["15m"]) || 0;
+    if (key === "score1h") return Number(item.tf_scores?.["1h"]) || 0;
+    if (key === "opportunity") return Number(item.opportunity?.quality_score) || -1;
+    if (key === "volume") return Number(item.quote_volume) || 0;
+    return 0;
+  }
+
   battleLabel(result, state) {
     if (state === "data_insufficient") return "数据不足";
     return { long: "多头占优", short: "空头占优", neutral: "多空均衡" }[result] || "等待预测";
@@ -584,7 +689,8 @@ class ContractMonitor extends HTMLElement {
   reasonLabel(code) {
     return ({
       AGGRESSIVE_FLOW: "主动成交",
-      BOOK_IMBALANCE: "盘口失衡",
+      BOOK_IMBALANCE: "100档订单池",
+      BOOK_IMBALANCE_5: "近5档压力",
       VELOCITY: "价格速度",
       FLASH_IMBALANCE: "30分钟力量",
       TAKER_FLOW: "主动买卖量",
@@ -604,75 +710,82 @@ class ContractMonitor extends HTMLElement {
   renderGrid() {
     const keyword = this.q("#search").value.trim().toUpperCase();
     const filter = this.q("#filter").value;
-    const sort = this.q("#sort").value;
     let items = this.state.overview.filter((item) => !keyword || item.symbol.includes(keyword));
     if (filter === "mine") items = items.filter((item) => item.watch);
     if (["long", "short", "neutral"].includes(filter)) {
-      items = items.filter((item) => item.opportunity?.direction === filter);
+      items = items.filter((item) => this.aiConclusion(item).tone === filter);
     }
     items.sort((left, right) => {
-      if (left.watch !== right.watch) return right.watch ? 1 : -1;
-      if (sort === "pct") return (right.pct_24h ?? -999) - (left.pct_24h ?? -999);
-      if (sort === "alpha") return left.symbol.localeCompare(right.symbol);
-      if (sort === "opportunity") return (right.opportunity?.quality_score ?? -1) - (left.opportunity?.quality_score ?? -1);
-      return Math.abs(right.score ?? 0) - Math.abs(left.score ?? 0);
+      const pinnedComparison = Number(Boolean(right.watch)) - Number(Boolean(left.watch));
+      if (pinnedComparison !== 0) return pinnedComparison;
+      const leftValue = this.matrixSortValue(left, this.state.matrixSort.key);
+      const rightValue = this.matrixSortValue(right, this.state.matrixSort.key);
+      const comparison = typeof leftValue === "string"
+        ? leftValue.localeCompare(rightValue, "zh-Hans")
+        : leftValue - rightValue;
+      if (comparison !== 0) return this.state.matrixSort.direction === "asc" ? comparison : -comparison;
+      return left.symbol.localeCompare(right.symbol);
     });
     this.q("#sym-count").textContent = `${items.length}/${this.state.overview.length}`;
-    this.q("#contract-grid").innerHTML = items.map((item) => {
-      const score = item.score;
+    const head = [
+      ["ai", "AI 结论"], ["confidence", "信心"], ["watch", "持仓/自选"], ["symbol", "合约"],
+      ["price", "最新"], ["pct2m", "2m 涨跌"], ["pct5m", "5m 涨跌"], ["pct10m", "10m 涨跌"], ["pct24h", "24h"], ["score", "综合分"],
+      ["battle", "5m 博弈"], ["book", "100档订单池"], ["force", "30m 力量"], ["score15m", "15m 分"], ["score1h", "1h 分"],
+      ["opportunity", "机会"], ["volume", "成交额"],
+    ].map(([key, label]) => `<th><button type="button" data-matrix-sort="${key}" aria-label="按${label}排序">${label}<i aria-hidden="true">${this.matrixSortMark(key)}</i></button></th>`).join("");
+    const rows = items.map((item) => {
+      const ai = this.aiConclusion(item);
       const opportunity = item.opportunity;
-      const direction = opportunity?.direction;
-      const alertClass = direction === "long" ? "alert-long" : direction === "short" ? "alert-short" : direction === "neutral" ? "alert-neutral" : "";
-      const pctClass = item.pct_24h == null ? "dim" : item.pct_24h > 0 ? "up" : item.pct_24h < 0 ? "down" : "flat";
-      const tags = item.trending ? "🔥" : "";
-      const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
-      const moveMark = item.priceMove === "up" ? '<i class="price-move" aria-hidden="true">↑</i>' : item.priceMove === "down" ? '<i class="price-move" aria-hidden="true">↓</i>' : "";
       const longForce = Math.max(0, Number(item.green_flashes_30m) || 0);
       const shortForce = Math.max(0, Number(item.red_flashes_30m) || 0);
       const totalForce = longForce + shortForce;
       const longForceWidth = totalForce ? longForce / totalForce * 100 : 0;
       const shortForceWidth = totalForce ? 100 - longForceWidth : 0;
-      const forceNet = longForce - shortForce;
-      const forceTone = forceNet > 0 ? "long" : forceNet < 0 ? "short" : "neutral";
-      const forceLabel = forceNet > 0
-        ? `净多 +${forceNet}`
-        : forceNet < 0
-          ? `净空 -${Math.abs(forceNet)}`
-          : totalForce ? "多空均衡" : "暂无波动";
-      const battle = item.battle?.["15m"];
-      const battleReady = battle && battle.state !== "data_insufficient";
-      const battleTone = battleReady ? this.battleTone(battle.result, battle.state) : "pending";
-      const battleValue = battleReady
-        ? battle.result === "long"
-          ? `多${Number(battle.long).toFixed(0)}`
-          : battle.result === "short"
-            ? `空${Number(battle.short).toFixed(0)}`
-            : `中${Number(battle.neutral).toFixed(0)}`
-        : "待采集";
-      const battleConfidence = battleReady ? this.escape(battle.confidence || "低") : "--";
-      return `<article class="contract-card ${item.watch ? "is-watch" : ""} ${alertClass} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
-        <header class="band-card-head">
-          <div class="symbol">${this.escape(item.symbol.replace("USDT", ""))}<span class="tags">${tags}</span></div>
-          <button class="card-watch ${item.watch ? "on" : ""}" type="button" data-watch-symbol="${this.escape(item.symbol)}" aria-label="${item.watch ? "取消自选" : "加入自选并置顶"}" title="${item.watch ? "取消自选" : "加入自选并置顶"}">${item.watch ? "★" : "☆"}</button>
-          <div class="price">${this.formatPrice(item.price)}${moveMark}</div>
-          <div class="pct ${pctClass}">${this.formatPercent(item.pct_24h)}</div>
-        </header>
-        <div class="force-band ${forceTone}" title="最近 30 分钟价格方向高亮次数" aria-label="多头力量 ${longForce}，空头力量 ${shortForce}，${forceLabel}">
-          <svg class="force-bar" viewBox="0 0 100 9" preserveAspectRatio="none" aria-hidden="true"><rect class="long" x="0" y="0" width="${longForceWidth}" height="9"></rect><rect class="short" x="${longForceWidth}" y="0" width="${shortForceWidth}" height="9"></rect></svg>
-          <div class="force-labels"><span>多头 ${longForce}</span><strong>${forceLabel}</strong><span>空头 ${shortForce}</span></div>
-        </div>
-        <footer class="band-meta" title="15m 为启发式多空博弈估算，尚未校准为真实胜率">
-          <span><em>评分</em><b class="score ${this.signalTone(score)}">${score == null ? "--" : `${score > 0 ? "+" : ""}${score}`}</b></span>
-          <span><em>15m</em><b class="${battleTone}">${battleValue}</b></span>
-          <span><em>置信</em><b>${battleConfidence}</b></span>
-        </footer>
-      </article>`;
-    }).join("") || `<div class="empty">${filter === "mine" ? "暂无本地自选合约。点击“导入币安自选”，或点击合约卡片上的 ☆ 添加并置顶。" : "没有符合条件的合约"}</div>`;
-    this.qa(".card-watch").forEach((button) => button.addEventListener("click", async (event) => {
+      const bidPool = Number(item.bid_depth_notional);
+      const askPool = Number(item.ask_depth_notional);
+      const totalPool = bidPool + askPool;
+      const depthLevels = Number(item.depth_levels) || 0;
+      const bidPoolWidth = totalPool > 0 ? bidPool / totalPool * 100 : 0;
+      const bookAvailable = Number.isFinite(bidPool) && Number.isFinite(askPool) && totalPool > 0;
+      const bookTitle = bookAvailable
+        ? `100档订单池（${depthLevels}档）：买方 ${this.formatCompact(bidPool)} / 卖方 ${this.formatCompact(askPool)}；近5档失衡 ${this.formatPercent(Number(item.book_imbalance_5) * 100)}`
+        : "100档订单池数据采集中";
+      const pct2mClass = item.pct_2m == null ? "dim" : item.pct_2m > 0 ? "up" : item.pct_2m < 0 ? "down" : "flat";
+      const pct5mClass = item.pct_5m == null ? "dim" : item.pct_5m > 0 ? "up" : item.pct_5m < 0 ? "down" : "flat";
+      const pct10mClass = item.pct_10m == null ? "dim" : item.pct_10m > 0 ? "up" : item.pct_10m < 0 ? "down" : "flat";
+      const pct24hClass = item.pct_24h == null ? "dim" : item.pct_24h > 0 ? "up" : item.pct_24h < 0 ? "down" : "flat";
+      const opportunityText = opportunity
+        ? `${this.opportunityLabel(opportunity.direction)} ${Number(opportunity.quality_score).toFixed(0)}`
+        : "--";
+      const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
+      return `<tr class="matrix-row matrix-${ai.tone} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
+        <td class="matrix-ai"><span>${ai.label}</span></td>
+        <td class="matrix-confidence" title="5 分钟 AI 结论信心"><svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="base" width="100" height="6"></rect><rect class="fill" width="${ai.confidence || 0}" height="6"></rect></svg><b>${ai.confidence == null ? "--" : `${ai.confidence}%`}</b></td>
+        <td><button class="matrix-watch ${item.watch ? "on" : ""}" type="button" data-watch-symbol="${this.escape(item.symbol)}" aria-label="${item.watch ? "取消自选" : "加入自选"}">${item.watch ? "★" : "☆"}</button></td>
+        <td class="matrix-symbol"><strong>${this.escape(item.symbol.replace(/(?:USDT|USD1)$/, ""))}</strong>${item.trending ? '<em aria-label="热度上升">🔥</em>' : ""}<small>${this.escape(item.annotation || item.underlying || "标的")}</small></td>
+        <td class="matrix-price">${this.formatPrice(item.price)}</td>
+        <td class="${pct2mClass}">${this.formatPercent(item.pct_2m)}</td>
+        <td class="${pct5mClass}">${this.formatPercent(item.pct_5m)}</td>
+        <td class="${pct10mClass}">${this.formatPercent(item.pct_10m)}</td>
+        <td class="${pct24hClass}">${this.formatPercent(item.pct_24h)}</td>
+        <td class="score ${this.signalTone(item.score)}">${this.formatScore(item.score)}</td>
+        <td class="matrix-battle" title="5 分钟多空博弈概率：多 ${Number(item.battle?.["5m"]?.long || 0).toFixed(1)}%，空 ${Number(item.battle?.["5m"]?.short || 0).toFixed(1)}%">多 ${Number(item.battle?.["5m"]?.long || 0).toFixed(0)} / 空 ${Number(item.battle?.["5m"]?.short || 0).toFixed(0)}</td>
+        <td class="matrix-book" title="${this.escape(bookTitle)}">${bookAvailable ? `<small>买/卖</small> <b>${this.formatCompact(bidPool)} / ${this.formatCompact(askPool)}</b><svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="long" x="0" width="${bidPoolWidth}" height="6"></rect><rect class="short" x="${bidPoolWidth}" width="${100 - bidPoolWidth}" height="6"></rect></svg>` : "--"}</td>
+        <td class="matrix-force" title="最近 30 分钟价格方向高亮：多 ${longForce}，空 ${shortForce}"><svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="long" x="0" width="${longForceWidth}" height="6"></rect><rect class="short" x="${longForceWidth}" width="${shortForceWidth}" height="6"></rect></svg><b>${longForce - shortForce > 0 ? "+" : ""}${longForce - shortForce}</b></td>
+        <td class="score ${this.signalTone(item.tf_scores?.["15m"])}">${this.formatScore(item.tf_scores?.["15m"])}</td>
+        <td class="score ${this.signalTone(item.tf_scores?.["1h"])}">${this.formatScore(item.tf_scores?.["1h"])}</td>
+        <td class="matrix-opportunity ${opportunity?.direction || "none"}">${this.escape(opportunityText)}</td>
+        <td>${this.formatCompact(item.quote_volume)}</td>
+      </tr>`;
+    }).join("");
+    this.q("#contract-grid").innerHTML = rows
+      ? `<table class="contract-matrix"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`
+      : `<div class="empty">${filter === "mine" ? "暂无自选合约。可点击 ☆ 添加，或同步持仓合约。" : "没有符合条件的合约"}</div>`;
+    this.qa(".matrix-watch").forEach((button) => button.addEventListener("click", async (event) => {
       event.stopPropagation();
       await this.toggleSymbolWatchlist(button.dataset.watchSymbol);
     }));
-    this.qa(".contract-card").forEach((card) => card.addEventListener("click", () => this.openModal(card.dataset.symbol)));
+    this.qa(".matrix-row").forEach((row) => row.addEventListener("click", () => this.openModal(row.dataset.symbol)));
     items.forEach((item) => { item.priceMove = null; });
   }
 
