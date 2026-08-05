@@ -134,25 +134,33 @@ button { cursor: pointer; }
 .matrix-opportunity.none { opacity: .58; }
 .matrix-row.tick-up td:nth-child(5) { box-shadow: inset 0 0 0 1px var(--m-up); }
 .matrix-row.tick-down td:nth-child(5) { box-shadow: inset 0 0 0 1px var(--m-down); }
-.underlying-row td { height: 28px; padding: 0 7px 5px; border-bottom: 1px solid #28403c; background: color-mix(in srgb, var(--m-bg) 82%, var(--m-panel)); text-align: left !important; }
-.underlying-band { min-width: 1320px; min-height: 25px; display: grid; grid-template-columns: 16px 72px 72px minmax(170px, 1fr) 90px 72px 76px 92px 120px minmax(90px, auto) minmax(230px, auto); align-items: center; gap: 8px; padding: 3px 8px; color: var(--m-dim); font-size: 10px; font-variant-numeric: tabular-nums; }
-.underlying-branch { color: var(--m-border-strong); font-size: 15px; }
-.underlying-band strong { color: var(--m-text); font-size: 11px; letter-spacing: .02em; }
-.underlying-relation { padding: 1px 5px; border: 1px solid var(--m-border); color: var(--m-gold); font-size: 9px; font-style: normal; text-align: center; }
-.underlying-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.underlying-price { color: var(--m-text); font-size: 11px; text-align: right; }
-.underlying-band .up { color: var(--m-up); text-align: right; }
-.underlying-band .down { color: var(--m-down); text-align: right; }
-.underlying-band .flat { color: var(--m-neutral); text-align: right; }
+.underlying-row td { height: 30px; padding: 4px 7px; border-bottom: 1px solid #28403c; background: color-mix(in srgb, var(--m-bg) 82%, var(--m-panel)); color: var(--m-dim); font-size: 10px; text-align: right; white-space: nowrap; }
+.underlying-row td:nth-child(1), .underlying-row td:nth-child(4) { text-align: left; }
+.underlying-row td:nth-child(2), .underlying-row td:nth-child(3), .underlying-row td:nth-child(10), .underlying-row td:nth-child(14), .underlying-row td:nth-child(15), .underlying-row td:nth-child(16) { text-align: center; }
+.underlying-kind { color: var(--m-gold) !important; font-weight: 800; }
+.underlying-watch-placeholder { color: color-mix(in srgb, var(--m-dim) 60%, transparent); }
+.underlying-relation { display: inline-block; max-width: 100%; overflow: hidden; padding: 1px 4px; border: 1px solid var(--m-border); color: var(--m-gold); font-size: 9px; font-style: normal; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.underlying-symbol { min-width: 0; overflow: hidden; }
+.underlying-symbol strong { margin-right: 3px; color: var(--m-text); font-size: 11px; letter-spacing: .02em; }
+.underlying-symbol small { overflow: hidden; color: var(--m-dim); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.underlying-price { color: var(--m-text) !important; font-size: 11px !important; font-weight: 700; }
+.underlying-window { font-weight: 700; }
+.underlying-window.up { color: var(--m-up); }
+.underlying-window.down { color: var(--m-down); }
+.underlying-window.flat { color: var(--m-neutral); }
+.underlying-window.dim { color: var(--m-dim); }
 .underlying-state { text-align: center; }
 .underlying-state.stale { color: var(--m-down); }
-.underlying-basis { font-weight: 700; text-align: right; }
+.underlying-volume { font-variant-numeric: tabular-nums; }
+.underlying-basis { overflow: hidden; font-weight: 700; text-align: right; text-overflow: ellipsis; }
 .underlying-basis.premium { color: var(--m-gold); }
 .underlying-basis.discount { color: var(--m-neutral); }
 .underlying-basis.strong { color: var(--m-down); text-shadow: 0 0 8px color-mix(in srgb, var(--m-down) 35%, transparent); }
 .underlying-basis.watch { color: var(--m-gold); }
 .underlying-basis.normal { color: var(--m-dim); }
-.underlying-alignment { color: var(--m-dim); white-space: nowrap; }
+.underlying-alignment { overflow: hidden; color: var(--m-dim); text-overflow: ellipsis; white-space: nowrap; }
+.underlying-quality { color: var(--m-dim); }
+.underlying-exchange, .underlying-link { overflow: hidden; text-overflow: ellipsis; }
 .underlying-time { overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .underlying-long td { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--m-down) 55%, transparent); }
 .underlying-short td { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--m-up) 55%, transparent); }

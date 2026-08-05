@@ -602,6 +602,26 @@ class MonitorRepository:
                             if underlying_has_market_data
                             else None
                         ),
+                        "pct_2m": (
+                            _optional_finite_number(underlying_quote.get("pct_2m"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "pct_5m": (
+                            _optional_finite_number(underlying_quote.get("pct_5m"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "pct_10m": (
+                            _optional_finite_number(underlying_quote.get("pct_10m"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "pct_24h": (
+                            _optional_finite_number(underlying_quote.get("pct_24h"))
+                            if underlying_has_market_data
+                            else None
+                        ),
                         "regular_market_price": (
                             _optional_finite_number(
                                 underlying_quote.get("regular_market_price")

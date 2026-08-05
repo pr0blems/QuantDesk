@@ -30,7 +30,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260806-14">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260806-16">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -617,12 +617,16 @@ class ContractMonitor extends HTMLElement {
         ? `${this.opportunityLabel(opportunity.direction)} ${Number(opportunity.quality_score).toFixed(0)}`
         : "--";
       const underlying = item.underlying_quote || {};
-      const underlyingChange = underlying.change_pct == null
-        ? null
-        : Number(underlying.change_pct);
-      const underlyingChangeClass = !Number.isFinite(underlyingChange)
-        ? "flat"
-        : underlyingChange > 0 ? "up" : underlyingChange < 0 ? "down" : "flat";
+      const underlyingWindowChanges = [
+        underlying.pct_2m,
+        underlying.pct_5m,
+        underlying.pct_10m,
+        underlying.pct_24h,
+      ].map((value) => value == null ? Number.NaN : Number(value));
+      const underlyingWindowCell = (value) => {
+        const tone = !Number.isFinite(value) ? "dim" : value > 0 ? "up" : value < 0 ? "down" : "flat";
+        return `<td class="underlying-window ${tone}">${this.formatPercent(Number.isFinite(value) ? value : null)}</td>`;
+      };
       const basis = Number(underlying.basis_bps);
       const basisText = underlying.basis_comparable && Number.isFinite(basis)
         ? `${basis >= 0 ? "溢价" : "折价"} ${basis >= 0 ? "+" : ""}${basis.toFixed(1)} bps`
@@ -667,19 +671,25 @@ class ContractMonitor extends HTMLElement {
         <td class="matrix-opportunity ${opportunity?.direction || "none"}">${this.escape(opportunityText)}</td>
         <td>${this.formatCompact(item.quote_volume)}</td>
       </tr>`;
-      const underlyingRow = `<tr class="underlying-row underlying-${ai.tone}" data-underlying-symbol="${this.escape(item.symbol)}"><td colspan="17"><div class="underlying-band">
-        <span class="underlying-branch" aria-hidden="true">└</span>
-        <strong>${this.escape(underlyingSymbol)}</strong>
-        <em class="underlying-relation">${this.escape(this.underlyingRelationLabel(underlying.relation))}</em>
-        <span class="underlying-name">${this.escape(underlying.display_name || item.annotation || "对应标的")}</span>
-        <b class="underlying-price">${this.formatPrice(underlying.price)}</b>
-        <b class="${underlyingChangeClass}">${this.formatPercent(Number.isFinite(underlyingChange) ? underlyingChange : null)}</b>
-        <span class="underlying-state ${underlying.stale ? "stale" : ""}">${this.escape(underlyingStatus)}</span>
-        <span>量 ${underlying.volume == null ? "--" : this.formatCompact(underlying.volume)}</span>
-        <span class="underlying-basis ${Number.isFinite(basis) && basis < 0 ? "discount" : "premium"} ${spreadAlertClass}" title="价差状态：${this.escape(this.spreadAlertLabel(spreadAlert))}">${this.escape(spreadAlertText)}</span>
-        <span class="underlying-alignment" title="统一时间对齐状态">↔ ${this.escape(alignmentText)}</span>
-        <span class="underlying-time" title="标的行情时间 ${this.escape(underlyingTime)}">${this.escape(underlying.exchange_name || "--")} · ${this.escape(underlying.currency || "--")} · ${this.escape(underlyingTime)}</span>
-      </div></td></tr>`;
+      const underlyingRow = `<tr class="underlying-row underlying-${ai.tone}" data-underlying-symbol="${this.escape(item.symbol)}">
+        <td class="underlying-kind">↳ 美股</td>
+        <td><em class="underlying-relation">${this.escape(this.underlyingRelationLabel(underlying.relation))}</em></td>
+        <td class="underlying-watch-placeholder">—</td>
+        <td class="underlying-symbol" title="${this.escape(underlying.display_name || item.annotation || "对应标的")}"><strong>${this.escape(underlyingSymbol)}</strong><small>${this.escape(underlying.display_name || item.annotation || "对应标的")}</small></td>
+        <td class="underlying-price">${this.formatPrice(underlying.price)}</td>
+        ${underlyingWindowCell(underlyingWindowChanges[0])}
+        ${underlyingWindowCell(underlyingWindowChanges[1])}
+        ${underlyingWindowCell(underlyingWindowChanges[2])}
+        ${underlyingWindowCell(underlyingWindowChanges[3])}
+        <td class="underlying-state ${underlying.stale ? "stale" : ""}">${this.escape(underlyingStatus)}</td>
+        <td class="underlying-alignment" title="统一时间对齐状态">↔ ${this.escape(alignmentText)}</td>
+        <td class="underlying-volume">量 ${underlying.volume == null ? "--" : this.formatCompact(underlying.volume)}</td>
+        <td class="underlying-basis ${Number.isFinite(basis) && basis < 0 ? "discount" : "premium"} ${spreadAlertClass}" title="价差状态：${this.escape(this.spreadAlertLabel(spreadAlert))}">${this.escape(spreadAlertText)}</td>
+        <td class="underlying-quality">${underlying.stale ? "质量待确认" : "数据正常"}</td>
+        <td class="underlying-exchange">${this.escape(underlying.exchange_name || "--")} · ${this.escape(underlying.currency || "--")}</td>
+        <td class="underlying-link">${dataOutOfSync ? "暂不联动" : "联动可用"}</td>
+        <td class="underlying-time" title="标的行情时间 ${this.escape(underlyingTime)}">${this.escape(underlyingTime)}</td>
+      </tr>`;
       return mainRow + underlyingRow;
     }).join("");
     this.q("#contract-grid").innerHTML = rows

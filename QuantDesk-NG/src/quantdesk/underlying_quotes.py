@@ -99,6 +99,35 @@ def _array_value(values: Any, index: int) -> float | None:
     return _number(values[index])
 
 
+def _rolling_change(
+    timestamps: list[Any], closes: list[Any], latest_index: int | None, window_seconds: int
+) -> float | None:
+    """Return a rolling return using the latest valid bar and a prior bar.
+
+    The monitor uses 2m, 5m, 10m and 24h windows for Binance contracts.  Use
+    the same named windows for the paired public-market quote rather than
+    showing a session-only percentage beside a rolling contract percentage.
+    """
+
+    if latest_index is None:
+        return None
+    latest_price = _array_value(closes, latest_index)
+    latest_time = _number(timestamps[latest_index])
+    if latest_price is None or latest_time is None:
+        return None
+    target_time = latest_time - window_seconds
+    reference_price: float | None = None
+    for index in range(min(latest_index - 1, len(timestamps) - 1, len(closes) - 1), -1, -1):
+        timestamp = _number(timestamps[index])
+        candidate = _array_value(closes, index)
+        if timestamp is not None and timestamp <= target_time and candidate is not None:
+            reference_price = candidate
+            break
+    if reference_price is None or reference_price <= 0:
+        return None
+    return (latest_price / reference_price - 1) * 100
+
+
 def _market_state(meta: dict[str, Any], now_seconds: int) -> str:
     periods = meta.get("currentTradingPeriod")
     if not isinstance(periods, dict):
@@ -149,6 +178,10 @@ def parse_chart_payload(
         if price is not None and previous_close is not None and previous_close > 0
         else None
     )
+    rolling_changes = {
+        window: _rolling_change(timestamps, closes, latest_index, window)
+        for window in (120, 300, 600, 86_400)
+    }
     market_time_ms = (
         int(timestamps[latest_index]) * 1_000
         if latest_index is not None
@@ -173,6 +206,10 @@ def parse_chart_payload(
         "price": price,
         "previous_close": previous_close,
         "change_pct": change_pct,
+        "pct_2m": rolling_changes[120],
+        "pct_5m": rolling_changes[300],
+        "pct_10m": rolling_changes[600],
+        "pct_24h": rolling_changes[86_400],
         "regular_market_price": regular_price,
         "day_open": _number(meta.get("regularMarketOpen"))
         or next((value for value in opens if value is not None), None),
@@ -202,7 +239,7 @@ def fetch_quote(quote_symbol: str, *, retries: int = 3) -> dict[str, Any] | None
     query = urllib.parse.urlencode(
         {
             "interval": "1m",
-            "range": "1d",
+            "range": "2d",
             "includePrePost": "true",
             "events": "div,splits",
         }
@@ -258,6 +295,10 @@ def _persist_rows(rows: list[dict[str, Any]]) -> int:
         "price",
         "previous_close",
         "change_pct",
+        "pct_2m",
+        "pct_5m",
+        "pct_10m",
+        "pct_24h",
         "regular_market_price",
         "day_open",
         "day_high",
@@ -289,6 +330,10 @@ def _persist_rows(rows: list[dict[str, Any]]) -> int:
                 price=COALESCE(VALUES(price),price),
                 previous_close=COALESCE(VALUES(previous_close),previous_close),
                 change_pct=COALESCE(VALUES(change_pct),change_pct),
+                pct_2m=COALESCE(VALUES(pct_2m),pct_2m),
+                pct_5m=COALESCE(VALUES(pct_5m),pct_5m),
+                pct_10m=COALESCE(VALUES(pct_10m),pct_10m),
+                pct_24h=COALESCE(VALUES(pct_24h),pct_24h),
                 regular_market_price=COALESCE(VALUES(regular_market_price),regular_market_price),
                 day_open=COALESCE(VALUES(day_open),day_open),
                 day_high=COALESCE(VALUES(day_high),day_high),
@@ -330,6 +375,10 @@ def collect_quote_cycle(stop_event=None) -> dict[str, Any]:
             "price": None,
             "previous_close": None,
             "change_pct": None,
+            "pct_2m": None,
+            "pct_5m": None,
+            "pct_10m": None,
+            "pct_24h": None,
             "regular_market_price": None,
             "day_open": None,
             "day_high": None,

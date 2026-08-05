@@ -231,6 +231,8 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) ->
     assert overview["items"][0]["quote_volume"] == 5_000
     assert overview["items"][0]["underlying_quote"]["quote_symbol"] == "TEST"
     assert overview["items"][0]["underlying_quote"]["price"] == 100
+    assert overview["items"][0]["underlying_quote"]["pct_2m"] is None
+    assert overview["items"][0]["underlying_quote"]["pct_24h"] is None
     assert overview["items"][0]["underlying_quote"]["basis_bps"] == pytest.approx(150)
     assert overview["items"][0]["underlying_quote"]["spread_alert"] == "strong"
     assert overview["items"][0]["underlying_quote"]["alignment_status"] in {

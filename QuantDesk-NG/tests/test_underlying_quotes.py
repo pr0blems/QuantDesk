@@ -94,3 +94,27 @@ def test_chart_payload_marks_active_but_old_quote_stale() -> None:
     assert quote is not None
     assert quote["market_state"] == "regular"
     assert quote["status"] == "stale"
+
+
+def test_chart_payload_calculates_contract_matched_rolling_windows() -> None:
+    payload = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {"currency": "USD", "currentTradingPeriod": {}},
+                    "timestamp": [3_600, 89_400, 89_700, 89_880, 90_000],
+                    "indicators": {
+                        "quote": [{"close": [100, 150, 160, 180, 200]}]
+                    },
+                }
+            ]
+        }
+    }
+
+    quote = underlying_quotes.parse_chart_payload(payload, now_ms=90_000_000)
+
+    assert quote is not None
+    assert quote["pct_2m"] == pytest.approx((200 / 180 - 1) * 100)
+    assert quote["pct_5m"] == pytest.approx((200 / 160 - 1) * 100)
+    assert quote["pct_10m"] == pytest.approx((200 / 150 - 1) * 100)
+    assert quote["pct_24h"] == pytest.approx((200 / 100 - 1) * 100)

@@ -60,8 +60,8 @@ def test_contract_matrix_is_ai_first_and_every_visible_indicator_sorts() -> None
     assert ".matrix-confidence" in stylesheet
     assert ".matrix-force" in stylesheet
     assert ".matrix-book" in stylesheet
-    assert "monitor.js?v=20260806-15" in index
-    assert "monitor.css?v=20260806-14" in script
+    assert "monitor.js?v=20260806-16" in index
+    assert "monitor.css?v=20260806-16" in script
     assert 'item.battle?.["2h"]' in script
     assert "2 小时 LightGBM 校准模型" in script
     assert 'class="underlying-row underlying-${ai.tone}"' in script
@@ -71,11 +71,16 @@ def test_contract_matrix_is_ai_first_and_every_visible_indicator_sorts() -> None
     assert "underlyingAlignmentLabel" in script
     assert "underlying-alignment" in script
     assert "dataOutOfSync" in script
-    assert "underlying.change_pct == null" in script
+    assert "underlying.pct_2m" in script
+    assert "underlying.pct_5m" in script
+    assert "underlying.pct_10m" in script
+    assert "underlying.pct_24h" in script
     assert 'underlying.volume == null ? "--"' in script
     assert "美股现货" in script
     assert "价格不可直接比较" in script
-    assert ".underlying-band" in stylesheet
+    assert 'class="underlying-window ${tone}"' in script
+    assert ".underlying-window" in stylesheet
+    assert ".underlying-symbol" in stylesheet
     assert ".underlying-alignment" in stylesheet
 
 
