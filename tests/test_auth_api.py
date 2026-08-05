@@ -284,11 +284,18 @@ def test_login_page_and_navigation_shell_are_served(mysql_test_engine: Engine) -
         assert "bars_used" in backtest_asset.text
         assert "我的策略" in backtest_asset.text
         assert "新增策略" in strategy_asset.text
+        assert 'id="strategy-composer-block"' in strategy_asset.text
+        assert 'id="strategy-indicator-picker"' in strategy_asset.text
+        assert "collectIndicatorSelections()" in strategy_asset.text
+        assert '"/compose/ai-preview"' in strategy_asset.text
+        assert "请至少选择两个指标" in strategy_asset.text
         assert "/ai-preview" in strategy_asset.text
         assert "/ai-apply" in strategy_asset.text
         assert "base_version" in strategy_asset.text
         assert "iframe" not in strategy_asset.text.lower()
         assert "@media (max-width: 820px)" in strategy_stylesheet.text
+        assert ".strategy-indicator-picker" in strategy_stylesheet.text
+        assert ".strategy-selected-indicator" in strategy_stylesheet.text
         assert "grid-template-rows: auto minmax(0, 1fr)" in strategy_stylesheet.text
         assert "scrollbar-gutter: stable" in strategy_stylesheet.text
         assert "max-height: calc(100vh - 122px)" not in strategy_stylesheet.text
