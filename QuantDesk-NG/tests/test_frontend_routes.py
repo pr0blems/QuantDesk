@@ -82,6 +82,7 @@ def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     client = _client()
     with client:
         asset = client.get("/assets/app.js")
+        monitor = client.get("/assets/monitor.js")
         docs = client.get("/api/docs")
         api_missing = client.get("/api/v2/route-that-does-not-exist")
 
@@ -92,6 +93,10 @@ def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     assert "String(actualUser.id) !== authenticatedUserId" in asset.text
     assert "if (refreshAccessPromise) return refreshAccessPromise" in asset.text
     assert "rejectChangedIdentity(actualUser)" in asset.text
+    assert monitor.status_code == 200
+    assert "manual-confirm" in monitor.text
+    assert '["5m", "15m", "1h", "2h", "4h"]' in monitor.text
+    assert "人工确认模拟盘" in monitor.text
     assert docs.status_code == 200
     assert api_missing.status_code == 404
     assert api_missing.json() == {"detail": "Not Found"}

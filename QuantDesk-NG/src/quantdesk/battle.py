@@ -19,8 +19,8 @@ MODEL_KEY = "battle-ensemble"
 MODEL_VERSION = 1
 FEATURE_SCHEMA_VERSION = 4
 COLLECTION_SECONDS = 300
-HORIZONS = (300, 900, 3_600)
-HORIZON_TIMEFRAME = {300: "15m", 900: "15m", 3_600: "1h"}
+HORIZONS = (300, 900, 3_600, 14_400)
+HORIZON_TIMEFRAME = {300: "15m", 900: "15m", 3_600: "1h", 14_400: "4h"}
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -218,7 +218,7 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
             "price_oi_impulse": 0.14,
             "trend": 0.20,
         }
-    else:
+    elif horizon_seconds == 3_600:
         weights = {
             "aggressive_flow": 0.10,
             "book_imbalance": 0.04,
@@ -228,6 +228,20 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
             "taker_flow": 0.15,
             "price_oi_impulse": 0.19,
             "trend": 0.40,
+        }
+    else:
+        # Four-hour signals intentionally lean on slower trend/positioning
+        # evidence.  Fast order-book features remain present, but cannot by
+        # themselves create a long-horizon directional recommendation.
+        weights = {
+            "aggressive_flow": 0.04,
+            "book_imbalance": 0.02,
+            "book_imbalance_5": 0.01,
+            "velocity": 0.02,
+            "flash_imbalance": 0.03,
+            "taker_flow": 0.16,
+            "price_oi_impulse": 0.22,
+            "trend": 0.50,
         }
     values = {name: _number(features.get(name)) for name in weights if name != "trend"}
     values["trend"] = trend
@@ -294,6 +308,19 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
             _number(features.get("verified_event_pressure")), 6
         ),
         "news_weight": 0.0,
+        "data_health": {
+            "status": "healthy" if not insufficient else "blocked",
+            "quality_score": round(quality, 6),
+            "market_microstructure": {
+                "age_ms": int(_number(features.get("micro_age_ms"), 10**12)),
+                "coverage_ratio": round(_number(features.get("micro_coverage_ratio"), 0.0), 6),
+            },
+            "positioning": {
+                "age_ms": int(_number(features.get("positioning_age_ms"), 10**12)),
+                "coverage_ratio": round(_number(features.get("positioning_coverage_ratio"), 0.0), 6),
+            },
+        },
+        "invalid_conditions": reason_codes[:2] if insufficient else [],
     }
     return {
         "prediction_state": state,

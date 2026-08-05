@@ -28,9 +28,9 @@ def test_contract_matrix_emphasizes_ai_direction_and_live_price_moves() -> None:
     assert "ask_depth_notional" in script
     assert '"100档订单池"' in script
     assert "最近 30 分钟价格方向高亮" in script
-    assert "多空博弈预测" in script
-    assert "启发式未校准" in script
-    assert 'const order = ["5m", "15m", "1h", "2h"]' in script
+    assert "多周期多空预测" in script
+    assert "未校准" in script
+    assert 'const order = ["5m", "15m", "1h", "2h", "4h"]' in script
     assert "LightGBM 校准模型" in script
     assert "battle-horizon" in stylesheet
     assert "prefers-reduced-motion: reduce" in stylesheet
@@ -60,8 +60,8 @@ def test_contract_matrix_is_ai_first_and_every_visible_indicator_sorts() -> None
     assert ".matrix-confidence" in stylesheet
     assert ".matrix-force" in stylesheet
     assert ".matrix-book" in stylesheet
-    assert "monitor.js?v=20260806-16" in index
-    assert "monitor.css?v=20260806-16" in script
+    assert "monitor.js?v=20260806-17" in index
+    assert "monitor.css?v=20260806-17" in script
     assert 'item.battle?.["2h"]' in script
     assert "2 小时 LightGBM 校准模型" in script
     assert 'class="underlying-row underlying-${ai.tone}"' in script

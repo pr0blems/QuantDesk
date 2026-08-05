@@ -4,6 +4,7 @@ import argparse
 import os
 import secrets
 import sys
+from datetime import UTC, datetime
 
 import uvicorn
 from cryptography.fernet import Fernet
@@ -88,6 +89,38 @@ def worker_status() -> int:
     return 0
 
 
+def worker_health(role: str) -> int:
+    """Exit non-zero unless the requested worker has a fresh, active lease."""
+
+    settings = get_settings()
+    settings.validate_runtime()
+    worker_key = f"quantdesk-ng:{role}"
+    maximum_lag = max(settings.worker_heartbeat_seconds * 2, 15)
+    with SessionLocal() as db:
+        row = db.execute(
+            text(
+                "SELECT heartbeat_at, expires_at FROM worker_leases WHERE worker_key=:worker_key"
+            ),
+            {"worker_key": worker_key},
+        ).mappings().one_or_none()
+    if row is None:
+        print(f"worker is not registered: {role}", file=sys.stderr)
+        return 2
+    now = datetime.now(UTC).replace(tzinfo=None)
+    heartbeat = row["heartbeat_at"]
+    expires_at = row["expires_at"]
+    if heartbeat.tzinfo is not None:
+        heartbeat = heartbeat.astimezone(UTC).replace(tzinfo=None)
+    if expires_at.tzinfo is not None:
+        expires_at = expires_at.astimezone(UTC).replace(tzinfo=None)
+    heartbeat_age = max(0, int((now - heartbeat).total_seconds()))
+    if expires_at <= now or heartbeat_age > maximum_lag:
+        print(f"worker lease is stale: {role} (heartbeat age {heartbeat_age}s)", file=sys.stderr)
+        return 2
+    print(f"worker is healthy: {role} (heartbeat age {heartbeat_age}s)")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="quantdesk-ng")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -99,6 +132,10 @@ def main() -> int:
         "--role", choices=("market", "news", "paper", "intelligence"), required=True
     )
     sub.add_parser("worker-status")
+    worker_health_parser = sub.add_parser("worker-health")
+    worker_health_parser.add_argument(
+        "--role", choices=("market", "news", "paper", "intelligence"), required=True
+    )
     admin = sub.add_parser("create-admin")
     admin.add_argument("--username", required=True)
     admin.add_argument("--email")
@@ -114,6 +151,8 @@ def main() -> int:
         return worker(args.role)
     if args.command == "worker-status":
         return worker_status()
+    if args.command == "worker-health":
+        return worker_health(args.role)
     if args.command == "create-admin":
         return create_admin(args.username, args.email)
     return 1

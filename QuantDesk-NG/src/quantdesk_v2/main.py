@@ -17,6 +17,7 @@ from .admin import router as admin_router
 from .api import router
 from .config import Settings, get_settings
 from .database import build_engine, engine
+from .reliability import router as reliability_router
 from .strategy_routes import router as strategy_router
 
 FRONTEND_ROUTES = (
@@ -152,6 +153,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(router)
     app.include_router(admin_router)
+    app.include_router(reliability_router)
     app.include_router(strategy_router)
 
     if runtime_settings.static_dir.is_dir():

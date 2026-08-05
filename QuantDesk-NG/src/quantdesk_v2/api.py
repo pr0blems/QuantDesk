@@ -1368,6 +1368,17 @@ def monitor_intelligence(
     return _monitor(request).intelligence()
 
 
+@router.get("/monitor/prediction-validation")
+def monitor_prediction_validation(
+    request: Request,
+    days: int = Query(default=30, ge=1, le=90),
+    _: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Expose completed forward-label metrics for model review and replay."""
+
+    return _monitor(request).prediction_validation(days)
+
+
 def _matching_strategies(db: Session, user_id: int) -> dict[str, list[dict[str, Any]]]:
     matches: dict[str, list[dict[str, Any]]] = {"long": [], "short": [], "neutral": []}
     strategies = db.scalars(

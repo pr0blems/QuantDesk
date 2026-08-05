@@ -41,7 +41,7 @@ function Test-ApiHealth {
 
     try {
         $health = Invoke-RestMethod -Uri $Uri -Method Get -TimeoutSec 2
-        return ($health.status -eq "ok" -and $health.version -eq "0.2.0")
+        return ($health.status -eq "ok" -and $health.database -eq "ok" -and -not [string]::IsNullOrWhiteSpace($health.version))
     }
     catch {
         return $false

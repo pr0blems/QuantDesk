@@ -30,7 +30,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260806-16">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260806-17">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -123,6 +123,24 @@ class ContractMonitor extends HTMLElement {
           <div class="watchlist-import-actions">
             <button id="watchlist-import-merge" class="primary" type="button">追加导入并置顶</button>
             <button id="watchlist-import-replace" type="button">用输入内容覆盖</button>
+          </div>
+        </div>
+      </div>
+      <div id="manual-confirm" class="modal hidden">
+        <div class="modal-box manual-confirm-box" role="dialog" aria-modal="true" aria-labelledby="manual-confirm-title">
+          <div class="modal-head">
+            <div>
+              <strong id="manual-confirm-title" class="modal-symbol">确认模拟盘建议</strong>
+              <p>此操作只会创建一笔经过风控审核的 Shadow 模拟意图，绝不会向 Binance 发送真实订单。</p>
+            </div>
+            <button id="manual-confirm-close" type="button">取消</button>
+          </div>
+          <div id="manual-confirm-summary" class="manual-confirm-summary"></div>
+          <label class="manual-confirm-check"><input id="manual-confirm-check" type="checkbox"> 我已核对方向、金额、杠杆、风险和数据状态，确认提交模拟盘。</label>
+          <p id="manual-confirm-message" class="manual-confirm-message" aria-live="polite"></p>
+          <div class="manual-confirm-actions">
+            <button id="manual-confirm-cancel" type="button">返回查看</button>
+            <button id="manual-confirm-submit" class="primary" type="button" disabled>确认提交模拟意图</button>
           </div>
         </div>
       </div>`;
@@ -218,9 +236,18 @@ class ContractMonitor extends HTMLElement {
     this.q("#opportunity-detail").addEventListener("click", (event) => {
       const button = event.target.closest("[data-opportunity-action]");
       if (!button) return;
-      if (button.dataset.opportunityAction === "shadow") this.createShadowIntent();
+      if (button.dataset.opportunityAction === "shadow") this.openManualConfirmation();
       else this.setOpportunityPreference(button.dataset.opportunityAction);
     });
+    this.q("#manual-confirm-close").addEventListener("click", () => this.closeManualConfirmation());
+    this.q("#manual-confirm-cancel").addEventListener("click", () => this.closeManualConfirmation());
+    this.q("#manual-confirm").addEventListener("click", (event) => {
+      if (event.target === this.q("#manual-confirm")) this.closeManualConfirmation();
+    });
+    this.q("#manual-confirm-check").addEventListener("change", (event) => {
+      this.q("#manual-confirm-submit").disabled = !event.currentTarget.checked;
+    });
+    this.q("#manual-confirm-submit").addEventListener("click", () => this.createShadowIntent());
   }
 
   updateClock() {
@@ -926,25 +953,53 @@ class ContractMonitor extends HTMLElement {
     }
   }
 
+  predictionHealth(battle) {
+    if (!battle) return { label: "未接入", value: "--", detail: "该周期尚无预测数据，系统保持观望。" };
+    if (battle.stale) return { label: "已过期", value: "不可用", detail: "预测已超过有效期，不能作为建议依据。" };
+    if (battle.state === "data_insufficient") return { label: "数据不足", value: "不可用", detail: "关键特征不足，系统保持观望。" };
+    const quality = Number(battle.data_quality);
+    return {
+      label: battle.state === "calibrated" ? "已校准" : battle.state === "heuristic" ? "未校准" : "待验证",
+      value: Number.isFinite(quality) ? `${Math.round(Math.max(0, Math.min(1, quality)) * 100)}%` : "未披露",
+      detail: battle.state === "calibrated" ? "数据质量与模型状态可用。" : "仅供观察，未达到校准模型标准。",
+    };
+  }
+
+  predictionInvalidation(battle) {
+    if (!battle) return "未接入模型，不能形成交易建议";
+    if (battle.stale) return "当前预测已过期，需等待刷新";
+    if (battle.state === "data_insufficient") return "关键数据不足，保持观望";
+    if (battle.valid_until_ms) return `在 ${this.barTimeString(battle.valid_until_ms)} 前有效；到期或数据异常即失效`;
+    return "数据质量下降、模型状态变化或行情过期即失效";
+  }
+
   renderBattle(battles) {
-    const order = ["5m", "15m", "1h", "2h"];
+    const order = ["5m", "15m", "1h", "2h", "4h"];
     const cards = order.map((horizon) => {
       const battle = battles[horizon];
-      if (!battle) return `<article class="battle-horizon pending"><div><strong>${horizon}</strong><span>数据采集中</span></div></article>`;
-      const reasons = (battle.reason_codes || []).map((code) => `<span>${this.escape(this.reasonLabel(code))}</span>`).join("");
+      const health = this.predictionHealth(battle);
+      if (!battle) return `<article class="battle-horizon pending">
+        <div class="battle-horizon-head"><strong>${horizon}</strong><b>观望</b><em>尚未接入</em></div>
+        <div class="battle-probabilities"><span>方向 --</span><span>概率 --</span><span>置信度 --</span></div>
+        <div class="battle-details"><span>数据健康度：${health.value}</span><span>失效条件：${health.detail}</span></div>
+      </article>`;
+      const available = battle.state !== "data_insufficient" && !battle.stale;
+      const direction = available && ["long", "short"].includes(battle.result) ? battle.result : "neutral";
+      const directionLabel = direction === "neutral" ? "观望" : this.battleLabel(direction, battle.state);
+      const reasons = (battle.reason_codes || []).map((code) => `<span>${this.escape(this.reasonLabel(code))}</span>`).join("") || '<span>未提供可解释证据</span>';
       const costText = battle.edge_after_cost_bps == null
-        ? "账户费率待同步"
-        : `扣费后边际 ${Number(battle.edge_after_cost_bps) >= 0 ? "+" : ""}${Number(battle.edge_after_cost_bps).toFixed(1)} bps`;
-      const freshness = battle.stale ? "已过期" : "有效";
-      return `<article class="battle-horizon ${this.battleTone(battle.result, battle.state)}">
-        <div class="battle-horizon-head"><strong>${horizon}</strong><b>${this.battleLabel(battle.result, battle.state)}</b><em>${battle.state === "calibrated" ? "LightGBM 校准模型" : battle.state === "heuristic" ? "启发式未校准" : "数据不足"}</em></div>
-        <div class="battle-probabilities"><span class="long">多 ${Number(battle.long).toFixed(1)}%</span><span>震荡 ${Number(battle.neutral).toFixed(1)}%</span><span class="short">空 ${Number(battle.short).toFixed(1)}%</span></div>
+        ? "成本后优势未计算"
+        : `成本后边际 ${Number(battle.edge_after_cost_bps) >= 0 ? "+" : ""}${Number(battle.edge_after_cost_bps).toFixed(1)} bps`;
+      return `<article class="battle-horizon ${this.battleTone(direction, available ? battle.state : "data_insufficient")}">
+        <div class="battle-horizon-head"><strong>${horizon}</strong><b>${directionLabel}</b><em>${battle.state === "calibrated" ? "校准模型" : battle.state === "heuristic" ? "未校准" : health.label}</em></div>
+        <div class="battle-probabilities"><span class="long">多 ${Number(battle.long || 0).toFixed(1)}%</span><span>观望 ${Number(battle.neutral || 0).toFixed(1)}%</span><span class="short">空 ${Number(battle.short || 0).toFixed(1)}%</span></div>
         <svg class="battle-bar large" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="long" x="0" y="0" width="${Number(battle.long) || 0}" height="6"></rect><rect class="neutral" x="${Number(battle.long) || 0}" y="0" width="${Number(battle.neutral) || 0}" height="6"></rect><rect class="short" x="${(Number(battle.long) || 0) + (Number(battle.neutral) || 0)}" y="0" width="${Number(battle.short) || 0}" height="6"></rect></svg>
-        <div class="battle-meta"><span>置信度 ${this.escape(battle.confidence || "低")}</span><span>${this.escape(costText)}</span><span>${freshness}</span></div>
+        <div class="battle-meta"><span>置信度 ${this.escape(battle.confidence || "低")}</span><span>数据健康度 ${this.escape(health.value)}</span><span>${this.escape(costText)}</span></div>
+        <div class="battle-details"><span>失效条件：${this.escape(this.predictionInvalidation(battle))}</span><span>刷新：${battle.valid_until_ms ? this.escape(this.barTimeString(battle.valid_until_ms)) : "等待数据"}</span></div>
         <div class="battle-reasons">${reasons}</div>
       </article>`;
     }).join("");
-    this.q("#battle-detail").innerHTML = `<div class="battle-title"><strong>多空博弈预测</strong><span>仅用于 Shadow 验证，不触发自动下单</span></div><div class="battle-grid">${cards}</div>`;
+    this.q("#battle-detail").innerHTML = `<div class="battle-title"><strong>多周期多空预测</strong><span>每个周期独立判断；低置信度、数据异常或过期时一律观望</span></div><div class="battle-grid">${cards}</div>`;
   }
 
   renderOpportunity(opportunity) {
@@ -966,7 +1021,7 @@ class ContractMonitor extends HTMLElement {
       <div class="opportunity-head">
         <div><span class="opportunity-direction ${this.opportunityTone(direction)}">${this.opportunityLabel(direction)}</span><strong>质量 ${Number(opportunity.quality_score).toFixed(1)}</strong><span class="chip">${this.escape(opportunity.status)}</span></div>
         <div class="opportunity-actions">
-          ${direction === "neutral" ? "" : '<button type="button" data-opportunity-action="shadow">Shadow验证</button>'}
+          ${direction === "neutral" ? "" : '<button type="button" data-opportunity-action="shadow">人工确认模拟盘</button>'}
           <button type="button" data-opportunity-action="watch" class="${state === "watching" ? "on" : ""}">关注并提醒</button>
           <button type="button" data-opportunity-action="ignore" class="${state === "ignored" ? "on" : ""}">忽略</button>
           ${state ? '<button type="button" data-opportunity-action="clear">清除偏好</button>' : ""}
@@ -995,21 +1050,53 @@ class ContractMonitor extends HTMLElement {
     }
   }
 
+  openManualConfirmation() {
+    const opportunity = this.state.modal.opportunity;
+    if (!opportunity || !["long", "short"].includes(opportunity.direction)) return;
+    const overview = this.state.overview.find((item) => item.symbol === opportunity.symbol) || {};
+    const direction = opportunity.direction === "long" ? "看多 / 买入" : "看空 / 卖出";
+    const price = this.formatPrice(overview.price);
+    this.q("#manual-confirm-check").checked = false;
+    this.q("#manual-confirm-submit").disabled = true;
+    this.q("#manual-confirm-message").textContent = "";
+    this.q("#manual-confirm-summary").innerHTML = `
+      <dl>
+        <div><dt>合约</dt><dd>${this.escape(opportunity.symbol)}</dd></div>
+        <div><dt>建议方向</dt><dd class="${opportunity.direction === "long" ? "up" : "down"}">${direction}</dd></div>
+        <div><dt>参考价格</dt><dd>${price}</dd></div>
+        <div><dt>模拟名义金额</dt><dd>100 USDT</dd></div>
+        <div><dt>模拟杠杆</dt><dd>1x</dd></div>
+        <div><dt>机会质量</dt><dd>${Number(opportunity.quality_score || 0).toFixed(1)}</dd></div>
+      </dl>
+      <p>提交后仍会重新检查行情新鲜度、全局熔断和单笔限额；任一检查未通过，意图会被拒绝且不会产生模拟成交。</p>`;
+    this.q("#manual-confirm").classList.remove("hidden");
+  }
+
+  closeManualConfirmation() {
+    this.q("#manual-confirm").classList.add("hidden");
+  }
+
   async createShadowIntent() {
     const opportunity = this.state.modal.opportunity;
-    if (!opportunity) return;
+    if (!opportunity || !this.q("#manual-confirm-check").checked) return;
+    const submit = this.q("#manual-confirm-submit");
+    submit.disabled = true;
+    this.q("#manual-confirm-message").textContent = "正在执行风控复核…";
     try {
       const result = await this.api(`/opportunities/${encodeURIComponent(opportunity.id)}/shadow`, {
         method: "POST",
         body: JSON.stringify({ notional_usdt: 100, leverage: 1 }),
       });
       this.showError("");
-      window.alert(result.state === "approved"
-        ? "Shadow 意图已通过风控，系统不会向 Binance 发送真实订单。"
-        : `Shadow 意图被风控拒绝：${(result.reason_codes || []).join(", ")}`);
+      this.q("#manual-confirm-message").textContent = result.state === "approved"
+        ? "模拟意图已通过风控。系统不会向 Binance 发送真实订单。"
+        : `模拟意图被风控拒绝：${(result.reason_codes || []).join(", ") || "未通过规则"}`;
       await this.pollIntelligence();
+      window.setTimeout(() => this.closeManualConfirmation(), 1300);
     } catch (error) {
       this.showError(error.message || "Shadow 意图创建失败");
+      this.q("#manual-confirm-message").textContent = error.message || "模拟意图创建失败，请重新核对后再试。";
+      submit.disabled = false;
     }
   }
 

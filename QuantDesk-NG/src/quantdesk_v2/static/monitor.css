@@ -299,6 +299,8 @@ button { cursor: pointer; }
 .battle-horizon.short .battle-horizon-head b { color: var(--m-down); }
 .battle-horizon-head em { margin-left: auto; color: var(--m-dim); font-size: 9px; font-style: normal; }
 .battle-probabilities, .battle-meta { display: flex; justify-content: space-between; gap: 7px; margin-top: 6px; color: var(--m-dim); font-size: 10px; }
+.battle-details { display: grid; gap: 3px; margin-top: 6px; color: var(--m-dim); font-size: 9px; line-height: 1.45; }
+.battle-details span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .battle-probabilities .long { color: var(--m-up); }
 .battle-probabilities .short { color: var(--m-down); }
 .battle-bar.large { height: 6px; margin-top: 4px; }
@@ -316,6 +318,23 @@ button { cursor: pointer; }
 .opportunity-direction.neutral { color: var(--m-neutral); }
 .opportunity-actions button { padding: 4px 9px; border: 1px solid var(--m-border); border-radius: 6px; background: #19282b; color: var(--m-text); }
 .opportunity-actions button:hover, .opportunity-actions button.on { border-color: var(--m-gold); color: var(--m-gold); }
+.manual-confirm-box { width: min(560px, 96vw); }
+.manual-confirm-box .modal-head p { max-width: 440px; margin: 4px 0 0; color: var(--m-dim); font-size: 11px; font-weight: 400; line-height: 1.55; }
+.manual-confirm-summary { margin: 6px 0 12px; padding: 11px 12px; border: 1px solid var(--m-border); background: var(--m-bg); }
+.manual-confirm-summary dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 18px; margin: 0; }
+.manual-confirm-summary dl > div { display: flex; justify-content: space-between; gap: 8px; padding-bottom: 4px; border-bottom: 1px solid color-mix(in srgb, var(--m-border) 65%, transparent); }
+.manual-confirm-summary dt { color: var(--m-dim); font-size: 11px; }
+.manual-confirm-summary dd { margin: 0; color: var(--m-text); font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.manual-confirm-summary dd.up { color: var(--m-up); }
+.manual-confirm-summary dd.down { color: var(--m-down); }
+.manual-confirm-summary p { margin: 10px 0 0; color: var(--m-dim); font-size: 10px; line-height: 1.6; }
+.manual-confirm-check { display: flex; align-items: flex-start; gap: 8px; color: var(--m-text); font-size: 12px; line-height: 1.55; cursor: pointer; }
+.manual-confirm-check input { width: 15px; height: 15px; margin: 2px 0 0; accent-color: var(--m-gold); }
+.manual-confirm-message { min-height: 18px; margin: 10px 0 0; color: var(--m-gold); font-size: 11px; }
+.manual-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.manual-confirm-actions button { min-height: 32px; padding: 5px 12px; border: 1px solid var(--m-border); border-radius: 3px; color: var(--m-text); background: var(--m-bg); }
+.manual-confirm-actions button.primary { border-color: var(--m-gold); color: var(--m-gold); font-weight: 800; }
+.manual-confirm-actions button:disabled { cursor: not-allowed; opacity: .45; }
 .opportunity-summary { margin-top: 6px; color: var(--m-neutral); font-weight: 700; }
 .opportunity-meta, .condition-list, .reason-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
 .opportunity-meta { color: var(--m-dim); font-size: 11px; }
@@ -382,6 +401,7 @@ button { cursor: pointer; }
   .modal-box { width: 100%; max-height: 98vh; padding: 10px; }
   .modal-head { align-items: flex-start; }
   .opportunity-head { display: grid; }
+  .manual-confirm-summary dl { grid-template-columns: 1fr; gap: 6px; }
   .factor { grid-template-columns: 78px 40px 1fr; font-size: 11px; }
 }
 
