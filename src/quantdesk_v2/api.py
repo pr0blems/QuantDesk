@@ -1498,14 +1498,26 @@ def monitor_prediction_history(
     direction: str | None = Query(default=None, pattern="^(long|short)$"),
     horizon: int | None = None,
     hit: str | None = Query(default=None, pattern="^(hit|miss)$"),
+    period: str | None = Query(default=None, pattern="^(24h|7d|30d)$"),
     _: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    period_ms = {
+        "24h": 24 * 60 * 60 * 1_000,
+        "7d": 7 * 24 * 60 * 60 * 1_000,
+        "30d": 30 * 24 * 60 * 60 * 1_000,
+    }
+    predicted_after_ms = (
+        int(datetime.now(UTC).timestamp() * 1_000) - period_ms[period]
+        if period is not None
+        else None
+    )
     return _monitor(request).prediction_history(
         page,
         page_size=50,
         direction=direction,
         horizon_seconds=horizon,
         hit=hit,
+        predicted_after_ms=predicted_after_ms,
     )
 
 

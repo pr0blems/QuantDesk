@@ -18,7 +18,7 @@ class ContractMonitor extends HTMLElement {
         total: 0,
         loading: false,
         statistics: null,
-        filters: { direction: "all", horizon: "all", hit: "all" },
+        filters: { period: "all", direction: "all", horizon: "all", hit: "all" },
       },
       algorithm: { data: null, loading: false },
       matrixSort: { key: "ai", direction: "desc" },
@@ -42,7 +42,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-19">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-20">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -160,6 +160,12 @@ class ContractMonitor extends HTMLElement {
             <button id="prediction-history-close" type="button">关闭</button>
           </div>
           <section class="prediction-history-overview" aria-label="历史预测统计与筛选">
+            <article class="prediction-hit-chart-card" aria-label="当前筛选条件下的方向命中率">
+              <div id="history-hit-chart" class="prediction-hit-chart" role="img" aria-label="方向命中率暂无数据">
+                <strong id="history-hit-chart-value">--</strong>
+              </div>
+              <div><strong>胜率</strong><span id="history-hit-chart-caption">当前筛选结果</span></div>
+            </article>
             <div class="prediction-history-stats">
               <article><span>方向样本</span><strong id="history-stat-total">--</strong></article>
               <article><span>方向命中率</span><strong id="history-stat-hit-rate">--</strong></article>
@@ -167,6 +173,7 @@ class ContractMonitor extends HTMLElement {
               <article><span>看多 / 看空</span><strong id="history-stat-directions">--</strong></article>
             </div>
             <div class="prediction-history-filters">
+              <div><span>时间</span><button class="on" type="button" data-history-filter="period" data-filter-value="all">全部</button><button type="button" data-history-filter="period" data-filter-value="24h">24小时</button><button type="button" data-history-filter="period" data-filter-value="7d">7天</button><button type="button" data-history-filter="period" data-filter-value="30d">30天</button></div>
               <div><span>方向</span><button class="on" type="button" data-history-filter="direction" data-filter-value="all">全部</button><button type="button" data-history-filter="direction" data-filter-value="long">看多</button><button type="button" data-history-filter="direction" data-filter-value="short">看空</button></div>
               <div><span>周期</span><button class="on" type="button" data-history-filter="horizon" data-filter-value="all">全部</button><button type="button" data-history-filter="horizon" data-filter-value="300">5m</button><button type="button" data-history-filter="horizon" data-filter-value="900">15m</button><button type="button" data-history-filter="horizon" data-filter-value="3600">1h</button></div>
               <div><span>结果</span><button class="on" type="button" data-history-filter="hit" data-filter-value="all">全部</button><button type="button" data-history-filter="hit" data-filter-value="hit">命中</button><button type="button" data-history-filter="hit" data-filter-value="miss">未命中</button></div>
@@ -1222,7 +1229,7 @@ class ContractMonitor extends HTMLElement {
   }
 
   async setPredictionHistoryFilter(name, value) {
-    if (this.state.history.loading || !["direction", "horizon", "hit"].includes(name)) return;
+    if (this.state.history.loading || !["period", "direction", "horizon", "hit"].includes(name)) return;
     if (this.state.history.filters[name] === value) return;
     this.state.history.filters[name] = value;
     this.renderPredictionHistoryFilters();
@@ -1244,7 +1251,8 @@ class ContractMonitor extends HTMLElement {
     body.innerHTML = '<tr><td colspan="11" class="history-empty">正在加载历史预测…</td></tr>';
     try {
       const query = new URLSearchParams({ page: String(Math.max(1, Number(page) || 1)) });
-      const { direction, horizon, hit } = this.state.history.filters;
+      const { period, direction, horizon, hit } = this.state.history.filters;
+      if (period !== "all") query.set("period", period);
       if (direction !== "all") query.set("direction", direction);
       if (horizon !== "all") query.set("horizon", horizon);
       if (hit !== "all") query.set("hit", hit);
@@ -1272,6 +1280,14 @@ class ContractMonitor extends HTMLElement {
       : `${Number(statistics.avg_return_bps) >= 0 ? "+" : ""}${Number(statistics.avg_return_bps).toFixed(2)} bps`;
     this.q("#history-stat-total").textContent = total.toLocaleString("zh-CN");
     this.q("#history-stat-hit-rate").textContent = hitRate;
+    const chart = this.q("#history-hit-chart");
+    const rate = statistics.hit_rate == null ? null : Math.max(0, Math.min(1, Number(statistics.hit_rate)));
+    const chartValue = rate == null ? "--" : `${(rate * 100).toFixed(1)}%`;
+    chart.style.setProperty("--hit-angle", `${(rate || 0) * 360}deg`);
+    chart.classList.toggle("empty", rate == null);
+    chart.setAttribute("aria-label", rate == null ? "方向命中率暂无数据" : `方向命中率 ${chartValue}`);
+    this.q("#history-hit-chart-value").textContent = chartValue;
+    this.q("#history-hit-chart-caption").textContent = total ? `${total.toLocaleString("zh-CN")} 个方向样本` : "当前筛选无样本";
     this.q("#history-stat-return").textContent = average;
     this.q("#history-stat-return").className = statistics.avg_return_bps == null
       ? "history-neutral" : Number(statistics.avg_return_bps) >= 0 ? "history-hit" : "history-miss";

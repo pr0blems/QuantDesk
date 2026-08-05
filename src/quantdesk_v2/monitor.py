@@ -414,6 +414,7 @@ class MonitorRepository:
         direction: str | None = None,
         horizon_seconds: int | None = None,
         hit: str | None = None,
+        predicted_after_ms: int | None = None,
     ) -> dict[str, Any]:
         """Return one newest-first page of battle predictions and their labels."""
         if direction not in {None, "long", "short"}:
@@ -422,11 +423,15 @@ class MonitorRepository:
             raise MonitorUnavailable("unknown prediction horizon")
         if hit not in {None, "hit", "miss"}:
             raise MonitorUnavailable("unknown prediction hit filter")
+        if predicted_after_ms is not None and predicted_after_ms < 0:
+            raise MonitorUnavailable("invalid prediction history start time")
         filter_params = (
             direction,
             direction,
             horizon_seconds,
             horizon_seconds,
+            predicted_after_ms,
+            predicted_after_ms,
             hit,
             hit,
             hit,
@@ -442,6 +447,7 @@ class MonitorRepository:
                WHERE o.status='completed' AND p.result IN ('long','short')
                  AND (? IS NULL OR p.result=?)
                  AND (? IS NULL OR p.horizon_seconds=?)
+                 AND (? IS NULL OR p.predicted_at_ms>=?)
                  AND (? IS NULL OR (?='hit' AND o.directional_return_bps>0)
                                 OR (?='miss' AND o.directional_return_bps<=0))""",
             filter_params,
@@ -466,6 +472,7 @@ class MonitorRepository:
                WHERE o.status='completed' AND p.result IN ('long','short')
                  AND (? IS NULL OR p.result=?)
                  AND (? IS NULL OR p.horizon_seconds=?)
+                 AND (? IS NULL OR p.predicted_at_ms>=?)
                  AND (? IS NULL OR (?='hit' AND o.directional_return_bps>0)
                                 OR (?='miss' AND o.directional_return_bps<=0))
                ORDER BY p.predicted_at_ms DESC,p.id DESC

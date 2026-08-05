@@ -282,6 +282,12 @@ def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_pat
         "direction_hit": True,
     }
 
+    filtered = repository.prediction_history(page=1, predicted_after_ms=1001)
+
+    assert filtered["total"] == 0
+    assert filtered["items"] == []
+    assert filtered["statistics"]["hit_rate"] is None
+
 
 def test_opportunity_preferences_are_isolated_by_user(mysql_test_engine, tmp_path) -> None:
     repository, user_id, _ = build_monitor_fixture(mysql_test_engine, tmp_path)

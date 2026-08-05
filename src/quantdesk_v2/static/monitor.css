@@ -281,7 +281,16 @@ button { cursor: pointer; }
 .prediction-history-box { width: min(1580px, 98vw); max-height: 94vh; overflow: hidden; display: flex; flex-direction: column; }
 .prediction-history-head { flex: 0 0 auto; }
 .prediction-history-head > div { display: flex; align-items: baseline; gap: 10px; }
-.prediction-history-overview { flex: 0 0 auto; display: grid; grid-template-columns: minmax(440px, .9fr) minmax(600px, 1.4fr); gap: 8px; margin-bottom: 9px; }
+.prediction-history-overview { flex: 0 0 auto; display: grid; grid-template-columns: 150px minmax(440px, .9fr) minmax(600px, 1.4fr); gap: 8px; margin-bottom: 9px; }
+.prediction-hit-chart-card { display: flex; align-items: center; justify-content: center; gap: 9px; min-width: 0; padding: 7px 9px; border: 1px solid var(--m-border); background: var(--m-bg); }
+.prediction-hit-chart { --hit-angle: 0deg; position: relative; width: 62px; height: 62px; flex: 0 0 62px; display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--m-up) 0deg var(--hit-angle), color-mix(in srgb, var(--m-down) 62%, var(--m-bg)) var(--hit-angle) 360deg); }
+.prediction-hit-chart::before { content: ""; position: absolute; inset: 8px; border-radius: 50%; background: var(--m-bg); }
+.prediction-hit-chart.empty { background: conic-gradient(var(--m-border) 0deg 360deg); }
+.prediction-hit-chart strong { position: relative; z-index: 1; color: var(--m-text); font-size: 12px; font-variant-numeric: tabular-nums; }
+.prediction-hit-chart-card > div:last-child { min-width: 0; }
+.prediction-hit-chart-card > div:last-child strong, .prediction-hit-chart-card > div:last-child span { display: block; }
+.prediction-hit-chart-card > div:last-child strong { color: var(--m-gold); font-size: 11px; }
+.prediction-hit-chart-card > div:last-child span { margin-top: 3px; color: var(--m-dim); font-size: 9px; line-height: 1.4; }
 .prediction-history-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--m-border); background: var(--m-border); }
 .prediction-history-stats article { min-width: 0; padding: 7px 9px; background: var(--m-bg); }
 .prediction-history-stats span { display: block; color: var(--m-dim); font-size: 9px; white-space: nowrap; }
@@ -420,6 +429,11 @@ button { cursor: pointer; }
 
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-thumb { border-radius: 4px; background: #365351; }
+
+@media (max-width: 1250px) {
+  .prediction-history-overview { grid-template-columns: 150px minmax(0, 1fr); }
+  .prediction-history-filters { grid-column: 1 / -1; justify-content: flex-start; }
+}
 
 @media (max-width: 900px) {
   .monitor { height: auto; min-height: calc(100vh - 96px); overflow: visible; }
