@@ -415,6 +415,8 @@ class MonitorRepository:
         horizon_seconds: int | None = None,
         hit: str | None = None,
         predicted_after_ms: int | None = None,
+        predicted_before_ms: int | None = None,
+        timezone_offset_minutes: int = 0,
     ) -> dict[str, Any]:
         """Return one newest-first page of battle predictions and their labels."""
         if direction not in {None, "long", "short"}:
@@ -425,6 +427,16 @@ class MonitorRepository:
             raise MonitorUnavailable("unknown prediction hit filter")
         if predicted_after_ms is not None and predicted_after_ms < 0:
             raise MonitorUnavailable("invalid prediction history start time")
+        if predicted_before_ms is not None and predicted_before_ms < 0:
+            raise MonitorUnavailable("invalid prediction history end time")
+        if (
+            predicted_after_ms is not None
+            and predicted_before_ms is not None
+            and predicted_after_ms >= predicted_before_ms
+        ):
+            raise MonitorUnavailable("invalid prediction history time range")
+        if not -840 <= timezone_offset_minutes <= 840:
+            raise MonitorUnavailable("invalid prediction history timezone offset")
         filter_params = (
             direction,
             direction,
@@ -432,6 +444,8 @@ class MonitorRepository:
             horizon_seconds,
             predicted_after_ms,
             predicted_after_ms,
+            predicted_before_ms,
+            predicted_before_ms,
             hit,
             hit,
             hit,
@@ -448,6 +462,7 @@ class MonitorRepository:
                  AND (? IS NULL OR p.result=?)
                  AND (? IS NULL OR p.horizon_seconds=?)
                  AND (? IS NULL OR p.predicted_at_ms>=?)
+                 AND (? IS NULL OR p.predicted_at_ms<?)
                  AND (? IS NULL OR (?='hit' AND o.directional_return_bps>0)
                                 OR (?='miss' AND o.directional_return_bps<=0))""",
             filter_params,
@@ -457,6 +472,50 @@ class MonitorRepository:
         pages = max(1, math.ceil(total / page_size))
         current_page = min(max(1, page), pages)
         offset = (current_page - 1) * page_size
+        timezone_offset_ms = timezone_offset_minutes * 60 * 1_000
+        hourly_rows = self._query(
+            """SELECT FLOOR((p.predicted_at_ms+?)/3600000) hour_bucket,
+                      COUNT(*) total,
+                      AVG(CASE WHEN o.directional_return_bps>0 THEN 1 ELSE 0 END) hit_rate,
+                      AVG(o.directional_return_bps) avg_return_bps
+               FROM battle_predictions p
+               JOIN prediction_outcomes o ON o.prediction_id=p.id
+               WHERE o.status='completed' AND p.result IN ('long','short')
+                 AND (? IS NULL OR p.result=?)
+                 AND (? IS NULL OR p.horizon_seconds=?)
+                 AND (? IS NULL OR p.predicted_at_ms>=?)
+                 AND (? IS NULL OR p.predicted_at_ms<?)
+                 AND (? IS NULL OR (?='hit' AND o.directional_return_bps>0)
+                                OR (?='miss' AND o.directional_return_bps<=0))
+               GROUP BY hour_bucket ORDER BY hour_bucket""",
+            (timezone_offset_ms, *filter_params),
+        )
+        hourly_by_bucket = {int(row["hour_bucket"]): row for row in hourly_rows}
+        if predicted_after_ms is not None and predicted_before_ms is not None:
+            first_bucket = math.floor((predicted_after_ms + timezone_offset_ms) / 3_600_000)
+            final_bucket = math.ceil((predicted_before_ms + timezone_offset_ms) / 3_600_000)
+            hourly_buckets = range(first_bucket, final_bucket)
+        else:
+            hourly_buckets = sorted(hourly_by_bucket)[-168:]
+        hourly_statistics = []
+        for bucket in hourly_buckets:
+            hourly = hourly_by_bucket.get(bucket, {})
+            hourly_statistics.append(
+                {
+                    "hour_start_ms": bucket * 3_600_000 - timezone_offset_ms,
+                    "total": int(hourly.get("total") or 0),
+                    "hit_rate": (
+                        None
+                        if hourly.get("hit_rate") is None
+                        else _finite_number(hourly["hit_rate"])
+                    ),
+                    "avg_return_bps": (
+                        None
+                        if hourly.get("avg_return_bps") is None
+                        else _finite_number(hourly["avg_return_bps"])
+                    ),
+                }
+            )
         rows = self._query(
             """SELECT p.public_id,p.symbol,p.horizon_seconds,p.prediction_state,
                       p.result AS prediction_result,p.battle_score,p.long_probability,
@@ -473,6 +532,7 @@ class MonitorRepository:
                  AND (? IS NULL OR p.result=?)
                  AND (? IS NULL OR p.horizon_seconds=?)
                  AND (? IS NULL OR p.predicted_at_ms>=?)
+                 AND (? IS NULL OR p.predicted_at_ms<?)
                  AND (? IS NULL OR (?='hit' AND o.directional_return_bps>0)
                                 OR (?='miss' AND o.directional_return_bps<=0))
                ORDER BY p.predicted_at_ms DESC,p.id DESC
@@ -518,6 +578,7 @@ class MonitorRepository:
             "page_size": page_size,
             "pages": pages,
             "total": total,
+            "hourly_statistics": hourly_statistics,
             "statistics": {
                 "total": total,
                 "long_count": int(totals.get("long_count") or 0),

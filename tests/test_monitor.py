@@ -282,11 +282,25 @@ def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_pat
         "direction_hit": True,
     }
 
-    filtered = repository.prediction_history(page=1, predicted_after_ms=1001)
+    assert history["hourly_statistics"] == [
+        {
+            "hour_start_ms": 0,
+            "total": 1,
+            "hit_rate": 1.0,
+            "avg_return_bps": 98.0,
+        }
+    ]
+
+    filtered = repository.prediction_history(
+        page=1,
+        predicted_after_ms=1001,
+        predicted_before_ms=3_600_000,
+    )
 
     assert filtered["total"] == 0
     assert filtered["items"] == []
     assert filtered["statistics"]["hit_rate"] is None
+    assert filtered["hourly_statistics"][0]["total"] == 0
 
 
 def test_opportunity_preferences_are_isolated_by_user(mysql_test_engine, tmp_path) -> None:

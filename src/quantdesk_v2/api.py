@@ -1499,6 +1499,9 @@ def monitor_prediction_history(
     horizon: int | None = None,
     hit: str | None = Query(default=None, pattern="^(hit|miss)$"),
     period: str | None = Query(default=None, pattern="^(24h|7d|30d)$"),
+    start_ms: int | None = Query(default=None, ge=0),
+    end_ms: int | None = Query(default=None, ge=0),
+    timezone_offset_minutes: int = Query(default=0, ge=-840, le=840),
     _: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     period_ms = {
@@ -1506,11 +1509,24 @@ def monitor_prediction_history(
         "7d": 7 * 24 * 60 * 60 * 1_000,
         "30d": 30 * 24 * 60 * 60 * 1_000,
     }
-    predicted_after_ms = (
-        int(datetime.now(UTC).timestamp() * 1_000) - period_ms[period]
-        if period is not None
-        else None
-    )
+    if (start_ms is None) != (end_ms is None):
+        raise HTTPException(status_code=422, detail="start_ms and end_ms must be provided together")
+    if start_ms is not None and end_ms is not None:
+        if period is not None:
+            raise HTTPException(status_code=422, detail="period cannot be combined with a time range")
+        if start_ms >= end_ms:
+            raise HTTPException(status_code=422, detail="prediction history time range is invalid")
+        if end_ms - start_ms > 7 * 24 * 60 * 60 * 1_000:
+            raise HTTPException(status_code=422, detail="prediction history time range exceeds 7 days")
+        predicted_after_ms = start_ms
+        predicted_before_ms = end_ms
+    else:
+        predicted_after_ms = (
+            int(datetime.now(UTC).timestamp() * 1_000) - period_ms[period]
+            if period is not None
+            else None
+        )
+        predicted_before_ms = None
     return _monitor(request).prediction_history(
         page,
         page_size=50,
@@ -1518,6 +1534,8 @@ def monitor_prediction_history(
         horizon_seconds=horizon,
         hit=hit,
         predicted_after_ms=predicted_after_ms,
+        predicted_before_ms=predicted_before_ms,
+        timezone_offset_minutes=timezone_offset_minutes,
     )
 
 

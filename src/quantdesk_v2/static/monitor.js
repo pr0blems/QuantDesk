@@ -18,7 +18,9 @@ class ContractMonitor extends HTMLElement {
         total: 0,
         loading: false,
         statistics: null,
-        filters: { period: "all", direction: "all", horizon: "all", hit: "all" },
+        hourlyStatistics: [],
+        timeRange: { startMs: null, endMs: null },
+        filters: { direction: "all", horizon: "all", hit: "all" },
       },
       algorithm: { data: null, loading: false },
       matrixSort: { key: "ai", direction: "desc" },
@@ -42,7 +44,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-20">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-21">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -160,12 +162,6 @@ class ContractMonitor extends HTMLElement {
             <button id="prediction-history-close" type="button">关闭</button>
           </div>
           <section class="prediction-history-overview" aria-label="历史预测统计与筛选">
-            <article class="prediction-hit-chart-card" aria-label="当前筛选条件下的方向命中率">
-              <div id="history-hit-chart" class="prediction-hit-chart" role="img" aria-label="方向命中率暂无数据">
-                <strong id="history-hit-chart-value">--</strong>
-              </div>
-              <div><strong>胜率</strong><span id="history-hit-chart-caption">当前筛选结果</span></div>
-            </article>
             <div class="prediction-history-stats">
               <article><span>方向样本</span><strong id="history-stat-total">--</strong></article>
               <article><span>方向命中率</span><strong id="history-stat-hit-rate">--</strong></article>
@@ -173,11 +169,15 @@ class ContractMonitor extends HTMLElement {
               <article><span>看多 / 看空</span><strong id="history-stat-directions">--</strong></article>
             </div>
             <div class="prediction-history-filters">
-              <div><span>时间</span><button class="on" type="button" data-history-filter="period" data-filter-value="all">全部</button><button type="button" data-history-filter="period" data-filter-value="24h">24小时</button><button type="button" data-history-filter="period" data-filter-value="7d">7天</button><button type="button" data-history-filter="period" data-filter-value="30d">30天</button></div>
+              <div class="history-time-filter"><span>时间范围</span><label>开始<input id="history-time-start" type="datetime-local" step="3600"></label><label>结束<input id="history-time-end" type="datetime-local" step="3600"></label><button id="history-time-apply" type="button">查询</button><button id="history-time-recent" type="button">最近24小时</button><button id="history-time-all" type="button">全部</button><small id="history-time-message">按整点小时筛选，最长 7 天</small></div>
               <div><span>方向</span><button class="on" type="button" data-history-filter="direction" data-filter-value="all">全部</button><button type="button" data-history-filter="direction" data-filter-value="long">看多</button><button type="button" data-history-filter="direction" data-filter-value="short">看空</button></div>
               <div><span>周期</span><button class="on" type="button" data-history-filter="horizon" data-filter-value="all">全部</button><button type="button" data-history-filter="horizon" data-filter-value="300">5m</button><button type="button" data-history-filter="horizon" data-filter-value="900">15m</button><button type="button" data-history-filter="horizon" data-filter-value="3600">1h</button></div>
               <div><span>结果</span><button class="on" type="button" data-history-filter="hit" data-filter-value="all">全部</button><button type="button" data-history-filter="hit" data-filter-value="hit">命中</button><button type="button" data-history-filter="hit" data-filter-value="miss">未命中</button></div>
             </div>
+            <section class="prediction-hourly-panel" aria-label="每小时方向胜率">
+              <header><strong>每小时胜率</strong><span id="history-hourly-caption">所选范围内每个小时的方向命中率</span></header>
+              <div id="history-hourly-list" class="prediction-hourly-list"><span class="hourly-empty">正在加载小时统计…</span></div>
+            </section>
           </section>
           <div class="prediction-history-table-wrap">
             <table class="prediction-history-table">
@@ -531,6 +531,9 @@ class ContractMonitor extends HTMLElement {
         button.dataset.filterValue,
       ));
     });
+    this.q("#history-time-apply").addEventListener("click", () => this.applyPredictionHistoryTimeRange());
+    this.q("#history-time-recent").addEventListener("click", () => this.setRecentPredictionHistoryRange());
+    this.q("#history-time-all").addEventListener("click", () => this.clearPredictionHistoryTimeRange());
     this.q("#prediction-algorithm-close").addEventListener("click", () => this.closePredictionAlgorithm());
     this.q("#prediction-algorithm-modal").addEventListener("click", (event) => {
       if (event.target === this.q("#prediction-algorithm-modal")) this.closePredictionAlgorithm();
@@ -1098,6 +1101,7 @@ class ContractMonitor extends HTMLElement {
     const modal = this.q("#prediction-history-modal");
     modal.classList.remove("hidden");
     modal.setAttribute("aria-hidden", "false");
+    if (this.state.history.timeRange.startMs == null) this.setRecentPredictionHistoryRange(false);
     await this.loadPredictionHistory(1);
   }
 
@@ -1229,7 +1233,7 @@ class ContractMonitor extends HTMLElement {
   }
 
   async setPredictionHistoryFilter(name, value) {
-    if (this.state.history.loading || !["period", "direction", "horizon", "hit"].includes(name)) return;
+    if (this.state.history.loading || !["direction", "horizon", "hit"].includes(name)) return;
     if (this.state.history.filters[name] === value) return;
     this.state.history.filters[name] = value;
     this.renderPredictionHistoryFilters();
@@ -1245,14 +1249,80 @@ class ContractMonitor extends HTMLElement {
     });
   }
 
+  historyHourInputValue(timestamp) {
+    const date = new Date(timestamp);
+    const local = new Date(timestamp - date.getTimezoneOffset() * 60 * 1000);
+    return local.toISOString().slice(0, 16);
+  }
+
+  syncPredictionHistoryTimeInputs() {
+    const { startMs, endMs } = this.state.history.timeRange;
+    this.q("#history-time-start").value = startMs == null ? "" : this.historyHourInputValue(startMs);
+    this.q("#history-time-end").value = endMs == null ? "" : this.historyHourInputValue(endMs - 3_600_000);
+  }
+
+  async setRecentPredictionHistoryRange(load = true) {
+    const currentHour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    this.state.history.timeRange = {
+      startMs: currentHour - 23 * 3_600_000,
+      endMs: currentHour + 3_600_000,
+    };
+    this.syncPredictionHistoryTimeInputs();
+    this.q("#history-time-message").textContent = "最近 24 个整点小时（包含当前小时）";
+    if (load) await this.loadPredictionHistory(1);
+  }
+
+  async clearPredictionHistoryTimeRange() {
+    if (this.state.history.loading) return;
+    this.state.history.timeRange = { startMs: null, endMs: null };
+    this.syncPredictionHistoryTimeInputs();
+    this.q("#history-time-message").textContent = "全部记录；小时图显示最近 168 个有数据小时";
+    await this.loadPredictionHistory(1);
+  }
+
+  async applyPredictionHistoryTimeRange() {
+    if (this.state.history.loading) return;
+    const startValue = this.q("#history-time-start").value;
+    const endValue = this.q("#history-time-end").value;
+    const message = this.q("#history-time-message");
+    if (!startValue || !endValue) {
+      message.textContent = "请选择开始小时和结束小时。";
+      return;
+    }
+    const start = new Date(startValue);
+    const end = new Date(endValue);
+    start.setMinutes(0, 0, 0);
+    end.setMinutes(0, 0, 0);
+    const startMs = start.getTime();
+    const endMs = end.getTime() + 3_600_000;
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) {
+      message.textContent = "时间范围无效，请重新选择。";
+      return;
+    }
+    const hours = (endMs - startMs) / 3_600_000;
+    if (hours > 168) {
+      message.textContent = "单次最多查看 168 小时（7 天）。";
+      return;
+    }
+    this.state.history.timeRange = { startMs, endMs };
+    this.syncPredictionHistoryTimeInputs();
+    message.textContent = `已选择 ${hours} 个整点小时。`;
+    await this.loadPredictionHistory(1);
+  }
+
   async loadPredictionHistory(page) {
     const body = this.q("#prediction-history-body");
     this.state.history.loading = true;
     body.innerHTML = '<tr><td colspan="11" class="history-empty">正在加载历史预测…</td></tr>';
     try {
       const query = new URLSearchParams({ page: String(Math.max(1, Number(page) || 1)) });
-      const { period, direction, horizon, hit } = this.state.history.filters;
-      if (period !== "all") query.set("period", period);
+      const { direction, horizon, hit } = this.state.history.filters;
+      const { startMs, endMs } = this.state.history.timeRange;
+      if (startMs != null && endMs != null) {
+        query.set("start_ms", String(startMs));
+        query.set("end_ms", String(endMs));
+      }
+      query.set("timezone_offset_minutes", String(-new Date().getTimezoneOffset()));
       if (direction !== "all") query.set("direction", direction);
       if (horizon !== "all") query.set("horizon", horizon);
       if (hit !== "all") query.set("hit", hit);
@@ -1261,6 +1331,7 @@ class ContractMonitor extends HTMLElement {
       this.state.history.pages = Number(data.pages) || 1;
       this.state.history.total = Number(data.total) || 0;
       this.state.history.statistics = data.statistics || null;
+      this.state.history.hourlyStatistics = data.hourly_statistics || [];
       this.renderPredictionHistory(data.items || []);
       this.renderPredictionHistoryStatistics();
     } catch (error) {
@@ -1280,18 +1351,38 @@ class ContractMonitor extends HTMLElement {
       : `${Number(statistics.avg_return_bps) >= 0 ? "+" : ""}${Number(statistics.avg_return_bps).toFixed(2)} bps`;
     this.q("#history-stat-total").textContent = total.toLocaleString("zh-CN");
     this.q("#history-stat-hit-rate").textContent = hitRate;
-    const chart = this.q("#history-hit-chart");
-    const rate = statistics.hit_rate == null ? null : Math.max(0, Math.min(1, Number(statistics.hit_rate)));
-    const chartValue = rate == null ? "--" : `${(rate * 100).toFixed(1)}%`;
-    chart.style.setProperty("--hit-angle", `${(rate || 0) * 360}deg`);
-    chart.classList.toggle("empty", rate == null);
-    chart.setAttribute("aria-label", rate == null ? "方向命中率暂无数据" : `方向命中率 ${chartValue}`);
-    this.q("#history-hit-chart-value").textContent = chartValue;
-    this.q("#history-hit-chart-caption").textContent = total ? `${total.toLocaleString("zh-CN")} 个方向样本` : "当前筛选无样本";
     this.q("#history-stat-return").textContent = average;
     this.q("#history-stat-return").className = statistics.avg_return_bps == null
       ? "history-neutral" : Number(statistics.avg_return_bps) >= 0 ? "history-hit" : "history-miss";
     this.q("#history-stat-directions").innerHTML = `<span class="history-long">${Number(statistics.long_count || 0).toLocaleString("zh-CN")}</span> / <span class="history-short">${Number(statistics.short_count || 0).toLocaleString("zh-CN")}</span>`;
+    this.renderHourlyPredictionStatistics();
+  }
+
+  renderHourlyPredictionStatistics() {
+    const hourly = this.state.history.hourlyStatistics || [];
+    const list = this.q("#history-hourly-list");
+    if (!hourly.length) {
+      list.innerHTML = '<span class="hourly-empty">当前筛选条件下没有小时统计</span>';
+      this.q("#history-hourly-caption").textContent = "所选范围内每个小时的方向命中率";
+      return;
+    }
+    const label = (timestamp) => {
+      const date = new Date(timestamp);
+      const pad = (value) => String(value).padStart(2, "0");
+      return `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:00`;
+    };
+    list.innerHTML = hourly.map((item) => {
+      const total = Number(item.total) || 0;
+      const rate = item.hit_rate == null ? null : Math.max(0, Math.min(1, Number(item.hit_rate)));
+      const value = rate == null ? "--" : `${(rate * 100).toFixed(1)}%`;
+      const average = item.avg_return_bps == null ? "--" : `${Number(item.avg_return_bps) >= 0 ? "+" : ""}${Number(item.avg_return_bps).toFixed(2)} bps`;
+      const title = `${label(item.hour_start_ms)} · ${total} 个样本 · 胜率 ${value} · 平均 ${average}`;
+      return `<article class="hourly-win-card" title="${this.escape(title)}">
+        <div class="prediction-hourly-chart ${rate == null ? "empty" : ""}" style="--hit-angle:${(rate || 0) * 360}deg" role="img" aria-label="${this.escape(title)}"><strong>${value}</strong></div>
+        <span>${label(item.hour_start_ms)}</span><small>${total.toLocaleString("zh-CN")} 样本</small>
+      </article>`;
+    }).join("");
+    this.q("#history-hourly-caption").textContent = `${label(hourly[0].hour_start_ms)} 至 ${label(hourly[hourly.length - 1].hour_start_ms)} · 绿色命中 / 红色未命中`;
   }
 
   renderPredictionHistory(items) {
