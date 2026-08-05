@@ -17,6 +17,7 @@ MAX_RESPONSE_BYTES = 64 * 1024
 MAX_WEBHOOK_BYTES = 64 * 1024
 MARKET_STATUS_PATH = "/api/v1/stock/market-status"
 QUOTE_PATH = "/api/v1/quote"
+COMPANY_PROFILE_PATH = "/api/v1/stock/profile2"
 MarketSession = Literal["pre-market", "regular", "post-market"]
 Transport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
 
@@ -153,6 +154,21 @@ class FinnhubClient:
             user_agent="QuantDesk/2 FinnhubUsQuotes",
         )
         return _parse_quote(payload, normalized)
+
+    def company_profile(self, symbol: str) -> dict[str, Any]:
+        normalized = symbol.strip().upper()
+        if not normalized or len(normalized) > 16 or not all(
+            character.isalnum() or character in {".", "-"} for character in normalized
+        ):
+            raise FinnhubClientError("rejected")
+        payload = self._get_json(
+            COMPANY_PROFILE_PATH,
+            {"symbol": normalized},
+            user_agent="QuantDesk/2 StockLibrary",
+        )
+        if not isinstance(payload, dict) or not payload.get("ticker"):
+            raise FinnhubClientError("no_data")
+        return payload
 
     def _get_json(
         self,

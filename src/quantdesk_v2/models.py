@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Computed,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -72,11 +73,114 @@ class News(Base):
     title_zh: Mapped[str | None] = mapped_column(Text, comment="新闻中文翻译标题")
     link: Mapped[str | None] = mapped_column(Text, comment="新闻原文链接")
     sentiment: Mapped[str | None] = mapped_column(String(32), comment="新闻情绪分类")
+    rule_sentiment: Mapped[str | None] = mapped_column(
+        String(32), comment="关键词规则产生的原始情绪分类"
+    )
     summary: Mapped[str | None] = mapped_column(Text, comment="新闻摘要或深度舆情摘要")
+    related_us_stocks: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, comment="AI 识别的关联美股、相关度与影响方向"
+    )
+    ai_sentiment: Mapped[str | None] = mapped_column(
+        String(32), comment="AI 语义研判情绪"
+    )
+    ai_confidence: Mapped[Decimal | None] = mapped_column(
+        Numeric(5, 4), comment="AI 情绪置信度，范围 0 到 1"
+    )
+    ai_impact_strength: Mapped[str | None] = mapped_column(
+        String(16), comment="AI 判断的影响强度"
+    )
+    ai_time_horizon: Mapped[str | None] = mapped_column(
+        String(32), comment="AI 判断的影响周期"
+    )
+    ai_category: Mapped[str | None] = mapped_column(
+        String(32), comment="AI 判断的新闻类别"
+    )
+    ai_reason: Mapped[str | None] = mapped_column(Text, comment="AI 情绪和关联标的判断依据")
+    ai_model: Mapped[str | None] = mapped_column(String(128), comment="执行分析的模型标识")
+    ai_batch_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("news_ai_batches.id", ondelete="SET NULL"), comment="AI 分析批次"
+    )
+    ai_analyzed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="AI 分析完成时间（UTC）"
+    )
     source_link_hash: Mapped[str | None] = mapped_column(
         String(64),
         Computed(NEWS_DEDUP_EXPRESSION, persisted=True),
         comment="来源名称与原文链接生成的 SHA-256 去重键",
+    )
+
+
+class NewsAiBatch(Base):
+    __tablename__ = "news_ai_batches"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'partial', 'failed')",
+            name="valid_status",
+        ),
+        CheckConstraint("requested_count IN (300, 500)", name="valid_requested_count"),
+        CheckConstraint(
+            "selected_count >= 0 AND processed_count >= 0 AND failed_count >= 0",
+            name="nonnegative_counts",
+        ),
+        Index("ix_news_ai_batches_created", "created_at"),
+        Index("ix_news_ai_batches_status", "status", "updated_at"),
+        {
+            "comment": "管理员发起的批量新闻 AI 研判任务与市场汇总结论",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4()), comment="批次 UUID"
+    )
+    started_by: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        comment="发起分析的管理员用户 ID",
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, comment="批次执行状态"
+    )
+    requested_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="请求分析的最近新闻数量"
+    )
+    selected_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="实际选中的新闻数量"
+    )
+    processed_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="成功完成 AI 研判的新闻数量"
+    )
+    failed_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="研判失败的新闻数量"
+    )
+    chunk_size: Mapped[int] = mapped_column(
+        Integer, default=10, nullable=False, comment="单次模型调用包含的新闻数量"
+    )
+    provider_code: Mapped[str | None] = mapped_column(String(32), comment="AI 服务商代码")
+    model_name: Mapped[str | None] = mapped_column(String(128), comment="模型标识")
+    market_sentiment: Mapped[str | None] = mapped_column(
+        String(32), comment="批次整体美股情绪结论"
+    )
+    market_confidence: Mapped[Decimal | None] = mapped_column(
+        Numeric(5, 4), comment="批次整体结论置信度"
+    )
+    market_summary: Mapped[str | None] = mapped_column(Text, comment="批次整体市场结论")
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="关键驱动、重点美股与模型汇总返回"
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, comment="脱敏后的最近错误")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, comment="开始时间（UTC）")
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, comment="完成时间（UTC）")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="最后更新时间（UTC）",
     )
 
 
@@ -344,7 +448,10 @@ class NewsSourceSetting(Base):
     )
 
     name: Mapped[str] = mapped_column(String(80), primary_key=True, comment="来源名称")
-    url: Mapped[str] = mapped_column(Text, nullable=False, comment="RSS HTTPS 地址")
+    url: Mapped[str] = mapped_column(Text, nullable=False, comment="新闻来源 HTTPS 地址")
+    feed_type: Mapped[str] = mapped_column(
+        String(32), default="rss", nullable=False, comment="来源格式：rss 或 taoz_flash"
+    )
     lang: Mapped[str] = mapped_column(String(16), default="en", nullable=False, comment="内容语言")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, comment="是否启用")
     slow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="是否低频轮询")
@@ -1456,3 +1563,107 @@ class LiveOrderIntent(Base):
         nullable=False,
         comment="订单意图最后更新时间（UTC）",
     )
+
+
+class Security(Base):
+    __tablename__ = "securities"
+    __table_args__ = (
+        UniqueConstraint("exchange", "symbol", name="uq_securities_exchange_symbol"),
+        Index("ix_securities_type_active", "security_type", "is_active"),
+        {"comment": "美股、ADR 与 ETF 证券主数据", "mysql_engine": "InnoDB", "mysql_charset": "utf8mb4"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), default="US", nullable=False)
+    security_type: Mapped[str] = mapped_column(String(32), default="UNKNOWN", nullable=False)
+    company_name: Mapped[str | None] = mapped_column(String(255))
+    company_name_zh: Mapped[str | None] = mapped_column(String(255))
+    currency: Mapped[str] = mapped_column(String(8), default="USD", nullable=False)
+    country: Mapped[str | None] = mapped_column(String(64))
+    cik: Mapped[str | None] = mapped_column(String(16))
+    isin: Mapped[str | None] = mapped_column(String(32))
+    finnhub_symbol: Mapped[str | None] = mapped_column(String(32))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    verification_status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class SecuritySymbolMapping(Base):
+    __tablename__ = "security_symbol_mappings"
+    __table_args__ = (UniqueConstraint("source", "source_symbol", name="uq_security_mapping_source_symbol"),)
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    mapping_status: Mapped[str] = mapped_column(String(32), default="AUTO", nullable=False)
+    mapping_method: Mapped[str | None] = mapped_column(String(64))
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class CompanyProfile(Base):
+    __tablename__ = "company_profiles"
+
+    security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), primary_key=True)
+    legal_name: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text)
+    industry: Mapped[str | None] = mapped_column(String(128))
+    industry_zh: Mapped[str | None] = mapped_column(String(128))
+    sector: Mapped[str | None] = mapped_column(String(128))
+    sector_zh: Mapped[str | None] = mapped_column(String(128))
+    website: Mapped[str | None] = mapped_column(Text)
+    ipo_date: Mapped[Any | None] = mapped_column(Date)
+    employee_count: Mapped[int | None] = mapped_column(BigInteger)
+    market_cap: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    shares_outstanding: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    source: Mapped[str | None] = mapped_column(String(32))
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    raw_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class SecurityResearchSource(Base):
+    __tablename__ = "security_research_sources"
+    __table_args__ = (UniqueConstraint("security_id", "content_hash", name="uq_research_security_hash"),)
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    url: Mapped[str | None] = mapped_column(Text)
+    publisher: Mapped[str | None] = mapped_column(String(128))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    content_summary: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    raw_metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(32), default="ACTIVE", nullable=False)
+
+
+class SecurityFundamentalAnalysis(Base):
+    __tablename__ = "security_fundamental_analyses"
+    __table_args__ = (UniqueConstraint("security_id", "analysis_version", "as_of_date", name="uq_analysis_security_version_date"),)
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False)
+    analysis_version: Mapped[str] = mapped_column(String(32), default="v1", nullable=False)
+    as_of_date: Mapped[Any] = mapped_column(Date, nullable=False)
+    business_summary: Mapped[str | None] = mapped_column(Text)
+    growth_analysis: Mapped[str | None] = mapped_column(Text)
+    profitability_analysis: Mapped[str | None] = mapped_column(Text)
+    valuation_analysis: Mapped[str | None] = mapped_column(Text)
+    risk_analysis: Mapped[str | None] = mapped_column(Text)
+    catalysts_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    risk_factors_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    quality_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    growth_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    valuation_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    financial_health_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    overall_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    evidence_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

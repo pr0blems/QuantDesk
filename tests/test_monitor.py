@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from quantdesk_v2 import market_engine
 from quantdesk_v2.models import PaperAccount, User
 from quantdesk_v2.monitor import MonitorRepository
 from quantdesk_v2.strategy_catalog import (
@@ -61,6 +62,22 @@ def build_monitor_fixture(
                 "pct_24h": 2.25,
                 "quote_volume": 5_000,
                 "ts": 2_000_000_000,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO market_microstructure(
+                    symbol,bid_depth_notional,ask_depth_notional,book_imbalance,
+                    book_imbalance_5,depth_levels,ts
+                ) VALUES(
+                    :symbol,1000,900,0.0526315789,0.1,100,:ts
+                )
+                """
+            ),
+            {
+                "symbol": "TESTUSDT",
+                "ts": int(datetime.now(UTC).timestamp()),
             },
         )
         connection.execute(
@@ -128,12 +145,25 @@ def build_monitor_fixture(
     return MonitorRepository(engine, symbols), user_id, account_id
 
 
-def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) -> None:
+def test_monitor_overview_breadth_and_user_state(
+    mysql_test_engine, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        market_engine,
+        "rolling_price_changes",
+        lambda symbols, **_: {
+            symbol: {"pct_2m": 1.25, "pct_5m": -2.5, "pct_10m": 3.75}
+            for symbol in symbols
+        },
+    )
     repository, user_id, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
     overview = repository.overview(["TESTUSDT"])
     assert len(overview["items"]) == 1
     assert overview["items"][0]["watch"] is True
     assert overview["items"][0]["score"] == 62
+    assert overview["items"][0]["pct_2m"] == 1.25
+    assert overview["items"][0]["pct_5m"] == -2.5
+    assert overview["items"][0]["pct_10m"] == 3.75
     assert overview["items"][0]["opportunity"]["direction"] == "long"
     assert overview["items"][0]["opportunity"]["quality_score"] == 88.5
     assert repository.breadth()["bull"] == 1

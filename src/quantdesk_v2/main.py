@@ -179,6 +179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runtime_settings.finnhub_api_key.get_secret_value(),
         timeout_seconds=runtime_settings.finnhub_timeout_seconds,
     )
+    app.state.finnhub_client = finnhub_client
     app.state.finnhub_market_status_service = FinnhubMarketStatusService(
         finnhub_client,
         cache_seconds=runtime_settings.finnhub_market_status_cache_seconds,

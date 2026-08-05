@@ -26,6 +26,7 @@ HORIZONS = (300, 900, 3_600)
 HORIZON_TIMEFRAME = {300: "15m", 900: "15m", 3_600: "1h"}
 HORIZON_NAMES = {300: "5m", 900: "15m", 3_600: "1h"}
 MAX_MARKET_AGE_MS = COLLECTION_SECONDS * 1_000
+MAX_DEPTH_AGE_MS = 30_000
 OUTCOME_POLL_SECONDS = 5
 OUTCOME_MAX_LAG_MS = 30_000
 OUTCOME_GRACE_MS = 60_000
@@ -462,29 +463,53 @@ def _save_positioning(snapshot: dict[str, Any]) -> None:
     )
 
 
+def _market_microstructure(symbol: str, now_ms: int) -> dict[str, Any] | None:
+    """Load the latest real depth metrics using the feature timestamp unit."""
+
+    try:
+        # ``market_microstructure.ts`` is stored in seconds for the monitor,
+        # while the prediction feature contract measures age in milliseconds.
+        rows = store.query(
+            """SELECT symbol,bid_depth_notional,ask_depth_notional,
+                      book_imbalance,book_imbalance_5,depth_levels,ts,
+                      ts*1000 AS received_at
+               FROM market_microstructure WHERE symbol=?""",
+            (symbol,),
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    snapshot = dict(rows[0])
+    received_at = int(snapshot.get("received_at") or 0)
+    age_ms = now_ms - received_at
+    if received_at <= 0 or age_ms < -5_000 or age_ms > MAX_DEPTH_AGE_MS:
+        return None
+    return snapshot
+
+
 def _local_microstructure(
     scores: dict[str, float], ticker: dict[str, Any], now_ms: int
 ) -> dict[str, Any]:
-    """Build a bounded fallback from locally collected prices and scores.
+    """Return an explicitly neutral fallback when real depth is unavailable.
 
-    Binance positioning endpoints can be unavailable by region. The fallback
-    keeps the heuristic running while clearly recording zero positioning data.
+    Trend scores already enter the ensemble through dedicated features.  They
+    must not be recycled into invented order-book levels or flow, otherwise a
+    depth outage both double-counts trend and appears healthier than it is.
     """
 
-    trend_15m = _clip(_number(scores.get("15m")) / 100.0)
-    trend_1h = _clip(_number(scores.get("1h")) / 100.0)
-    combined = _clip(trend_15m * 0.65 + trend_1h * 0.35)
+    del scores, now_ms
     pct_24h = _number(ticker.get("pct_24h"))
     ticker_ts = int(ticker.get("ts") or 0)
     received_at = ticker_ts * 1_000 if ticker_ts < 10_000_000_000 else ticker_ts
     return {
-        "received_at": received_at or now_ms,
+        "received_at": received_at,
         "mid_price": _number(ticker.get("price")),
-        "book_imbalance": combined * 0.75,
-        "book_imbalance_5": trend_15m * 0.65,
-        "depth_levels": 20,
-        "aggressive_buy_ratio": _clip(0.5 + trend_15m * 0.42, 0.02, 0.98),
-        "price_velocity_bps_60s": trend_15m * 8.0,
+        "book_imbalance": 0.0,
+        "book_imbalance_5": 0.0,
+        "depth_levels": 0,
+        "aggressive_buy_ratio": 0.5,
+        "price_velocity_bps_60s": 0.0,
         "realized_volatility_60s": max(2.0, abs(pct_24h) * 100.0 / math.sqrt(96.0)),
         "spread_bps": 0.0,
     }
@@ -514,11 +539,9 @@ def create_predictions(symbol: str, as_of_ms: int | None = None) -> int:
     scores = {str(row["tf"]): _number(row["score"]) for row in score_rows}
     ticker_rows = store.query("SELECT price,pct_24h,ts FROM ticker WHERE symbol=?", (symbol,))
     ticker = dict(ticker_rows[0]) if ticker_rows else {}
-    try:
-        micro_rows = store.query("SELECT * FROM market_microstructure WHERE symbol=?", (symbol,))
-    except Exception:
-        micro_rows = []
-    micro = dict(micro_rows[0]) if micro_rows else _local_microstructure(scores, ticker, now_ms)
+    micro = _market_microstructure(symbol, now_ms) or _local_microstructure(
+        scores, ticker, now_ms
+    )
     try:
         movement_rows = store.query(
             """SELECT SUM(up_count) up_count,SUM(down_count) down_count
@@ -837,6 +860,16 @@ def outcome_loop(stop_event=None) -> None:
             break
 
 
+def positioning_after_depth_loop(stop_event=None) -> None:
+    """Defer Binance positioning calls until depth snapshots own startup weight."""
+
+    from . import market_engine
+
+    if not market_engine.wait_for_depth_ready():
+        print("[battle] depth bootstrap wait expired; starting positioning anyway")
+    positioning_loop(stop_event)
+
+
 def start() -> None:
     """Start the in-process prediction and forward-label workers once."""
 
@@ -846,7 +879,7 @@ def start() -> None:
             return
         _started = True
     threading.Thread(
-        target=positioning_loop,
+        target=positioning_after_depth_loop,
         daemon=True,
         name="battle-prediction",
     ).start()

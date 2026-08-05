@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>QuantDesk 管理中心</title>
-  <link rel="stylesheet" href="/assets/admin.css?v=20260804-3">
+  <link rel="stylesheet" href="/assets/admin.css?v=20260805-5">
 </head>
 <body>
   <main id="admin-boot" class="boot-screen" aria-live="polite">
@@ -52,14 +52,16 @@
         <button class="nav-item active" data-view-target="overview"><span>01</span>运行总览</button>
         <button class="nav-item" data-view-target="collectors"><span>02</span>采集器</button>
         <p>内容与信号</p>
-        <button class="nav-item" data-view-target="alerts"><span>03</span>提醒事件</button>
-        <button class="nav-item" data-view-target="rules"><span>04</span>信号规则</button>
-        <button class="nav-item" data-view-target="sources"><span>05</span>舆情来源</button>
-        <button class="nav-item" data-view-target="symbols"><span>06</span>合约数据</button>
+        <button class="nav-item" data-view-target="stock-library"><span>03</span>美股资料库</button>
+        <button class="nav-item" data-view-target="alerts"><span>04</span>提醒事件</button>
+        <button class="nav-item" data-view-target="rules"><span>05</span>信号规则</button>
+        <button class="nav-item" data-view-target="sources"><span>06</span>舆情来源</button>
+        <button class="nav-item" data-view-target="news"><span>07</span>采集新闻</button>
+        <button class="nav-item" data-view-target="symbols"><span>08</span>合约数据</button>
         <p>平台治理</p>
-        <button class="nav-item" data-view-target="users"><span>07</span>用户权限</button>
-        <button class="nav-item" data-view-target="storage"><span>08</span>存储维护</button>
-        <button class="nav-item" data-view-target="audit"><span>09</span>审计日志</button>
+        <button class="nav-item" data-view-target="users"><span>09</span>用户权限</button>
+        <button class="nav-item" data-view-target="storage"><span>10</span>存储维护</button>
+        <button class="nav-item" data-view-target="audit"><span>11</span>审计日志</button>
       </nav>
       <div class="sidebar-foot">
         <span class="live-dot"></span><span>控制面在线</span>
@@ -102,6 +104,23 @@
           <article class="panel"><div class="table-wrap"><table><thead><tr><th>采集器</th><th>运行状态</th><th>心跳</th><th>累计周期</th><th>累计条目</th><th>运行详情</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="collectors-table"></tbody></table></div></article>
         </section>
 
+        <section class="view hidden" data-view="stock-library">
+          <div class="section-intro">
+            <div>
+              <p class="eyebrow">US EQUITY INTELLIGENCE</p>
+              <h2>美股资料库</h2>
+              <p>集中管理美股证券主数据、公司基础资料、财务指标、研究来源与基础面分析。</p>
+            </div>
+            <div class="intro-actions"><span id="stock-library-total" class="counter">0 个标的</span><button id="stock-library-import" class="primary" type="button">导入当前美股</button></div>
+          </div>
+          <form id="stock-library-filter" class="filter-bar compact">
+            <label>搜索标的<input name="query" placeholder="代码或公司名称"></label>
+            <label>证券类型<select name="security_type"><option value="">全部类型</option><option value="COMMON_STOCK">普通股 / ADR</option><option value="ETF">ETF</option><option value="UNKNOWN">待核验</option></select></label>
+            <button class="primary" type="submit">搜索</button>
+          </form>
+          <article class="panel"><div class="panel-head"><div><span>STOCK RESEARCH DATABASE</span><h3>证券主数据与基础面状态</h3></div><span id="stock-library-status">尚未导入</span></div><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称 / 行业</th><th>类型</th><th>核验状态</th><th>市值 / 基金规模</th><th>基础面分析</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="stock-library-table"></tbody></table></div></article>
+        </section>
+
         <section class="view hidden" data-view="alerts">
           <div class="section-intro"><div><p class="eyebrow">SIGNAL EVENTS</p><h2>提醒事件</h2><p>跨用户追踪评分、异动与持仓提醒，定位规则噪音和漏报。</p></div><span id="alerts-total" class="counter">0 条</span></div>
           <form id="alerts-filter" class="filter-bar">
@@ -124,9 +143,36 @@
         </section>
 
         <section class="view hidden" data-view="sources">
-          <div class="section-intro"><div><p class="eyebrow">INTELLIGENCE SOURCES</p><h2>舆情来源</h2><p>新增、编辑和维护 RSS 来源的地址、语言、启停、轮询策略、权重、限频与抓取健康。</p></div><div class="intro-actions"><span id="sources-total" class="counter">0 个来源</span><button id="source-create" class="primary" type="button">＋ 新增来源</button></div></div>
-          <form id="news-filter" class="filter-bar"><label>检索舆情<input name="query" placeholder="标题、摘要关键词"></label><label>情绪<select name="sentiment"><option value="">全部情绪</option><option value="positive">正面</option><option value="neutral">中性</option><option value="negative">负面</option></select></label><button class="primary" type="submit">检索</button></form>
-          <div class="source-layout"><article class="panel"><div class="table-wrap tall"><table><thead><tr><th>来源</th><th>状态</th><th>策略</th><th>抓取 / 入库</th><th>最近成功</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="sources-table"></tbody></table></div></article><article class="panel news-panel"><div class="panel-head"><div><span>LATEST INTELLIGENCE</span><h3>最新舆情流</h3></div><span id="news-total">0 条</span></div><div id="news-list" class="news-list"></div></article></div>
+          <div class="section-intro"><div><p class="eyebrow">INTELLIGENCE SOURCES</p><h2>舆情来源</h2><p>新增、编辑和维护新闻来源的地址、格式、语言、启停、轮询策略、权重、限频与抓取健康。</p></div><div class="intro-actions"><span id="sources-total" class="counter">0 个来源</span><button id="source-create" class="primary" type="button">＋ 新增来源</button></div></div>
+          <article class="panel source-panel">
+            <div class="table-wrap tall"><table><thead><tr><th>来源</th><th>状态</th><th>策略</th><th>抓取 / 入库</th><th>最近成功</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="sources-table"></tbody></table></div>
+          </article>
+        </section>
+
+        <section class="view hidden" data-view="news" aria-labelledby="news-section-title">
+            <div class="section-intro">
+              <div><p class="eyebrow">INGESTED NEWS</p><h2 id="news-section-title">采集新闻列表</h2><p>展示已经写入数据库的新闻，可按来源、情绪和标题或摘要关键词筛选。</p></div>
+              <span id="news-total" class="counter">0 条新闻</span>
+            </div>
+            <article class="panel news-ai-panel">
+              <div class="news-ai-copy"><span>AI MARKET INTELLIGENCE</span><h3>批量美股舆情研判</h3><p>使用当前管理员的默认 AI 模型，每组 5 条识别关联美股、重新判断最终情绪，并生成整批市场结论。</p></div>
+              <div id="news-ai-status" class="news-ai-status"><span class="pill">尚未运行</span><small>请选择最近 300 或 500 条新闻开始分析</small></div>
+              <div class="news-ai-actions"><button id="news-ai-retry" class="hidden" type="button">继续未完成批次</button><button type="button" data-news-ai-count="300">分析最近 300 条</button><button class="primary" type="button" data-news-ai-count="500">分析最近 500 条</button></div>
+              <div id="news-ai-progress" class="news-ai-progress hidden"><i></i></div>
+              <div id="news-ai-conclusion" class="news-ai-conclusion hidden"></div>
+            </article>
+            <form id="news-filter" class="filter-bar news-filter">
+              <label>检索新闻<input name="query" placeholder="标题、摘要关键词"></label>
+              <label>数据来源<select name="source"><option value="">全部来源</option></select></label>
+              <label>情绪<select name="sentiment"><option value="">全部情绪</option><option value="bull">看多</option><option value="neutral">中性</option><option value="bear">看空</option></select></label>
+              <label>显示数量<select name="limit"><option value="20">20 条</option><option value="50" selected>50 条</option><option value="100">100 条</option><option value="200">200 条</option></select></label>
+              <button id="news-filter-reset" type="button">重置</button>
+              <button class="primary" type="submit">查询新闻</button>
+            </form>
+            <article class="panel news-panel">
+              <div class="panel-head"><div><span>LATEST INGESTED DATA</span><h3>数据库新闻明细</h3></div><button id="news-refresh" type="button">↻ 刷新列表</button></div>
+              <div class="table-wrap news-table-wrap"><table class="news-table"><thead><tr><th>发布时间</th><th>来源</th><th>关联美股</th><th>最终情绪</th><th>标题与摘要</th><th>AI 判断依据</th><th>语言</th><th>原文</th></tr></thead><tbody id="news-list"></tbody></table></div>
+            </article>
         </section>
 
         <section class="view hidden" data-view="symbols">
@@ -169,7 +215,8 @@
       <div class="editor-fields">
         <label>来源名称<input name="name" maxlength="80" placeholder="例如 ReutersMarkets" required></label>
         <label>语言代码<input name="lang" maxlength="16" pattern="[A-Za-z0-9-]+" value="en" placeholder="en / zh-CN" required></label>
-        <label class="full">RSS 地址<input name="url" type="url" maxlength="2048" placeholder="https://example.com/feed.xml" required></label>
+        <label>来源格式<select name="feed_type" required><option value="rss">RSS / Atom</option><option value="taoz_flash">Taoz 快讯 JSON</option></select></label>
+        <label class="full">来源地址<input name="url" type="url" maxlength="2048" placeholder="https://example.com/feed.xml" required></label>
         <label>展示权重<input name="weight" type="number" min="1" max="1000" value="100" required></label>
         <label>每小时入库上限<input name="hourly_limit" type="number" min="1" max="10000" value="600" required></label>
       </div>
@@ -182,6 +229,6 @@
     </form>
   </dialog>
   <dialog id="confirm-dialog"><form method="dialog"><span class="dialog-mark">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p><div><button value="cancel">取消</button><button id="confirm-accept" class="danger" value="confirm">确认执行</button></div></form></dialog>
-  <script src="/assets/admin.js?v=20260804-3" defer></script>
+  <script src="/assets/admin.js?v=20260805-9" defer></script>
 </body>
 </html>

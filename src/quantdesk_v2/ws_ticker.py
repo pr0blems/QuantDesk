@@ -16,7 +16,11 @@ from collections.abc import Callable
 from typing import Any
 
 WS_HOST = "fstream.binance.com"
-WS_PATH = "/ws/!miniTicker@arr"
+# Since Binance split USD-M WebSocket traffic by data type, mini-tickers must
+# use the regular-market route.  The legacy unrouted path still handshakes but
+# no longer pushes market streams, which looks like an intermittently healthy
+# connection to callers.
+WS_PATH = "/market/ws/!miniTicker@arr"
 _WS_ALLOWED_HOSTS = frozenset({"fstream.binance.com"})
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _MAX_HEADER_BYTES = 64 * 1024

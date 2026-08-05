@@ -187,6 +187,7 @@ class AdminNewsSourceCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=80)
     url: str = Field(min_length=10, max_length=2048)
+    feed_type: str = Field(default="rss", pattern=r"^(rss|taoz_flash)$")
     lang: str = Field(default="en", min_length=2, max_length=16, pattern=r"^[A-Za-z0-9-]+$")
     enabled: bool = True
     slow: bool = False
@@ -203,6 +204,7 @@ class AdminNewsSourceUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     url: str | None = Field(default=None, min_length=10, max_length=2048)
+    feed_type: str | None = Field(default=None, pattern=r"^(rss|taoz_flash)$")
     lang: str | None = Field(default=None, min_length=2, max_length=16, pattern=r"^[A-Za-z0-9-]+$")
     enabled: bool | None = None
     slow: bool | None = None
@@ -218,7 +220,15 @@ class AdminNewsSourceUpdate(BaseModel):
     def require_change(self) -> Self:
         if all(
             getattr(self, name) is None
-            for name in ("url", "lang", "enabled", "slow", "weight", "hourly_limit")
+            for name in (
+                "url",
+                "feed_type",
+                "lang",
+                "enabled",
+                "slow",
+                "weight",
+                "hourly_limit",
+            )
         ):
             raise ValueError("at least one news source field is required")
         return self
@@ -626,6 +636,12 @@ class PredictionAlgorithmWeights(BaseModel):
         if not math.isclose(total, 1.0, abs_tol=0.001):
             raise ValueError("prediction weights must sum to 1")
         return self
+
+
+class AdminNewsAiBatchCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    count: Literal[300, 500]
 
 
 class PredictionAlgorithmHorizons(BaseModel):

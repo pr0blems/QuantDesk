@@ -27,6 +27,10 @@ from quantdesk_v2.binance_rate_limit import (
 from quantdesk_v2.binance_trading import BinanceUsdMTradingClient
 
 
+def test_ws_ticker_uses_binance_market_route() -> None:
+    assert ws_ticker.WS_PATH == "/market/ws/!miniTicker@arr"
+
+
 class _Response:
     def __init__(self, payload: bytes):
         self.payload = payload
@@ -400,7 +404,7 @@ def test_ticker_ingestion_is_serialized_between_ws_and_rest(monkeypatch) -> None
         with guard:
             active -= 1
 
-    monkeypatch.setattr(market_engine.store, "executemany", write)
+    monkeypatch.setattr(market_engine.store, "realtime_executemany", write)
 
     def ingest():
         start.wait()
@@ -417,6 +421,328 @@ def test_ticker_ingestion_is_serialized_between_ws_and_rest(monkeypatch) -> None
 
     assert all(not worker.is_alive() for worker in workers)
     assert maximum_active == 1
+
+
+def test_realtime_market_write_bypasses_strategy_transaction_mutex(monkeypatch) -> None:
+    calls: list[tuple[str, tuple]] = []
+    completed = threading.Event()
+    errors: list[BaseException] = []
+
+    class _Result:
+        rowcount = 1
+
+    class _Connection:
+        def exec_driver_sql(self, statement, values):
+            calls.append((statement, values))
+            return _Result()
+
+    class _Begin:
+        def __enter__(self):
+            return _Connection()
+
+        def __exit__(self, *_args):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Begin()
+
+    monkeypatch.setattr(market_engine.store, "get_engine", _Engine)
+
+    def write() -> None:
+        try:
+            assert market_engine.store.realtime_execute(
+                "UPDATE ticker SET ts=? WHERE symbol=?", (1, "BTCUSDT")
+            ) == 1
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    market_engine.store._lock.acquire()
+    worker = threading.Thread(target=write)
+    try:
+        worker.start()
+        assert completed.wait(0.5), "realtime write waited on the strategy mutex"
+    finally:
+        market_engine.store._lock.release()
+        worker.join(timeout=2)
+
+    assert errors == []
+    assert calls == [("UPDATE ticker SET ts=%s WHERE symbol=%s", (1, "BTCUSDT"))]
+
+
+def test_ws_ticker_throttle_coalesces_changed_symbols(monkeypatch) -> None:
+    captured: list[list[tuple]] = []
+    clock = {"now": 101.0}
+    monkeypatch.setattr(market_engine.store, "collector_paused", lambda *_: False)
+    monkeypatch.setattr(market_engine.store, "collector_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        market_engine,
+        "ingest_tickers",
+        lambda rows, full=True: captured.append(list(rows)),
+    )
+    monkeypatch.setattr(market_engine.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setitem(market_engine.settings, "websocket_ticker_write_seconds", 2)
+    monkeypatch.setattr(market_engine, "_ws_last_write_at", 100.0)
+    market_engine._ws_pending_rows.clear()
+
+    market_engine.ingest_ws_tickers(
+        [("AAPLUSDT", 100.0, 1.0, 1_000.0, 1_800_000_000)]
+    )
+    assert captured == []
+
+    clock["now"] = 102.0
+    market_engine.ingest_ws_tickers(
+        [("NVDAUSDT", 200.0, 2.0, 2_000.0, 1_800_000_001)]
+    )
+
+    assert {row[0] for row in captured[0]} == {"AAPLUSDT", "NVDAUSDT"}
+    assert market_engine._ws_pending_rows == {}
+
+
+def test_rolling_price_changes_use_exact_point_in_time_baselines(monkeypatch) -> None:
+    monkeypatch.setitem(market_engine._state, "price_hist", {})
+    for timestamp, price in (
+        (1_000, 100.0),
+        (1_120, 101.0),
+        (1_300, 104.0),
+        (1_480, 106.0),
+        (1_600, 110.0),
+    ):
+        market_engine._record_price_sample("TESTUSDT", price, timestamp)
+
+    changes = market_engine.rolling_price_changes(
+        ["TESTUSDT"],
+        current_prices={"TESTUSDT": 110.0},
+        now=1_600,
+    )["TESTUSDT"]
+
+    assert changes["pct_2m"] == pytest.approx((110 / 106 - 1) * 100)
+    assert changes["pct_5m"] == pytest.approx((110 / 104 - 1) * 100)
+    assert changes["pct_10m"] == pytest.approx(10.0)
+
+
+def test_rolling_price_changes_fail_closed_during_window_warmup(monkeypatch) -> None:
+    monkeypatch.setitem(market_engine._state, "price_hist", {})
+    market_engine._record_price_sample("TESTUSDT", 100.0, 1_500)
+    market_engine._record_price_sample("TESTUSDT", 101.0, 1_600)
+
+    changes = market_engine.rolling_price_changes(["TESTUSDT"], now=1_600)[
+        "TESTUSDT"
+    ]
+
+    assert changes == {"pct_2m": None, "pct_5m": None, "pct_10m": None}
+
+
+def test_rolling_price_changes_fail_closed_when_websocket_is_stale(monkeypatch) -> None:
+    monkeypatch.setitem(
+        market_engine._state,
+        "price_hist",
+        {"TESTUSDT": [(1_000, 100.0), (1_600, 110.0)]},
+    )
+    monkeypatch.setitem(market_engine._state, "last_ws_ticker", 1_000)
+
+    changes = market_engine.rolling_price_changes(
+        ["TESTUSDT"], now=1_600, require_fresh_stream=True
+    )["TESTUSDT"]
+
+    assert changes == {"pct_2m": None, "pct_5m": None, "pct_10m": None}
+
+
+def test_rolling_price_changes_use_ring_latest_not_racing_database_price(
+    monkeypatch,
+) -> None:
+    monkeypatch.setitem(
+        market_engine._state,
+        "price_hist",
+        {"TESTUSDT": [(1_000, 100.0), (1_600, 110.0)]},
+    )
+
+    changes = market_engine.rolling_price_changes(
+        ["TESTUSDT"],
+        current_prices={"TESTUSDT": 90.0},
+        now=1_600,
+    )["TESTUSDT"]
+
+    assert changes["pct_10m"] == pytest.approx(10.0)
+
+
+def test_price_history_retains_sparse_continuity_anchor(monkeypatch) -> None:
+    monkeypatch.setitem(market_engine._state, "price_hist", {})
+    market_engine._record_price_sample("TESTUSDT", 100.0, 100)
+    market_engine._record_price_sample("TESTUSDT", 120.0, 2_000)
+
+    changes = market_engine.rolling_price_changes(["TESTUSDT"], now=2_000)[
+        "TESTUSDT"
+    ]
+
+    assert changes["pct_10m"] == pytest.approx(20.0)
+    assert len(market_engine._state["price_hist"]["TESTUSDT"]) == 2
+
+
+def test_depth_metrics_are_coalesced_into_one_bulk_upsert(monkeypatch) -> None:
+    writes: list[tuple[str, list[tuple]]] = []
+    monkeypatch.setattr(market_engine, "_depth_symbols", {"TESTUSDT"})
+    with market_engine._depth_metrics_lock:
+        market_engine._depth_metrics_pending.clear()
+    monkeypatch.setattr(
+        market_engine.store,
+        "realtime_executemany",
+        lambda sql, rows: writes.append((sql, list(rows))),
+    )
+
+    assert market_engine.queue_depth_metric(
+        {
+            "symbol": "TESTUSDT",
+            "bid_depth_notional": 1_000,
+            "ask_depth_notional": 900,
+            "book_imbalance": 0.0526315789,
+            "book_imbalance_5": 0.1,
+            "depth_levels": 100,
+            "ts": 1_800_000_000,
+        }
+    )
+    assert market_engine.queue_depth_metric(
+        {
+            "symbol": "TESTUSDT",
+            "bid_depth_notional": 1_100,
+            "ask_depth_notional": 900,
+            "book_imbalance": 0.1,
+            "book_imbalance_5": 0.2,
+            "depth_levels": 100,
+            "ts": 1_800_000_001,
+        }
+    )
+
+    assert market_engine._flush_depth_metrics() == 1
+    assert len(writes) == 1
+    assert "ON DUPLICATE KEY UPDATE" in writes[0][0]
+    assert writes[0][1][0][1:] == (
+        1_100.0,
+        900.0,
+        0.1,
+        0.2,
+        100,
+        1_800_000_001,
+    )
+
+
+def test_depth_metric_validation_fails_closed(monkeypatch) -> None:
+    monkeypatch.setattr(market_engine, "_depth_symbols", {"TESTUSDT"})
+
+    assert not market_engine.queue_depth_metric(
+        {
+            "symbol": "OTHERUSDT",
+            "bid_depth_notional": 1,
+            "ask_depth_notional": 1,
+            "book_imbalance": 0,
+            "book_imbalance_5": 0,
+            "depth_levels": 100,
+            "ts": 1_800_000_000,
+        }
+    )
+    assert not market_engine.queue_depth_metric(
+        {
+            "symbol": "TESTUSDT",
+            "bid_depth_notional": float("nan"),
+            "ask_depth_notional": 1,
+            "book_imbalance": 0,
+            "book_imbalance_5": 0,
+            "depth_levels": 100,
+            "ts": 1_800_000_000,
+        }
+    )
+
+
+def test_failed_depth_batch_does_not_overwrite_a_newer_callback(monkeypatch) -> None:
+    monkeypatch.setattr(market_engine, "_depth_symbols", {"TESTUSDT"})
+    with market_engine._depth_metrics_lock:
+        market_engine._depth_metrics_pending.clear()
+
+    def payload(timestamp: int, bid: float) -> dict[str, object]:
+        return {
+            "symbol": "TESTUSDT",
+            "bid_depth_notional": bid,
+            "ask_depth_notional": 900,
+            "book_imbalance": 0.1,
+            "book_imbalance_5": 0.2,
+            "depth_levels": 100,
+            "ts": timestamp,
+        }
+
+    assert market_engine.queue_depth_metric(payload(1_800_000_000, 1_000))
+
+    def fail_after_new_callback(*_args):
+        assert market_engine.queue_depth_metric(payload(1_800_000_001, 1_100))
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(
+        market_engine.store, "realtime_executemany", fail_after_new_callback
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        market_engine._flush_depth_metrics()
+    with market_engine._depth_metrics_lock:
+        pending = market_engine._depth_metrics_pending["TESTUSDT"]
+    assert pending[1] == 1_100
+    assert pending[-1] == 1_800_000_001
+
+
+def test_depth_freshness_detects_a_partial_stream_group(monkeypatch) -> None:
+    monkeypatch.setattr(
+        market_engine, "_depth_symbols", {"AAPLUSDT", "NVDAUSDT"}
+    )
+    with market_engine._depth_metrics_lock:
+        market_engine._depth_last_seen.clear()
+        market_engine._depth_last_seen.update(
+            {"AAPLUSDT": 1_000, "NVDAUSDT": 980}
+        )
+
+    assert market_engine._depth_freshness(1_005) == (1, 2)
+
+
+def test_depth_health_exits_warmup_when_all_snapshots_fail(monkeypatch) -> None:
+    monkeypatch.setattr(
+        market_engine, "_depth_symbols", {"AAPLUSDT", "NVDAUSDT"}
+    )
+    monkeypatch.setitem(market_engine._state, "started_at", 1_000)
+    monkeypatch.setitem(market_engine._state, "depth_complete_since", 0)
+    monkeypatch.setitem(
+        market_engine.settings, "depth_bootstrap_priority_seconds", 60
+    )
+    with market_engine._depth_metrics_lock:
+        market_engine._depth_last_seen.clear()
+
+    warming = market_engine._depth_health(1_050)
+    degraded = market_engine._depth_health(1_061)
+
+    assert warming["success"] is True
+    assert warming["details"]["state"] == "warming"
+    assert degraded["success"] is False
+    assert degraded["details"]["state"] == "degraded"
+    assert degraded["error"] == "2 depth symbols not fresh"
+
+
+def test_depth_health_releases_deferred_workers_when_all_symbols_are_fresh(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        market_engine, "_depth_symbols", {"AAPLUSDT", "NVDAUSDT"}
+    )
+    with market_engine._depth_metrics_lock:
+        market_engine._depth_last_seen.clear()
+        market_engine._depth_last_seen.update(
+            {"AAPLUSDT": 1_000, "NVDAUSDT": 1_000}
+        )
+    monkeypatch.setitem(market_engine.settings, "depth_bootstrap_stable_seconds", 20)
+    monkeypatch.setitem(market_engine._state, "depth_complete_since", 980)
+    market_engine._depth_ready_event.clear()
+
+    health = market_engine._depth_health(1_005)
+
+    assert health["details"]["state"] == "ready"
+    assert market_engine._depth_ready_event.is_set()
 
 
 def test_market_engine_starts_one_ws_and_one_rest_fallback(monkeypatch) -> None:
@@ -445,6 +771,8 @@ def test_market_engine_starts_one_ws_and_one_rest_fallback(monkeypatch) -> None:
     names = [thread.name for thread in started]
     assert names.count("ticker-ws") == 1
     assert names.count("ticker-rest-fallback") == 1
+    assert names.count("depth-ws") == 1
+    assert names.count("depth-store") == 1
     assert "price" not in names
     assert "ticker" not in names
 

@@ -18,6 +18,22 @@
   "spike_alert_pct_5m": 2.0,
   "news_sources": [
     {
+      "name": "金十数据",
+      "lang": "zh-CN",
+      "feed_type": "taoz_flash",
+      "url": "https://admin.taoz.chat/api/v1/news/flash?source=jin10&limit=50",
+      "weight": 300,
+      "hourly_limit": 1000
+    },
+    {
+      "name": "东方财富全球",
+      "lang": "zh-CN",
+      "feed_type": "taoz_flash",
+      "url": "https://admin.taoz.chat/api/v1/news/flash?source=eastmoney&limit=50",
+      "weight": 290,
+      "hourly_limit": 1000
+    },
+    {
       "name": "CoinDesk",
       "lang": "en",
       "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"
@@ -177,6 +193,11 @@
   "ticker_rest_seconds": 300,
   "ticker_rest_fallback_stale_seconds": 90,
   "websocket_ticker_write_seconds": 2,
+  "depth_stream_group_size": 50,
+  "depth_snapshot_limit": 500,
+  "depth_store_seconds": 2,
+  "depth_bootstrap_priority_seconds": 240,
+  "depth_bootstrap_stable_seconds": 30,
   "kline_batch_size": 20,
   "price_poll_seconds": 2
 }

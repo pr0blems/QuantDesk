@@ -1,7 +1,9 @@
 """调度引擎：行情轮询 / K线更新 / 评分计算 / 提醒触发 / 持仓同步"""
 import json
+import math
 import threading
 import time
+from collections.abc import Mapping
 
 from . import market_data_client as bc
 from . import market_store as store
@@ -16,20 +18,42 @@ _state = {
     "last_ticker": 0,
     "last_ws_ticker": 0,
     "last_ws_report": 0,
+    "last_depth": 0,
+    "last_depth_report": 0,
+    "depth_complete_since": 0,
     "rest_blocked_until_persisted": 0,
     "last_kline_batch": {},
     "kline_cursor": {},
     "errors": [],
-    "price_hist": {},   # symbol -> [(ts, price)] 用于5分钟异动
+    "price_hist": {},   # symbol -> [(ts, price)] 用于短周期滚动涨跌
 }
 _lock = threading.Lock()
 _ws_ingest_lock = threading.Lock()
 _ws_last_write_at = 0.0
+_ws_pending_rows: dict[str, tuple] = {}
 _ticker_ingest_lock = threading.Lock()
 _WS_STALE_SECONDS = 90
 _WS_STARTUP_GRACE_SECONDS = 30
 _REST_FALLBACK_SECONDS = 300
 _REST_CIRCUIT_STATE_KEY = "binance_public_rest_blocked_until"
+_ROLLING_PRICE_WINDOWS = {
+    "pct_2m": 2 * 60,
+    "pct_5m": 5 * 60,
+    "pct_10m": 10 * 60,
+}
+# Keep a small margin beyond the longest displayed window.  The history is
+# process-local on purpose: persisting a quote every two seconds for the whole
+# universe would add millions of short-lived rows without improving accuracy.
+_PRICE_HISTORY_RETENTION_SECONDS = max(_ROLLING_PRICE_WINDOWS.values()) + 60
+_PRICE_HISTORY_MAX_SAMPLES = 1_024
+_price_history_lock = threading.Lock()
+_depth_metrics_lock = threading.Lock()
+_depth_metrics_pending: dict[str, tuple] = {}
+_depth_last_seen: dict[str, int] = {}
+_depth_symbols: set[str] = set()
+_depth_ready_event = threading.Event()
+_depth_pause_lock = threading.Lock()
+_depth_pause_cache = {"expires": 0.0, "paused": False}
 
 def log_err(where, e):
     msg = f"{where}: {e}"
@@ -39,7 +63,7 @@ def log_err(where, e):
         _state["errors"] = _state["errors"][-50:]
 
 def state_snapshot():
-    with _lock:
+    with _lock, _price_history_lock:
         return json.loads(json.dumps(_state, default=str))
 
 
@@ -105,6 +129,382 @@ def _restore_public_rest_circuit():
             log_err("Binance REST circuit cleanup", exc)
     return False
 
+
+def _price_at_or_before(
+    history: list[tuple[int, float]], target_timestamp: int
+) -> float | None:
+    """Return the price in force at ``target_timestamp``.
+
+    Binance's all-market mini-ticker stream only emits symbols that changed.
+    Treating the last emitted price as effective until the next update is
+    therefore more accurate than requiring a sample at the exact second.
+    """
+
+    for timestamp, price in reversed(history):
+        if timestamp <= target_timestamp:
+            return price
+    return None
+
+
+def _rolling_change(
+    history: list[tuple[int, float]],
+    current_price: float,
+    *,
+    now: int,
+    window_seconds: int,
+) -> float | None:
+    baseline = _price_at_or_before(history, now - window_seconds)
+    if baseline is None or baseline <= 0:
+        return None
+    return (current_price / baseline - 1.0) * 100.0
+
+
+def _record_price_sample(symbol: str, price: float, timestamp: int) -> float | None:
+    """Record one bounded price sample and return its exact rolling 5m move."""
+
+    try:
+        normalized_price = float(price)
+        normalized_timestamp = int(timestamp)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        not symbol
+        or not math.isfinite(normalized_price)
+        or normalized_price <= 0
+        or normalized_timestamp <= 0
+    ):
+        return None
+
+    with _price_history_lock:
+        histories = _state.setdefault("price_hist", {})
+        history = histories.setdefault(symbol, [])
+        if history and normalized_timestamp < history[-1][0]:
+            # The collector timestamps samples on receipt, so an older sample
+            # can only be a delayed duplicate and must not rewrite history.
+            return _rolling_change(
+                history,
+                history[-1][1],
+                now=history[-1][0],
+                window_seconds=_ROLLING_PRICE_WINDOWS["pct_5m"],
+            )
+        if history and normalized_timestamp == history[-1][0]:
+            history[-1] = (normalized_timestamp, normalized_price)
+        else:
+            history.append((normalized_timestamp, normalized_price))
+
+        cutoff = normalized_timestamp - _PRICE_HISTORY_RETENTION_SECONDS
+        # Preserve the final sample at/before the cutoff as a continuity
+        # anchor.  Sparse symbols can remain unchanged for several minutes.
+        keep_from = 0
+        while keep_from + 1 < len(history) and history[keep_from + 1][0] <= cutoff:
+            keep_from += 1
+        if keep_from:
+            del history[:keep_from]
+        if len(history) > _PRICE_HISTORY_MAX_SAMPLES:
+            del history[: len(history) - _PRICE_HISTORY_MAX_SAMPLES]
+
+        return _rolling_change(
+            history,
+            normalized_price,
+            now=normalized_timestamp,
+            window_seconds=_ROLLING_PRICE_WINDOWS["pct_5m"],
+        )
+
+
+def rolling_price_changes(
+    symbols: list[str] | tuple[str, ...],
+    *,
+    current_prices: dict[str, object] | None = None,
+    now: int | None = None,
+    require_fresh_stream: bool = False,
+) -> dict[str, dict[str, float | None]]:
+    """Return 2m/5m/10m rolling changes from the WebSocket price ring.
+
+    A window remains ``None`` until the in-process stream has observed a
+    price at or before the requested horizon.  This avoids inventing a move
+    during the warm-up period after a service restart.
+    """
+
+    timestamp = int(time.time()) if now is None else int(now)
+    empty = {name: None for name in _ROLLING_PRICE_WINDOWS}
+    if require_fresh_stream and not _ws_ticker_fresh(timestamp):
+        return {symbol: dict(empty) for symbol in symbols}
+    with _price_history_lock:
+        snapshots = {
+            symbol: list(_state.get("price_hist", {}).get(symbol, []))
+            for symbol in symbols
+        }
+
+    result: dict[str, dict[str, float | None]] = {}
+    for symbol, history in snapshots.items():
+        values = dict(empty)
+        if not history:
+            result[symbol] = values
+            continue
+        # The in-memory ring is updated before the ticker row is committed.
+        # Using its own final sample keeps each rolling calculation internally
+        # consistent during that very small cross-thread window.  The optional
+        # argument remains accepted for backwards compatibility with callers.
+        raw_current = history[-1][1]
+        try:
+            current_price = float(raw_current)
+        except (TypeError, ValueError, OverflowError):
+            result[symbol] = values
+            continue
+        if not math.isfinite(current_price) or current_price <= 0:
+            result[symbol] = values
+            continue
+        for name, window_seconds in _ROLLING_PRICE_WINDOWS.items():
+            change = _rolling_change(
+                history,
+                current_price,
+                now=timestamp,
+                window_seconds=window_seconds,
+            )
+            values[name] = round(change, 6) if change is not None else None
+        result[symbol] = values
+    return result
+
+
+# ---------- order-book depth ----------
+def _depth_paused() -> bool:
+    """Read the admin switch at a bounded rate across all depth groups."""
+
+    now = time.monotonic()
+    with _depth_pause_lock:
+        if now < float(_depth_pause_cache["expires"]):
+            return bool(_depth_pause_cache["paused"])
+    paused = store.collector_paused("depth")
+    with _depth_pause_lock:
+        _depth_pause_cache["paused"] = bool(paused)
+        _depth_pause_cache["expires"] = now + 2.0
+    return bool(paused)
+
+
+def queue_depth_metric(metric: object) -> bool:
+    """Validate and coalesce one depth update without performing a DB write."""
+
+    if hasattr(metric, "as_dict"):
+        payload = metric.as_dict()
+    elif isinstance(metric, Mapping):
+        payload = dict(metric)
+    else:
+        return False
+    try:
+        symbol = str(payload["symbol"]).strip().upper()
+        bid_notional = float(payload["bid_depth_notional"])
+        ask_notional = float(payload["ask_depth_notional"])
+        imbalance = float(payload["book_imbalance"])
+        imbalance_5 = float(payload["book_imbalance_5"])
+        depth_levels = int(payload["depth_levels"])
+        timestamp = int(payload["ts"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if timestamp >= 100_000_000_000:
+        timestamp //= 1_000
+    if (
+        not symbol
+        or (_depth_symbols and symbol not in _depth_symbols)
+        or not all(
+            math.isfinite(value)
+            for value in (bid_notional, ask_notional, imbalance, imbalance_5)
+        )
+        or bid_notional < 0
+        or ask_notional < 0
+        or not -1 <= imbalance <= 1
+        or not -1 <= imbalance_5 <= 1
+        or not 0 <= depth_levels <= 100
+        or timestamp <= 0
+    ):
+        return False
+    row = (
+        symbol,
+        bid_notional,
+        ask_notional,
+        imbalance,
+        imbalance_5,
+        depth_levels,
+        timestamp,
+    )
+    with _depth_metrics_lock:
+        _depth_metrics_pending[symbol] = row
+        _depth_last_seen[symbol] = int(time.time())
+    return True
+
+
+def _flush_depth_metrics() -> int:
+    """Persist the latest update per symbol in one bounded transaction."""
+
+    with _depth_metrics_lock:
+        if not _depth_metrics_pending:
+            return 0
+        batch = dict(_depth_metrics_pending)
+        _depth_metrics_pending.clear()
+    rows = list(batch.values())
+    try:
+        store.realtime_executemany(
+            "INSERT INTO market_microstructure("
+            "symbol,bid_depth_notional,ask_depth_notional,book_imbalance,"
+            "book_imbalance_5,depth_levels,ts) VALUES(?,?,?,?,?,?,?) "
+            "ON DUPLICATE KEY UPDATE "
+            "bid_depth_notional=VALUES(bid_depth_notional),"
+            "ask_depth_notional=VALUES(ask_depth_notional),"
+            "book_imbalance=VALUES(book_imbalance),"
+            "book_imbalance_5=VALUES(book_imbalance_5),"
+            "depth_levels=VALUES(depth_levels),ts=VALUES(ts)",
+            rows,
+        )
+    except Exception:
+        # Do not replace a newer callback that arrived while this batch was
+        # being written.  The next loop retries only the still-latest values.
+        with _depth_metrics_lock:
+            for symbol, row in batch.items():
+                _depth_metrics_pending.setdefault(symbol, row)
+        raise
+    with _lock:
+        _state["last_depth"] = int(time.time())
+    return len(rows)
+
+
+def _depth_freshness(now: int | None = None) -> tuple[int, int]:
+    timestamp = int(time.time()) if now is None else int(now)
+    with _depth_metrics_lock:
+        fresh = sum(
+            1
+            for symbol in _depth_symbols
+            if timestamp - int(_depth_last_seen.get(symbol) or 0) <= 15
+        )
+    return fresh, len(_depth_symbols)
+
+
+def _depth_health(now: int | None = None) -> dict[str, object]:
+    timestamp = int(time.time()) if now is None else int(now)
+    fresh, total = _depth_freshness(timestamp)
+    complete = total > 0 and fresh == total
+    with _lock:
+        startup_age = timestamp - int(_state.get("started_at") or timestamp)
+        complete_since = int(_state.get("depth_complete_since") or 0)
+        if complete:
+            if complete_since <= 0:
+                complete_since = timestamp
+                _state["depth_complete_since"] = complete_since
+        else:
+            complete_since = 0
+            _state["depth_complete_since"] = 0
+    stable_seconds = max(
+        0,
+        min(int(settings.get("depth_bootstrap_stable_seconds", 30)), 120),
+    )
+    stable_for = max(0, timestamp - complete_since) if complete_since else 0
+    ready = complete and stable_for >= stable_seconds
+    if ready:
+        _depth_ready_event.set()
+    bootstrap_seconds = max(
+        60,
+        min(int(settings.get("depth_bootstrap_priority_seconds", 240)), 600),
+    )
+    warming = startup_age < bootstrap_seconds and not ready
+    state = "warming" if warming else "ready" if ready else "degraded"
+    error = None
+    if not ready and not warming:
+        error = (
+            f"{total - fresh} depth symbols not fresh"
+            if not complete
+            else "depth synchronization has not remained stable long enough"
+        )
+    return {
+        "success": ready or warming,
+        "error": error,
+        "details": {
+            "source": "websocket",
+            "levels": 100,
+            "fresh_symbols": fresh,
+            "total_symbols": total,
+            "state": state,
+            "stable_seconds": stable_for,
+        },
+    }
+
+
+def wait_for_depth_ready(timeout: float | None = None) -> bool:
+    """Wait for the initial 150-symbol depth bootstrap without waiting forever."""
+
+    seconds = (
+        max(1.0, min(float(timeout), 600.0))
+        if timeout is not None
+        else max(
+            60.0,
+            min(
+                float(settings.get("depth_bootstrap_priority_seconds", 240)),
+                600.0,
+            ),
+        )
+    )
+    return _depth_ready_event.wait(seconds)
+
+
+def depth_store_loop() -> None:
+    interval = max(1.0, min(float(settings.get("depth_store_seconds", 2)), 10.0))
+    while True:
+        time.sleep(interval)
+        if _depth_paused():
+            continue
+        try:
+            written = _flush_depth_metrics()
+        except Exception as exc:
+            log_err("depth storage", exc)
+            store.collector_report("depth", success=False, error=str(exc))
+            continue
+        now = int(time.time())
+        with _lock:
+            should_report = now - int(_state.get("last_depth_report") or 0) >= 10
+            if should_report:
+                _state["last_depth_report"] = now
+        if should_report:
+            health = _depth_health(now)
+            store.collector_report(
+                "depth",
+                success=bool(health["success"]),
+                items=written,
+                error=health["error"],
+                details=health["details"],
+            )
+
+
+def depth_loop() -> None:
+    """Supervise grouped Binance depth streams without REST polling."""
+
+    from . import ws_depth
+
+    global _depth_symbols
+    symbols = tradfi_symbols()
+    _depth_symbols = set(symbols)
+    group_size = max(1, min(int(settings.get("depth_stream_group_size", 50)), 50))
+    snapshot_limit = int(settings.get("depth_snapshot_limit", 500))
+    if snapshot_limit not in {100, 500, 1_000}:
+        snapshot_limit = 500
+    while True:
+        try:
+            ws_depth.ws_depth_loop(
+                symbols,
+                queue_depth_metric,
+                should_pause=_depth_paused,
+                group_size=group_size,
+                snapshot_limit=snapshot_limit,
+            )
+        except Exception as exc:
+            log_err("depth websocket", exc)
+            store.collector_report("depth", success=False, error=str(exc))
+            time.sleep(15)
+
+
+def kline_after_depth_loop() -> None:
+    """Give the one-time depth snapshots first claim on public REST weight."""
+
+    if not wait_for_depth_ready():
+        print("[kline] depth bootstrap wait expired; starting with degraded depth")
+    kline_loop()
+
 # ---------- ticker ----------
 def ingest_tickers(rows, full=True):
     """Serialize WebSocket and REST writes to the shared ticker table."""
@@ -128,20 +528,20 @@ def _ingest_tickers_locked(rows, full=True):
             out.append((s, price, pct, qvol, now))
         else:
             lite.append((price, now, s))
-        # 5分钟异动检测
-        hist = _state["price_hist"].setdefault(s, [])
-        hist.append((now, price))
-        cutoff = now - 360
-        _state["price_hist"][s] = [h for h in hist if h[0] >= cutoff]
-        old = _state["price_hist"][s][0]
-        if now - old[0] >= 300 and old[1] > 0:
-            chg = (price - old[1]) / old[1] * 100
-            if abs(chg) >= spike_threshold:
-                maybe_alert(s, "spike", "long" if chg > 0 else "short", None,
-                            f"⚡ {s} 5分钟{'急涨' if chg>0 else '急跌'} {chg:+.2f}%（{old[1]:.6g} → {price:.6g}）",
-                            dedup_key=f"spike:{s}", dedup_sec=300)
+        # Reuse one bounded ring for the monitor and the existing 5m alert.
+        change_5m = _record_price_sample(s, price, now)
+        if change_5m is not None and abs(change_5m) >= spike_threshold:
+            maybe_alert(
+                s,
+                "spike",
+                "long" if change_5m > 0 else "short",
+                None,
+                f"⚡ {s} 5分钟{'急涨' if change_5m > 0 else '急跌'} {change_5m:+.2f}%",
+                dedup_key=f"spike:{s}",
+                dedup_sec=300,
+            )
     if out:
-        store.executemany(
+        store.realtime_executemany(
             "INSERT INTO ticker(symbol,price,pct_24h,quote_volume,ts) "
             "VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE "
             "price=VALUES(price),pct_24h=VALUES(pct_24h),"
@@ -149,7 +549,9 @@ def _ingest_tickers_locked(rows, full=True):
             out,
         )
     if lite:
-        store.executemany("UPDATE ticker SET price=?, ts=? WHERE symbol=?", lite)
+        store.realtime_executemany(
+            "UPDATE ticker SET price=?, ts=? WHERE symbol=?", lite
+        )
     if out or lite:
         _state["last_ticker"] = now
 
@@ -167,17 +569,32 @@ def ingest_ws_tickers(rows):
         float(settings.get("websocket_ticker_write_seconds", 2)),
     )
     with _ws_ingest_lock:
+        # ``!miniTicker@arr`` contains only symbols that changed in that push.
+        # Dropping throttled pushes would therefore leave individual symbols
+        # stale indefinitely.  Coalesce the latest row per symbol and flush the
+        # whole changed set at the configured DB cadence instead.
+        for row in rows:
+            if row:
+                _ws_pending_rows[str(row[0])] = tuple(row)
         if now_monotonic - _ws_last_write_at < write_interval:
             return
+        batch = list(_ws_pending_rows.values())
+        _ws_pending_rows.clear()
         _ws_last_write_at = now_monotonic
-    ingest_tickers(rows, full=True)
+    try:
+        ingest_tickers(batch, full=True)
+    except Exception:
+        with _ws_ingest_lock:
+            for row in batch:
+                _ws_pending_rows.setdefault(str(row[0]), row)
+        raise
     now = int(time.time())
     _state["last_ws_ticker"] = now
     if now - int(_state.get("last_ws_report") or 0) >= 10:
         _state["last_ws_report"] = now
         details = {"source": "websocket"}
-        store.collector_report("price", success=True, items=len(rows), details=details)
-        store.collector_report("ticker", success=True, items=len(rows), details=details)
+        store.collector_report("price", success=True, items=len(batch), details=details)
+        store.collector_report("ticker", success=True, items=len(batch), details=details)
 
 
 def _ws_ticker_fresh(now=None):
@@ -505,6 +922,8 @@ def start():
             return
         _state["started"] = True
         _state["started_at"] = int(time.time())
+        _state["depth_complete_since"] = 0
+        _depth_ready_event.clear()
     _restore_public_rest_circuit()
     from . import ws_ticker
 
@@ -515,13 +934,21 @@ def start():
         name="ticker-ws",
     ).start()
     threading.Thread(target=ticker_loop, daemon=True, name="ticker-rest-fallback").start()
-    threading.Thread(target=kline_loop, daemon=True, name="kline").start()
+    threading.Thread(target=depth_loop, daemon=True, name="depth-ws").start()
+    threading.Thread(target=depth_store_loop, daemon=True, name="depth-store").start()
+    threading.Thread(target=kline_after_depth_loop, daemon=True, name="kline").start()
     from . import news, social
     threading.Thread(target=news.news_loop, daemon=True, name="news").start()
     threading.Thread(target=social.social_loop, daemon=True, name="social").start()
     if settings.get("paper_trading", True):
         from . import paper_engine as paper
         threading.Thread(target=paper.paper_loop, daemon=True, name="paper").start()
-        print("[engine] workers started: ticker-ws / REST fallback / kline / news / social / paper")
+        print(
+            "[engine] workers started: ticker-ws / REST fallback / depth / "
+            "kline / news / social / paper"
+        )
     else:
-        print("[engine] workers started: ticker-ws / REST fallback / kline / news / social")
+        print(
+            "[engine] workers started: ticker-ws / REST fallback / depth / "
+            "kline / news / social"
+        )

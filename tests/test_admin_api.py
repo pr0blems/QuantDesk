@@ -157,6 +157,9 @@ def test_admin_authorization_rules_and_news_source_management(
         sources = client.get("/api/v2/admin/news-sources", headers=admin_headers)
         assert sources.status_code == 200
         assert len(sources.json()) >= 20
+        source_map = {item["name"]: item for item in sources.json()}
+        assert source_map["金十数据"]["feed_type"] == "taoz_flash"
+        assert source_map["东方财富全球"]["feed_type"] == "taoz_flash"
         source_name = sources.json()[0]["name"]
         disabled = client.patch(
             f"/api/v2/admin/news-sources/{source_name}",
@@ -172,6 +175,7 @@ def test_admin_authorization_rules_and_news_source_management(
             json={
                 "name": "TestEditorialFeed",
                 "url": "https://example.com/markets.xml",
+                "feed_type": "rss",
                 "lang": "en",
                 "enabled": True,
                 "slow": True,
@@ -181,6 +185,7 @@ def test_admin_authorization_rules_and_news_source_management(
         )
         assert created_source.status_code == 201
         assert created_source.json()["name"] == "TestEditorialFeed"
+        assert created_source.json()["feed_type"] == "rss"
         duplicate_source = client.post(
             "/api/v2/admin/news-sources",
             headers=admin_headers,
@@ -249,14 +254,41 @@ def test_admin_frontend_assets_and_route(mysql_test_engine: Engine) -> None:
     assert 'id="admin-login"' in page.text
     assert 'id="admin-shell"' in page.text
     assert 'data-view="collectors"' in page.text
+    assert '<button class="nav-item" data-view-target="stock-library"><span>03</span>美股资料库</button>' in page.text
+    assert 'data-view="stock-library"' in page.text
+    assert 'id="stock-library-import"' in page.text
+    assert 'id="stock-library-table"' in page.text
     assert 'data-view="audit"' in page.text
+    assert '<button class="nav-item" data-view-target="sources"><span>06</span>舆情来源</button>' in page.text
+    assert '<button class="nav-item" data-view-target="news"><span>07</span>采集新闻</button>' in page.text
+    assert 'data-view="news"' in page.text
+    assert 'id="news-section-title">采集新闻列表' in page.text
+    assert '<tbody id="news-list"></tbody>' in page.text
+    assert '<select name="source">' in page.text
+    assert '<option value="bull">看多</option>' in page.text
+    assert 'data-news-ai-count="300"' in page.text
+    assert 'data-news-ai-count="500"' in page.text
+    assert "关联美股" in page.text
     assert "<contract-monitor" not in page.text
     assert 'data-panel-target="admin"' not in user_page.text
+    sources_start = page.text.index('<section class="view hidden" data-view="sources">')
+    news_start = page.text.index('<section class="view hidden" data-view="news"')
+    assert sources_start < news_start
+    assert 'id="news-list"' not in page.text[sources_start:news_start]
     assert "/assets/admin.js" not in user_page.text
     assert script.status_code == 200
+    assert '"stock-library": ["US EQUITIES / 03", "美股资料库"]' in script.text
+    assert 'news: ["INTELLIGENCE / 07", "采集新闻"]' in script.text
+    assert "news: loadNews" in script.text
+    assert 'if (activeView !== "news") return;' in script.text
+    assert 'api("/stock-library/import"' in script.text
     assert 'fetch("/api/v2/auth/refresh"' in script.text
     assert "if (!user.is_admin)" in script.text
     assert 'const VIEWS = {' in script.text
+    assert 'api(`/news?${formQuery(newsFilter)}`)' in script.text
+    assert 'api("/news-ai-batches?limit=5")' in script.text
+    assert "sentimentView(item.ai_sentiment || item.sentiment)" in script.text
+    assert 'method: "POST"' in script.text
     assert stylesheet.status_code == 200
     assert ".admin-shell" in stylesheet.text
     assert ".login-screen" in stylesheet.text

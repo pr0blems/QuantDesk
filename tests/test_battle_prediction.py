@@ -164,7 +164,7 @@ def test_binance_positioning_client_uses_public_tradfi_endpoints(
     assert any("/futures/data/takerlongshortRatio?" in url for url in calls)
 
 
-def test_local_microstructure_keeps_predictions_available_without_positioning() -> None:
+def test_local_microstructure_abstains_without_real_depth_or_positioning() -> None:
     now_ms = 1_800_000
     micro = battle._local_microstructure(
         {"15m": 60, "1h": 40, "4h": 20},
@@ -185,10 +185,76 @@ def test_local_microstructure_keeps_predictions_available_without_positioning() 
         now_ms=now_ms,
     )
 
-    assert quality == pytest.approx(0.8)
+    assert micro["depth_levels"] == 0
+    assert micro["book_imbalance"] == 0
+    assert quality == pytest.approx(0.6)
     result = battle.predict(features, 900)
-    assert result["prediction_state"] == "heuristic"
-    assert result["result"] == "long"
+    assert result["prediction_state"] == "data_insufficient"
+    assert result["result"] == "neutral"
+
+
+def test_local_microstructure_does_not_invent_freshness_without_ticker() -> None:
+    micro = battle._local_microstructure(
+        {"15m": 100, "1h": 100},
+        {"price": None, "pct_24h": None, "ts": None},
+        1_800_000,
+    )
+
+    assert micro["received_at"] == 0
+    assert micro["depth_levels"] == 0
+    assert micro["aggressive_buy_ratio"] == pytest.approx(0.5)
+
+
+def test_real_microstructure_converts_seconds_to_prediction_milliseconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[str, tuple[str, ...]]] = []
+
+    def query(sql: str, params: tuple[str, ...]):
+        captured.append((sql, params))
+        return [
+            {
+                "symbol": "AAPLUSDT",
+                "book_imbalance": 0.2,
+                "book_imbalance_5": 0.1,
+                "depth_levels": 100,
+                "ts": 1_800_000_000,
+                "received_at": 1_800_000_000_000,
+            }
+        ]
+
+    monkeypatch.setattr(battle.store, "query", query)
+
+    snapshot = battle._market_microstructure("AAPLUSDT", 1_800_000_001_000)
+
+    assert snapshot is not None
+    assert snapshot["received_at"] == 1_800_000_000_000
+    assert captured[0][1] == ("AAPLUSDT",)
+    assert "ts*1000 AS received_at" in captured[0][0]
+
+
+def test_real_microstructure_rejects_stale_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        battle.store,
+        "query",
+        lambda *_args: [
+            {
+                "symbol": "AAPLUSDT",
+                "book_imbalance": 0.9,
+                "book_imbalance_5": 0.9,
+                "depth_levels": 100,
+                "received_at": 1_800_000_000_000,
+            }
+        ],
+    )
+
+    snapshot = battle._market_microstructure(
+        "AAPLUSDT", 1_800_000_000_000 + battle.MAX_DEPTH_AGE_MS + 1
+    )
+
+    assert snapshot is None
 
 
 def test_battle_migration_preserves_model_and_feature_versions(

@@ -223,10 +223,37 @@ def fetch_tickers() -> Any:
 
 
 def _public_symbol(symbol: str) -> str:
-    normalized = str(symbol).strip().upper()
+    if not isinstance(symbol, str):
+        raise ValueError("invalid Binance symbol")
+    normalized = symbol.strip().upper()
     if not 2 <= len(normalized) <= 32 or not normalized.isalnum():
         raise ValueError("invalid Binance symbol")
     return normalized
+
+
+def fetch_depth_snapshot(symbol: str, limit: int = 500) -> dict[str, Any]:
+    """Return one USD-M order-book snapshot for diff-depth reconciliation.
+
+    Five hundred levels are fetched by default so deleting a visible top-100
+    level can be filled from deeper locally cached liquidity without an
+    immediate REST refresh.  The request still goes through the process-wide
+    Binance IP weight limiter used by every public and signed client.
+    """
+
+    if isinstance(limit, bool) or limit not in {5, 10, 20, 50, 100, 500, 1_000}:
+        raise ValueError("unsupported Binance depth snapshot limit")
+    query = urllib.parse.urlencode(
+        {"symbol": _public_symbol(symbol), "limit": int(limit)}
+    )
+    payload = _get(
+        f"{FAPI}/fapi/v1/depth?{query}", timeout=10, retries=1
+    )
+    if not isinstance(payload, dict):
+        raise BinancePublicRequestError(
+            "Binance depth snapshot must be an object",
+            retryable=True,
+        )
+    return payload
 
 
 def fetch_open_interest(symbol: str) -> dict[str, Any]:

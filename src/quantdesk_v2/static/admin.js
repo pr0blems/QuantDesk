@@ -4,13 +4,15 @@ const API_ROOT = "/api/v2/admin";
 const VIEWS = {
   overview: ["OPERATIONS / 01", "运行总览"],
   collectors: ["OPERATIONS / 02", "采集器"],
-  alerts: ["SIGNALS / 03", "提醒事件"],
-  rules: ["SIGNALS / 04", "信号规则"],
-  sources: ["INTELLIGENCE / 05", "舆情来源"],
-  symbols: ["MARKET DATA / 06", "合约数据"],
-  users: ["GOVERNANCE / 07", "用户权限"],
-  storage: ["GOVERNANCE / 08", "存储维护"],
-  audit: ["GOVERNANCE / 09", "审计日志"],
+  "stock-library": ["US EQUITIES / 03", "美股资料库"],
+  alerts: ["SIGNALS / 04", "提醒事件"],
+  rules: ["SIGNALS / 05", "信号规则"],
+  sources: ["INTELLIGENCE / 06", "舆情来源"],
+  news: ["INTELLIGENCE / 07", "采集新闻"],
+  symbols: ["MARKET DATA / 08", "合约数据"],
+  users: ["GOVERNANCE / 09", "用户权限"],
+  storage: ["GOVERNANCE / 10", "存储维护"],
+  audit: ["GOVERNANCE / 11", "审计日志"],
 };
 
 let accessToken = "";
@@ -20,6 +22,7 @@ let refreshPromise = null;
 let toastTimer = null;
 let cleanupPayload = null;
 let newsSources = [];
+let newsAiPollTimer = null;
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -62,6 +65,80 @@ function formatPrice(value) {
 function objectSummary(value) {
   if (!value || typeof value !== "object" || !Object.keys(value).length) return "--";
   return Object.entries(value).map(([key, count]) => `${escapeHtml(key)} ${compactNumber(count)}`).join(" · ");
+}
+
+function sentimentView(value) {
+  return {
+    bull: { label: "看多", className: "bull" },
+    bear: { label: "看空", className: "bear" },
+    neutral: { label: "中性", className: "neutral" },
+  }[value] || { label: value || "未知", className: "neutral" };
+}
+
+function newsAiBatchStatus(value) {
+  return {
+    pending: { label: "等待执行", className: "warning" },
+    running: { label: "分析中", className: "warning" },
+    completed: { label: "分析完成", className: "ok" },
+    partial: { label: "部分完成", className: "warning" },
+    failed: { label: "分析失败", className: "error" },
+  }[value] || { label: "尚未运行", className: "" };
+}
+
+function renderNewsAiBatch(data) {
+  const batch = data.items?.[0];
+  const statusBox = $("#news-ai-status");
+  const progress = $("#news-ai-progress");
+  const conclusion = $("#news-ai-conclusion");
+  const buttons = $$('[data-news-ai-count]');
+  const retryButton = $("#news-ai-retry");
+  if (!batch) {
+    statusBox.innerHTML = '<span class="pill">尚未运行</span><small>请选择最近 300 或 500 条新闻开始分析</small>';
+    progress.classList.add("hidden");
+    conclusion.classList.add("hidden");
+    buttons.forEach((button) => { button.disabled = false; });
+    retryButton.classList.add("hidden");
+    scheduleNewsAiPoll(false);
+    return;
+  }
+  const status = newsAiBatchStatus(batch.status);
+  const active = ["pending", "running"].includes(batch.status);
+  retryButton.dataset.batchId = batch.id;
+  retryButton.classList.toggle(
+    "hidden",
+    !["failed", "partial"].includes(batch.status) || batch.processed_count >= batch.selected_count,
+  );
+  retryButton.disabled = active;
+  const progressValue = Math.max(0, Math.min(1, Number(batch.progress || 0)));
+  const model = [batch.provider_code, batch.model_name].filter(Boolean).join(" / ") || "等待载入默认模型";
+  statusBox.innerHTML = `<span class="pill ${status.className}">${status.label}</span><small>${batch.processed_count} / ${batch.selected_count || batch.requested_count} 条 · 失败 ${batch.failed_count} 条<br>${escapeHtml(model)} · ${formatTime(batch.created_at)}</small>`;
+  progress.classList.toggle("hidden", !active && progressValue === 0);
+  progress.querySelector("i").style.width = `${Math.round(progressValue * 100)}%`;
+  buttons.forEach((button) => { button.disabled = active; });
+  if (batch.market_summary) {
+    const market = sentimentView(batch.market_sentiment);
+    const confidence = batch.market_confidence == null ? "--" : `${Math.round(Number(batch.market_confidence) * 100)}%`;
+    const drivers = Array.isArray(batch.result?.key_drivers) ? batch.result.key_drivers.slice(0, 5).join("；") : "";
+    const focus = Array.isArray(batch.result?.focus_stocks) ? batch.result.focus_stocks.slice(0, 12).map((item) => item.symbol).filter(Boolean).join(" · ") : "";
+    conclusion.innerHTML = `<strong>${escapeHtml(market.label)} · 置信度 ${confidence}</strong><p>${escapeHtml(batch.market_summary)}</p><small>${drivers ? `关键驱动：${escapeHtml(drivers)}` : ""}${drivers && focus ? "<br>" : ""}${focus ? `重点美股：${escapeHtml(focus)}` : ""}</small>`;
+    conclusion.classList.remove("hidden");
+  } else if (batch.error_message && !active) {
+    conclusion.innerHTML = `<strong>任务未完成</strong><p>${escapeHtml(batch.error_message)}</p>`;
+    conclusion.classList.remove("hidden");
+  } else {
+    conclusion.classList.add("hidden");
+  }
+  scheduleNewsAiPoll(active);
+}
+
+function scheduleNewsAiPoll(active) {
+  if (newsAiPollTimer) clearTimeout(newsAiPollTimer);
+  newsAiPollTimer = null;
+  if (!active) return;
+  newsAiPollTimer = setTimeout(() => {
+    if (activeView !== "news") return;
+    loadNews().catch((error) => toast(error.message, "error"));
+  }, 3000);
 }
 
 function errorMessage(payload, fallback = "请求失败") {
@@ -191,9 +268,11 @@ async function loadView(view = activeView) {
     const loaders = {
       overview: loadOverview,
       collectors: loadCollectors,
+      "stock-library": loadStockLibrary,
       alerts: loadAlerts,
       rules: loadRules,
       sources: loadSources,
+      news: loadNews,
       symbols: loadSymbols,
       users: loadUsers,
       storage: loadStorage,
@@ -233,6 +312,40 @@ async function loadOverview() {
   $("#overview-activity").innerHTML = activity.map(([label, value, hint]) => `<div class="activity-card"><span>${escapeHtml(label)}</span><strong>${compactNumber(value)}</strong><small>${hint}</small></div>`).join("");
 }
 
+async function loadStockLibrary() {
+  const data = await api(`/stock-library?${formQuery($("#stock-library-filter"))}`);
+  $("#stock-library-total").textContent = `${data.total} 个标的`;
+  $("#stock-library-status").textContent = `已核验 ${data.verified} · 待复核 ${data.review_required}`;
+  $("#stock-library-table").innerHTML = data.items.length ? data.items.map((item) => {
+    const profile = item.profile || {};
+    const analysis = item.analysis || {};
+    const marketCap = profile.market_cap == null
+      ? (item.security_type === "ETF" ? "基金规模待补充" : item.security_type === "PRE_IPO" ? "未上市" : "市值待补充")
+      : compactNumber(profile.market_cap * 1000000);
+    const isBaseline = analysis.analysis_version === "baseline-v1";
+    const score = analysis.overall_score == null ? (isBaseline ? "" : "财务分析待生成") : `${Number(analysis.overall_score).toFixed(1)} 分`;
+    const verifyClass = item.verification_status === "REVIEW_REQUIRED" ? "warning" : "active";
+    const chineseName = item.company_name_zh || profile.legal_name || item.company_name || "待同步";
+    const englishName = item.company_name_zh ? (profile.legal_name || item.company_name || "") : "";
+    const chineseIndustry = [profile.sector_zh, profile.industry_zh].filter(Boolean).join(" · ");
+    const englishIndustry = [profile.sector, profile.industry].filter(Boolean).join(" · ");
+    const analysisSummary = analysis.business_summary || (profile.source ? "基础资料已同步，等待生成分析摘要" : "基础资料尚未同步");
+    return `<tr><td><strong>${escapeHtml(item.symbol)}</strong><small>${escapeHtml(item.exchange)}</small></td><td><strong>${escapeHtml(chineseName)}</strong><small>${escapeHtml(chineseIndustry || "暂无中文行业资料")}</small>${englishName ? `<small>${escapeHtml(englishName)}${englishIndustry ? ` · ${escapeHtml(englishIndustry)}` : ""}</small>` : ""}</td><td><span class="pill">${escapeHtml(item.security_type)}</span></td><td><span class="pill ${verifyClass}">${item.verification_status === "REVIEW_REQUIRED" ? "需要复核" : "已核验"}</span></td><td>${marketCap}</td><td>${score ? `<strong>${escapeHtml(score)}</strong>` : ""}<small>${escapeHtml(analysisSummary)}</small></td><td>${formatTime(item.updated_at)}</td><td><button data-stock-sync="${escapeHtml(item.symbol)}">同步资料</button></td></tr>`;
+  }).join("") : '<tr><td class="empty" colspan="8">资料库为空，请点击“导入当前美股”。</td></tr>';
+}
+
+async function importStockLibrary() {
+  const result = await api("/stock-library/import", { method: "POST", body: "{}" });
+  toast(`导入完成：新增 ${result.created}，更新 ${result.updated}，待复核 ${result.review_required}`);
+  await loadStockLibrary();
+}
+
+async function syncStockProfile(symbol) {
+  await api(`/stock-library/${encodeURIComponent(symbol)}/sync`, { method: "POST", body: "{}" });
+  toast(`${symbol} 公司资料同步完成`);
+  await loadStockLibrary();
+}
+
 async function loadCollectors() {
   const items = await api("/collectors");
   $("#collectors-table").innerHTML = items.length ? items.map((item) => {
@@ -268,15 +381,65 @@ async function loadRules() {
 }
 
 async function loadSources() {
-  const [sources, news] = await Promise.all([
-    api("/news-sources"),
-    api(`/news?limit=40&${formQuery($("#news-filter"))}`),
-  ]);
+  const sources = await api("/news-sources");
   newsSources = sources;
   $("#sources-total").textContent = `${sources.length} 个来源`;
-  $("#sources-table").innerHTML = sources.length ? sources.map((item) => `<tr><td><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.lang)}</small><small class="truncate" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</small></td><td><span class="pill ${item.enabled ? "active" : "disabled"}">${item.enabled ? "启用" : "停用"}</span>${item.slow ? '<small>慢速轮询</small>' : ""}</td><td><label>权重<input class="table-input" data-field="weight" type="number" value="${Number(item.weight)}" min="1" max="1000"></label><label>限额<input class="table-input" data-field="hourly_limit" type="number" value="${Number(item.hourly_limit)}" min="1" max="10000"></label></td><td>${compactNumber(item.fetched_items)} / ${compactNumber(item.inserted_items)}</td><td>${formatTime(item.last_success_at)}</td><td class="truncate" title="${escapeHtml(item.last_error || "")}">${escapeHtml(item.last_error || "--")}</td><td><div class="button-group" data-source-row="${escapeHtml(item.name)}"><button data-source-action="edit">编辑</button><button data-source-action="toggle" data-enabled="${item.enabled}">${item.enabled ? "停用" : "启用"}</button><button data-source-action="slow" data-slow="${item.slow}">${item.slow ? "正常频率" : "设为慢速"}</button><button data-source-action="save">保存参数</button><button data-source-action="test">测试</button></div></td></tr>`).join("") : '<tr><td class="empty" colspan="7">暂无舆情来源，请点击“新增来源”创建。</td></tr>';
-  $("#news-total").textContent = `${news.total} 条`;
-  $("#news-list").innerHTML = news.items.length ? news.items.map((item) => `<article class="news-item"><span>${escapeHtml(item.source || "未知来源")} · ${formatTime(item.ts)} · ${escapeHtml(item.sentiment || "unknown")}</span><h4><a href="${safeLink(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title_zh || item.title)}</a></h4><p>${escapeHtml(item.summary || item.title)}</p></article>`).join("") : '<div class="empty">没有符合条件的舆情内容</div>';
+  $("#sources-table").innerHTML = sources.length ? sources.map((item) => `<tr><td><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.lang)} · ${item.feed_type === "taoz_flash" ? "快讯 JSON" : "RSS / Atom"}</small><small class="truncate" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</small></td><td><span class="pill ${item.enabled ? "active" : "disabled"}">${item.enabled ? "启用" : "停用"}</span>${item.slow ? '<small>慢速轮询</small>' : ""}</td><td><label>权重<input class="table-input" data-field="weight" type="number" value="${Number(item.weight)}" min="1" max="1000"></label><label>限额<input class="table-input" data-field="hourly_limit" type="number" value="${Number(item.hourly_limit)}" min="1" max="10000"></label></td><td>${compactNumber(item.fetched_items)} / ${compactNumber(item.inserted_items)}</td><td>${formatTime(item.last_success_at)}</td><td class="truncate" title="${escapeHtml(item.last_error || "")}">${escapeHtml(item.last_error || "--")}</td><td><div class="button-group" data-source-row="${escapeHtml(item.name)}"><button data-source-action="edit">编辑</button><button data-source-action="toggle" data-enabled="${item.enabled}">${item.enabled ? "停用" : "启用"}</button><button data-source-action="slow" data-slow="${item.slow}">${item.slow ? "正常频率" : "设为慢速"}</button><button data-source-action="save">保存参数</button><button data-source-action="test">测试</button></div></td></tr>`).join("") : '<tr><td class="empty" colspan="7">暂无舆情来源，请点击“新增来源”创建。</td></tr>';
+}
+
+async function loadNews() {
+  const newsFilter = $("#news-filter");
+  const [sources, news, batches] = await Promise.all([
+    api("/news-sources"),
+    api(`/news?${formQuery(newsFilter)}`),
+    api("/news-ai-batches?limit=5"),
+  ]);
+  const sourceSelect = newsFilter.elements.namedItem("source");
+  const selectedSource = sourceSelect.value;
+  sourceSelect.innerHTML = '<option value="">全部来源</option>' + sources.map((item) => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`).join("");
+  sourceSelect.value = sources.some((item) => item.name === selectedSource) ? selectedSource : "";
+  renderNewsAiBatch(batches);
+  $("#news-total").textContent = `${compactNumber(news.total)} 条新闻 · 当前显示 ${news.items.length} 条`;
+  $("#news-list").innerHTML = news.items.length ? news.items.map((item) => {
+    const sentiment = sentimentView(item.ai_sentiment || item.sentiment);
+    const ruleSentiment = sentimentView(item.rule_sentiment || item.sentiment);
+    const title = item.title_zh || item.title || "无标题";
+    const summary = item.summary || (item.title_zh && item.title_zh !== item.title ? item.title : "") || "暂无摘要";
+    const link = safeLink(item.link);
+    const stocks = Array.isArray(item.related_us_stocks) ? item.related_us_stocks : [];
+    const stockList = stocks.length ? stocks.map((stock) => `<span class="news-stock" title="相关度 ${Math.round(Number(stock.relevance || 0) * 100)}% · ${escapeHtml(sentimentView(stock.direction).label)}">${escapeHtml(stock.symbol)}</span>`).join("") : '<span class="pill">待分析</span>';
+    const confidence = item.ai_confidence == null ? "" : `${Math.round(Number(item.ai_confidence) * 100)}%`;
+    const aiMeta = item.ai_sentiment ? `AI ${confidence} · 规则 ${ruleSentiment.label}` : `规则 ${ruleSentiment.label} · 等待 AI`;
+    const reason = item.ai_reason || "尚未进行批量 AI 语义研判";
+    const reasonMeta = [item.ai_category, item.ai_impact_strength, item.ai_time_horizon, item.ai_model].filter(Boolean).join(" · ");
+    return `<tr><td>${formatTime(item.ts)}</td><td class="news-source"><strong>${escapeHtml(item.source || "未知来源")}</strong><small title="${escapeHtml(item.id || "")}">${escapeHtml(item.id || "--")}</small></td><td><div class="news-stock-list">${stockList}</div></td><td><span class="pill ${sentiment.className}">${escapeHtml(sentiment.label)}</span><small>${escapeHtml(aiMeta)}</small></td><td class="news-title"><strong>${escapeHtml(title)}</strong><small title="${escapeHtml(summary)}">${escapeHtml(summary)}</small></td><td class="news-ai-reason"><span title="${escapeHtml(reason)}">${escapeHtml(reason)}</span><small>${escapeHtml(reasonMeta)}</small></td><td>${escapeHtml(item.lang || "--")}</td><td>${link === "#" ? "--" : `<a class="news-link" href="${link}" target="_blank" rel="noopener noreferrer">查看 ↗</a>`}</td></tr>`;
+  }).join("") : '<tr><td class="empty" colspan="8">没有符合条件的采集新闻</td></tr>';
+}
+
+async function startNewsAiBatch(count) {
+  if (!(await confirmAction(
+    `分析最近 ${count} 条新闻`,
+    `系统将调用当前默认 AI 模型，按每组 5 条分析并生成美股整体结论。该操作会消耗模型额度，确认开始？`,
+  ))) return;
+  const result = await api("/news-ai-batches", {
+    method: "POST",
+    body: JSON.stringify({ count }),
+  });
+  toast(`AI 新闻分析批次已创建：${result.requested_count} 条`);
+  await loadNews();
+}
+
+async function retryNewsAiBatch(batchId) {
+  if (!(await confirmAction(
+    "继续未完成 AI 批次",
+    "系统会保留已成功的新闻结果，只分析尚未完成的新闻并重新生成整体结论。确认继续？",
+  ))) return;
+  await api(`/news-ai-batches/${encodeURIComponent(batchId)}/retry`, {
+    method: "POST",
+    body: "{}",
+  });
+  toast("AI 新闻批次已继续执行");
+  await loadNews();
 }
 
 async function loadSymbols() {
@@ -360,6 +523,7 @@ function openSourceEditor(source = null) {
   form.name.readOnly = Boolean(source);
   form.name.value = source?.name || "";
   form.url.value = source?.url || "";
+  form.feed_type.value = source?.feed_type || "rss";
   form.lang.value = source?.lang || "en";
   form.weight.value = source?.weight ?? 100;
   form.hourly_limit.value = source?.hourly_limit ?? 600;
@@ -376,6 +540,7 @@ function sourceFormPayload(form) {
   return {
     name: form.name.value.trim(),
     url: form.url.value.trim(),
+    feed_type: form.feed_type.value,
     lang: form.lang.value.trim(),
     enabled: form.enabled.checked,
     slow: form.slow.checked,
@@ -486,7 +651,12 @@ function bindEvents() {
     await fetch("/api/v2/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", credentials: "include" }).catch(() => {});
     showLogin();
   });
-  ["alerts-filter", "news-filter", "symbols-filter", "users-filter", "audit-filter"].forEach((id) => $("#" + id).addEventListener("submit", (event) => { event.preventDefault(); loadView(); }));
+  ["stock-library-filter", "alerts-filter", "news-filter", "symbols-filter", "users-filter", "audit-filter"].forEach((id) => $("#" + id).addEventListener("submit", (event) => { event.preventDefault(); loadView(); }));
+  $("#stock-library-import").addEventListener("click", () => importStockLibrary().catch((error) => toast(error.message, "error")));
+  $("#stock-library-table").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-stock-sync]");
+    if (button) syncStockProfile(button.dataset.stockSync).catch((error) => toast(error.message, "error"));
+  });
   $("#rules-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -508,6 +678,14 @@ function bindEvents() {
   $("#source-dialog-close").addEventListener("click", () => $("#source-dialog").close());
   $("#source-cancel").addEventListener("click", () => $("#source-dialog").close());
   $("#source-delete").addEventListener("click", () => deleteSource().catch((error) => toast(error.message, "error")));
+  $("#news-refresh").addEventListener("click", () => loadView("news"));
+  $("#news-filter-reset").addEventListener("click", () => { $("#news-filter").reset(); loadView("news"); });
+  $$("[data-news-ai-count]").forEach((button) => button.addEventListener("click", () => {
+    startNewsAiBatch(Number(button.dataset.newsAiCount)).catch((error) => toast(error.message, "error"));
+  }));
+  $("#news-ai-retry").addEventListener("click", (event) => {
+    retryNewsAiBatch(event.currentTarget.dataset.batchId).catch((error) => toast(error.message, "error"));
+  });
   $("#users-table").addEventListener("click", (event) => { const button = event.target.closest("[data-user-action]"); if (button) updateUser(button).catch((error) => toast(error.message, "error")); });
   $("#cleanup-preview").addEventListener("click", () => previewCleanup().catch((error) => toast(error.message, "error")));
   $("#cleanup-run").addEventListener("click", () => runCleanup().catch((error) => toast(error.message, "error")));

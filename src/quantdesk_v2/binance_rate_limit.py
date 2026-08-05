@@ -252,6 +252,18 @@ def rest_request_weight(method: str, url: str) -> int:
         if limit <= 1_000:
             return 5
         return 10
+    if path == "/fapi/v1/depth":
+        try:
+            limit = int(query.get("limit", [500])[0])
+        except (TypeError, ValueError):
+            limit = 500
+        if limit <= 50:
+            return 2
+        if limit <= 100:
+            return 5
+        if limit <= 500:
+            return 10
+        return 20
     if path.endswith("/income"):
         return 30
     if path.endswith("/openOrders") or path.endswith("/openAlgoOrders"):

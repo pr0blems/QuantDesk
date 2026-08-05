@@ -29,6 +29,8 @@ def _bind_params(sql: str, params: tuple[Any, ...]):
 
 
 _REPORT_LOCK = threading.Lock()
+_MARKET_MICROSTRUCTURE_STALE_SECONDS = 30
+_MAX_MARKET_CLOCK_SKEW_SECONDS = 5
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -41,6 +43,58 @@ def _json_object(value: Any) -> dict[str, Any]:
             return {}
         return decoded if isinstance(decoded, dict) else {}
     return {}
+
+
+def _optional_finite_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _fresh_microstructure_metrics(
+    row: dict[str, Any] | None,
+    *,
+    now_seconds: int,
+) -> dict[str, float | int]:
+    """Expose a depth snapshot only while all of its metrics remain trustworthy."""
+
+    if not row:
+        return {}
+    try:
+        snapshot_at = int(row.get("ts") or 0)
+        depth_levels = int(row.get("depth_levels"))
+    except (TypeError, ValueError):
+        return {}
+    age_seconds = now_seconds - snapshot_at
+    if not (
+        -_MAX_MARKET_CLOCK_SKEW_SECONDS
+        <= age_seconds
+        <= _MARKET_MICROSTRUCTURE_STALE_SECONDS
+    ):
+        return {}
+    numbers = {
+        key: _optional_finite_number(row.get(key))
+        for key in (
+            "bid_depth_notional",
+            "ask_depth_notional",
+            "book_imbalance",
+            "book_imbalance_5",
+        )
+    }
+    if (
+        any(value is None for value in numbers.values())
+        or numbers["bid_depth_notional"] < 0
+        or numbers["ask_depth_notional"] < 0
+        or not -1 <= numbers["book_imbalance"] <= 1
+        or not -1 <= numbers["book_imbalance_5"] <= 1
+        or not 0 <= depth_levels <= 100
+    ):
+        return {}
+    return {**numbers, "depth_levels": depth_levels}
 
 
 def _opportunity_out(row: dict[str, Any], *, compact: bool = False) -> dict[str, Any]:
@@ -110,7 +164,27 @@ class MonitorRepository:
         market_store.configure_engine(self.engine)
 
     def overview(self, watchlist: list[str]) -> dict[str, Any]:
+        from . import market_engine
+
+        now_seconds = int(time.time())
         tickers = {row["symbol"]: row for row in self._query("SELECT * FROM ticker")}
+        rolling_changes = market_engine.rolling_price_changes(
+            self.symbols,
+            now=now_seconds,
+            require_fresh_stream=True,
+        )
+        try:
+            microstructure = {
+                row["symbol"]: row
+                for row in self._query(
+                    """SELECT symbol,bid_depth_notional,ask_depth_notional,
+                              book_imbalance,book_imbalance_5,depth_levels,ts
+                       FROM market_microstructure"""
+                )
+            }
+        except MonitorUnavailable:
+            # Keep a rolling deployment usable until the new table is migrated.
+            microstructure = {}
         score_rows = self._query(
             """
             SELECT s.symbol, s.tf, s.score FROM scores s
@@ -195,6 +269,11 @@ class MonitorRepository:
         latest = 0
         for symbol in self.symbols:
             ticker = tickers.get(symbol, {})
+            short_term = rolling_changes.get(symbol, {})
+            depth = _fresh_microstructure_metrics(
+                microstructure.get(symbol),
+                now_seconds=now_seconds,
+            )
             latest = max(latest, int(ticker.get("ts") or 0))
             tf_scores = scores.get(symbol, {})
             numerator = sum(
@@ -207,16 +286,16 @@ class MonitorRepository:
                     "symbol": symbol,
                     "underlying": metadata.get(symbol, {}).get("underlyingType", ""),
                     "price": _finite_number(ticker.get("price")),
-                    "pct_2m": None,
-                    "pct_5m": None,
-                    "pct_10m": None,
+                    "pct_2m": short_term.get("pct_2m"),
+                    "pct_5m": short_term.get("pct_5m"),
+                    "pct_10m": short_term.get("pct_10m"),
                     "pct_24h": _finite_number(ticker.get("pct_24h")),
                     "quote_volume": _finite_number(ticker.get("quote_volume")),
-                    "bid_depth_notional": None,
-                    "ask_depth_notional": None,
-                    "book_imbalance": None,
-                    "book_imbalance_5": None,
-                    "depth_levels": 0,
+                    "bid_depth_notional": depth.get("bid_depth_notional"),
+                    "ask_depth_notional": depth.get("ask_depth_notional"),
+                    "book_imbalance": depth.get("book_imbalance"),
+                    "book_imbalance_5": depth.get("book_imbalance_5"),
+                    "depth_levels": depth.get("depth_levels"),
                     "score": round(numerator / denominator) if denominator else None,
                     "tf_scores": tf_scores,
                     "watch": symbol in selected,
@@ -318,12 +397,17 @@ class MonitorRepository:
     def intelligence(self) -> dict[str, Any]:
         """Return monitor feedback from the intelligence data available in V2."""
         now_seconds = int(time.time())
-        ticker_rows = self._query(
-            """SELECT COUNT(*) total,
-                      SUM(CASE WHEN ts>=? THEN 1 ELSE 0 END) fresh
-               FROM ticker""",
-            (now_seconds - 300,),
-        )
+        try:
+            fresh_depth_rows = self._query(
+                """SELECT symbol FROM market_microstructure
+                   WHERE ts>=? AND ts<=?""",
+                (
+                    now_seconds - _MARKET_MICROSTRUCTURE_STALE_SECONDS,
+                    now_seconds + _MAX_MARKET_CLOCK_SKEW_SECONDS,
+                ),
+            )
+        except MonitorUnavailable:
+            fresh_depth_rows = []
         lifecycle_rows = self._query(
             """SELECT COUNT(*) active,
                       SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END) confirmed,
@@ -356,11 +440,13 @@ class MonitorRepository:
                GROUP BY p.model_key,p.horizon_seconds
                ORDER BY p.horizon_seconds,p.model_key"""
         )
-        ticker = ticker_rows[0] if ticker_rows else {}
         lifecycle = lifecycle_rows[0] if lifecycle_rows else {}
         outcomes = outcome_rows[0] if outcome_rows else {}
         total_symbols = len(self.symbols)
-        fresh = int(ticker.get("fresh") or 0)
+        fresh = len(
+            self.symbol_set
+            & {str(row.get("symbol") or "") for row in fresh_depth_rows}
+        )
         return {
             "market_data": {
                 "symbols": total_symbols,

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import time
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -17,27 +19,38 @@ from .database import get_db
 from .dependencies import require_admin, require_admin_write
 from .models import (
     AdminSetting,
+    AiModelConfig,
     AuditLog,
     CollectorStatus,
+    CompanyProfile,
+    NewsAiBatch,
     NewsSourceSetting,
+    Security,
+    SecurityFundamentalAnalysis,
+    SecurityResearchSource,
     User,
     UserSession,
     utcnow,
 )
+from .news_ai import CHUNK_SIZE, run_news_ai_batch
 from .schemas import (
     AdminAlertRulesUpdate,
     AdminCleanupRequest,
+    AdminNewsAiBatchCreate,
     AdminNewsSourceCreate,
     AdminNewsSourceUpdate,
     AdminUserUpdate,
     MessageOut,
 )
+from .stock_library import import_tradfi_equities, security_out, sync_company_profile
 
 router = APIRouter(prefix="/api/v2/admin", tags=["admin"])
-COLLECTOR_NAMES = {"price", "ticker", "kline", "news", "social", "paper"}
+COLLECTOR_NAMES = {"price", "ticker", "depth", "kline", "news", "social", "paper"}
+FLASH_SOURCE_SEED_KEY = "news_source_seed:taoz_flash_v1"
 COLLECTOR_STALE_SECONDS = {
     "price": 20,
     "ticker": 150,
+    "depth": 30,
     "kline": 180,
     "news": 90,
     "social": 1200,
@@ -89,6 +102,46 @@ def _iso_from_unix(value: int | None) -> str | None:
     return datetime.fromtimestamp(value, UTC).isoformat().replace("+00:00", "Z")
 
 
+def _news_ai_batch_out(batch: NewsAiBatch) -> dict[str, Any]:
+    selected = max(0, int(batch.selected_count or 0))
+    finished = max(0, int(batch.processed_count or 0)) + max(0, int(batch.failed_count or 0))
+    return {
+        "id": batch.id,
+        "status": batch.status,
+        "requested_count": batch.requested_count,
+        "selected_count": selected,
+        "processed_count": batch.processed_count,
+        "failed_count": batch.failed_count,
+        "progress": round(min(1.0, finished / selected), 4) if selected else 0.0,
+        "chunk_size": batch.chunk_size,
+        "provider_code": batch.provider_code,
+        "model_name": batch.model_name,
+        "market_sentiment": batch.market_sentiment,
+        "market_confidence": (
+            float(batch.market_confidence) if batch.market_confidence is not None else None
+        ),
+        "market_summary": batch.market_summary,
+        "result": batch.result_json,
+        "error_message": batch.error_message,
+        "started_at": batch.started_at,
+        "completed_at": batch.completed_at,
+        "created_at": batch.created_at,
+        "updated_at": batch.updated_at,
+    }
+
+
+def _json_list(value: Any) -> list[Any] | None:
+    if value is None or isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, list) else None
+    return None
+
+
 def _default_alert_rules() -> dict[str, Any]:
     settings = config_loader.settings
     return {
@@ -112,9 +165,18 @@ def _setting_payload(db: Session, key: str, default: dict[str, Any]) -> tuple[di
 def _sync_news_sources(db: Session) -> None:
     # Once seeded, the database is authoritative. This prevents an intentionally
     # deleted file-defined source from being recreated on the next admin read.
-    if db.scalar(select(func.count()).select_from(NewsSourceSetting)):
-        return
-    for source in config_loader.settings.get("news_sources", []):
+    configured_sources = config_loader.settings.get("news_sources", [])
+    if not db.scalar(select(func.count()).select_from(NewsSourceSetting)):
+        sources_to_seed = configured_sources
+    elif db.get(AdminSetting, FLASH_SOURCE_SEED_KEY) is None:
+        sources_to_seed = [
+            source
+            for source in configured_sources
+            if source.get("feed_type") == "taoz_flash"
+        ]
+    else:
+        sources_to_seed = []
+    for source in sources_to_seed:
         name = str(source.get("name") or "").strip()
         url = str(source.get("url") or "").strip()
         if not name or not url or db.get(NewsSourceSetting, name) is not None:
@@ -123,9 +185,20 @@ def _sync_news_sources(db: Session) -> None:
             NewsSourceSetting(
                 name=name,
                 url=url,
+                feed_type=str(source.get("feed_type") or "rss"),
                 lang=str(source.get("lang") or "en"),
                 slow=bool(source.get("slow")),
                 enabled=True,
+                weight=int(source.get("weight") or 100),
+                hourly_limit=int(source.get("hourly_limit") or 600),
+            )
+        )
+    if db.get(AdminSetting, FLASH_SOURCE_SEED_KEY) is None:
+        db.add(
+            AdminSetting(
+                key=FLASH_SOURCE_SEED_KEY,
+                value_json={"seeded": True},
+                version=1,
             )
         )
     db.flush()
@@ -135,6 +208,15 @@ def initialize_admin_runtime(engine: Engine) -> None:
     """Seed file-defined news sources before production workers start."""
 
     with Session(engine) as db:
+        db.execute(
+            update(NewsAiBatch)
+            .where(NewsAiBatch.status.in_(("pending", "running")))
+            .values(
+                status="failed",
+                error_message="服务重启导致任务中断，请重新发起分析",
+                completed_at=utcnow(),
+            )
+        )
         _sync_news_sources(db)
         db.commit()
 
@@ -371,12 +453,231 @@ def admin_news(
     )
     rows = db.execute(
         text(
-            "SELECT id,ts,source,lang,title,title_zh,link,sentiment,summary FROM news "
+            "SELECT id,ts,source,lang,title,title_zh,link,sentiment,rule_sentiment,summary,"
+            "related_us_stocks,ai_sentiment,ai_confidence,ai_impact_strength,"
+            "ai_time_horizon,ai_category,ai_reason,ai_model,ai_batch_id,ai_analyzed_at "
+            "FROM news "
             f"WHERE {where} ORDER BY ts DESC LIMIT :limit OFFSET :offset"
         ),
         params,
     ).mappings()
-    return {"total": total, "limit": limit, "offset": offset, "items": [dict(row) for row in rows]}
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["related_us_stocks"] = _json_list(item.get("related_us_stocks"))
+        if item.get("ai_confidence") is not None:
+            item["ai_confidence"] = float(item["ai_confidence"])
+        items.append(item)
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@router.get("/news-ai-batches")
+def news_ai_batches(
+    limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> dict[str, Any]:
+    rows = db.scalars(
+        select(NewsAiBatch).order_by(NewsAiBatch.created_at.desc()).limit(limit)
+    ).all()
+    return {"items": [_news_ai_batch_out(row) for row in rows]}
+
+
+@router.get("/news-ai-batches/{batch_id}")
+def news_ai_batch(
+    batch_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> dict[str, Any]:
+    batch = db.get(NewsAiBatch, str(batch_id))
+    if batch is None:
+        raise HTTPException(status_code=404, detail="news AI batch not found")
+    return _news_ai_batch_out(batch)
+
+
+@router.post("/news-ai-batches", status_code=202)
+def create_news_ai_batch(
+    payload: AdminNewsAiBatchCreate,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_write),
+) -> dict[str, Any]:
+    active_batch = db.scalar(
+        select(NewsAiBatch.id)
+        .where(NewsAiBatch.status.in_(("pending", "running")))
+        .order_by(NewsAiBatch.created_at.desc())
+        .limit(1)
+    )
+    if active_batch is not None:
+        raise HTTPException(status_code=409, detail="已有 AI 新闻分析批次正在运行")
+    model = db.scalar(
+        select(AiModelConfig.id)
+        .where(
+            AiModelConfig.user_id == admin.id,
+            AiModelConfig.is_enabled.is_(True),
+            AiModelConfig.is_default.is_(True),
+        )
+        .limit(1)
+    )
+    if model is None:
+        raise HTTPException(status_code=422, detail="请先在系统设置中配置并启用默认 AI 模型")
+    batch = NewsAiBatch(
+        id=str(uuid.uuid4()),
+        started_by=admin.id,
+        status="pending",
+        requested_count=payload.count,
+        chunk_size=CHUNK_SIZE,
+    )
+    db.add(batch)
+    _audit(
+        db,
+        request,
+        admin.id,
+        "admin.news_ai_batch.create",
+        "news_ai_batch",
+        batch.id,
+        {"requested_count": payload.count},
+    )
+    db.commit()
+    db.refresh(batch)
+    background_tasks.add_task(
+        run_news_ai_batch,
+        request.app.state.database_engine,
+        batch.id,
+        request.app.state.settings.credential_master_key.get_secret_value(),
+    )
+    return _news_ai_batch_out(batch)
+
+
+@router.post("/news-ai-batches/{batch_id}/retry", status_code=202)
+def retry_news_ai_batch(
+    batch_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_write),
+) -> dict[str, Any]:
+    batch = db.get(NewsAiBatch, str(batch_id))
+    if batch is None:
+        raise HTTPException(status_code=404, detail="news AI batch not found")
+    if batch.status not in {"failed", "partial"}:
+        raise HTTPException(status_code=409, detail="该批次当前不能续跑")
+    active_batch = db.scalar(
+        select(NewsAiBatch.id)
+        .where(NewsAiBatch.status.in_(("pending", "running")))
+        .limit(1)
+    )
+    if active_batch is not None:
+        raise HTTPException(status_code=409, detail="已有 AI 新闻分析批次正在运行")
+    batch.status = "pending"
+    batch.failed_count = 0
+    batch.error_message = None
+    batch.completed_at = None
+    batch.chunk_size = CHUNK_SIZE
+    _audit(
+        db,
+        request,
+        admin.id,
+        "admin.news_ai_batch.retry",
+        "news_ai_batch",
+        batch.id,
+        {"processed_count": batch.processed_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    background_tasks.add_task(
+        run_news_ai_batch,
+        request.app.state.database_engine,
+        batch.id,
+        request.app.state.settings.credential_master_key.get_secret_value(),
+    )
+    return _news_ai_batch_out(batch)
+
+
+@router.get("/stock-library")
+def stock_library(
+    query: str | None = Query(default=None, max_length=64),
+    security_type: str | None = Query(default=None, max_length=32),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> dict[str, Any]:
+    statement = select(Security).order_by(Security.symbol)
+    if query:
+        needle = f"%{query.strip()}%"
+        statement = statement.where(
+            Security.symbol.like(needle) | Security.company_name.like(needle)
+        )
+    if security_type:
+        statement = statement.where(Security.security_type == security_type)
+    rows = db.scalars(statement.limit(500)).all()
+    items = []
+    for row in rows:
+        profile = db.get(CompanyProfile, row.id)
+        analysis = db.scalar(
+            select(SecurityFundamentalAnalysis)
+            .where(SecurityFundamentalAnalysis.security_id == row.id)
+            .order_by(SecurityFundamentalAnalysis.as_of_date.desc())
+            .limit(1)
+        )
+        items.append(security_out(row, profile, analysis))
+    return {
+        "total": len(items),
+        "verified": sum(item["verification_status"] != "REVIEW_REQUIRED" for item in items),
+        "review_required": sum(item["verification_status"] == "REVIEW_REQUIRED" for item in items),
+        "items": items,
+    }
+
+
+@router.get("/stock-library/{symbol}")
+def stock_library_detail(
+    symbol: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> dict[str, Any]:
+    security = db.scalar(select(Security).where(Security.symbol == symbol.strip().upper()))
+    if security is None:
+        raise HTTPException(status_code=404, detail="security not found")
+    profile = db.get(CompanyProfile, security.id)
+    analysis = db.scalar(select(SecurityFundamentalAnalysis).where(SecurityFundamentalAnalysis.security_id == security.id).order_by(SecurityFundamentalAnalysis.as_of_date.desc()).limit(1))
+    result = security_out(security, profile, analysis)
+    result["research_sources"] = [
+        {"source_type": row.source_type, "title": row.title, "url": row.url, "publisher": row.publisher, "published_at": row.published_at, "content_summary": row.content_summary}
+        for row in db.scalars(select(SecurityResearchSource).where(SecurityResearchSource.security_id == security.id).order_by(SecurityResearchSource.retrieved_at.desc()).limit(100)).all()
+    ]
+    return result
+
+
+@router.post("/stock-library/import", status_code=202)
+def import_stock_library(
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_write),
+) -> dict[str, Any]:
+    result = import_tradfi_equities(db, request.app.state.settings.monitor_symbols_config)
+    _audit(db, request, admin.id, "admin.stock_library.import", "stock_library", "tradfi", result)
+    db.commit()
+    return result
+
+
+@router.post("/stock-library/{symbol}/sync")
+def sync_stock_library_profile(
+    symbol: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_write),
+) -> dict[str, Any]:
+    security = db.scalar(select(Security).where(Security.symbol == symbol.strip().upper()))
+    if security is None:
+        raise HTTPException(status_code=404, detail="security not found")
+    try:
+        profile = sync_company_profile(db, request.app.state.finnhub_client, security)
+    except Exception as exc:
+        category = getattr(exc, "category", "upstream")
+        raise HTTPException(status_code=502, detail=f"Finnhub profile sync failed: {category}") from exc
+    _audit(db, request, admin.id, "admin.stock_library.sync", "security", security.symbol, {"source": "finnhub"})
+    db.commit()
+    return security_out(security, profile)
 
 
 @router.get("/symbols")
@@ -535,6 +836,7 @@ def news_sources(
         {
             "name": row.name,
             "url": row.url,
+            "feed_type": row.feed_type,
             "lang": row.lang,
             "enabled": row.enabled,
             "slow": row.slow,
@@ -597,6 +899,7 @@ def update_news_source(
     return {
         "name": source.name,
         "url": source.url,
+        "feed_type": source.feed_type,
         "lang": source.lang,
         "enabled": source.enabled,
         "slow": source.slow,
@@ -641,7 +944,16 @@ def test_news_source(
     if source is None:
         raise HTTPException(status_code=404, detail="news source not found")
     try:
-        items = market_news.fetch_rss(source.url, timeout=10, retries=1)[:5]
+        items = market_news.fetch_source(
+            {
+                "name": source.name,
+                "url": source.url,
+                "feed_type": source.feed_type,
+                "lang": source.lang,
+            },
+            timeout=10,
+            retries=1,
+        )[:5]
     except Exception as exc:
         raise HTTPException(
             status_code=502, detail=f"source test failed: {str(exc)[:160]}"
@@ -650,12 +962,15 @@ def test_news_source(
         "name": source.name,
         "items": [
             {
-                "title": title,
-                "link": link,
-                "published": published,
-                "sentiment": market_news.sentiment_of(title),
+                "title": item["title"],
+                "link": item["link"],
+                "published": item["published"],
+                "summary": item.get("summary"),
+                "sentiment": market_news.sentiment_of(
+                    f"{item['title']} {item.get('summary') or ''}"
+                ),
             }
-            for title, link, published in items
+            for item in items
         ],
     }
 

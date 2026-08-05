@@ -239,6 +239,11 @@ class PaperDashboard extends HTMLElement {
       this.data = data;
       this.renderData(data);
       const environment = data.account?.execution_environment || {};
+      const syncedTradfiSymbols = data.account?.synced_tradfi_symbols;
+      const syncCountKnown = syncedTradfiSymbols !== undefined
+        && syncedTradfiSymbols !== null
+        && syncedTradfiSymbols !== ""
+        && Number.isFinite(Number(syncedTradfiSymbols));
       const environmentMessages = {
         binance_credentials_required: "高保真模拟已阻止新开仓：请先在系统设置中配置 Binance API，只读权限即可同步账户真实费率与杠杆档位。",
         binance_private_sync_failed: "高保真模拟已阻止新开仓：Binance 账户费率或杠杆档位同步失败，请检查 API 权限与网络。",
@@ -250,7 +255,7 @@ class PaperDashboard extends HTMLElement {
       };
       if (!environment.ready && environmentMessages[environment.reason]) {
         this.showBanner(environmentMessages[environment.reason], "warning");
-      } else if (Number(data.account?.synced_tradfi_symbols || 0) === 0) {
+      } else if (syncCountKnown && Number(syncedTradfiSymbols) === 0) {
         this.showBanner("Binance 实盘环境尚未完成同步，系统已安全阻止新开仓。", "warning");
       } else {
         this.showBanner("");

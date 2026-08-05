@@ -106,6 +106,8 @@ def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     assert paper_asset.status_code == 200
     assert 'id="paper-delete"' in paper_asset.text
     assert 'id="paper-rename"' in paper_asset.text
+    assert "syncCountKnown && Number(syncedTradfiSymbols) === 0" in paper_asset.text
+    assert "Number(data.account?.synced_tradfi_symbols || 0) === 0" not in paper_asset.text
     assert 'href="/live" data-panel-target="live"' in client.get("/").text
     assert docs.status_code == 200
     assert api_missing.status_code == 404

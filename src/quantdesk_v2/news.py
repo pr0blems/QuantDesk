@@ -8,6 +8,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Collection
+from datetime import datetime, timedelta, timezone
 
 from defusedxml import ElementTree as ET
 
@@ -48,6 +49,7 @@ RSS_ALLOWED_HOSTS = frozenset(
         "www.theblock.co",
     }
 )
+FLASH_ALLOWED_HOSTS = frozenset({"admin.taoz.chat"})
 TRANSLATION_ALLOWED_HOSTS = frozenset(
     {
         "api.mymemory.translated.net",
@@ -56,6 +58,7 @@ TRANSLATION_ALLOWED_HOSTS = frozenset(
     }
 )
 MAX_RSS_BYTES = 2 * 1024 * 1024
+MAX_FLASH_BYTES = 2 * 1024 * 1024
 MAX_TRANSLATION_BYTES = 512 * 1024
 
 
@@ -262,6 +265,109 @@ def fetch_rss(url, timeout=20, retries=3):
     return items
 
 
+def _flash_fallback_link(source_url: str, item: dict[str, object]) -> str:
+    fingerprint = hashlib.sha256(
+        "\0".join(
+            (
+                str(item.get("source") or ""),
+                str(item.get("time") or ""),
+                str(item.get("title") or ""),
+                str(item.get("content") or ""),
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"{urllib.parse.urldefrag(source_url).url}#flash-{fingerprint}"
+
+
+def _flash_item_link(source_url: str, item: dict[str, object]) -> str:
+    candidate = str(item.get("url") or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port in (None, 443)
+            and len(candidate) <= 2048
+        ):
+            return candidate
+    except ValueError:
+        pass
+    return _flash_fallback_link(source_url, item)
+
+
+def fetch_flash_json(url: str, timeout: float = 20, retries: int = 3) -> list[dict[str, str]]:
+    """Fetch the bounded Taoz flash-news JSON envelope."""
+
+    if retries < 1:
+        raise ValueError("retries must be positive")
+    last: Exception | None = None
+    for attempt in range(retries):
+        try:
+            raw = _read_https(
+                url,
+                allowed_hosts=FLASH_ALLOWED_HOSTS,
+                timeout=timeout,
+                max_bytes=MAX_FLASH_BYTES,
+            )
+            break
+        except NewsUrlRejected:
+            raise
+        except Exception as exc:
+            last = exc
+            time.sleep(1.5 * (attempt + 1))
+    else:
+        if last is None:
+            raise RuntimeError("flash fetch failed without an error")
+        raise last
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid flash JSON response") from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    raw_items = data.get("items") if isinstance(data, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("code") != 0
+        or not isinstance(raw_items, list)
+        or len(raw_items) > 500
+    ):
+        raise ValueError("invalid flash JSON envelope")
+    items: list[dict[str, str]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        title = str(raw_item.get("title") or "").strip()
+        content = str(raw_item.get("content") or "").strip()
+        if not title and not content:
+            continue
+        items.append(
+            {
+                "title": title or content,
+                "link": _flash_item_link(url, raw_item),
+                "published": str(raw_item.get("time") or "").strip(),
+                "summary": content or title,
+            }
+        )
+    return items
+
+
+def fetch_source(
+    source: dict[str, object], timeout: float = 20, retries: int = 3
+) -> list[dict[str, str | None]]:
+    feed_type = str(source.get("feed_type") or "rss")
+    url = str(source.get("url") or "")
+    if feed_type == "taoz_flash":
+        return fetch_flash_json(url, timeout=timeout, retries=retries)
+    if feed_type != "rss":
+        raise ValueError("unsupported news source format")
+    return [
+        {"title": title, "link": link, "published": published, "summary": None}
+        for title, link, published in fetch_rss(url, timeout=timeout, retries=retries)
+    ]
+
+
 _translate_cooldown_until = 0.0  # 全部翻译引擎熔断到该时间
 
 
@@ -333,6 +439,14 @@ def parse_pub(pub):
     from email.utils import parsedate_to_datetime
 
     try:
+        return int(
+            datetime.strptime(pub, "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=timezone(timedelta(hours=8)))
+            .timestamp()
+        )
+    except (TypeError, ValueError):
+        pass
+    try:
         return int(parsedate_to_datetime(pub).timestamp())
     except Exception:
         return int(time.time())
@@ -375,7 +489,7 @@ def news_once(batch=None):
         if time.time() < _skip_until.get(name, 0):
             continue
         try:
-            items = fetch_rss(src["url"])
+            items = fetch_source(src)
             _fail_streak[name] = 0
             if src.get("_admin_managed"):
                 store.news_source_result(name, success=True, fetched=len(items))
@@ -407,7 +521,12 @@ def news_once(batch=None):
                 0, hourly_limit - int(current_hour[0]["n"] if current_hour else 0)
             )
         source_added = 0
-        for title, link, pub in items[: min(10, remaining)]:
+        batch_limit = 50 if src.get("feed_type") == "taoz_flash" else 10
+        for item in items[: min(batch_limit, remaining)]:
+            title = str(item["title"])
+            link = str(item["link"])
+            pub = str(item.get("published") or "")
+            summary = str(item.get("summary") or "").strip() or None
             nid = _news_id(name, link)
             if store.query("SELECT 1 FROM news WHERE id=? LIMIT 1", (nid,)):
                 continue
@@ -421,10 +540,11 @@ def news_once(batch=None):
             if lang == "en":
                 title_zh = translate_en2zh(title)
                 time.sleep(0.3)  # 翻译接口限速
-            senti = sentiment_of(title)
+            senti = sentiment_of(f"{title} {summary or ''}")
             inserted = store.execute(
-                "INSERT IGNORE INTO news(id,ts,source,lang,title,title_zh,link,sentiment) VALUES(?,?,?,?,?,?,?,?)",
-                (nid, ts, src["name"], lang, title, title_zh, link, senti),
+                "INSERT IGNORE INTO news(id,ts,source,lang,title,title_zh,link,sentiment,"
+                "rule_sentiment,summary) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (nid, ts, src["name"], lang, title, title_zh, link, senti, senti, summary),
             )
             added += int(inserted > 0)
             source_added += int(inserted > 0)

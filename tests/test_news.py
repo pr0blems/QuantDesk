@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,54 @@ def test_fetch_rss_rejects_xml_entities(monkeypatch) -> None:
 
     with pytest.raises(EntitiesForbidden):
         news.fetch_rss("https://www.coindesk.com/feed", retries=1)
+
+
+def test_fetch_taoz_flash_json_normalizes_content_and_stable_links(monkeypatch) -> None:
+    payload = json.dumps(
+        {
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "items": [
+                    {
+                        "time": "2026-08-05 17:29:00",
+                        "title": "",
+                        "content": "金十快讯正文",
+                        "url": "",
+                        "source": "jin10",
+                    },
+                    {
+                        "time": "2026-08-05 17:28:00",
+                        "title": "东方财富标题",
+                        "content": "东方财富正文",
+                        "url": "https://example.com/article",
+                        "source": "eastmoney",
+                    },
+                ],
+                "total": 2,
+            },
+        },
+        ensure_ascii=False,
+    ).encode()
+    monkeypatch.setattr(news, "_read_https", lambda *args, **kwargs: payload)
+
+    items = news.fetch_flash_json(
+        "https://admin.taoz.chat/api/v1/news/flash?source=jin10&limit=50",
+        retries=1,
+    )
+
+    assert items[0]["title"] == "金十快讯正文"
+    assert items[0]["summary"] == "金十快讯正文"
+    assert items[0]["link"].startswith(
+        "https://admin.taoz.chat/api/v1/news/flash?source=jin10&limit=50#flash-"
+    )
+    assert items[1]["link"] == "https://example.com/article"
+    assert news.parse_pub(items[0]["published"]) == 1785922140
+
+
+def test_fetch_source_rejects_unknown_format() -> None:
+    with pytest.raises(ValueError, match="unsupported"):
+        news.fetch_source({"feed_type": "unknown", "url": "https://example.com"})
 
 
 def test_news_identifier_is_stable_sha256() -> None:

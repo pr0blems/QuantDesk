@@ -77,6 +77,35 @@ def executemany(sql: str, seq: Iterable[Sequence[Any]]) -> int:
         return result.rowcount
 
 
+def realtime_execute(sql: str, params: Sequence[Any] = ()) -> int:
+    """Execute a small telemetry write without the strategy transaction mutex.
+
+    SQLAlchemy's engine supplies an independent pooled connection and MySQL
+    provides transaction isolation.  This lane is intentionally limited to
+    latest-value market data and collector heartbeats so long opportunity or
+    prediction transactions cannot starve time-sensitive freshness writes.
+    """
+
+    statement, values = _driver_sql(sql, params)
+    with get_engine().begin() as connection:
+        result = connection.exec_driver_sql(statement, values)
+        return result.rowcount
+
+
+def realtime_executemany(sql: str, seq: Iterable[Sequence[Any]]) -> int:
+    """Bulk counterpart to :func:`realtime_execute` for latest-value feeds."""
+
+    rows = [tuple(row) for row in seq]
+    if not rows:
+        return 0
+    statement, _ = _driver_sql(sql, rows[0])
+    if any(len(row) != len(rows[0]) for row in rows):
+        raise ValueError("bulk SQL parameter rows must have equal lengths")
+    with get_engine().begin() as connection:
+        result = connection.exec_driver_sql(statement, rows)
+        return result.rowcount
+
+
 def query(sql: str, params: Sequence[Any] = ()) -> list[Mapping[str, Any]]:
     statement, values = _driver_sql(sql, params)
     with get_engine().connect() as connection:
@@ -187,7 +216,7 @@ def collector_report(
     success_at = now if success else None
     error_at = now if error else None
     try:
-        execute(
+        realtime_execute(
             "INSERT INTO collector_status(name,heartbeat_at,last_success_at,last_error_at,last_error,cycles,items,details_json) "
             "VALUES(?,?,?,?,?,1,?,?) ON DUPLICATE KEY UPDATE "
             "heartbeat_at=VALUES(heartbeat_at),last_success_at=COALESCE(VALUES(last_success_at),last_success_at),"
@@ -213,7 +242,8 @@ def admin_news_sources(default_sources: list[dict[str, Any]]) -> list[dict[str, 
 
     try:
         rows = query(
-            "SELECT name,url,lang,slow,weight,hourly_limit,enabled FROM news_source_settings "
+            "SELECT name,url,feed_type,lang,slow,weight,hourly_limit,enabled "
+            "FROM news_source_settings "
             "ORDER BY weight DESC,name"
         )
     except Exception:
