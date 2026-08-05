@@ -33,7 +33,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-14">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-15">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -59,8 +59,8 @@ class ContractMonitor extends HTMLElement {
         <section id="intelligence-strip" class="intelligence-strip" aria-label="机会引擎反馈">
           <article><span>实时数据覆盖</span><strong id="intel-coverage">--</strong><small>行情与战局预测</small></article>
           <article><span>活跃扫描器</span><strong id="intel-scanners">--</strong><small id="intel-opportunities">等待数据</small></article>
-          <article><span>结果标签</span><strong id="intel-labels">--</strong><small id="intel-pending">等待校准</small></article>
-          <article><span>方向命中率</span><strong id="intel-hit-rate">--</strong><small id="intel-return">完成样本后显示</small></article>
+          <article><span class="intel-heading">结果标签 <button class="intel-help" type="button" aria-label="结果标签说明" data-tip="每轮会为每个合约生成 5m、15m、1h 三种预测。已完成表示观察窗口结束并取得有效价格后已经标注；待完成表示仍在等待窗口到期或标注处理。到期后仍无有效价格的样本会标为不可用，不计入已完成数和命中率。它们是评估样本，不是订单、持仓或待交易数量。">?</button></span><strong id="intel-labels">--</strong><small id="intel-pending">等待校准</small></article>
+          <article><span class="intel-heading">方向命中率 <button class="intel-help" type="button" aria-label="方向命中率说明" data-tip="仅统计已经完成的看多/看空预测：看多后成本后价格上涨，或看空后成本后价格下跌，记为命中。中性预测不进入方向命中率分母。这是启发式模型的历史标注结果，不是实盘胜率或收益承诺。">?</button></span><strong id="intel-hit-rate">--</strong><small id="intel-return">完成样本后显示</small></article>
           <article><span>Shadow执行</span><strong id="intel-shadow">LOCKED</strong><small>实盘保持锁定</small></article>
         </section>
         <div class="monitor-layout">

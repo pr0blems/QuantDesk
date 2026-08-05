@@ -608,6 +608,9 @@ def update_prediction_outcomes(limit: int = 2_000) -> dict[str, int]:
         (limit,),
     )
     completed = updated = unavailable = 0
+    completed_rows: list[tuple[Any, ...]] = []
+    updated_rows: list[tuple[Any, ...]] = []
+    unavailable_rows: list[tuple[Any, ...]] = []
     for row in rows:
         entry = _number(row.get("entry_price"))
         due_at_ms = int(row["due_at_ms"])
@@ -659,12 +662,7 @@ def update_prediction_outcomes(limit: int = 2_000) -> dict[str, int]:
             else:
                 actual = "neutral"
             cost = max(0.0, _number(row.get("spread_bps")))
-            store.execute(
-                """UPDATE prediction_outcomes SET status='completed',actual_result=?,exit_price=?,
-                       raw_return_bps=?,directional_return_bps=?,max_favorable_bps=?,
-                       max_adverse_bps=?,hit_result=?,last_observed_price=?,
-                       last_observed_at_ms=?,cost_bps=?,completed_at_ms=?,
-                       updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'""",
+            completed_rows.append(
                 (
                     actual,
                     price,
@@ -678,24 +676,36 @@ def update_prediction_outcomes(limit: int = 2_000) -> dict[str, int]:
                     cost,
                     observed_at_ms if hit else due_at_ms,
                     row["id"],
-                ),
+                )
             )
             completed += 1
         elif has_new_pre_horizon_sample:
-            store.execute(
-                """UPDATE prediction_outcomes SET max_favorable_bps=?,max_adverse_bps=?,
-                       last_observed_price=?,last_observed_at_ms=?,
-                       updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'""",
-                (favorable, adverse, price, observed_at_ms, row["id"]),
+            updated_rows.append(
+                (favorable, adverse, price, observed_at_ms, row["id"])
             )
             updated += 1
         elif now_ms >= due_at_ms + OUTCOME_GRACE_MS:
-            store.execute(
-                """UPDATE prediction_outcomes SET status='unavailable',
-                       updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'""",
-                (row["id"],),
-            )
+            unavailable_rows.append((row["id"],))
             unavailable += 1
+    store.executemany(
+        """UPDATE prediction_outcomes SET status='completed',actual_result=?,exit_price=?,
+               raw_return_bps=?,directional_return_bps=?,max_favorable_bps=?,
+               max_adverse_bps=?,hit_result=?,last_observed_price=?,
+               last_observed_at_ms=?,cost_bps=?,completed_at_ms=?,
+               updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'""",
+        completed_rows,
+    )
+    store.executemany(
+        """UPDATE prediction_outcomes SET max_favorable_bps=?,max_adverse_bps=?,
+               last_observed_price=?,last_observed_at_ms=?,
+               updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'""",
+        updated_rows,
+    )
+    store.executemany(
+        """UPDATE prediction_outcomes SET status='unavailable',
+               updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'""",
+        unavailable_rows,
+    )
     return {"completed": completed, "updated": updated, "unavailable": unavailable}
 
 

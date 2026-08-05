@@ -333,13 +333,16 @@ class MonitorRepository:
         )
         outcome_rows = self._query(
             """SELECT COUNT(*) total,
-                      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,
-                      SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending,
-                      AVG(CASE WHEN status='completed' THEN directional_return_bps END)
-                          avg_return_bps,
-                      AVG(CASE WHEN status='completed' AND directional_return_bps>0 THEN 1
-                               WHEN status='completed' THEN 0 ELSE NULL END) hit_rate
-               FROM prediction_outcomes"""
+                      SUM(CASE WHEN o.status='completed' THEN 1 ELSE 0 END) completed,
+                      SUM(CASE WHEN o.status='pending' THEN 1 ELSE 0 END) pending,
+                      AVG(CASE WHEN o.status='completed' AND p.result IN ('long','short')
+                               THEN o.directional_return_bps END) avg_return_bps,
+                      AVG(CASE WHEN o.status='completed' AND p.result IN ('long','short')
+                                    AND o.directional_return_bps>0 THEN 1
+                               WHEN o.status='completed' AND p.result IN ('long','short') THEN 0
+                               ELSE NULL END) hit_rate
+               FROM prediction_outcomes o
+               JOIN battle_predictions p ON p.id=o.prediction_id"""
         )
         scanner_rows = self._query(
             """SELECT p.model_key AS scanner_key,p.horizon_seconds,COUNT(*) samples,

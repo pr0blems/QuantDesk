@@ -94,6 +94,11 @@ button { cursor: pointer; }
 .intelligence-strip article { min-width: 0; padding: 8px 12px; background: var(--m-panel); }
 .intelligence-strip span, .intelligence-strip small { display: block; overflow: hidden; color: var(--m-dim); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .intelligence-strip strong { display: block; margin: 2px 0; color: var(--m-text); font-size: 17px; letter-spacing: -.02em; }
+.intelligence-strip .intel-heading { overflow: visible; display: flex; align-items: center; gap: 4px; }
+.intel-help { width: 15px; height: 15px; position: relative; display: inline-grid; place-items: center; padding: 0; border: 1px solid var(--m-dim); border-radius: 50%; background: transparent; color: var(--m-dim); font: 800 9px/1 sans-serif; cursor: help; }
+.intel-help:hover, .intel-help:focus-visible { border-color: var(--m-gold); color: var(--m-gold); outline: none; }
+.intel-help::after { content: attr(data-tip); width: min(330px, 72vw); position: absolute; z-index: 20; left: 50%; top: calc(100% + 8px); padding: 8px 10px; border: 1px solid var(--m-border); background: #0b1418; color: var(--m-text); font: 11px/1.65 "Microsoft YaHei", sans-serif; text-align: left; white-space: normal; box-shadow: 0 10px 30px rgba(0, 0, 0, .38); opacity: 0; pointer-events: none; transform: translate(-50%, -3px); transition: opacity .12s ease, transform .12s ease; }
+.intel-help:hover::after, .intel-help:focus-visible::after { opacity: 1; transform: translate(-50%, 0); }
 .panel { min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--m-border); border-radius: 2px; background: var(--m-panel); }
 .grid-panel { flex: 1; }
 .panel-title { min-height: 38px; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--m-border); font-weight: 700; }

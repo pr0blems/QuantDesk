@@ -243,8 +243,8 @@ def test_outcome_uses_last_pre_horizon_observation(
     monkeypatch.setattr(battle.store, "query", lambda *_args, **_kwargs: [_pending_outcome()])
     monkeypatch.setattr(
         battle.store,
-        "execute",
-        lambda sql, params=(): writes.append((sql, tuple(params))) or 1,
+        "executemany",
+        lambda sql, rows: writes.extend((sql, tuple(params)) for params in rows) or len(rows),
     )
 
     result = battle.update_prediction_outcomes()
@@ -273,8 +273,8 @@ def test_outcome_rejects_post_horizon_price_without_prior_sample(
     monkeypatch.setattr(battle.store, "query", lambda *_args, **_kwargs: [row])
     monkeypatch.setattr(
         battle.store,
-        "execute",
-        lambda sql, params=(): writes.append((sql, tuple(params))) or 1,
+        "executemany",
+        lambda sql, rows: writes.extend((sql, tuple(params)) for params in rows) or len(rows),
     )
 
     result = battle.update_prediction_outcomes()
@@ -302,8 +302,8 @@ def test_outcome_finishes_on_first_observed_barrier(
     monkeypatch.setattr(battle.store, "query", lambda *_args, **_kwargs: [row])
     monkeypatch.setattr(
         battle.store,
-        "execute",
-        lambda sql, params=(): writes.append((sql, tuple(params))) or 1,
+        "executemany",
+        lambda sql, rows: writes.extend((sql, tuple(params)) for params in rows) or len(rows),
     )
 
     result = battle.update_prediction_outcomes()
