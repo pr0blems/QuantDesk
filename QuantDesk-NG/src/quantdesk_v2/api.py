@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
@@ -95,6 +96,8 @@ router = APIRouter(prefix="/api/v2")
 MIN_PERSISTED_QUANTITY = Decimal("0.000000000000000001")
 MAX_CONCURRENT_BACKTESTS = 2
 MAX_PERSISTED_TRADES = 10_000
+MAX_MONITOR_WATCHLIST_SYMBOLS = 250
+_BINANCE_FUTURES_SYMBOL = re.compile(r"^[A-Z0-9]{3,32}$")
 _backtest_guard = Lock()
 _active_backtest_users: set[int] = set()
 
@@ -186,6 +189,71 @@ def _audit(
             metadata_json=metadata_json,
         )
     )
+
+
+def _sync_binance_symbols_to_watchlist(
+    db: Session,
+    request: Request,
+    user: User,
+    *collections: tuple[dict[str, Any], ...],
+) -> bool:
+    """Keep actively used Binance futures contracts visible in the monitor.
+
+    Binance positions and open orders are authenticated account data.  They are a
+    reliable source for this opt-in sync, unlike the Binance web watchlist, which
+    has no supported API endpoint.  Existing local choices are retained.
+    """
+
+    active_symbols: list[str] = []
+    for collection in collections:
+        for item in collection:
+            symbol = item.get("symbol")
+            if not isinstance(symbol, str):
+                continue
+            normalized = symbol.strip().upper()
+            if (
+                not _BINANCE_FUTURES_SYMBOL.fullmatch(normalized)
+                or normalized in active_symbols
+            ):
+                continue
+            active_symbols.append(normalized)
+
+    if not active_symbols:
+        return False
+
+    existing_symbols: list[str] = []
+    for symbol in user.monitor_watchlist or []:
+        if not isinstance(symbol, str):
+            continue
+        normalized = symbol.strip().upper()
+        if normalized and normalized not in existing_symbols:
+            existing_symbols.append(normalized)
+
+    existing_set = set(existing_symbols)
+    already_selected = [symbol for symbol in active_symbols if symbol in existing_set]
+    available_slots = max(0, MAX_MONITOR_WATCHLIST_SYMBOLS - len(existing_symbols))
+    added_symbols = [
+        symbol for symbol in active_symbols if symbol not in existing_set
+    ][:available_slots]
+    synced_symbols = [*already_selected, *added_symbols]
+    updated_symbols = [
+        *synced_symbols,
+        *(symbol for symbol in existing_symbols if symbol not in set(synced_symbols)),
+    ]
+    if updated_symbols == existing_symbols:
+        return False
+
+    user.monitor_watchlist = updated_symbols
+    _audit(
+        db,
+        request,
+        "monitor.watchlist.binance_sync",
+        user.id,
+        "user",
+        str(user.id),
+        {"added_symbols": added_symbols, "source": "positions_and_open_orders"},
+    )
+    return True
 
 
 def _ai_provider_out(preset: AiProviderPreset) -> AiProviderOut:
@@ -851,6 +919,7 @@ def binance_account_summary(
             ),
             [{**position, "user_id": user.id} for position in snapshot.positions],
         )
+    _sync_binance_symbols_to_watchlist(db, request, user, snapshot.positions)
     db.commit()
     return BinanceAccountSummary(
         configured=True,
@@ -922,6 +991,9 @@ def binance_orders(
             updated_at=checked_at,
             error_category=exc.category,
         )
+
+    if _sync_binance_symbols_to_watchlist(db, request, user, account.positions, open_orders):
+        db.commit()
 
     return BinanceTradingState(
         configured=True,
@@ -1621,27 +1693,27 @@ def monitor_klines(
     symbol: str,
     tf: str = Query(default="1h", pattern="^(15m|1h|4h)$"),
     limit: int = Query(default=120, ge=20, le=300),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[dict]:
-    return _monitor(request).klines(symbol, tf, limit)
+    return _monitor(request).klines(symbol, tf, limit, user.monitor_watchlist or [])
 
 
 @router.get("/monitor/score")
 def monitor_score(
     request: Request,
     symbol: str,
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> dict:
-    return _monitor(request).score_detail(symbol)
+    return _monitor(request).score_detail(symbol, user.monitor_watchlist or [])
 
 
 @router.get("/monitor/report")
 def monitor_report(
     request: Request,
     symbol: str,
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> dict:
-    return _monitor(request).report(symbol)
+    return _monitor(request).report(symbol, user.monitor_watchlist or [])
 
 
 def _paper_account_record(

@@ -17,7 +17,7 @@ from . import binance_client, news_intelligence, store
 
 MODEL_KEY = "battle-ensemble"
 MODEL_VERSION = 1
-FEATURE_SCHEMA_VERSION = 2
+FEATURE_SCHEMA_VERSION = 4
 COLLECTION_SECONDS = 300
 HORIZONS = (300, 900, 3_600)
 HORIZON_TIMEFRAME = {300: "15m", 900: "15m", 3_600: "1h"}
@@ -90,6 +90,7 @@ def build_feature_vector(
     micro_age_ms = max(0, now_ms - received_at) if received_at else 10**12
     positioning_at = int(positioning.get("snapshot_at_ms") or 0)
     positioning_age_ms = max(0, now_ms - positioning_at) if positioning_at else 10**12
+    depth_levels = max(0, int(micro.get("depth_levels") or 0))
 
     endpoint_quality = positioning.get("quality_json")
     if isinstance(endpoint_quality, str):
@@ -106,11 +107,14 @@ def build_feature_vector(
         available_endpoints / 3.0,
         1.0 if positioning_age_ms <= 10 * 60 * 1_000 else 0.0,
         1.0 if mark_price > 0 else 0.0,
+        1.0 if depth_levels >= 5 else 0.0,
     ]
     quality = sum(quality_parts) / len(quality_parts)
 
     features = {
         "book_imbalance": _clip(_number(micro.get("book_imbalance"))),
+        "book_imbalance_5": _clip(_number(micro.get("book_imbalance_5"))),
+        "depth_levels": depth_levels,
         "aggressive_flow": _clip((_number(micro.get("aggressive_buy_ratio"), 0.5) - 0.5) * 2),
         "velocity": math.tanh(_number(micro.get("price_velocity_bps_60s")) / 8.0),
         "realized_volatility_bps": max(
@@ -150,32 +154,35 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
     )
     if horizon_seconds == 300:
         weights = {
-            "aggressive_flow": 0.27,
-            "book_imbalance": 0.20,
-            "velocity": 0.18,
+            "aggressive_flow": 0.25,
+            "book_imbalance": 0.15,
+            "book_imbalance_5": 0.10,
+            "velocity": 0.17,
             "flash_imbalance": 0.10,
-            "taker_flow": 0.15,
+            "taker_flow": 0.14,
             "price_oi_impulse": 0.05,
-            "trend": 0.05,
+            "trend": 0.04,
         }
     elif horizon_seconds == 900:
         weights = {
-            "aggressive_flow": 0.20,
-            "book_imbalance": 0.10,
+            "aggressive_flow": 0.19,
+            "book_imbalance": 0.08,
+            "book_imbalance_5": 0.05,
             "velocity": 0.10,
-            "flash_imbalance": 0.10,
+            "flash_imbalance": 0.09,
             "taker_flow": 0.15,
-            "price_oi_impulse": 0.15,
+            "price_oi_impulse": 0.14,
             "trend": 0.20,
         }
     else:
         weights = {
             "aggressive_flow": 0.10,
-            "book_imbalance": 0.05,
+            "book_imbalance": 0.04,
+            "book_imbalance_5": 0.03,
             "velocity": 0.05,
-            "flash_imbalance": 0.05,
+            "flash_imbalance": 0.04,
             "taker_flow": 0.15,
-            "price_oi_impulse": 0.20,
+            "price_oi_impulse": 0.19,
             "trend": 0.40,
         }
     values = {name: _number(features.get(name)) for name in weights if name != "trend"}
@@ -398,8 +405,9 @@ def create_predictions(symbol: str, as_of_ms: int | None = None) -> int:
             ),
         )
         feature_rows = transaction.query(
-            "SELECT id FROM prediction_feature_snapshots WHERE symbol=? AND as_of_ms=?",
-            (symbol, feature_time),
+            """SELECT id FROM prediction_feature_snapshots
+               WHERE symbol=? AND as_of_ms=? AND feature_schema_version=?""",
+            (symbol, feature_time, FEATURE_SCHEMA_VERSION),
         )
         feature_id = int(feature_rows[0]["id"])
         for horizon in HORIZONS:

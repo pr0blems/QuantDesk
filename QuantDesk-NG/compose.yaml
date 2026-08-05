@@ -6,6 +6,7 @@ x-runtime-env: &runtime-env
   DB_HOST: mysql
   DB_SSL_REQUIRED: "false"
   DB_SSL_VERIFY_IDENTITY: "false"
+  QUANTDESK_CONFIG_DIR: /app/config
 
 x-app: &app
   build: .
@@ -52,18 +53,26 @@ services:
 
   worker-market:
     <<: *app
+    healthcheck:
+      disable: true
     command: ["quantdesk-ng", "worker", "--role", "market"]
 
   worker-news:
     <<: *app
+    healthcheck:
+      disable: true
     command: ["quantdesk-ng", "worker", "--role", "news"]
 
   worker-paper:
     <<: *app
+    healthcheck:
+      disable: true
     command: ["quantdesk-ng", "worker", "--role", "paper"]
 
   worker-intelligence:
     <<: *app
+    healthcheck:
+      disable: true
     command: ["quantdesk-ng", "worker", "--role", "intelligence"]
 
 volumes:

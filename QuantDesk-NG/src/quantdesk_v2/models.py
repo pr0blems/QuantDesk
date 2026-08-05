@@ -160,7 +160,7 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     ai_model_configs: Mapped[list[AiModelConfig]] = relationship(
-        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="user", cascade="all, delete-orphan"
     )
 
     @property
@@ -203,7 +203,7 @@ class AiModelConfig(Base):
     )
     user_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("users.id", ondelete="CASCADE"),
+        ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
         comment="所属用户 ID，用于租户隔离",
     )
@@ -830,6 +830,12 @@ class MarketMicrostructure(Base):
     window_low_event_time: Mapped[int | None] = mapped_column(BigInteger)
     window_high_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     window_high_event_time: Mapped[int | None] = mapped_column(BigInteger)
+    bid_depth_qty: Mapped[Decimal | None] = mapped_column(Numeric(30, 8))
+    ask_depth_qty: Mapped[Decimal | None] = mapped_column(Numeric(30, 8))
+    bid_depth_notional: Mapped[Decimal | None] = mapped_column(Numeric(30, 8))
+    ask_depth_notional: Mapped[Decimal | None] = mapped_column(Numeric(30, 8))
+    book_imbalance_5: Mapped[Decimal | None] = mapped_column(Numeric(16, 8))
+    depth_levels: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     quality_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 

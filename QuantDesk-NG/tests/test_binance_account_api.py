@@ -410,6 +410,12 @@ def test_binance_orders_returns_current_positions_and_open_orders(
     client = build_test_client(mysql_test_engine)
     with client:
         headers = register_and_login(client, configure=True)
+        saved_watchlist = client.put(
+            "/api/v2/monitor/watchlist",
+            headers=headers,
+            json={"symbols": ["AAPLUSDT"]},
+        )
+        assert saved_watchlist.status_code == 200
         result = client.get("/api/v2/me/binance-orders", headers=headers)
 
     assert result.status_code == 200
@@ -438,6 +444,17 @@ def test_binance_orders_returns_current_positions_and_open_orders(
     assert payload["open_orders"][1]["quantity"] == 2.25
     assert payload["open_orders"][1]["executed_quantity"] == 0.25
     assert payload["open_orders"][0]["reduce_only"] is True
+    watchlist = client.get("/api/v2/monitor/watchlist", headers=headers)
+    assert watchlist.status_code == 200
+    assert watchlist.json() == ["BTCUSDT", "ETHUSDT", "AAPLUSDT"]
+    overview = client.get("/api/v2/monitor/overview", headers=headers)
+    assert overview.status_code == 200
+    watched_items = {
+        item["symbol"]: item["watch"]
+        for item in overview.json()["items"]
+        if item["symbol"] in {"BTCUSDT", "ETHUSDT"}
+    }
+    assert watched_items == {"BTCUSDT": True, "ETHUSDT": True}
     assert calls == [
         "/fapi/v3/account",
         "/fapi/v3/positionRisk",

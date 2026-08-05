@@ -12,6 +12,8 @@ def _features(direction: float = 1.0) -> dict[str, float]:
         "positioning_age_ms": 60_000,
         "aggressive_flow": 0.8 * direction,
         "book_imbalance": 0.7 * direction,
+        "book_imbalance_5": 0.6 * direction,
+        "depth_levels": 100,
         "velocity": 0.6 * direction,
         "flash_imbalance": 0.5 * direction,
         "taker_flow": 0.7 * direction,
@@ -72,6 +74,8 @@ def test_feature_vector_normalizes_flashes_and_price_open_interest() -> None:
     micro = {
         "received_at": now_ms - 1_000,
         "book_imbalance": 0.2,
+        "book_imbalance_5": 0.3,
+        "depth_levels": 100,
         "aggressive_buy_ratio": 0.6,
         "price_velocity_bps_60s": 4,
         "realized_volatility_60s": 8,
@@ -101,6 +105,8 @@ def test_binance_positioning_client_uses_public_tradfi_endpoints(
 
     def fake_get(url: str, **_: object):
         calls.append(url)
+        if "/fapi/v1/depth?" in url:
+            return {"bids": [["100", "1"]], "asks": [["101", "1"]]}
         return [] if "/futures/data/" in url else {}
 
     monkeypatch.setattr(battle.binance_client, "_get", fake_get)
@@ -108,7 +114,9 @@ def test_binance_positioning_client_uses_public_tradfi_endpoints(
     battle.binance_client.fetch_open_interest("aaplusdt")
     battle.binance_client.fetch_global_long_short_ratio("aaplusdt")
     battle.binance_client.fetch_taker_buy_sell_ratio("aaplusdt")
+    battle.binance_client.fetch_order_book("aaplusdt", limit=20)
 
     assert any("/fapi/v1/openInterest?" in url and "AAPLUSDT" in url for url in calls)
     assert any("/futures/data/globalLongShortAccountRatio?" in url for url in calls)
     assert any("/futures/data/takerlongshortRatio?" in url for url in calls)
+    assert any("/fapi/v1/depth?" in url and "limit=20" in url for url in calls)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,204 @@ def _bind_params(sql: str, params: tuple[Any, ...]):
 
 
 _REPORT_LOCK = threading.Lock()
+_MONITOR_SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{3,32}$")
+
+# Fallback labels for temporary or externally supplied symbol configurations.
+# Production contracts use the full-symbol catalogue in
+# ``config/contract_annotations.json`` so every displayed label is reviewed
+# rather than inferred from a short ticker.
+_CONTRACT_ANNOTATIONS = {
+    "AAOI": "Applied Optoelectronics",
+    "AAPL": "Apple",
+    "ADBE": "Adobe",
+    "ALAB": "Astera Labs",
+    "AMAT": "Applied Materials",
+    "AMD": "AMD",
+    "AMZN": "Amazon",
+    "ANTHROPIC": "Anthropic",
+    "APP": "AppLovin",
+    "ARM": "Arm Holdings",
+    "ASML": "ASML 光刻机",
+    "ASTS": "AST SpaceMobile",
+    "AVGO": "Broadcom",
+    "AXTI": "AXT 半导体材料",
+    "BABA": "阿里巴巴",
+    "BBX": "BBX 标的",
+    "BE": "Bloom Energy",
+    "BITO": "比特币期货 ETF",
+    "BMNR": "BitMine Immersion",
+    "BNC": "BNC 标的",
+    "BOT": "BOT 标的",
+    "BRKB": "伯克希尔哈撒韦 B",
+    "BSP": "BSP 标的",
+    "BX": "Blackstone",
+    "BZ": "BOSS 直聘",
+    "CAT": "卡特彼勒",
+    "CBRS": "Cerebras Systems",
+    "CIEN": "Ciena 光通信",
+    "CL": "WTI 原油",
+    "COHR": "Coherent 光学",
+    "COIN": "Coinbase",
+    "COPPER": "铜",
+    "COST": "Costco",
+    "CRC": "California Resources",
+    "CRDO": "Credo Technology",
+    "CRM": "Salesforce",
+    "CRWD": "CrowdStrike",
+    "CRWV": "CoreWeave",
+    "CSCO": "Cisco",
+    "DELL": "戴尔科技",
+    "DIS": "迪士尼",
+    "DKNG": "DraftKings",
+    "DRAM": "DRAM 存储芯片",
+    "EBAY": "eBay",
+    "EWJ": "日本股票 ETF",
+    "EWT": "台湾股票 ETF",
+    "EWY": "韩国股票 ETF",
+    "EWZ": "巴西股票 ETF",
+    "FLEX": "Flex",
+    "FLNC": "Fluence Energy",
+    "FWDI": "FWDI 标的",
+    "GEV": "GE Vernova",
+    "GIGADEV": "兆易创新",
+    "GLW": "康宁",
+    "GME": "GameStop",
+    "GOOGL": "Alphabet A",
+    "GS": "高盛",
+    "HD": "家得宝",
+    "HIMS": "Hims & Hers",
+    "HK0700": "腾讯控股",
+    "HK1810": "小米集团",
+    "HOOD": "Robinhood",
+    "HPE": "慧与科技",
+    "HYUNDAI": "现代汽车",
+    "IBM": "IBM",
+    "INTC": "英特尔",
+    "INTW": "INTW 标的",
+    "IREN": "IREN 比特币矿企",
+    "IWM": "罗素 2000 ETF",
+    "JPM": "摩根大通",
+    "KLAC": "KLA 半导体设备",
+    "KORU": "韩国 3 倍做多 ETF",
+    "KSTR": "KSTR 标的",
+    "LITE": "Lumentum",
+    "LLY": "礼来",
+    "LRCX": "拉姆研究",
+    "META": "Meta",
+    "MINIMAX": "MiniMax",
+    "MRVL": "Marvell Technology",
+    "MSFT": "微软",
+    "MSTR": "Strategy（原 MicroStrategy）",
+    "MU": "美光科技",
+    "MUU": "MUU 标的",
+    "MVLL": "Marvell 关联标的",
+    "NATGAS": "天然气",
+    "NBIS": "Nebius Group",
+    "NFLX": "Netflix",
+    "NOK": "诺基亚",
+    "NOW": "ServiceNow",
+    "NVDA": "英伟达",
+    "NVO": "诺和诺德",
+    "ONDS": "Ondas Holdings",
+    "OPENAI": "OpenAI",
+    "ORCL": "甲骨文",
+    "PANW": "Palo Alto Networks",
+    "PAYP": "PayPal",
+    "PENG": "Penguin Solutions",
+    "PLTR": "Palantir",
+    "POPMART": "泡泡玛特",
+    "PYPL": "PayPal",
+    "QCOM": "高通",
+    "QNTX": "QNTX 标的",
+    "QQQ": "纳斯达克 100 ETF",
+    "RIVN": "Rivian",
+    "RKLB": "Rocket Lab",
+    "SAMSUNG": "三星电子",
+    "SHAZ": "SHAZ 标的",
+    "SKHYNIX": "SK 海力士",
+    "SKHY": "SK 海力士",
+    "SMCI": "超微电脑",
+    "SMH": "半导体 ETF",
+    "SNDK": "闪迪",
+    "SNOW": "Snowflake",
+    "SNXX": "SNXX 标的",
+    "SOFI": "SoFi",
+    "SONY": "索尼",
+    "SOXL": "半导体 3 倍做多 ETF",
+    "SOXS": "半导体 3 倍做空 ETF",
+    "SPC": "SpaceX",
+    "SPCX": "SpaceX",
+    "SPY": "标普 500 ETF",
+    "SQQQ": "纳指 100 3 倍做空 ETF",
+    "STR": "Strategy",
+    "STXX": "欧洲斯托克 50",
+    "TBT": "20 年美债 2 倍做空 ETF",
+    "TENCENT": "腾讯控股",
+    "TER": "泰瑞达",
+    "TMF": "20 年美债 3 倍做多 ETF",
+    "TQQQ": "纳指 100 3 倍做多 ETF",
+    "TSLA": "特斯拉",
+    "TSM": "台积电",
+    "TTWO": "Take-Two Interactive",
+    "TXN": "德州仪器",
+    "TZA": "小盘股 3 倍做空 ETF",
+    "UBER": "优步",
+    "URNM": "铀矿 ETF",
+    "USAR": "USA Rare Earth",
+    "UVXY": "波动率 1.5 倍 ETF",
+    "V": "Visa",
+    "WDC": "西部数据",
+    "WEN": "Wendy's",
+    "WMT": "沃尔玛",
+    "XAG": "白银",
+    "XAU": "黄金",
+    "XBI": "生物科技 ETF",
+    "XLE": "能源 ETF",
+    "XPD": "钯金",
+    "XPT": "铂金",
+    "ZHIPU": "智谱 AI",
+    "ZM": "Zoom",
+    "BTC": "比特币",
+    "ETH": "以太坊",
+    "BNB": "BNB",
+    "SOL": "Solana",
+    "XRP": "瑞波币",
+    "DOGE": "狗狗币",
+}
+
+
+def _contract_annotation(symbol: str, metadata: dict[str, Any]) -> str:
+    configured = metadata.get("annotation") or metadata.get("name")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    base = symbol.removesuffix("USDT").removesuffix("USD1")
+    return _CONTRACT_ANNOTATIONS.get(base, f"{base}（未配置合约说明）")
+
+
+def _load_contract_annotations(path: Path) -> dict[str, str]:
+    """Load the curated, full-symbol annotation catalogue when it is present.
+
+    The exchange's ``underlyingType`` is intentionally broad, so keeping this
+    separate from the exchange-discovered symbols lets us state the real
+    company, fund, index, commodity, or pre-IPO reference without modifying
+    the source list every time Binance adds a contract.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        symbol.strip().upper(): annotation.strip()
+        for symbol, annotation in raw.items()
+        if isinstance(symbol, str)
+        and _MONITOR_SYMBOL_PATTERN.fullmatch(symbol.strip().upper())
+        and isinstance(annotation, str)
+        and annotation.strip()
+    }
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -101,6 +300,13 @@ class MonitorRepository:
         self.symbols_meta = config.get("symbols", [])
         self.symbols = [item["symbol"] for item in self.symbols_meta if item.get("symbol")]
         self.symbol_set = set(self.symbols)
+        annotations_path = self.symbols_config.with_name("contract_annotations.json")
+        self.contract_annotations = _load_contract_annotations(annotations_path)
+        if annotations_path.is_file():
+            missing_annotations = self.symbol_set - set(self.contract_annotations)
+            extra_annotations = set(self.contract_annotations) - self.symbol_set
+            if missing_annotations or extra_annotations:
+                raise MonitorUnavailable("contract monitor annotation catalog is incomplete")
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         try:
@@ -110,9 +316,24 @@ class MonitorRepository:
         except SQLAlchemyError as exc:
             raise MonitorUnavailable("contract monitor data query failed") from exc
 
-    def _validate_symbol(self, symbol: str) -> str:
+    def _watchlist_symbols(self, watchlist: list[str] | tuple[str, ...]) -> list[str]:
+        symbols: list[str] = []
+        for raw_symbol in watchlist:
+            if not isinstance(raw_symbol, str):
+                continue
+            symbol = raw_symbol.strip().upper()
+            if _MONITOR_SYMBOL_PATTERN.fullmatch(symbol) and symbol not in symbols:
+                symbols.append(symbol)
+        return symbols
+
+    def _validate_symbol(
+        self, symbol: str, extra_symbols: list[str] | tuple[str, ...] = ()
+    ) -> str:
         normalized = symbol.strip().upper()
-        if normalized not in self.symbol_set:
+        if (
+            normalized not in self.symbol_set
+            and normalized not in self._watchlist_symbols(extra_symbols)
+        ):
             raise MonitorUnavailable("unknown contract monitor symbol")
         return normalized
 
@@ -124,12 +345,36 @@ class MonitorRepository:
 
     def overview(self, watchlist: list[str], user_id: int | None = None) -> dict[str, Any]:
         tickers = {row["symbol"]: row for row in self._query("SELECT * FROM ticker")}
+        now_seconds = int(time.time())
+        price_change_windows = {120: {}, 300: {}, 600: {}}
+        snapshot_rows = self._query(
+            """SELECT symbol,bucket_ts,price FROM contract_price_snapshots
+               WHERE bucket_ts BETWEEN ? AND ?""",
+            (now_seconds - 11 * 60, now_seconds - 2 * 60),
+        )
+        for row in snapshot_rows:
+            symbol = str(row["symbol"])
+            bucket_ts = int(row["bucket_ts"])
+            for window_seconds, references in price_change_windows.items():
+                lower_bound = now_seconds - window_seconds - 60
+                upper_bound = now_seconds - window_seconds
+                existing = references.get(symbol)
+                if lower_bound <= bucket_ts <= upper_bound and (
+                    existing is None or bucket_ts > int(existing["bucket_ts"])
+                ):
+                    references[symbol] = row
         movement_rows = self._query(
             """SELECT symbol,SUM(up_count) AS up_count,SUM(down_count) AS down_count
                FROM contract_price_move_buckets WHERE bucket_ts>=? GROUP BY symbol""",
             (int(time.time()) - 30 * 60,),
         )
         movements = {row["symbol"]: row for row in movement_rows}
+        depth_rows = self._query(
+            """SELECT symbol,bid_depth_notional,ask_depth_notional,book_imbalance,
+                      book_imbalance_5,depth_levels,received_at
+               FROM market_microstructure"""
+        )
+        depth_by_symbol = {str(row["symbol"]): row for row in depth_rows}
         battle_rows = self._query(
             """SELECT p.*,f.quality_score FROM battle_predictions p
                JOIN prediction_feature_snapshots f ON f.id=p.feature_snapshot_id
@@ -228,25 +473,50 @@ class MonitorRepository:
             trending = set()
 
         metadata = {item["symbol"]: item for item in self.symbols_meta}
-        selected = set(watchlist)
+        selected = set(self._watchlist_symbols(watchlist))
+        symbols = [*self.symbols]
+        symbols.extend(symbol for symbol in selected if symbol not in self.symbol_set)
         weights = {"15m": 0.3, "1h": 0.4, "4h": 0.3}
         items = []
         latest = 0
-        for symbol in self.symbols:
+        for symbol in symbols:
             ticker = tickers.get(symbol, {})
             latest = max(latest, int(ticker.get("ts") or 0))
+            price = _finite_number(ticker.get("price"))
+            price_changes = {}
+            for window_seconds, references in price_change_windows.items():
+                reference_price = _finite_number(references.get(symbol, {}).get("price"))
+                price_changes[window_seconds] = (
+                    round((price - reference_price) / reference_price * 100, 4)
+                    if price is not None and reference_price is not None and reference_price > 0
+                    else None
+            )
             tf_scores = scores.get(symbol, {})
+            depth = depth_by_symbol.get(symbol, {})
             numerator = sum(
                 tf_scores.get(tf, 0) * weight for tf, weight in weights.items() if tf in tf_scores
             )
             denominator = sum(weight for tf, weight in weights.items() if tf in tf_scores)
             base = symbol.replace("USDT", "").replace("USD1", "")
+            symbol_metadata = metadata.get(symbol, {})
             items.append(
                 {
                     "symbol": symbol,
-                    "underlying": metadata.get(symbol, {}).get("underlyingType", ""),
-                    "price": ticker.get("price"),
-                    "pct_24h": ticker.get("pct_24h"),
+                    "annotation": self.contract_annotations.get(symbol)
+                    or _contract_annotation(symbol, symbol_metadata),
+                    "underlying": symbol_metadata.get("underlyingType", ""),
+                    "price": price,
+                    "pct_2m": price_changes[120],
+                    "pct_5m": price_changes[300],
+                    "pct_10m": price_changes[600],
+                    "pct_24h": _finite_number(ticker.get("pct_24h")),
+                    "quote_volume": _finite_number(ticker.get("quote_volume")),
+                    "bid_depth_notional": _finite_number(depth.get("bid_depth_notional")),
+                    "ask_depth_notional": _finite_number(depth.get("ask_depth_notional")),
+                    "book_imbalance": _finite_number(depth.get("book_imbalance")),
+                    "book_imbalance_5": _finite_number(depth.get("book_imbalance_5")),
+                    "depth_levels": int(depth.get("depth_levels") or 0),
+                    "depth_updated_at": int(depth.get("received_at") or 0),
                     "score": round(numerator / denominator) if denominator else None,
                     "tf_scores": tf_scores,
                     "watch": symbol in selected,
@@ -513,8 +783,14 @@ class MonitorRepository:
                 indexed[news_id]["assessments"].append(assessment)
         return output[:limit]
 
-    def klines(self, symbol: str, timeframe: str, limit: int) -> list[dict[str, Any]]:
-        normalized = self._validate_symbol(symbol)
+    def klines(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        extra_symbols: list[str] | tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        normalized = self._validate_symbol(symbol, extra_symbols)
         rows = self._query(
             """
             SELECT open_time, open, high, low, close, volume FROM klines
@@ -524,8 +800,10 @@ class MonitorRepository:
         )
         return list(reversed(rows))
 
-    def score_detail(self, symbol: str) -> dict[str, Any]:
-        normalized = self._validate_symbol(symbol)
+    def score_detail(
+        self, symbol: str, extra_symbols: list[str] | tuple[str, ...] = ()
+    ) -> dict[str, Any]:
+        normalized = self._validate_symbol(symbol, extra_symbols)
         rows = self._query(
             """
             SELECT s.tf, s.score, s.detail, s.open_time FROM scores s
@@ -543,8 +821,10 @@ class MonitorRepository:
             for row in rows
         }
 
-    def report(self, symbol: str) -> dict[str, Any]:
-        normalized = self._validate_symbol(symbol)
+    def report(
+        self, symbol: str, extra_symbols: list[str] | tuple[str, ...] = ()
+    ) -> dict[str, Any]:
+        normalized = self._validate_symbol(symbol, extra_symbols)
         with _REPORT_LOCK:
             from quantdesk import report as market_report
 

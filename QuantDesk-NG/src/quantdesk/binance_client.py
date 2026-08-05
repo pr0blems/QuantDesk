@@ -157,6 +157,26 @@ def fetch_open_interest(symbol: str) -> dict[str, Any]:
     return data
 
 
+def fetch_order_book(symbol: str, limit: int = 20) -> dict[str, Any]:
+    """Fetch a bounded USD-M futures depth snapshot for a single contract.
+
+    This is deliberately used only as a recovery path when a websocket partial
+    depth stream is missing or stale.  Keeping the limit at a supported small
+    value gives the monitor a coherent liquidity pool without polling the whole
+    market on every flush.
+    """
+
+    if limit not in {5, 10, 20, 50, 100, 500, 1000}:
+        raise ValueError("Binance order-book limit is unsupported")
+    query = urllib.parse.urlencode({"symbol": symbol.upper(), "limit": int(limit)})
+    data = _get(f"{FAPI}/fapi/v1/depth?{query}", timeout=5, retries=1)
+    if not isinstance(data, dict) or not isinstance(data.get("bids"), list) or not isinstance(
+        data.get("asks"), list
+    ):
+        raise RuntimeError("Binance order-book response is invalid")
+    return data
+
+
 def fetch_global_long_short_ratio(
     symbol: str, period: str = "5m", limit: int = 2
 ) -> list[dict[str, Any]]:

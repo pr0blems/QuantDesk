@@ -30,7 +30,9 @@ build/
 /config/*
 !/config/settings.json
 !/config/tradfi_symbols.json
+!/config/contract_annotations.json
 /data/*.db*
+/data/*.sqlite*
 /src/data/
 reports/
 *.log

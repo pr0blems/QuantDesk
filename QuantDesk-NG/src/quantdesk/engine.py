@@ -14,10 +14,17 @@ _state = {
     "started": False,
     "last_ticker": 0,
     "last_kline_batch": {},
+    "last_price_snapshot_cleanup_bucket": 0,
     "errors": [],
     "price_hist": {},  # symbol -> [(ts, price)] 用于5分钟异动
 }
 _lock = threading.Lock()
+
+
+def monitor_symbols() -> list[str]:
+    """Combine the curated monitor universe with synced Binance account symbols."""
+
+    return list(dict.fromkeys([*tradfi_symbols(), *store.dynamic_monitor_symbols()]))
 
 
 def _stopped(stop_event):
@@ -49,9 +56,10 @@ def ingest_tickers(rows, full=True):
     """行情统一入口：写库 + 5分钟异动检测。
     full=True 完整行（价格+涨跌幅+成交额，INSERT OR REPLACE）；
     full=False 轻量行（只更新价格与 ts，不动涨跌幅/成交额）"""
-    syms = set(tradfi_symbols())
+    syms = set(monitor_symbols())
     now = int(time.time())
-    out, lite = [], []
+    snapshot_bucket = now - now % 60
+    out, lite, snapshots = [], [], []
     rules = store.admin_alert_rules()
     spike_threshold = float(
         rules.get("spike_alert_pct_5m", settings.get("spike_alert_pct_5m", 2.0))
@@ -63,6 +71,7 @@ def ingest_tickers(rows, full=True):
             out.append((s, price, pct, qvol, now))
         else:
             lite.append((price, now, s))
+        snapshots.append((s, snapshot_bucket, price))
         # 5分钟异动检测
         hist = _state["price_hist"].setdefault(s, [])
         hist.append((now, price))
@@ -87,6 +96,18 @@ def ingest_tickers(rows, full=True):
         )
     if lite:
         store.executemany("UPDATE ticker SET price=?, ts=? WHERE symbol=?", lite)
+    if snapshots:
+        store.executemany(
+            """INSERT INTO contract_price_snapshots(symbol,bucket_ts,price) VALUES(?,?,?)
+               ON DUPLICATE KEY UPDATE price=VALUES(price)""",
+            snapshots,
+        )
+        if _state["last_price_snapshot_cleanup_bucket"] != snapshot_bucket:
+            store.execute(
+                "DELETE FROM contract_price_snapshots WHERE bucket_ts<?",
+                (snapshot_bucket - 12 * 60,),
+            )
+            _state["last_price_snapshot_cleanup_bucket"] = snapshot_bucket
     if out or lite:
         _state["last_ticker"] = now
 
@@ -137,7 +158,6 @@ def ticker_loop(stop_event=None):
 
 # ---------- klines ----------
 def kline_loop(stop_event=None):
-    syms = tradfi_symbols()
     tfs = settings.get("timeframes", ["15m", "1h", "4h"])
     limit = settings.get("kline_limit", 300)
     first = True
@@ -145,6 +165,7 @@ def kline_loop(stop_event=None):
         if store.collector_paused("kline"):
             _wait(stop_event, 5)
             continue
+        syms = monitor_symbols()
         now_ms = int(time.time() * 1000)
         cycle_ok = cycle_fail = 0
         for tf in tfs:
@@ -159,7 +180,12 @@ def kline_loop(stop_event=None):
                 if _stopped(stop_event):
                     break
                 try:
-                    rows = bc.fetch_klines(s, tf, limit if first else 5)
+                    history_limit = (
+                        limit
+                        if first or not store.latest_closed_time(s, tf)
+                        else 5
+                    )
+                    rows = bc.fetch_klines(s, tf, history_limit)
                     # 只保留已收盘的
                     rows = [r for r in rows if r[0] <= last_closed_open]
                     store.upsert_klines(s, tf, rows)
@@ -213,7 +239,7 @@ def kline_loop(stop_event=None):
 
 # ---------- scoring ----------
 def score_all(tf, open_time):
-    for s in tradfi_symbols():
+    for s in monitor_symbols():
         kl = store.get_klines(s, tf, settings.get("kline_limit", 300))
         if not kl:
             continue

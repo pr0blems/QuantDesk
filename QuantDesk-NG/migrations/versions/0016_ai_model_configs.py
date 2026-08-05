@@ -115,7 +115,7 @@ def upgrade() -> None:
             ["user_id"],
             ["users.id"],
             name="fk_ai_model_configs_user_id_users",
-            ondelete="CASCADE",
+            ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id", name="pk_ai_model_configs"),
         sa.UniqueConstraint("public_id", name="uq_ai_model_configs_public_id"),

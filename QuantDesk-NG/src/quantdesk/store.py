@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections.abc import Generator, Iterable, Mapping, Sequence
@@ -15,6 +16,10 @@ _lock = threading.Lock()
 _engine: Engine | None = None
 _admin_cache_lock = threading.Lock()
 _admin_cache: dict[str, Any] = {"expires": 0.0, "alert_rules": {}}
+_dynamic_monitor_cache_lock = threading.Lock()
+_dynamic_monitor_cache: dict[str, Any] = {"expires": 0.0, "symbols": ()}
+_MONITOR_SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{3,32}$")
+MAX_DYNAMIC_MONITOR_SYMBOLS = 250
 
 
 class Transaction:
@@ -158,6 +163,57 @@ def admin_alert_rules() -> dict[str, Any]:
         _admin_cache["alert_rules"] = dict(rules)
         _admin_cache["expires"] = now + 10.0
     return rules
+
+
+def dynamic_monitor_symbols() -> list[str]:
+    """Return Binance account-derived watchlist symbols with a short worker cache.
+
+    The static configuration remains the baseline.  This supplemental list lets
+    a user's active Binance position or open order receive monitoring even when
+    it is not one of the preconfigured TradFi contracts.
+    """
+
+    now = time.monotonic()
+    with _dynamic_monitor_cache_lock:
+        if now < float(_dynamic_monitor_cache["expires"]):
+            return list(_dynamic_monitor_cache["symbols"])
+
+    symbols: list[str] = []
+    try:
+        rows = query(
+            "SELECT monitor_watchlist FROM users "
+            "WHERE is_active=1 AND monitor_watchlist IS NOT NULL"
+        )
+        for row in rows:
+            value = row.get("monitor_watchlist")
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(value, list):
+                continue
+            for raw_symbol in value:
+                if not isinstance(raw_symbol, str):
+                    continue
+                symbol = raw_symbol.strip().upper()
+                if (
+                    not _MONITOR_SYMBOL_PATTERN.fullmatch(symbol)
+                    or symbol in symbols
+                ):
+                    continue
+                symbols.append(symbol)
+                if len(symbols) >= MAX_DYNAMIC_MONITOR_SYMBOLS:
+                    break
+            if len(symbols) >= MAX_DYNAMIC_MONITOR_SYMBOLS:
+                break
+    except Exception:
+        symbols = []
+
+    with _dynamic_monitor_cache_lock:
+        _dynamic_monitor_cache["symbols"] = tuple(symbols)
+        _dynamic_monitor_cache["expires"] = now + 10.0
+    return symbols
 
 
 def collector_paused(name: str) -> bool:

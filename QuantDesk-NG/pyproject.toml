@@ -27,6 +27,12 @@ dev = [
   "pytest>=8.4,<10",
   "ruff>=0.12,<1",
 ]
+research = [
+  "joblib>=1.4,<2",
+  "numpy>=2,<3",
+  "pandas>=3,<4",
+  "scikit-learn>=1.5,<2",
+]
 
 [project.scripts]
 quantdesk-v2 = "quantdesk_v2.cli:main"

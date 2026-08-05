@@ -4,6 +4,7 @@ import json
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -18,10 +19,40 @@ from quantdesk_v2.strategy_catalog import (
 )
 
 
+def test_contract_annotation_catalog_covers_every_configured_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+    symbols_config = json.loads(
+        (root / "config" / "tradfi_symbols.json").read_text(encoding="utf-8")
+    )
+    annotations = json.loads(
+        (root / "config" / "contract_annotations.json").read_text(encoding="utf-8")
+    )
+    symbols = {item["symbol"] for item in symbols_config["symbols"]}
+
+    assert symbols_config["count"] == len(symbols)
+    assert set(annotations) == symbols
+    assert all(annotation.strip() for annotation in annotations.values())
+    assert not any(
+        placeholder in annotation
+        for annotation in annotations.values()
+        for placeholder in ("标的", "待确认", "关联合约", "未配置")
+    )
+
+
 def build_monitor_fixture(engine: Engine, tmp_path) -> tuple[MonitorRepository, int, int]:
     symbols = tmp_path / "symbols.json"
     symbols.write_text(
-        json.dumps({"symbols": [{"symbol": "TESTUSDT", "underlyingType": "stock"}]}),
+        json.dumps(
+            {
+                "symbols": [
+                    {
+                        "symbol": "TESTUSDT",
+                        "underlyingType": "stock",
+                        "annotation": "测试标的",
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -63,6 +94,21 @@ def build_monitor_fixture(engine: Engine, tmp_path) -> tuple[MonitorRepository, 
                 "ts": 2_000_000_000,
             },
         )
+        now = int(time.time())
+        connection.execute(
+            text(
+                """INSERT INTO contract_price_snapshots(symbol,bucket_ts,price)
+                   VALUES
+                     ('TESTUSDT',:two_minute_bucket,100.5),
+                     ('TESTUSDT',:five_minute_bucket,100),
+                     ('TESTUSDT',:ten_minute_bucket,99.5)"""
+            ),
+            {
+                "two_minute_bucket": now - 2 * 60,
+                "five_minute_bucket": now - 5 * 60,
+                "ten_minute_bucket": now - 10 * 60,
+            },
+        )
         connection.execute(
             text(
                 """INSERT INTO contract_price_move_buckets(
@@ -70,6 +116,19 @@ def build_monitor_fixture(engine: Engine, tmp_path) -> tuple[MonitorRepository, 
                    ) VALUES('TESTUSDT',:bucket_ts,7,4)"""
             ),
             {"bucket_ts": int(time.time()) - 60},
+        )
+        connection.execute(
+            text(
+                """INSERT INTO market_microstructure(
+                       symbol,event_time,received_at,bid_depth_notional,ask_depth_notional,
+                       book_imbalance,book_imbalance_5,depth_levels,trade_count_60s,
+                       quote_volume_60s,quality_json,updated_at
+                   ) VALUES(
+                       'TESTUSDT',:event_time,:received_at,250000,175000,
+                       0.17647059,0.2,100,0,0,JSON_OBJECT(),CURRENT_TIMESTAMP
+                   )"""
+            ),
+            {"event_time": int(time.time() * 1000), "received_at": int(time.time() * 1000)},
         )
         connection.execute(
             text(
@@ -142,6 +201,15 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) ->
     assert len(overview["items"]) == 1
     assert overview["items"][0]["watch"] is True
     assert overview["items"][0]["score"] == 62
+    assert overview["items"][0]["annotation"] == "测试标的"
+    assert overview["items"][0]["pct_2m"] == pytest.approx((101.5 - 100.5) / 100.5 * 100)
+    assert overview["items"][0]["pct_5m"] == pytest.approx(1.5)
+    assert overview["items"][0]["pct_10m"] == pytest.approx((101.5 - 99.5) / 99.5 * 100)
+    assert overview["items"][0]["quote_volume"] == 5_000
+    assert overview["items"][0]["bid_depth_notional"] == 250_000
+    assert overview["items"][0]["ask_depth_notional"] == 175_000
+    assert overview["items"][0]["depth_levels"] == 100
+    assert overview["items"][0]["book_imbalance"] == pytest.approx(0.17647059)
     assert overview["items"][0]["opportunity"]["direction"] == "long"
     assert overview["items"][0]["opportunity"]["quality_score"] == 88.5
     assert overview["items"][0]["green_flashes_30m"] == 7
