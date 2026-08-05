@@ -408,7 +408,12 @@ class MonitorRepository:
 
     def prediction_history(self, page: int, page_size: int = 50) -> dict[str, Any]:
         """Return one newest-first page of battle predictions and their labels."""
-        total_rows = self._query("SELECT COUNT(*) total FROM battle_predictions")
+        total_rows = self._query(
+            """SELECT COUNT(*) total
+               FROM battle_predictions p
+               JOIN prediction_outcomes o ON o.prediction_id=p.id
+               WHERE o.status='completed'"""
+        )
         total = int(total_rows[0].get("total") or 0) if total_rows else 0
         pages = max(1, math.ceil(total / page_size))
         current_page = min(max(1, page), pages)
@@ -425,6 +430,7 @@ class MonitorRepository:
                       o.hit_result,o.cost_bps,o.due_at_ms,o.completed_at_ms
                FROM battle_predictions p
                JOIN prediction_outcomes o ON o.prediction_id=p.id
+               WHERE o.status='completed'
                ORDER BY p.predicted_at_ms DESC,p.id DESC
                LIMIT ? OFFSET ?""",
             (page_size, offset),

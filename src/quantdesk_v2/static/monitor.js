@@ -147,7 +147,7 @@ class ContractMonitor extends HTMLElement {
           <div class="modal-head prediction-history-head">
             <div>
               <strong id="prediction-history-title" class="modal-symbol">历史预测</strong>
-              <span class="dim">按判断时间倒序 · 每页固定 50 条</span>
+              <span class="dim">仅显示已出结果 · 按判断时间倒序 · 每页固定 50 条</span>
             </div>
             <button id="prediction-history-close" type="button">关闭</button>
           </div>
