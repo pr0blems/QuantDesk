@@ -8,6 +8,7 @@ from pathlib import Path
 
 from quantdesk.two_hour_research import (
     download_earnings_surprises,
+    download_futures_metrics,
     download_history,
     download_sec_events,
     download_sec_text_features,
@@ -23,6 +24,7 @@ def parser() -> argparse.ArgumentParser:
         "command",
         choices=(
             "download",
+            "metrics",
             "sec",
             "underlying",
             "earnings",
@@ -43,12 +45,13 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument(
         "--model-dir", type=Path, default=project / "reports" / "two_hour_models"
     )
-    value.add_argument("--lookback-days", type=int, default=120)
+    value.add_argument("--lookback-days", type=int, default=700)
+    value.add_argument("--metrics-lookback-days", type=int, default=700)
     value.add_argument("--workers", type=int, default=8)
     value.add_argument("--event-lookback-days", type=int, default=730)
     value.add_argument("--underlying-lookback-days", type=int, default=700)
     value.add_argument("--seed", type=int, default=20260805)
-    value.add_argument("--sample-minutes", type=int, choices=(5, 15), default=5)
+    value.add_argument("--sample-minutes", type=int, choices=(5, 15), default=15)
     value.add_argument("--maximum-fit-rows", type=int, default=800_000)
     return value
 
@@ -64,6 +67,14 @@ def main() -> None:
             workers=arguments.workers,
         )
         print(json.dumps({"download": output}, ensure_ascii=False, indent=2))
+    if arguments.command in {"metrics", "run"}:
+        output = download_futures_metrics(
+            metadata_path=arguments.metadata,
+            cache_path=arguments.cache,
+            lookback_days=arguments.metrics_lookback_days,
+            workers=max(arguments.workers, 12),
+        )
+        print(json.dumps({"futures_metrics": output}, ensure_ascii=False, indent=2))
     if arguments.command in {"sec", "run"}:
         output = download_sec_events(
             metadata_path=arguments.metadata,

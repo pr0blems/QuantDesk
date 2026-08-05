@@ -193,6 +193,32 @@ def fetch_global_long_short_ratio(
     return [item for item in data if isinstance(item, dict)]
 
 
+def _fetch_long_short_ratio(
+    path: str, symbol: str, period: str = "5m", limit: int = 2
+) -> list[dict[str, Any]]:
+    if path not in {"topLongShortAccountRatio", "topLongShortPositionRatio"}:
+        raise ValueError("unsupported Binance long/short ratio endpoint")
+    query = urllib.parse.urlencode(
+        {"symbol": symbol.upper(), "period": period, "limit": int(limit)}
+    )
+    data = _get(f"{FAPI}/futures/data/{path}?{query}", timeout=8, retries=2)
+    if not isinstance(data, list):
+        raise RuntimeError("Binance top-trader long/short response is invalid")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def fetch_top_trader_account_ratio(
+    symbol: str, period: str = "5m", limit: int = 2
+) -> list[dict[str, Any]]:
+    return _fetch_long_short_ratio("topLongShortAccountRatio", symbol, period, limit)
+
+
+def fetch_top_trader_position_ratio(
+    symbol: str, period: str = "5m", limit: int = 2
+) -> list[dict[str, Any]]:
+    return _fetch_long_short_ratio("topLongShortPositionRatio", symbol, period, limit)
+
+
 def fetch_taker_buy_sell_ratio(
     symbol: str, period: str = "5m", limit: int = 2
 ) -> list[dict[str, Any]]:
@@ -223,6 +249,50 @@ def fetch_klines(symbol: str, interval: str, limit: int = 300) -> list[tuple]:
             float(row[5]),
         )
         for row in data
+    ]
+
+
+def fetch_research_klines(
+    symbol: str,
+    interval: str = "5m",
+    limit: int = 1500,
+    *,
+    start_time_ms: int | None = None,
+    end_time_ms: int | None = None,
+) -> list[tuple]:
+    """Return the complete public kline fields required by the ML feature schema."""
+
+    parameters: dict[str, str | int] = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": min(1500, max(1, int(limit))),
+    }
+    if start_time_ms is not None:
+        parameters["startTime"] = int(start_time_ms)
+    if end_time_ms is not None:
+        parameters["endTime"] = int(end_time_ms)
+    data = _get(
+        f"{FAPI}/fapi/v1/klines?{urllib.parse.urlencode(parameters)}",
+        timeout=20,
+        retries=2,
+    )
+    if not isinstance(data, list):
+        raise RuntimeError("Binance kline response is invalid")
+    return [
+        (
+            int(row[0]),
+            float(row[1]),
+            float(row[2]),
+            float(row[3]),
+            float(row[4]),
+            float(row[5]),
+            float(row[7]),
+            int(row[8]),
+            float(row[9]),
+            float(row[10]),
+        )
+        for row in data
+        if isinstance(row, list) and len(row) >= 11
     ]
 
 

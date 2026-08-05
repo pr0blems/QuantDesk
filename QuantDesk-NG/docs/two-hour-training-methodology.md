@@ -45,7 +45,7 @@
 ```powershell
 python -m pip install -e ".[research]"
 $env:PYTHONPATH = "src"
-python scripts/two_hour_research.py run --lookback-days 120
+python scripts/two_hour_research.py run --lookback-days 700 --sample-minutes 15
 ```
 
 输出包括缓存数据库、锁定回测报告、两个校准模型和模型清单。研究产物默认位于 `data/` 与 `reports/`，不会提交到版本库。

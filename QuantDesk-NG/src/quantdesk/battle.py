@@ -261,10 +261,18 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
 
 
 def _positioning_snapshot(symbol: str, now_ms: int, mark_price: Any, funding: Any) -> dict[str, Any]:
-    quality = {"open_interest": False, "account_ratio": False, "taker": False}
+    quality = {
+        "open_interest": False,
+        "account_ratio": False,
+        "taker": False,
+        "top_account_ratio": False,
+        "top_position_ratio": False,
+    }
     open_interest: dict[str, Any] = {}
     accounts: dict[str, Any] = {}
     taker: dict[str, Any] = {}
+    top_account: dict[str, Any] = {}
+    top_position: dict[str, Any] = {}
     errors: dict[str, str] = {}
     try:
         open_interest = binance_client.fetch_open_interest(symbol)
@@ -281,10 +289,28 @@ def _positioning_snapshot(symbol: str, now_ms: int, mark_price: Any, funding: An
         quality["taker"] = bool(taker)
     except Exception as exc:
         errors["taker"] = type(exc).__name__
+    try:
+        top_account = _latest(binance_client.fetch_top_trader_account_ratio(symbol))
+        quality["top_account_ratio"] = bool(top_account)
+    except Exception as exc:
+        errors["top_account_ratio"] = type(exc).__name__
+    try:
+        top_position = _latest(binance_client.fetch_top_trader_position_ratio(symbol))
+        quality["top_position_ratio"] = bool(top_position)
+    except Exception as exc:
+        errors["top_position_ratio"] = type(exc).__name__
     source_timestamp = max(
         int(open_interest.get("time") or 0),
         int(accounts.get("timestamp") or 0),
         int(taker.get("timestamp") or 0),
+        int(top_account.get("timestamp") or 0),
+        int(top_position.get("timestamp") or 0),
+    )
+    quality["top_account_long_short_ratio"] = _optional_number(
+        top_account.get("longShortRatio")
+    )
+    quality["top_position_long_short_ratio"] = _optional_number(
+        top_position.get("longShortRatio")
     )
     quality["errors"] = errors
     return {

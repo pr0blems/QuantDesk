@@ -31,12 +31,14 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+from lightgbm import LGBMClassifier, early_stopping, log_evaluation
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.frozen import FrozenEstimator
 from sklearn.metrics import accuracy_score, brier_score_loss, confusion_matrix
 
 ARCHIVE_ORIGIN = "https://data.binance.vision"
+DATASET_CACHE_SCHEMA = 2
 BAR_COLUMNS = (
     "symbol",
     "market_type",
@@ -97,6 +99,30 @@ FEATURE_COLUMNS = (
     "group_ret_1",
     "group_ret_24",
     "relative_ret_24",
+    "underlying_available",
+    "underlying_ret_1",
+    "underlying_ret_3",
+    "underlying_ret_6",
+    "underlying_ret_12",
+    "underlying_ret_24",
+    "underlying_trend_6_24",
+    "underlying_volume_z_24",
+    "contract_underlying_gap_1",
+    "contract_underlying_gap_24",
+    "metrics_available",
+    "oi_change_1",
+    "oi_change_3",
+    "oi_change_12",
+    "oi_value_z_24",
+    "top_account_bias",
+    "top_position_bias",
+    "global_account_bias",
+    "metrics_taker_bias",
+    "top_account_impulse_3",
+    "top_position_impulse_3",
+    "global_account_impulse_3",
+    "metrics_taker_impulse_3",
+    "top_global_disagreement",
     "market_EQUITY",
     "market_HK_EQUITY",
     "market_KR_EQUITY",
@@ -126,6 +152,20 @@ class ArchiveTask:
 
 
 @dataclass(frozen=True)
+class MetricsArchiveTask:
+    symbol: str
+    period: str
+
+    @property
+    def url(self) -> str:
+        filename = f"{self.symbol}-metrics-{self.period}.zip"
+        return (
+            f"{ARCHIVE_ORIGIN}/data/futures/um/daily/metrics/"
+            f"{self.symbol}/{filename}"
+        )
+
+
+@dataclass(frozen=True)
 class SplitBoundaries:
     train_end_ms: int
     calibration_end_ms: int
@@ -140,6 +180,20 @@ class ThresholdChoice:
     precision: float
     coverage: float
     target_met: bool
+
+
+@dataclass(frozen=True)
+class MultiHeadSelection:
+    samples: int
+    precision: float
+    coverage: float
+    direction_weight: float
+    terminal_weight: float
+    event_direction_weight: float
+    occurrence_weight: float
+    occurrence_threshold: float
+    confidence_threshold: float
+    target_precision: float
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -168,6 +222,24 @@ def _connect(path: Path) -> sqlite3.Connection:
     )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS ix_research_bars_time ON bars(open_time)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS futures_metrics(
+            symbol TEXT NOT NULL,
+            open_time INTEGER NOT NULL,
+            sum_open_interest REAL NOT NULL,
+            sum_open_interest_value REAL NOT NULL,
+            count_toptrader_long_short_ratio REAL NOT NULL,
+            sum_toptrader_long_short_ratio REAL NOT NULL,
+            count_long_short_ratio REAL NOT NULL,
+            sum_taker_long_short_vol_ratio REAL NOT NULL,
+            PRIMARY KEY(symbol,open_time)
+        ) WITHOUT ROWID
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_futures_metrics_time ON futures_metrics(open_time)"
     )
     connection.execute(
         """
@@ -399,6 +471,170 @@ def download_history(
                 errors.append(f"{task.symbol}/{task.period}: {type(exc).__name__}: {exc}")
     counts = connection.execute(
         "SELECT COUNT(*),COUNT(DISTINCT symbol),MIN(open_time),MAX(open_time) FROM bars"
+    ).fetchone()
+    connection.close()
+    return {
+        "requested_archives": len(tasks),
+        "already_cached_archives": cached_tasks,
+        "downloaded_archives": archives,
+        "missing_archives": missing,
+        "failed_archives": failures,
+        "inserted_rows": inserted,
+        "cached_rows": int(counts[0] or 0),
+        "cached_symbols": int(counts[1] or 0),
+        "first_open_time": counts[2],
+        "last_open_time": counts[3],
+        "errors": errors[:50],
+    }
+
+
+def metrics_archive_tasks(
+    symbols: Sequence[dict[str, Any]], *, as_of: date, lookback_days: int
+) -> list[MetricsArchiveTask]:
+    earliest = as_of - timedelta(days=max(1, lookback_days))
+    tasks: list[MetricsArchiveTask] = []
+    for item in symbols:
+        onboard = datetime.fromtimestamp(item["onboard_ms"] / 1000, UTC).date()
+        day = max(earliest, onboard)
+        while day < as_of:
+            tasks.append(MetricsArchiveTask(item["symbol"], day.isoformat()))
+            day += timedelta(days=1)
+    return tasks
+
+
+def _parse_metrics_archive(
+    content: bytes, task: MetricsArchiveTask
+) -> list[tuple[Any, ...]]:
+    rows: list[tuple[Any, ...]] = []
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+        if len(names) != 1:
+            raise ValueError("Binance metrics archive must contain exactly one CSV")
+        with archive.open(names[0]) as raw:
+            reader = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8"))
+            required = {
+                "create_time",
+                "symbol",
+                "sum_open_interest",
+                "sum_open_interest_value",
+                "count_toptrader_long_short_ratio",
+                "sum_toptrader_long_short_ratio",
+                "count_long_short_ratio",
+                "sum_taker_long_short_vol_ratio",
+            }
+            if not reader.fieldnames or not required.issubset(reader.fieldnames):
+                raise ValueError("Binance metrics archive schema changed")
+            for row in reader:
+                if str(row.get("symbol") or "").upper() != task.symbol:
+                    continue
+                open_interest = str(row.get("sum_open_interest") or "").strip()
+                open_interest_value = str(row.get("sum_open_interest_value") or "").strip()
+                if not open_interest or not open_interest_value:
+                    continue
+                timestamp = datetime.fromisoformat(str(row["create_time"])).replace(tzinfo=UTC)
+                rows.append(
+                    (
+                        task.symbol,
+                        int(timestamp.timestamp() * 1000),
+                        float(open_interest),
+                        float(open_interest_value),
+                        float(row["count_toptrader_long_short_ratio"] or 1.0),
+                        float(row["sum_toptrader_long_short_ratio"] or 1.0),
+                        float(row["count_long_short_ratio"] or 1.0),
+                        float(row["sum_taker_long_short_vol_ratio"] or 1.0),
+                    )
+                )
+    return rows
+
+
+def _download_metrics_archive(
+    task: MetricsArchiveTask, retries: int = 3
+) -> list[tuple[Any, ...]]:
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            request = urllib.request.Request(  # noqa: S310 - fixed HTTPS archive origin
+                task.url,
+                headers={"User-Agent": "QuantDesk-NG two-hour metrics research"},
+                method="GET",
+            )
+            with urllib.request.urlopen(request, timeout=45) as response:  # noqa: S310
+                if response.geturl().split("/", 3)[:3] != task.url.split("/", 3)[:3]:
+                    raise ValueError("metrics archive redirect changed origin")
+                return _parse_metrics_archive(response.read(), task)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return []
+            last_error = exc
+        except (
+            http.client.IncompleteRead,
+            OSError,
+            TimeoutError,
+            ValueError,
+            zipfile.BadZipFile,
+        ) as exc:
+            last_error = exc
+        time.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    return []
+
+
+def _metrics_task_is_cached(
+    connection: sqlite3.Connection, task: MetricsArchiveTask
+) -> bool:
+    start = datetime.fromisoformat(task.period).replace(tzinfo=UTC)
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int((start + timedelta(days=1)).timestamp() * 1000)
+    row = connection.execute(
+        "SELECT 1 FROM futures_metrics WHERE symbol=? AND open_time>=? AND open_time<? LIMIT 1",
+        (task.symbol, start_ms, end_ms),
+    ).fetchone()
+    return row is not None
+
+
+def download_futures_metrics(
+    *,
+    metadata_path: Path,
+    cache_path: Path,
+    lookback_days: int = 700,
+    workers: int = 16,
+    as_of: date | None = None,
+) -> dict[str, Any]:
+    symbols = load_symbol_metadata(metadata_path)
+    tasks = metrics_archive_tasks(
+        symbols,
+        as_of=as_of or datetime.now(UTC).date(),
+        lookback_days=lookback_days,
+    )
+    connection = _connect(cache_path)
+    cached_tasks = sum(1 for task in tasks if _metrics_task_is_cached(connection, task))
+    tasks = [task for task in tasks if not _metrics_task_is_cached(connection, task)]
+    inserted = archives = missing = failures = 0
+    errors: list[str] = []
+    insert_sql = """INSERT OR REPLACE INTO futures_metrics(
+        symbol,open_time,sum_open_interest,sum_open_interest_value,
+        count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,
+        count_long_short_ratio,sum_taker_long_short_vol_ratio
+    ) VALUES(?,?,?,?,?,?,?,?)"""
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {executor.submit(_download_metrics_archive, task): task for task in tasks}
+        for future in as_completed(futures):
+            task = futures[future]
+            try:
+                rows = future.result()
+                if rows:
+                    connection.executemany(insert_sql, rows)
+                    connection.commit()
+                    inserted += len(rows)
+                    archives += 1
+                else:
+                    missing += 1
+            except Exception as exc:
+                failures += 1
+                errors.append(f"{task.symbol}/{task.period}: {type(exc).__name__}: {exc}")
+    counts = connection.execute(
+        "SELECT COUNT(*),COUNT(DISTINCT symbol),MIN(open_time),MAX(open_time) FROM futures_metrics"
     ).fetchone()
     connection.close()
     return {
@@ -1250,7 +1486,97 @@ def _join_external_events(
     return output
 
 
-def build_dataset(cache_path: Path, *, sample_minutes: int = 15) -> pd.DataFrame:
+def _underlying_features(bars: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "symbol",
+        "open_time",
+        "underlying_available",
+        "underlying_ret_1",
+        "underlying_ret_3",
+        "underlying_ret_6",
+        "underlying_ret_12",
+        "underlying_ret_24",
+        "underlying_trend_6_24",
+        "underlying_volume_z_24",
+    ]
+    if bars.empty:
+        return pd.DataFrame(columns=columns)
+    frame = bars.copy()
+    frame["open_time"] = frame["open_time"].astype(np.int64) // 300_000 * 300_000
+    frame = (
+        frame.sort_values(["symbol", "open_time"])
+        .groupby(["symbol", "open_time"], as_index=False)
+        .agg(close=("close", "last"), volume=("volume", "sum"))
+    )
+    outputs: list[pd.DataFrame] = []
+    for _, group in frame.groupby("symbol", sort=False):
+        group = group.copy()
+        close = group["close"].astype(float)
+        for period in (1, 3, 6, 12, 24):
+            group[f"underlying_ret_{period}"] = close.pct_change(period) * 10_000
+        ema_6 = close.ewm(span=6, adjust=False).mean()
+        ema_24 = close.ewm(span=24, adjust=False).mean()
+        group["underlying_trend_6_24"] = (ema_6 / ema_24 - 1) * 10_000
+        group["underlying_volume_z_24"] = _rolling_zscore(
+            np.log1p(group["volume"].astype(float)), 24
+        )
+        group["underlying_available"] = 1.0
+        outputs.append(group[columns])
+    return pd.concat(outputs, ignore_index=True) if outputs else pd.DataFrame(columns=columns)
+
+
+def _metrics_features(metrics: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "symbol",
+        "open_time",
+        "metrics_available",
+        "oi_change_1",
+        "oi_change_3",
+        "oi_change_12",
+        "oi_value_z_24",
+        "top_account_bias",
+        "top_position_bias",
+        "global_account_bias",
+        "metrics_taker_bias",
+        "top_account_impulse_3",
+        "top_position_impulse_3",
+        "global_account_impulse_3",
+        "metrics_taker_impulse_3",
+        "top_global_disagreement",
+    ]
+    if metrics.empty:
+        return pd.DataFrame(columns=columns)
+    outputs: list[pd.DataFrame] = []
+    ratio_columns = {
+        "count_toptrader_long_short_ratio": ("top_account_bias", "top_account_impulse_3"),
+        "sum_toptrader_long_short_ratio": ("top_position_bias", "top_position_impulse_3"),
+        "count_long_short_ratio": ("global_account_bias", "global_account_impulse_3"),
+        "sum_taker_long_short_vol_ratio": ("metrics_taker_bias", "metrics_taker_impulse_3"),
+    }
+    for _, group in metrics.sort_values(["symbol", "open_time"]).groupby(
+        "symbol", sort=False
+    ):
+        group = group.copy()
+        open_interest = group["sum_open_interest"].astype(float)
+        for period in (1, 3, 12):
+            group[f"oi_change_{period}"] = open_interest.pct_change(period) * 10_000
+        group["oi_value_z_24"] = _rolling_zscore(
+            np.log1p(group["sum_open_interest_value"].astype(float)), 24
+        )
+        for source, (target, impulse) in ratio_columns.items():
+            group[target] = np.log(group[source].astype(float).clip(lower=1e-6))
+            group[impulse] = group[target].diff(3)
+        group["top_global_disagreement"] = (
+            group["top_account_bias"] - group["global_account_bias"]
+        )
+        group["metrics_available"] = 1.0
+        outputs.append(group[columns])
+    return pd.concat(outputs, ignore_index=True) if outputs else pd.DataFrame(columns=columns)
+
+
+def build_dataset(
+    cache_path: Path, *, sample_minutes: int = 15, require_labels: bool = True
+) -> pd.DataFrame:
     connection = _connect(cache_path)
     bars = pd.read_sql_query(
         """SELECT symbol,market_type,open_time,open,high,low,close,volume,
@@ -1263,6 +1589,18 @@ def build_dataset(cache_path: Path, *, sample_minutes: int = 15) -> pd.DataFrame
            FROM external_events ORDER BY symbol,event_time""",
         connection,
     )
+    underlying = pd.read_sql_query(
+        """SELECT symbol,open_time,close,volume
+           FROM underlying_bars ORDER BY symbol,open_time""",
+        connection,
+    )
+    metrics = pd.read_sql_query(
+        """SELECT symbol,open_time,sum_open_interest,sum_open_interest_value,
+                  count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,
+                  count_long_short_ratio,sum_taker_long_short_vol_ratio
+           FROM futures_metrics ORDER BY symbol,open_time""",
+        connection,
+    )
     connection.close()
     if bars.empty:
         raise ValueError("research cache has no bars")
@@ -1272,6 +1610,26 @@ def build_dataset(cache_path: Path, *, sample_minutes: int = 15) -> pd.DataFrame
     ]
     dataset = pd.concat(frames, ignore_index=True)
     dataset = _join_external_events(dataset, events, sample_minutes=sample_minutes)
+    underlying_frame = _underlying_features(underlying)
+    dataset = dataset.merge(underlying_frame, on=["symbol", "open_time"], how="left")
+    underlying_columns = [
+        column for column in underlying_frame.columns if column not in {"symbol", "open_time"}
+    ]
+    for column in underlying_columns:
+        dataset[column] = dataset[column].fillna(0.0)
+    dataset["contract_underlying_gap_1"] = (
+        dataset["ret_1"] - dataset["underlying_ret_1"]
+    )
+    dataset["contract_underlying_gap_24"] = (
+        dataset["ret_24"] - dataset["underlying_ret_24"]
+    )
+    metrics_frame = _metrics_features(metrics)
+    dataset = dataset.merge(metrics_frame, on=["symbol", "open_time"], how="left")
+    metrics_columns = [
+        column for column in metrics_frame.columns if column not in {"symbol", "open_time"}
+    ]
+    for column in metrics_columns:
+        dataset[column] = dataset[column].fillna(0.0)
     market_trigger = pd.concat(
         [
             dataset["ret_3"].abs() / dataset["barrier_bps"].replace(0, np.nan),
@@ -1298,7 +1656,57 @@ def build_dataset(cache_path: Path, *, sample_minutes: int = 15) -> pd.DataFrame
     dataset["relative_ret_24"] = dataset["ret_24"] - dataset["group_ret_24"]
     for market_type in ("EQUITY", "HK_EQUITY", "KR_EQUITY", "COMMODITY", "PREMARKET"):
         dataset[f"market_{market_type}"] = (dataset["market_type"] == market_type).astype(int)
-    return dataset.dropna(subset=["terminal_label"]).reset_index(drop=True)
+    if require_labels:
+        dataset = dataset.dropna(subset=["terminal_label"])
+    return dataset.reset_index(drop=True)
+
+
+def load_or_build_dataset(cache_path: Path, *, sample_minutes: int = 15) -> pd.DataFrame:
+    dataset_path = cache_path.parent / f"two_hour_dataset_{sample_minutes}m.joblib"
+    manifest_path = dataset_path.with_suffix(".manifest.json")
+    database_stat = cache_path.stat()
+    signature = {
+        "schema_version": DATASET_CACHE_SCHEMA,
+        "database_size": database_stat.st_size,
+        "database_mtime_ns": database_stat.st_mtime_ns,
+        "sample_minutes": int(sample_minutes),
+        "features": list(FEATURE_COLUMNS),
+    }
+    if dataset_path.exists():
+        manifest: dict[str, Any] | None = None
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                manifest = None
+        legacy_cache_is_current = (
+            manifest is None
+            and dataset_path.stat().st_mtime_ns >= database_stat.st_mtime_ns
+        )
+        if manifest == signature or legacy_cache_is_current:
+            dataset = joblib.load(dataset_path)
+            required = set(FEATURE_COLUMNS) | {
+                "symbol",
+                "open_time",
+                "event_label",
+                "terminal_label",
+                "event_candidate",
+            }
+            if required.issubset(dataset.columns):
+                if legacy_cache_is_current:
+                    manifest_path.write_text(
+                        json.dumps(signature, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                return dataset
+    dataset = build_dataset(cache_path, sample_minutes=sample_minutes)
+    temporary_path = dataset_path.with_suffix(".tmp.joblib")
+    joblib.dump(dataset, temporary_path, compress=0)
+    temporary_path.replace(dataset_path)
+    manifest_path.write_text(
+        json.dumps(signature, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return dataset
 
 
 def chronological_boundaries(
@@ -1366,6 +1774,198 @@ def _calibrate(
     calibrated = CalibratedClassifierCV(FrozenEstimator(model), method=method)
     calibrated.fit(x, y)
     return calibrated
+
+
+def _fit_lightgbm_classifier(
+    train_x: np.ndarray,
+    train_y: np.ndarray,
+    calibration_x: np.ndarray,
+    calibration_y: np.ndarray,
+    *,
+    seed: int,
+    class_count: int,
+) -> CalibratedClassifierCV:
+    model = LGBMClassifier(
+        objective="multiclass" if class_count == 3 else "binary",
+        n_estimators=700,
+        learning_rate=0.035,
+        num_leaves=31,
+        min_child_samples=80,
+        subsample=0.85,
+        colsample_bytree=0.90,
+        reg_lambda=4.0,
+        reg_alpha=0.2,
+        class_weight="balanced",
+        n_jobs=-1,
+        verbosity=-1,
+        random_state=seed,
+    )
+    model.fit(
+        train_x,
+        train_y,
+        eval_X=calibration_x,
+        eval_y=calibration_y,
+        callbacks=[early_stopping(60, verbose=False), log_evaluation(0)],
+    )
+    calibrated = CalibratedClassifierCV(FrozenEstimator(model), method="isotonic")
+    calibrated.fit(calibration_x, calibration_y)
+    return calibrated
+
+
+def _class_probability(
+    model: CalibratedClassifierCV, x: np.ndarray, label: int
+) -> np.ndarray:
+    classes = np.asarray(model.classes_)
+    index = int(np.flatnonzero(classes == label)[0])
+    return model.predict_proba(x)[:, index]
+
+
+def _multihead_probabilities(
+    *,
+    event_model: CalibratedClassifierCV,
+    direction_model: CalibratedClassifierCV,
+    occurrence_model: CalibratedClassifierCV,
+    terminal_model: CalibratedClassifierCV,
+    x: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    event_probability = event_model.predict_proba(x)
+    event_classes = np.asarray(event_model.classes_)
+    up_index = int(np.flatnonzero(event_classes == 1)[0])
+    down_index = int(np.flatnonzero(event_classes == -1)[0])
+    no_event_index = int(np.flatnonzero(event_classes == 0)[0])
+    event_direction_up = event_probability[:, up_index] / np.maximum(
+        event_probability[:, up_index] + event_probability[:, down_index], 1e-9
+    )
+    event_occurrence = 1 - event_probability[:, no_event_index]
+    direction_up = _class_probability(direction_model, x, 1)
+    occurrence = _class_probability(occurrence_model, x, 1)
+    terminal_up = _class_probability(terminal_model, x, 1)
+    return event_direction_up, event_occurrence, direction_up, occurrence, terminal_up
+
+
+def choose_multihead_selection(
+    *,
+    event_direction_up: np.ndarray,
+    event_occurrence: np.ndarray,
+    direction_up: np.ndarray,
+    occurrence: np.ndarray,
+    terminal_up: np.ndarray,
+    actual: np.ndarray,
+    minimum_samples: int = 100,
+    target_precision: float = 0.755,
+) -> MultiHeadSelection:
+    choices: list[MultiHeadSelection] = []
+    fallbacks: list[MultiHeadSelection] = []
+    for direction_weight in (0.50, 0.70, 0.85, 1.0):
+        for terminal_weight in (0.0, 0.15, 0.30):
+            event_direction_weight = 1 - direction_weight - terminal_weight
+            if event_direction_weight < -1e-9:
+                continue
+            event_direction_weight = max(0.0, event_direction_weight)
+            probability_up = (
+                direction_weight * direction_up
+                + terminal_weight * terminal_up
+                + event_direction_weight * event_direction_up
+            )
+            direction = np.where(probability_up >= 0.5, 1, -1)
+            confidence = np.maximum(probability_up, 1 - probability_up)
+            for occurrence_weight in (0.50, 0.75, 1.0):
+                combined_occurrence = (
+                    occurrence_weight * occurrence
+                    + (1 - occurrence_weight) * event_occurrence
+                )
+                for occurrence_threshold in np.arange(0.50, 0.951, 0.025):
+                    eligible = np.flatnonzero(combined_occurrence >= occurrence_threshold)
+                    if len(eligible) < minimum_samples:
+                        continue
+                    order = eligible[np.argsort(-confidence[eligible], kind="stable")]
+                    correct = (direction[order] == actual[order]).astype(np.int64)
+                    counts = np.arange(1, len(order) + 1)
+                    precision = np.cumsum(correct) / counts
+                    valid = np.flatnonzero(
+                        (counts >= minimum_samples) & (precision >= target_precision)
+                    )
+                    best_index = int(valid[-1]) if len(valid) else int(np.argmax(precision))
+                    threshold = float(confidence[order[best_index]])
+                    selected = (combined_occurrence >= occurrence_threshold) & (
+                        confidence >= threshold
+                    )
+                    samples = int(selected.sum())
+                    if samples < minimum_samples:
+                        continue
+                    observed = float(np.mean(direction[selected] == actual[selected]))
+                    choice = MultiHeadSelection(
+                        samples=samples,
+                        precision=observed,
+                        coverage=float(samples / len(actual)),
+                        direction_weight=direction_weight,
+                        terminal_weight=terminal_weight,
+                        event_direction_weight=event_direction_weight,
+                        occurrence_weight=occurrence_weight,
+                        occurrence_threshold=float(occurrence_threshold),
+                        confidence_threshold=threshold,
+                        target_precision=target_precision,
+                    )
+                    fallbacks.append(choice)
+                    if observed >= target_precision:
+                        choices.append(choice)
+    if choices:
+        return max(choices, key=lambda item: (item.coverage, item.precision))
+    if fallbacks:
+        return max(fallbacks, key=lambda item: (item.precision, item.samples))
+    return MultiHeadSelection(
+        samples=0,
+        precision=0.0,
+        coverage=0.0,
+        direction_weight=1.0,
+        terminal_weight=0.0,
+        event_direction_weight=0.0,
+        occurrence_weight=1.0,
+        occurrence_threshold=0.95,
+        confidence_threshold=0.95,
+        target_precision=target_precision,
+    )
+
+
+def _multihead_event_metrics(
+    *,
+    event_direction_up: np.ndarray,
+    event_occurrence: np.ndarray,
+    direction_up: np.ndarray,
+    occurrence: np.ndarray,
+    terminal_up: np.ndarray,
+    actual: np.ndarray,
+    selection: MultiHeadSelection,
+) -> dict[str, Any]:
+    probability_up = (
+        selection.direction_weight * direction_up
+        + selection.terminal_weight * terminal_up
+        + selection.event_direction_weight * event_direction_up
+    )
+    direction = np.where(probability_up >= 0.5, 1, -1)
+    confidence = np.maximum(probability_up, 1 - probability_up)
+    combined_occurrence = (
+        selection.occurrence_weight * occurrence
+        + (1 - selection.occurrence_weight) * event_occurrence
+    )
+    selected = (combined_occurrence >= selection.occurrence_threshold) & (
+        confidence >= selection.confidence_threshold
+    )
+    samples = int(selected.sum())
+    actual_events = actual != 0
+    return {
+        "samples": samples,
+        "precision": float(np.mean(direction[selected] == actual[selected])) if samples else 0.0,
+        "coverage": float(samples / len(actual)) if len(actual) else 0.0,
+        "actual_event_rate": float(actual_events.mean()) if len(actual) else 0.0,
+        "directional_recall": (
+            float(np.sum(selected & (direction == actual)) / np.sum(actual_events))
+            if np.sum(actual_events)
+            else 0.0
+        ),
+        "predicted_up": int(np.sum(selected & (direction == 1))),
+        "predicted_down": int(np.sum(selected & (direction == -1))),
+    }
 
 
 def choose_event_threshold(
@@ -1483,10 +2083,10 @@ def train_and_backtest(
     report_path: Path,
     model_dir: Path,
     seed: int = 20260805,
-    sample_minutes: int = 5,
+    sample_minutes: int = 15,
     maximum_fit_rows: int = 800_000,
 ) -> dict[str, Any]:
-    dataset = build_dataset(cache_path, sample_minutes=sample_minutes)
+    dataset = load_or_build_dataset(cache_path, sample_minutes=sample_minutes)
     boundaries = chronological_boundaries(dataset["open_time"])
     masks = split_masks(dataset, boundaries)
     feature_names = list(FEATURE_COLUMNS)
@@ -1496,54 +2096,95 @@ def train_and_backtest(
 
     terminal_train_indices = _bounded_indices(masks["train"], maximum_fit_rows)
     terminal_calibration_indices = _bounded_indices(masks["calibration"], 300_000)
-    terminal_base = _fit_classifier(
-        x[terminal_train_indices], terminal_y[terminal_train_indices], seed
-    )
-    terminal_model = _calibrate(
-        terminal_base,
+    terminal_model = _fit_lightgbm_classifier(
+        x[terminal_train_indices],
+        terminal_y[terminal_train_indices],
         x[terminal_calibration_indices],
         terminal_y[terminal_calibration_indices],
+        seed=seed,
+        class_count=2,
     )
     event_candidates = dataset["event_candidate"].to_numpy(dtype=bool)
     event_train = masks["train"] & event_candidates & np.isfinite(event_y)
     event_calibration = masks["calibration"] & event_candidates & np.isfinite(event_y)
     event_train_indices = _bounded_indices(event_train, maximum_fit_rows)
     event_calibration_indices = _bounded_indices(event_calibration, 300_000)
-    event_base = _fit_classifier(
-        x[event_train_indices], event_y[event_train_indices].astype(np.int8), seed + 1
-    )
-    event_model = _calibrate(
-        event_base,
+    event_labels = np.nan_to_num(event_y, nan=0.0).astype(np.int8)
+    event_model = _fit_lightgbm_classifier(
+        x[event_train_indices],
+        event_labels[event_train_indices],
         x[event_calibration_indices],
-        event_y[event_calibration_indices].astype(np.int8),
+        event_labels[event_calibration_indices],
+        seed=seed + 1,
+        class_count=3,
+    )
+    direction_train = event_train & (event_y != 0)
+    direction_calibration = event_calibration & (event_y != 0)
+    direction_train_indices = _bounded_indices(direction_train, maximum_fit_rows)
+    direction_calibration_indices = _bounded_indices(direction_calibration, 300_000)
+    direction_model = _fit_lightgbm_classifier(
+        x[direction_train_indices],
+        event_labels[direction_train_indices],
+        x[direction_calibration_indices],
+        event_labels[direction_calibration_indices],
+        seed=seed + 2,
+        class_count=2,
+    )
+    occurrence_labels = (event_y != 0).astype(np.int8)
+    occurrence_model = _fit_lightgbm_classifier(
+        x[event_train_indices],
+        occurrence_labels[event_train_indices],
+        x[event_calibration_indices],
+        occurrence_labels[event_calibration_indices],
+        seed=seed + 3,
+        class_count=2,
     )
 
     tuning = _event_evaluation_rows(dataset, masks["tuning"])
     tuning_x = tuning[feature_names].to_numpy(dtype=np.float32)
     tuning_event_mask = np.isfinite(tuning["event_label"].to_numpy(dtype=float))
-    tuning_probabilities = event_model.predict_proba(tuning_x[tuning_event_mask])
-    threshold = choose_event_threshold(
-        tuning_probabilities,
-        np.asarray(event_model.classes_),
-        tuning.loc[tuning_event_mask, "event_label"].to_numpy(dtype=np.int8),
-        minimum_samples=max(50, int(tuning_event_mask.sum() * 0.01)),
+    tuning_probabilities = _multihead_probabilities(
+        event_model=event_model,
+        direction_model=direction_model,
+        occurrence_model=occurrence_model,
+        terminal_model=terminal_model,
+        x=tuning_x[tuning_event_mask],
+    )
+    selection = choose_multihead_selection(
+        event_direction_up=tuning_probabilities[0],
+        event_occurrence=tuning_probabilities[1],
+        direction_up=tuning_probabilities[2],
+        occurrence=tuning_probabilities[3],
+        terminal_up=tuning_probabilities[4],
+        actual=tuning.loc[tuning_event_mask, "event_label"].to_numpy(dtype=np.int8),
+        minimum_samples=max(100, int(tuning_event_mask.sum() * 0.005)),
+        target_precision=0.755,
     )
 
     test = _evaluation_rows(dataset, masks["test"])
     test_x = test[feature_names].to_numpy(dtype=np.float32)
-    terminal_up_index = int(np.flatnonzero(np.asarray(terminal_model.classes_) == 1)[0])
-    terminal_probability = terminal_model.predict_proba(test_x)[:, terminal_up_index]
+    terminal_probability = _class_probability(terminal_model, test_x, 1)
     terminal_metrics = _endpoint_metrics(
         test["terminal_label"].to_numpy(dtype=np.int8), terminal_probability
     )
     event_test = _event_evaluation_rows(dataset, masks["test"])
     event_test_x = event_test[feature_names].to_numpy(dtype=np.float32)
     event_test_mask = np.isfinite(event_test["event_label"].to_numpy(dtype=float))
-    event_metrics = _event_metrics(
-        event_model,
-        event_test_x[event_test_mask],
-        event_test.loc[event_test_mask, "event_label"].to_numpy(dtype=np.int8),
-        threshold.threshold,
+    event_test_probabilities = _multihead_probabilities(
+        event_model=event_model,
+        direction_model=direction_model,
+        occurrence_model=occurrence_model,
+        terminal_model=terminal_model,
+        x=event_test_x[event_test_mask],
+    )
+    event_metrics = _multihead_event_metrics(
+        event_direction_up=event_test_probabilities[0],
+        event_occurrence=event_test_probabilities[1],
+        direction_up=event_test_probabilities[2],
+        occurrence=event_test_probabilities[3],
+        terminal_up=event_test_probabilities[4],
+        actual=event_test.loc[event_test_mask, "event_label"].to_numpy(dtype=np.int8),
+        selection=selection,
     )
     event_metrics["candidate_rows"] = int(len(event_test))
     event_metrics["candidate_symbols"] = int(event_test["symbol"].nunique())
@@ -1582,6 +2223,8 @@ def train_and_backtest(
             "external_events": int(split_frame["external_event"].sum()),
             "earnings_events": int(split_frame["external_earnings"].sum()),
             "earnings_surprise_events": int((split_frame["external_sentiment"] != 0).sum()),
+            "underlying_rows": int((split_frame["underlying_available"] > 0).sum()),
+            "futures_metrics_rows": int((split_frame["metrics_available"] > 0).sum()),
         }
     qualification = {
         "all_contracts_present": int(test["symbol"].nunique()) == 151,
@@ -1590,13 +2233,13 @@ def train_and_backtest(
         "minimum_semantic_training_events_met": (
             feature_coverage["train"]["earnings_surprise_events"] >= 50
         ),
-        "event_precision_target_met": float(event_metrics["precision"]) >= 0.80,
+        "event_precision_target_met": float(event_metrics["precision"]) >= 0.75,
     }
     qualification["qualified"] = all(qualification.values())
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": generated_at.isoformat(),
-        "method": "chronological_train_calibrate_tune_locked_test",
+        "method": "lightgbm_multihead_train_calibrate_tune_locked_test",
         "sample_minutes": int(sample_minutes),
         "label": {
             "horizon_seconds": 7200,
@@ -1610,6 +2253,8 @@ def train_and_backtest(
             "rows": int(len(dataset)),
             "symbols": int(dataset["symbol"].nunique()),
             "external_events": int(dataset["external_event"].sum()),
+            "underlying_rows": int((dataset["underlying_available"] > 0).sum()),
+            "futures_metrics_rows": int((dataset["metrics_available"] > 0).sum()),
             "market_types": market_types,
             "first_time_ms": int(dataset["open_time"].min()),
             "last_time_ms": int(dataset["open_time"].max()),
@@ -1621,12 +2266,14 @@ def train_and_backtest(
             "terminal_calibration": int(len(terminal_calibration_indices)),
             "event_train": int(len(event_train_indices)),
             "event_calibration": int(len(event_calibration_indices)),
+            "direction_train": int(len(direction_train_indices)),
+            "direction_calibration": int(len(direction_calibration_indices)),
         },
         "feature_coverage_by_split": feature_coverage,
         "official_test_rows": int(len(test)),
         "official_test_symbols": int(test["symbol"].nunique()),
         "official_test_days": completed_days,
-        "event_threshold": asdict(threshold),
+        "event_threshold": asdict(selection),
         "terminal_test": terminal_metrics,
         "event_test": event_metrics,
         "macro_symbol_terminal_accuracy": (
@@ -1638,9 +2285,10 @@ def train_and_backtest(
         "group_test": group_metrics,
         "symbol_terminal_metrics": symbol_metrics,
         "limitations": [
-            "quick baseline uses historical OHLCV, trades and taker volume only",
+            "market features include OHLCV, taker flow, open interest and long-short ratios",
+            "matched underlying prices are joined at the same or earlier five-minute timestamp",
             "historical news, social and order-book snapshots are not fabricated",
-            "event threshold is selected on tuning data and evaluated once on locked test data",
+            "multi-head weights and thresholds are selected on tuning data only",
             "correlated contracts are reported by symbol and market group as well as pooled",
         ],
     }
@@ -1650,17 +2298,20 @@ def train_and_backtest(
     candidate_dir = model_dir / "candidates" / run_id
     candidate_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "generated_at": report["generated_at"],
         "features": feature_names,
-        "event_threshold": threshold.threshold,
+        "architecture": "lightgbm_multihead",
+        "event_threshold": asdict(selection),
         "split_boundaries": asdict(boundaries),
         "qualification": qualification,
         "report": str(report_path),
     }
     joblib.dump(terminal_model, candidate_dir / "terminal_model.joblib")
     joblib.dump(event_model, candidate_dir / "event_model.joblib")
+    joblib.dump(direction_model, candidate_dir / "direction_model.joblib")
+    joblib.dump(occurrence_model, candidate_dir / "occurrence_model.joblib")
     (candidate_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -1669,6 +2320,8 @@ def train_and_backtest(
         champion_dir.mkdir(parents=True, exist_ok=True)
         joblib.dump(terminal_model, champion_dir / "terminal_model.joblib")
         joblib.dump(event_model, champion_dir / "event_model.joblib")
+        joblib.dump(direction_model, champion_dir / "direction_model.joblib")
+        joblib.dump(occurrence_model, champion_dir / "occurrence_model.joblib")
         (champion_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )

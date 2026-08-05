@@ -114,9 +114,13 @@ def test_binance_positioning_client_uses_public_tradfi_endpoints(
     battle.binance_client.fetch_open_interest("aaplusdt")
     battle.binance_client.fetch_global_long_short_ratio("aaplusdt")
     battle.binance_client.fetch_taker_buy_sell_ratio("aaplusdt")
+    battle.binance_client.fetch_top_trader_account_ratio("aaplusdt")
+    battle.binance_client.fetch_top_trader_position_ratio("aaplusdt")
     battle.binance_client.fetch_order_book("aaplusdt", limit=20)
 
     assert any("/fapi/v1/openInterest?" in url and "AAPLUSDT" in url for url in calls)
     assert any("/futures/data/globalLongShortAccountRatio?" in url for url in calls)
     assert any("/futures/data/takerlongshortRatio?" in url for url in calls)
+    assert any("/futures/data/topLongShortAccountRatio?" in url for url in calls)
+    assert any("/futures/data/topLongShortPositionRatio?" in url for url in calls)
     assert any("/fapi/v1/depth?" in url and "limit=20" in url for url in calls)

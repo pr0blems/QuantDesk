@@ -11,6 +11,7 @@ class ContractMonitor extends HTMLElement {
       matrixSort: { key: "ai", direction: "desc" },
       sound: true,
       notifyOn: false,
+      spreadAlertStates: new Map(),
     };
     this.timers = [];
     this.newsTimer = null;
@@ -29,7 +30,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-10">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260806-14">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
@@ -386,6 +387,52 @@ class ContractMonitor extends HTMLElement {
     return new Date(milliseconds).toLocaleString("zh-CN", { hour12: false });
   }
 
+  underlyingRelationLabel(value) {
+    return ({
+      direct: "美股现货",
+      benchmark: "基准行情",
+      native: "原生市场",
+      unlisted: "未上市标的",
+      index: "主题指数",
+    })[value] || "标的行情";
+  }
+
+  underlyingMarketStateLabel(value) {
+    return ({
+      pre_market: "盘前",
+      regular: "盘中",
+      after_hours: "盘后",
+      closed: "已收盘",
+      unavailable: "暂无行情",
+      unknown: "时段未知",
+    })[value] || "数据采集";
+  }
+
+  underlyingAlignmentLabel(value) {
+    return ({
+      aligned: "同窗对齐",
+      lagging: "时间滞后",
+      stale: "行情延迟",
+      closed: "市场休市",
+      unavailable: "无法对齐",
+    })[value] || "等待对齐";
+  }
+
+  spreadAlertLabel(value) {
+    return ({
+      strong: "强提醒",
+      watch: "观察",
+      normal: "正常",
+      disabled: "不可比",
+    })[value] || "等待计算";
+  }
+
+  formatAlignmentDelta(value) {
+    if (value == null || !Number.isFinite(Number(value))) return "--";
+    const seconds = Number(value) / 1000;
+    return seconds < 1 ? "<1s" : `${seconds < 10 ? seconds.toFixed(1) : seconds.toFixed(0)}s`;
+  }
+
   opportunityTone(direction) {
     return direction === "long" ? "strong-up" : direction === "short" ? "strong-down" : "neutral";
   }
@@ -418,9 +465,11 @@ class ContractMonitor extends HTMLElement {
   }
 
   aiConclusion(item) {
-    const battle = item.battle?.["5m"];
+    const model = item.battle?.["2h"];
+    const fallback = item.battle?.["5m"];
+    const battle = model && model.state === "calibrated" && !model.stale ? model : fallback;
     if (!battle || battle.state === "data_insufficient" || battle.stale) {
-      return { tone: "neutral", label: "数据不足", confidence: null, rank: 0, edge: 0 };
+      return { tone: "neutral", label: "数据不足", confidence: null, rank: 0, edge: 0, source: "无有效预测" };
     }
     const tone = ["long", "short"].includes(battle.result) ? battle.result : "neutral";
     const confidence = Number(battle.confidence_score);
@@ -430,6 +479,7 @@ class ContractMonitor extends HTMLElement {
       confidence: Number.isFinite(confidence) ? Math.round(Math.max(0, Math.min(1, confidence)) * 100) : null,
       rank: { long: 3, neutral: 2, short: 1 }[tone],
       edge: Number(battle.long || 0) - Number(battle.short || 0),
+      source: battle === model ? "2 小时 LightGBM 校准模型" : "5 分钟启发式降级信号",
     };
   }
 
@@ -496,6 +546,13 @@ class ContractMonitor extends HTMLElement {
       TREND: "趋势结构",
       CROWDING_RISK: "持仓拥挤风险",
       DATA_INSUFFICIENT: "数据不足",
+      TWO_HOUR_LIGHTGBM: "2小时校准模型",
+      EVENT_CANDIDATE: "事件机会已触发",
+      NO_EVENT_CANDIDATE: "未触发事件机会",
+      OCCURRENCE_GATE_PASS: "发生概率通过",
+      OCCURRENCE_GATE_ABSTAIN: "发生概率未通过",
+      DIRECTION_GATE_PASS: "方向置信度通过",
+      DIRECTION_GATE_ABSTAIN: "方向置信度未通过",
     })[code] || code;
   }
 
@@ -559,10 +616,41 @@ class ContractMonitor extends HTMLElement {
       const opportunityText = opportunity
         ? `${this.opportunityLabel(opportunity.direction)} ${Number(opportunity.quality_score).toFixed(0)}`
         : "--";
+      const underlying = item.underlying_quote || {};
+      const underlyingChange = underlying.change_pct == null
+        ? null
+        : Number(underlying.change_pct);
+      const underlyingChangeClass = !Number.isFinite(underlyingChange)
+        ? "flat"
+        : underlyingChange > 0 ? "up" : underlyingChange < 0 ? "down" : "flat";
+      const basis = Number(underlying.basis_bps);
+      const basisText = underlying.basis_comparable && Number.isFinite(basis)
+        ? `${basis >= 0 ? "溢价" : "折价"} ${basis >= 0 ? "+" : ""}${basis.toFixed(1)} bps`
+        : "价格不可直接比较";
+      const dataOutOfSync = Boolean(underlying.quote_symbol)
+        && underlying.status === "ok"
+        && underlying.market_state !== "closed"
+        && underlying.alignment_status !== "aligned";
+      const displayBasisText = dataOutOfSync ? "数据未对齐" : basisText;
+      const spreadAlert = underlying.spread_alert || (underlying.basis_comparable ? "normal" : "disabled");
+      const spreadAlertClass = spreadAlert === "strong" ? "strong" : spreadAlert === "watch" ? "watch" : "normal";
+      const spreadAlertText = dataOutOfSync
+        ? "数据未对齐 · 暂停提醒"
+        : underlying.basis_comparable
+        ? `${displayBasisText} · ${this.spreadAlertLabel(spreadAlert)}`
+        : displayBasisText;
+      const alignmentText = `${this.underlyingAlignmentLabel(underlying.alignment_status)} ${this.formatAlignmentDelta(underlying.alignment_delta_ms)}`;
+      const underlyingSymbol = underlying.quote_symbol || item.symbol.replace(/(?:USDT|USD1)$/, "");
+      const underlyingStatus = underlying.status === "ok"
+        ? this.underlyingMarketStateLabel(underlying.market_state)
+        : underlying.status === "unsupported" ? "暂无公开行情" : underlying.status === "stale" ? "行情延迟" : "行情采集中";
+      const underlyingTime = underlying.market_time_ms
+        ? this.barTimeString(underlying.market_time_ms)
+        : "--";
       const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
-      return `<tr class="matrix-row matrix-${ai.tone} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
-        <td class="matrix-ai"><span>${ai.label}</span></td>
-        <td class="matrix-confidence" title="5 分钟 AI 结论信心"><svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="base" width="100" height="6"></rect><rect class="fill" width="${ai.confidence || 0}" height="6"></rect></svg><b>${ai.confidence == null ? "--" : `${ai.confidence}%`}</b></td>
+      const mainRow = `<tr class="matrix-row matrix-${ai.tone} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
+        <td class="matrix-ai" title="${this.escape(ai.source)}"><span>${ai.label}</span></td>
+        <td class="matrix-confidence" title="${this.escape(ai.source)}置信度"><svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="base" width="100" height="6"></rect><rect class="fill" width="${ai.confidence || 0}" height="6"></rect></svg><b>${ai.confidence == null ? "--" : `${ai.confidence}%`}</b></td>
         <td><button class="matrix-watch ${item.watch ? "on" : ""}" type="button" data-watch-symbol="${this.escape(item.symbol)}" aria-label="${item.watch ? "取消自选" : "加入自选"}">${item.watch ? "★" : "☆"}</button></td>
         <td class="matrix-symbol"><strong>${this.escape(item.symbol.replace(/(?:USDT|USD1)$/, ""))}</strong>${item.trending ? '<em aria-label="热度上升">🔥</em>' : ""}<small>${this.escape(item.annotation || item.underlying || "标的")}</small></td>
         <td class="matrix-price">${this.formatPrice(item.price)}</td>
@@ -579,6 +667,20 @@ class ContractMonitor extends HTMLElement {
         <td class="matrix-opportunity ${opportunity?.direction || "none"}">${this.escape(opportunityText)}</td>
         <td>${this.formatCompact(item.quote_volume)}</td>
       </tr>`;
+      const underlyingRow = `<tr class="underlying-row underlying-${ai.tone}" data-underlying-symbol="${this.escape(item.symbol)}"><td colspan="17"><div class="underlying-band">
+        <span class="underlying-branch" aria-hidden="true">└</span>
+        <strong>${this.escape(underlyingSymbol)}</strong>
+        <em class="underlying-relation">${this.escape(this.underlyingRelationLabel(underlying.relation))}</em>
+        <span class="underlying-name">${this.escape(underlying.display_name || item.annotation || "对应标的")}</span>
+        <b class="underlying-price">${this.formatPrice(underlying.price)}</b>
+        <b class="${underlyingChangeClass}">${this.formatPercent(Number.isFinite(underlyingChange) ? underlyingChange : null)}</b>
+        <span class="underlying-state ${underlying.stale ? "stale" : ""}">${this.escape(underlyingStatus)}</span>
+        <span>量 ${underlying.volume == null ? "--" : this.formatCompact(underlying.volume)}</span>
+        <span class="underlying-basis ${Number.isFinite(basis) && basis < 0 ? "discount" : "premium"} ${spreadAlertClass}" title="价差状态：${this.escape(this.spreadAlertLabel(spreadAlert))}">${this.escape(spreadAlertText)}</span>
+        <span class="underlying-alignment" title="统一时间对齐状态">↔ ${this.escape(alignmentText)}</span>
+        <span class="underlying-time" title="标的行情时间 ${this.escape(underlyingTime)}">${this.escape(underlying.exchange_name || "--")} · ${this.escape(underlying.currency || "--")} · ${this.escape(underlyingTime)}</span>
+      </div></td></tr>`;
+      return mainRow + underlyingRow;
     }).join("");
     this.q("#contract-grid").innerHTML = rows
       ? `<table class="contract-matrix"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`
@@ -609,6 +711,7 @@ class ContractMonitor extends HTMLElement {
       });
       this.state.watchlist = new Set(watchlist);
       this.state.overview.forEach((item) => { item.watch = this.state.watchlist.has(item.symbol); });
+      if (previousPrices.size) this.state.overview.forEach((item) => this.maybeNotifySpreadAlert(item));
       this.updateWatchlistUi();
       this.renderGrid();
       const breadthElement = this.q("#breadth");
@@ -629,6 +732,21 @@ class ContractMonitor extends HTMLElement {
       status.textContent = "● 连接失败";
       status.className = "badge err";
       this.showError(error.message || "合约监控数据加载失败");
+    }
+  }
+
+  maybeNotifySpreadAlert(item) {
+    const quote = item.underlying_quote || {};
+    const level = quote.spread_alert || "disabled";
+    const previous = this.state.spreadAlertStates.get(item.symbol);
+    this.state.spreadAlertStates.set(item.symbol, level);
+    if (!quote.basis_comparable || !["watch", "strong"].includes(level) || level === previous) return;
+    const basis = Number(quote.basis_bps);
+    const direction = basis >= 0 ? "溢价" : "折价";
+    const message = `${item.symbol} ${direction} ${Number.isFinite(basis) ? `${basis >= 0 ? "+" : ""}${basis.toFixed(1)} bps` : "异常"}，${this.underlyingAlignmentLabel(quote.alignment_status)}`;
+    this.beep(level === "strong" ? 1180 : 760, level === "strong" ? 3 : 2);
+    if (this.state.notifyOn && "Notification" in window && Notification.permission === "granted") {
+      new Notification("QuantDesk 价差提醒", { body: message });
     }
   }
 
@@ -799,7 +917,7 @@ class ContractMonitor extends HTMLElement {
   }
 
   renderBattle(battles) {
-    const order = ["5m", "15m", "1h"];
+    const order = ["5m", "15m", "1h", "2h"];
     const cards = order.map((horizon) => {
       const battle = battles[horizon];
       if (!battle) return `<article class="battle-horizon pending"><div><strong>${horizon}</strong><span>数据采集中</span></div></article>`;
@@ -809,7 +927,7 @@ class ContractMonitor extends HTMLElement {
         : `扣费后边际 ${Number(battle.edge_after_cost_bps) >= 0 ? "+" : ""}${Number(battle.edge_after_cost_bps).toFixed(1)} bps`;
       const freshness = battle.stale ? "已过期" : "有效";
       return `<article class="battle-horizon ${this.battleTone(battle.result, battle.state)}">
-        <div class="battle-horizon-head"><strong>${horizon}</strong><b>${this.battleLabel(battle.result, battle.state)}</b><em>${battle.state === "heuristic" ? "启发式未校准" : "数据不足"}</em></div>
+        <div class="battle-horizon-head"><strong>${horizon}</strong><b>${this.battleLabel(battle.result, battle.state)}</b><em>${battle.state === "calibrated" ? "LightGBM 校准模型" : battle.state === "heuristic" ? "启发式未校准" : "数据不足"}</em></div>
         <div class="battle-probabilities"><span class="long">多 ${Number(battle.long).toFixed(1)}%</span><span>震荡 ${Number(battle.neutral).toFixed(1)}%</span><span class="short">空 ${Number(battle.short).toFixed(1)}%</span></div>
         <svg class="battle-bar large" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="long" x="0" y="0" width="${Number(battle.long) || 0}" height="6"></rect><rect class="neutral" x="${Number(battle.long) || 0}" y="0" width="${Number(battle.neutral) || 0}" height="6"></rect><rect class="short" x="${(Number(battle.long) || 0) + (Number(battle.neutral) || 0)}" y="0" width="${Number(battle.short) || 0}" height="6"></rect></svg>
         <div class="battle-meta"><span>置信度 ${this.escape(battle.confidence || "低")}</span><span>${this.escape(costText)}</span><span>${freshness}</span></div>

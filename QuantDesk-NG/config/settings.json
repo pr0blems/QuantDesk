@@ -175,5 +175,6 @@
     }
   ],
   "ticker_rest_seconds": 60,
+  "underlying_quote_seconds": 120,
   "price_poll_seconds": 2
 }
