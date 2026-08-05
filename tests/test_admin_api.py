@@ -4,6 +4,7 @@ from pydantic import SecretStr
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
+from quantdesk_v2 import battle
 from quantdesk_v2.config import Settings
 from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
@@ -78,6 +79,33 @@ def test_admin_authorization_rules_and_news_source_management(
             "Authorization": f"Bearer {admin_token}",
             "X-QuantDesk-User-ID": str(admin_id),
         }
+
+        regular_algorithm = client.get(
+            "/api/v2/monitor/prediction-algorithm",
+            headers={"Authorization": f"Bearer {regular_token}"},
+        )
+        assert regular_algorithm.status_code == 200
+        assert regular_algorithm.json()["editable"] is False
+        algorithm_config = regular_algorithm.json()["defaults"]
+        algorithm_config["direction_threshold"] = 0.22
+        forbidden_algorithm_update = client.put(
+            "/api/v2/monitor/prediction-algorithm",
+            headers={
+                "Authorization": f"Bearer {regular_token}",
+                "X-QuantDesk-User-ID": str(regular_id),
+            },
+            json=algorithm_config,
+        )
+        assert forbidden_algorithm_update.status_code == 403
+        saved_algorithm = client.put(
+            "/api/v2/monitor/prediction-algorithm",
+            headers=admin_headers,
+            json=algorithm_config,
+        )
+        assert saved_algorithm.status_code == 200
+        assert saved_algorithm.json()["editable"] is True
+        assert saved_algorithm.json()["config_version"] == 1
+        assert saved_algorithm.json()["config"]["direction_threshold"] == 0.22
 
         forbidden = client.get(
             "/api/v2/admin/overview",
@@ -199,6 +227,7 @@ def test_admin_authorization_rules_and_news_source_management(
 
         with test_session() as db:
             assert db.get(AdminSetting, "alert_rules").version == 1
+            assert db.get(AdminSetting, battle.ALGORITHM_SETTING_KEY).version == 1
             assert db.get(NewsSourceSetting, source_name).enabled is False
             assert db.get(NewsSourceSetting, source_name).lang == "zh-CN"
             assert db.get(NewsSourceSetting, "TestEditorialFeed") is None

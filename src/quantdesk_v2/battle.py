@@ -12,6 +12,7 @@ import math
 import threading
 import time
 import uuid
+from copy import deepcopy
 from typing import Any
 
 from . import market_data_client as binance_client
@@ -23,6 +24,7 @@ FEATURE_SCHEMA_VERSION = 4
 COLLECTION_SECONDS = 300
 HORIZONS = (300, 900, 3_600)
 HORIZON_TIMEFRAME = {300: "15m", 900: "15m", 3_600: "1h"}
+HORIZON_NAMES = {300: "5m", 900: "15m", 3_600: "1h"}
 MAX_MARKET_AGE_MS = COLLECTION_SECONDS * 1_000
 OUTCOME_POLL_SECONDS = 5
 OUTCOME_MAX_LAG_MS = 30_000
@@ -31,6 +33,60 @@ RETENTION_MS = 35 * 24 * 60 * 60 * 1_000
 _start_lock = threading.Lock()
 _started = False
 _positioning_blocked_until = 0.0
+ALGORITHM_SETTING_KEY = "battle_prediction_algorithm"
+ALGORITHM_FEATURES = (
+    "aggressive_flow",
+    "book_imbalance",
+    "book_imbalance_5",
+    "velocity",
+    "flash_imbalance",
+    "taker_flow",
+    "price_oi_impulse",
+    "trend",
+)
+DEFAULT_ALGORITHM_CONFIG: dict[str, Any] = {
+    "direction_threshold": 0.18,
+    "min_data_quality": 0.70,
+    "account_crowding_penalty": 0.08,
+    "funding_crowding_penalty": 0.04,
+    "weights": {
+        "5m": {
+            "aggressive_flow": 0.25,
+            "book_imbalance": 0.15,
+            "book_imbalance_5": 0.10,
+            "velocity": 0.17,
+            "flash_imbalance": 0.10,
+            "taker_flow": 0.14,
+            "price_oi_impulse": 0.05,
+            "trend": 0.04,
+        },
+        "15m": {
+            "aggressive_flow": 0.19,
+            "book_imbalance": 0.08,
+            "book_imbalance_5": 0.05,
+            "velocity": 0.10,
+            "flash_imbalance": 0.09,
+            "taker_flow": 0.15,
+            "price_oi_impulse": 0.14,
+            "trend": 0.20,
+        },
+        "1h": {
+            "aggressive_flow": 0.10,
+            "book_imbalance": 0.04,
+            "book_imbalance_5": 0.03,
+            "velocity": 0.05,
+            "flash_imbalance": 0.04,
+            "taker_flow": 0.15,
+            "price_oi_impulse": 0.19,
+            "trend": 0.40,
+        },
+    },
+}
+_algorithm_config_lock = threading.Lock()
+_algorithm_config_cache: dict[str, Any] = {
+    "expires": 0.0,
+    "config": deepcopy(DEFAULT_ALGORITHM_CONFIG),
+}
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -50,6 +106,72 @@ def _optional_number(value: Any) -> float | None:
 
 def _clip(value: float, lower: float = -1.0, upper: float = 1.0) -> float:
     return min(upper, max(lower, value))
+
+
+def default_algorithm_config() -> dict[str, Any]:
+    return deepcopy(DEFAULT_ALGORITHM_CONFIG)
+
+
+def normalize_algorithm_config(value: Any) -> dict[str, Any]:
+    """Return a complete safe config, falling back per invalid field or horizon."""
+    result = default_algorithm_config()
+    if not isinstance(value, dict):
+        return result
+    scalar_limits = {
+        "direction_threshold": (0.05, 0.5),
+        "min_data_quality": (0.5, 1.0),
+        "account_crowding_penalty": (0.0, 0.5),
+        "funding_crowding_penalty": (0.0, 0.5),
+    }
+    for name, (lower, upper) in scalar_limits.items():
+        candidate = _number(value.get(name), math.nan)
+        if math.isfinite(candidate) and lower <= candidate <= upper:
+            result[name] = candidate
+    configured_weights = value.get("weights")
+    if not isinstance(configured_weights, dict):
+        return result
+    for horizon in ("5m", "15m", "1h"):
+        candidate = configured_weights.get(horizon)
+        if not isinstance(candidate, dict):
+            continue
+        weights = {name: _number(candidate.get(name), math.nan) for name in ALGORITHM_FEATURES}
+        if all(math.isfinite(weight) and 0 <= weight <= 1 for weight in weights.values()) and math.isclose(
+            sum(weights.values()), 1.0, abs_tol=0.001
+        ):
+            result["weights"][horizon] = weights
+    return result
+
+
+def current_algorithm_config() -> dict[str, Any]:
+    now = time.monotonic()
+    with _algorithm_config_lock:
+        if now < float(_algorithm_config_cache["expires"]):
+            return deepcopy(_algorithm_config_cache["config"])
+    config = default_algorithm_config()
+    version = 0
+    try:
+        rows = store.query(
+            "SELECT value_json,version FROM admin_settings WHERE `key`=?",
+            (ALGORITHM_SETTING_KEY,),
+        )
+        if rows:
+            raw = rows[0].get("value_json")
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+            config = normalize_algorithm_config(raw)
+            version = int(rows[0].get("version") or 0)
+    except Exception:
+        config = default_algorithm_config()
+    config["config_version"] = version
+    with _algorithm_config_lock:
+        _algorithm_config_cache["config"] = deepcopy(config)
+        _algorithm_config_cache["expires"] = now + 5.0
+    return config
+
+
+def invalidate_algorithm_config_cache() -> None:
+    with _algorithm_config_lock:
+        _algorithm_config_cache["expires"] = 0.0
 
 
 def _log_ratio(value: Any) -> float:
@@ -146,60 +268,43 @@ def build_feature_vector(
     return features, quality
 
 
-def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
+def predict(
+    features: dict[str, Any],
+    horizon_seconds: int,
+    algorithm_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Create a three-way, explicitly uncalibrated prediction."""
 
     if horizon_seconds not in HORIZONS:
         raise ValueError("unsupported battle prediction horizon")
+    config = (
+        normalize_algorithm_config(algorithm_config)
+        if algorithm_config is not None
+        else default_algorithm_config()
+    )
+    if algorithm_config and "config_version" in algorithm_config:
+        config["config_version"] = int(algorithm_config["config_version"] or 0)
     quality = _clip(_number(features.get("data_quality")), 0.0, 1.0)
     trend = (
         _number(features.get("trend_15m"))
         if horizon_seconds in {300, 900}
         else 0.65 * _number(features.get("trend_1h")) + 0.35 * _number(features.get("trend_4h"))
     )
-    if horizon_seconds == 300:
-        weights = {
-            "aggressive_flow": 0.25,
-            "book_imbalance": 0.15,
-            "book_imbalance_5": 0.10,
-            "velocity": 0.17,
-            "flash_imbalance": 0.10,
-            "taker_flow": 0.14,
-            "price_oi_impulse": 0.05,
-            "trend": 0.04,
-        }
-    elif horizon_seconds == 900:
-        weights = {
-            "aggressive_flow": 0.19,
-            "book_imbalance": 0.08,
-            "book_imbalance_5": 0.05,
-            "velocity": 0.10,
-            "flash_imbalance": 0.09,
-            "taker_flow": 0.15,
-            "price_oi_impulse": 0.14,
-            "trend": 0.20,
-        }
-    else:
-        weights = {
-            "aggressive_flow": 0.10,
-            "book_imbalance": 0.04,
-            "book_imbalance_5": 0.03,
-            "velocity": 0.05,
-            "flash_imbalance": 0.04,
-            "taker_flow": 0.15,
-            "price_oi_impulse": 0.19,
-            "trend": 0.40,
-        }
+    weights = config["weights"][HORIZON_NAMES[horizon_seconds]]
     values = {name: _number(features.get(name)) for name in weights if name != "trend"}
     values["trend"] = trend
     contributions = {name: values[name] * weight for name, weight in weights.items()}
-    crowding_penalty = -0.08 * _number(features.get("account_crowding"))
-    funding_penalty = -0.04 * _number(features.get("funding_crowding"))
+    crowding_penalty = -config["account_crowding_penalty"] * _number(
+        features.get("account_crowding")
+    )
+    funding_penalty = -config["funding_crowding_penalty"] * _number(
+        features.get("funding_crowding")
+    )
     raw_score = sum(contributions.values()) + crowding_penalty + funding_penalty
     score = _clip(raw_score)
 
     insufficient = (
-        quality < 0.70
+        quality < config["min_data_quality"]
         or _number(features.get("micro_age_ms"), 10**12) > MAX_MARKET_AGE_MS
         or _number(features.get("positioning_age_ms"), 10**12) > 10 * 60 * 1_000
     )
@@ -214,7 +319,8 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
         long_share = 1.0 / (1.0 + math.exp(-3.2 * score))
         long_probability = directional_probability * long_share
         short_probability = directional_probability - long_probability
-        result = "long" if score >= 0.18 else "short" if score <= -0.18 else "neutral"
+        threshold = config["direction_threshold"]
+        result = "long" if score >= threshold else "short" if score <= -threshold else "neutral"
         confidence = min(0.69, quality * (0.32 + 0.55 * abs(score)))
         state = "heuristic"
 
@@ -241,6 +347,9 @@ def predict(features: dict[str, Any], horizon_seconds: int) -> dict[str, Any]:
         **{name: round(value, 6) for name, value in contributions.items()},
         "account_crowding_penalty": round(crowding_penalty, 6),
         "funding_penalty": round(funding_penalty, 6),
+        "algorithm_config_version": int(config.get("config_version") or 0),
+        "direction_threshold": config["direction_threshold"],
+        "min_data_quality": config["min_data_quality"],
         # Collected for shadow evaluation only. A future calibrated model may
         # assign a non-zero weight after leakage-safe forward validation.
         "verified_event_pressure_shadow": round(
@@ -450,6 +559,7 @@ def create_predictions(symbol: str, as_of_ms: int | None = None) -> int:
         return 0
     feature_time = int(positioning["snapshot_at_ms"])
     inserted = 0
+    algorithm_config = current_algorithm_config()
     with store.transaction() as transaction:
         transaction.execute(
             """INSERT IGNORE INTO prediction_feature_snapshots(
@@ -476,7 +586,7 @@ def create_predictions(symbol: str, as_of_ms: int | None = None) -> int:
             )
             if existing:
                 continue
-            result = predict(features, horizon)
+            result = predict(features, horizon, algorithm_config)
             transaction.execute(
                 "UPDATE battle_predictions SET current_marker=NULL WHERE symbol=? AND horizon_seconds=? AND current_marker=1",
                 (symbol, horizon),

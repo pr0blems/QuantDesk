@@ -20,6 +20,7 @@ class ContractMonitor extends HTMLElement {
         statistics: null,
         filters: { direction: "all", horizon: "all", hit: "all" },
       },
+      algorithm: { data: null, loading: false },
       matrixSort: { key: "ai", direction: "desc" },
       sound: true,
       notifyOn: false,
@@ -41,7 +42,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-18">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-19">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -66,7 +67,7 @@ class ContractMonitor extends HTMLElement {
         <div id="binance-market-view" class="market-view">
         <section id="intelligence-strip" class="intelligence-strip" aria-label="机会引擎反馈">
           <article><span>实时数据覆盖</span><strong id="intel-coverage">--</strong><small>行情与战局预测</small></article>
-          <article><span>活跃扫描器</span><strong id="intel-scanners">--</strong><small id="intel-opportunities">等待数据</small></article>
+          <article class="intel-scanner-card"><span>活跃扫描器</span><strong id="intel-scanners">--</strong><small id="intel-opportunities">等待数据</small><button id="btn-prediction-algorithm" class="intel-algorithm-open" type="button">查看预测算法</button></article>
           <article class="intel-result-card"><span class="intel-heading">结果标签 <button class="intel-help" type="button" aria-label="结果标签说明" data-tip="每轮会为每个合约生成 5m、15m、1h 三种预测。已完成表示观察窗口结束并取得有效价格后已经标注；待完成表示仍在等待窗口到期或标注处理。到期后仍无有效价格的样本会标为不可用，不计入已完成数和命中率。它们是评估样本，不是订单、持仓或待交易数量。">?</button></span><strong id="intel-labels">--</strong><small id="intel-pending">等待校准</small><button id="btn-prediction-history" class="intel-history-open" type="button">查看历史预测</button></article>
           <article><span class="intel-heading">方向命中率 <button class="intel-help" type="button" aria-label="方向命中率说明" data-tip="仅统计已经完成的看多/看空预测：看多后成本后价格上涨，或看空后成本后价格下跌，记为命中。中性预测不进入方向命中率分母。这是启发式模型的历史标注结果，不是实盘胜率或收益承诺。">?</button></span><strong id="intel-hit-rate">--</strong><small id="intel-return">完成样本后显示</small></article>
           <article><span>Shadow执行</span><strong id="intel-shadow">LOCKED</strong><small>实盘保持锁定</small></article>
@@ -191,6 +192,53 @@ class ContractMonitor extends HTMLElement {
               <button type="button" data-history-page="last">末页</button>
             </div>
           </footer>
+        </div>
+      </div>
+      <div id="prediction-algorithm-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-box prediction-algorithm-box" role="dialog" aria-modal="true" aria-labelledby="prediction-algorithm-title">
+          <div class="modal-head prediction-algorithm-head">
+            <div>
+              <strong id="prediction-algorithm-title" class="modal-symbol">当前预测算法</strong>
+              <span id="prediction-algorithm-version" class="dim">正在读取配置…</span>
+            </div>
+            <button id="prediction-algorithm-close" type="button">关闭</button>
+          </div>
+          <section class="algorithm-rules" aria-label="算法规则说明">
+            <article><strong>综合评分</strong><span>各特征标准化到 -1～+1，按周期权重加总，再扣除账户拥挤与资金费率拥挤惩罚。</span></article>
+            <article><strong>方向判断</strong><span>评分达到正阈值判为看多，低于负阈值判为看空，阈值之间保持中性。</span></article>
+            <article><strong>数据门槛</strong><span>数据质量不足、微观行情过期或持仓数据过期时强制中性，不参与方向命中率。</span></article>
+            <article><strong>结算规则</strong><span>分别在 5m、15m、1h 观察窗口结算，方向收益扣除价差成本后大于 0 记为命中。</span></article>
+          </section>
+          <form id="prediction-algorithm-form" class="prediction-algorithm-form">
+            <section class="algorithm-parameters">
+              <label><span>方向阈值</span><input type="number" min="0.05" max="0.5" step="0.01" data-algorithm-scalar="direction_threshold"><small>越高越谨慎，中性预测越多</small></label>
+              <label><span>最低数据质量</span><input type="number" min="0.5" max="1" step="0.01" data-algorithm-scalar="min_data_quality"><small>低于此值时强制中性</small></label>
+              <label><span>账户拥挤惩罚</span><input type="number" min="0" max="0.5" step="0.01" data-algorithm-scalar="account_crowding_penalty"><small>逆向削弱拥挤方向评分</small></label>
+              <label><span>资金费率拥挤惩罚</span><input type="number" min="0" max="0.5" step="0.01" data-algorithm-scalar="funding_crowding_penalty"><small>削弱资金费率过热方向</small></label>
+            </section>
+            <div class="algorithm-weight-wrap">
+              <table class="algorithm-weight-table">
+                <thead><tr><th>评分特征</th><th>5m 权重</th><th>15m 权重</th><th>1h 权重</th><th>规则含义</th></tr></thead>
+                <tbody>
+                  <tr><th>主动成交流</th><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="1h"></td><td>主动买入与主动卖出强弱</td></tr>
+                  <tr><th>订单簿失衡</th><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="1h"></td><td>完整深度买卖盘力量差</td></tr>
+                  <tr><th>近五档失衡</th><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="1h"></td><td>盘口近端流动性倾斜</td></tr>
+                  <tr><th>价格速度</th><td><input type="number" data-algorithm-weight="velocity" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="velocity" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="velocity" data-horizon="1h"></td><td>最近一分钟价格变化速度</td></tr>
+                  <tr><th>闪动失衡</th><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="1h"></td><td>30 分钟上涨与下跌闪动差</td></tr>
+                  <tr><th>Taker 流向</th><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="1h"></td><td>Binance 主动买卖量比</td></tr>
+                  <tr><th>价格 × 持仓量</th><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="1h"></td><td>价格变化与未平仓量联合冲量</td></tr>
+                  <tr><th>周期趋势</th><td><input type="number" data-algorithm-weight="trend" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="trend" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="trend" data-horizon="1h"></td><td>15m 趋势；1h 使用 1h 与 4h 组合</td></tr>
+                </tbody>
+                <tfoot><tr><th>权重合计</th><td id="algorithm-sum-5m">--</td><td id="algorithm-sum-15m">--</td><td id="algorithm-sum-1h">--</td><td>每个周期必须等于 1.000</td></tr></tfoot>
+              </table>
+            </div>
+            <p id="prediction-algorithm-message" class="algorithm-message" aria-live="polite"></p>
+            <footer class="algorithm-actions">
+              <span>概率映射、置信度、波动率止盈止损公式保持固定；修改只影响保存后的新预测。</span>
+              <button id="prediction-algorithm-defaults" type="button">恢复默认参数</button>
+              <button id="prediction-algorithm-save" class="primary" type="submit">保存全局算法</button>
+            </footer>
+          </form>
         </div>
       </div>
       <div id="watchlist-import" class="modal hidden">
@@ -433,6 +481,7 @@ class ContractMonitor extends HTMLElement {
     });
     this.q("#btn-refresh").addEventListener("click", () => this.refreshAll());
     this.q("#btn-prediction-history").addEventListener("click", () => this.openPredictionHistory());
+    this.q("#btn-prediction-algorithm").addEventListener("click", () => this.openPredictionAlgorithm());
     this.q("#btn-import-watchlist").addEventListener("click", () => this.openWatchlistImport());
     this.q("#btn-clear-watchlist").addEventListener("click", () => this.clearWatchlist());
     this.q("#btn-sync-positions").addEventListener("click", () => this.syncPositionsToMonitor());
@@ -475,6 +524,13 @@ class ContractMonitor extends HTMLElement {
         button.dataset.filterValue,
       ));
     });
+    this.q("#prediction-algorithm-close").addEventListener("click", () => this.closePredictionAlgorithm());
+    this.q("#prediction-algorithm-modal").addEventListener("click", (event) => {
+      if (event.target === this.q("#prediction-algorithm-modal")) this.closePredictionAlgorithm();
+    });
+    this.q("#prediction-algorithm-form").addEventListener("input", () => this.renderAlgorithmWeightSums());
+    this.q("#prediction-algorithm-defaults").addEventListener("click", () => this.restoreDefaultAlgorithm());
+    this.q("#prediction-algorithm-form").addEventListener("submit", (event) => this.savePredictionAlgorithm(event));
     this.q("#watchlist-import-close").addEventListener("click", () => this.closeWatchlistImport());
     this.q("#watchlist-import").addEventListener("click", (event) => {
       if (event.target === this.q("#watchlist-import")) this.closeWatchlistImport();
@@ -1042,6 +1098,116 @@ class ContractMonitor extends HTMLElement {
     const modal = this.q("#prediction-history-modal");
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
+  }
+
+  async openPredictionAlgorithm() {
+    const modal = this.q("#prediction-algorithm-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    await this.loadPredictionAlgorithm();
+  }
+
+  closePredictionAlgorithm() {
+    const modal = this.q("#prediction-algorithm-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  async loadPredictionAlgorithm() {
+    const message = this.q("#prediction-algorithm-message");
+    this.state.algorithm.loading = true;
+    message.textContent = "正在读取当前算法…";
+    try {
+      const data = await this.api("/prediction-algorithm");
+      this.state.algorithm.data = data;
+      this.populatePredictionAlgorithm(data.config);
+      const source = data.source === "custom" ? "自定义配置" : "系统默认配置";
+      const updated = data.updated_at ? ` · 更新于 ${new Date(data.updated_at).toLocaleString("zh-CN", { hour12: false })}` : "";
+      this.q("#prediction-algorithm-version").textContent = `${data.model_key} v${data.model_version} · 配置版本 ${data.config_version} · ${source}${updated}`;
+      this.qa("#prediction-algorithm-form input").forEach((input) => { input.disabled = !data.editable; });
+      this.q("#prediction-algorithm-defaults").disabled = !data.editable;
+      this.q("#prediction-algorithm-save").disabled = !data.editable;
+      message.textContent = data.editable ? "修改后需保存才会生效。" : "当前账号可查看规则，但只有管理员可以调整全局算法。";
+    } catch (error) {
+      message.textContent = error.message || "预测算法加载失败";
+    } finally {
+      this.state.algorithm.loading = false;
+    }
+  }
+
+  populatePredictionAlgorithm(config) {
+    if (!config) return;
+    this.qa("[data-algorithm-scalar]").forEach((input) => {
+      input.value = Number(config[input.dataset.algorithmScalar]).toFixed(2);
+    });
+    this.qa("[data-algorithm-weight]").forEach((input) => {
+      input.min = "0";
+      input.max = "1";
+      input.step = "0.01";
+      input.value = Number(config.weights?.[input.dataset.horizon]?.[input.dataset.algorithmWeight] || 0).toFixed(2);
+    });
+    this.renderAlgorithmWeightSums();
+  }
+
+  renderAlgorithmWeightSums() {
+    ["5m", "15m", "1h"].forEach((horizon) => {
+      const total = [...this.qa(`[data-algorithm-weight][data-horizon="${horizon}"]`)]
+        .reduce((sum, input) => sum + (Number(input.value) || 0), 0);
+      const output = this.q(`#algorithm-sum-${horizon}`);
+      output.textContent = total.toFixed(3);
+      output.className = Math.abs(total - 1) <= 0.001 ? "algorithm-sum-ok" : "algorithm-sum-error";
+    });
+  }
+
+  collectPredictionAlgorithm() {
+    const config = { weights: { "5m": {}, "15m": {}, "1h": {} } };
+    this.qa("[data-algorithm-scalar]").forEach((input) => {
+      config[input.dataset.algorithmScalar] = Number(input.value);
+    });
+    this.qa("[data-algorithm-weight]").forEach((input) => {
+      config.weights[input.dataset.horizon][input.dataset.algorithmWeight] = Number(input.value);
+    });
+    for (const horizon of ["5m", "15m", "1h"]) {
+      const total = Object.values(config.weights[horizon]).reduce((sum, value) => sum + value, 0);
+      if (Math.abs(total - 1) > 0.001) throw new Error(`${horizon} 权重合计必须等于 1.000`);
+    }
+    return config;
+  }
+
+  restoreDefaultAlgorithm() {
+    const defaults = this.state.algorithm.data?.defaults;
+    if (!defaults) return;
+    this.populatePredictionAlgorithm(defaults);
+    this.q("#prediction-algorithm-message").textContent = "已填入系统默认参数，点击“保存全局算法”后生效。";
+  }
+
+  async savePredictionAlgorithm(event) {
+    event.preventDefault();
+    if (this.state.algorithm.loading || !this.state.algorithm.data?.editable) return;
+    const message = this.q("#prediction-algorithm-message");
+    let config;
+    try {
+      config = this.collectPredictionAlgorithm();
+    } catch (error) {
+      message.textContent = error.message;
+      return;
+    }
+    if (!window.confirm("保存后将影响所有合约后续生成的新预测，历史预测不会重算。确定继续吗？")) return;
+    this.state.algorithm.loading = true;
+    this.q("#prediction-algorithm-save").disabled = true;
+    message.textContent = "正在保存全局算法…";
+    try {
+      const data = await this.api("/prediction-algorithm", { method: "PUT", body: JSON.stringify(config) });
+      this.state.algorithm.data = data;
+      this.populatePredictionAlgorithm(data.config);
+      this.q("#prediction-algorithm-version").textContent = `${data.model_key} v${data.model_version} · 配置版本 ${data.config_version} · 自定义配置`;
+      message.textContent = "保存成功，新配置将在 5 秒内用于后续预测。";
+    } catch (error) {
+      message.textContent = error.message || "预测算法保存失败";
+    } finally {
+      this.state.algorithm.loading = false;
+      this.q("#prediction-algorithm-save").disabled = false;
+    }
   }
 
   async changePredictionHistoryPage(action) {

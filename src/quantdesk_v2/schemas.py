@@ -608,6 +608,44 @@ class OpportunityPreferenceUpdate(BaseModel):
     notify_enabled: bool = True
 
 
+class PredictionAlgorithmWeights(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    aggressive_flow: float = Field(ge=0, le=1)
+    book_imbalance: float = Field(ge=0, le=1)
+    book_imbalance_5: float = Field(ge=0, le=1)
+    velocity: float = Field(ge=0, le=1)
+    flash_imbalance: float = Field(ge=0, le=1)
+    taker_flow: float = Field(ge=0, le=1)
+    price_oi_impulse: float = Field(ge=0, le=1)
+    trend: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def weights_must_sum_to_one(self) -> Self:
+        total = sum(getattr(self, name) for name in type(self).model_fields)
+        if not math.isclose(total, 1.0, abs_tol=0.001):
+            raise ValueError("prediction weights must sum to 1")
+        return self
+
+
+class PredictionAlgorithmHorizons(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    five_minutes: PredictionAlgorithmWeights = Field(alias="5m")
+    fifteen_minutes: PredictionAlgorithmWeights = Field(alias="15m")
+    one_hour: PredictionAlgorithmWeights = Field(alias="1h")
+
+
+class PredictionAlgorithmUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    direction_threshold: float = Field(ge=0.05, le=0.5)
+    min_data_quality: float = Field(ge=0.5, le=1)
+    account_crowding_penalty: float = Field(ge=0, le=0.5)
+    funding_crowding_penalty: float = Field(ge=0, le=0.5)
+    weights: PredictionAlgorithmHorizons
+
+
 class PaperAccountCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

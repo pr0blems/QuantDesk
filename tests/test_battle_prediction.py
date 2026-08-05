@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import ForeignKeyConstraint, MetaData, Table, UniqueConstraint
 
 from quantdesk_v2 import battle
+from quantdesk_v2.schemas import PredictionAlgorithmUpdate
 
 
 def _features(direction: float = 1.0) -> dict[str, float]:
@@ -58,6 +59,47 @@ def test_battle_prediction_abstains_when_market_data_is_stale() -> None:
     assert result["result"] == "neutral"
     assert result["neutral_probability"] == pytest.approx(0.8)
     assert "DATA_INSUFFICIENT" in result["reason_codes"]
+
+
+def test_custom_direction_threshold_changes_new_prediction_only() -> None:
+    features = _features(0.3)
+    config = battle.default_algorithm_config()
+    config["direction_threshold"] = 0.5
+    config["config_version"] = 7
+
+    assert battle.predict(features, 900)["result"] == "long"
+    adjusted = battle.predict(features, 900, config)
+
+    assert adjusted["result"] == "neutral"
+    assert adjusted["components"]["algorithm_config_version"] == 7
+    assert adjusted["components"]["direction_threshold"] == 0.5
+
+
+def test_prediction_algorithm_schema_rejects_invalid_weight_total() -> None:
+    config = battle.default_algorithm_config()
+    config["weights"]["5m"]["trend"] = 0.5
+
+    with pytest.raises(ValueError, match="weights must sum to 1"):
+        PredictionAlgorithmUpdate.model_validate(config)
+
+
+def test_runtime_algorithm_config_reads_persisted_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = battle.default_algorithm_config()
+    config["direction_threshold"] = 0.27
+    monkeypatch.setattr(
+        battle.store,
+        "query",
+        lambda *_args, **_kwargs: [{"value_json": config, "version": 4}],
+    )
+    battle.invalidate_algorithm_config_cache()
+
+    loaded = battle.current_algorithm_config()
+
+    assert loaded["direction_threshold"] == 0.27
+    assert loaded["config_version"] == 4
+    battle.invalidate_algorithm_config_cache()
 
 
 def test_feature_vector_normalizes_flashes_and_price_open_interest() -> None:

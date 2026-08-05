@@ -25,7 +25,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from . import __version__
+from . import __version__, battle
 from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
 from .backtest import BacktestRepository, BacktestUnavailable
 from .binance_client import BinanceAccountClientError
@@ -40,6 +40,7 @@ from .database import get_db
 from .dependencies import get_current_user
 from .market_config import TRADFI_UNIVERSE_KEY, tradfi_symbols
 from .models import (
+    AdminSetting,
     AiModelConfig,
     AuditLog,
     BacktestRun,
@@ -84,6 +85,7 @@ from .schemas import (
     OpportunityPreferenceUpdate,
     PaperAccountCreateRequest,
     PaperAccountStatusUpdate,
+    PredictionAlgorithmUpdate,
     RefreshRequest,
     RegisterRequest,
     TokenPair,
@@ -190,6 +192,7 @@ def _audit(
     user_id: int | None,
     resource_type: str | None = None,
     resource_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     db.add(
         AuditLog(
@@ -198,6 +201,7 @@ def _audit(
             resource_type=resource_type,
             resource_id=resource_id,
             ip_address=_client_ip(request),
+            metadata_json=metadata,
         )
     )
 
@@ -1419,6 +1423,72 @@ def monitor_intelligence(
     _: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     return _monitor(request).intelligence()
+
+
+def _prediction_algorithm_out(
+    setting: AdminSetting | None,
+    user: User,
+) -> dict[str, Any]:
+    stored = setting.value_json if setting is not None else None
+    return {
+        "model_key": battle.MODEL_KEY,
+        "model_version": battle.MODEL_VERSION,
+        "feature_schema_version": battle.FEATURE_SCHEMA_VERSION,
+        "config": battle.normalize_algorithm_config(stored),
+        "defaults": battle.default_algorithm_config(),
+        "config_version": int(setting.version if setting is not None else 0),
+        "source": "custom" if setting is not None else "default",
+        "updated_at": setting.updated_at if setting is not None else None,
+        "editable": bool(user.is_admin),
+    }
+
+
+@router.get("/monitor/prediction-algorithm")
+def monitor_prediction_algorithm(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return _prediction_algorithm_out(db.get(AdminSetting, battle.ALGORITHM_SETTING_KEY), user)
+
+
+@router.put("/monitor/prediction-algorithm")
+def update_monitor_prediction_algorithm(
+    payload: PredictionAlgorithmUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="administrator access required")
+    _require_expected_user(request, user)
+    value = payload.model_dump(by_alias=True)
+    setting = db.get(AdminSetting, battle.ALGORITHM_SETTING_KEY)
+    if setting is None:
+        setting = AdminSetting(
+            key=battle.ALGORITHM_SETTING_KEY,
+            value_json=value,
+            version=1,
+            updated_by=user.id,
+        )
+        db.add(setting)
+    else:
+        setting.value_json = value
+        setting.version += 1
+        setting.updated_by = user.id
+        setting.updated_at = utcnow()
+    db.flush()
+    _audit(
+        db,
+        request,
+        "monitor.prediction_algorithm.update",
+        user.id,
+        "admin_setting",
+        battle.ALGORITHM_SETTING_KEY,
+        {"version": setting.version, "config": value},
+    )
+    db.commit()
+    battle.invalidate_algorithm_config_cache()
+    return _prediction_algorithm_out(setting, user)
 
 
 @router.get("/monitor/prediction-history")
