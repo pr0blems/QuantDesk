@@ -201,12 +201,52 @@ def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_pat
             ),
             {"prediction_id": prediction_id},
         )
+        neutral_prediction_id = connection.execute(
+            text(
+                """INSERT INTO battle_predictions(
+                       public_id,feature_snapshot_id,symbol,horizon_seconds,current_marker,
+                       prediction_state,result,battle_score,long_probability,
+                       short_probability,neutral_probability,confidence_score,
+                       confidence_label,gross_edge_bps,entry_price,spread_bps,target_bps,
+                       stop_bps,reason_codes_json,components_json,model_key,model_version,
+                       predicted_at_ms,valid_until_ms,created_at
+                   ) SELECT
+                       '33333333-3333-3333-3333-333333333333',feature_snapshot_id,
+                       symbol,900,NULL,prediction_state,'neutral',0,0.2,0.2,0.6,
+                       confidence_score,confidence_label,gross_edge_bps,entry_price,
+                       spread_bps,target_bps,stop_bps,reason_codes_json,components_json,
+                       model_key,model_version,999,1999,created_at
+                   FROM battle_predictions WHERE id=:prediction_id"""
+            ),
+            {"prediction_id": prediction_id},
+        ).lastrowid
+        connection.execute(
+            text(
+                """INSERT INTO prediction_outcomes(
+                       prediction_id,status,actual_result,exit_price,raw_return_bps,
+                       directional_return_bps,max_favorable_bps,max_adverse_bps,
+                       hit_result,last_observed_price,last_observed_at_ms,cost_bps,
+                       due_at_ms,completed_at_ms,label_version,created_at,updated_at
+                   ) VALUES(
+                       :prediction_id,'completed','neutral',100,0,0,0,0,
+                       'neither',100,1999,2,1999,1999,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+                   )"""
+            ),
+            {"prediction_id": neutral_prediction_id},
+        )
 
     history = repository.prediction_history(page=99)
 
     assert history["page"] == 1
     assert history["page_size"] == 50
     assert history["total"] == 1
+    assert history["statistics"] == {
+        "total": 1,
+        "long_count": 1,
+        "short_count": 0,
+        "hit_rate": 1.0,
+        "avg_return_bps": 98.0,
+    }
     assert history["items"][0] == {
         "public_id": "22222222-2222-2222-2222-222222222222",
         "symbol": "TESTUSDT",

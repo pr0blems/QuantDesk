@@ -406,15 +406,48 @@ class MonitorRepository:
             },
         }
 
-    def prediction_history(self, page: int, page_size: int = 50) -> dict[str, Any]:
+    def prediction_history(
+        self,
+        page: int,
+        page_size: int = 50,
+        *,
+        direction: str | None = None,
+        horizon_seconds: int | None = None,
+        hit: str | None = None,
+    ) -> dict[str, Any]:
         """Return one newest-first page of battle predictions and their labels."""
+        if direction not in {None, "long", "short"}:
+            raise MonitorUnavailable("unknown prediction direction")
+        if horizon_seconds not in {None, 300, 900, 3_600}:
+            raise MonitorUnavailable("unknown prediction horizon")
+        if hit not in {None, "hit", "miss"}:
+            raise MonitorUnavailable("unknown prediction hit filter")
+        filter_params = (
+            direction,
+            direction,
+            horizon_seconds,
+            horizon_seconds,
+            hit,
+            hit,
+            hit,
+        )
         total_rows = self._query(
-            """SELECT COUNT(*) total
+            """SELECT COUNT(*) total,
+                       SUM(CASE WHEN p.result='long' THEN 1 ELSE 0 END) long_count,
+                       SUM(CASE WHEN p.result='short' THEN 1 ELSE 0 END) short_count,
+                       AVG(CASE WHEN o.directional_return_bps>0 THEN 1 ELSE 0 END) hit_rate,
+                       AVG(o.directional_return_bps) avg_return_bps
                FROM battle_predictions p
                JOIN prediction_outcomes o ON o.prediction_id=p.id
-               WHERE o.status='completed'"""
+               WHERE o.status='completed' AND p.result IN ('long','short')
+                 AND (? IS NULL OR p.result=?)
+                 AND (? IS NULL OR p.horizon_seconds=?)
+                 AND (? IS NULL OR (?='hit' AND o.directional_return_bps>0)
+                                OR (?='miss' AND o.directional_return_bps<=0))""",
+            filter_params,
         )
-        total = int(total_rows[0].get("total") or 0) if total_rows else 0
+        totals = total_rows[0] if total_rows else {}
+        total = int(totals.get("total") or 0)
         pages = max(1, math.ceil(total / page_size))
         current_page = min(max(1, page), pages)
         offset = (current_page - 1) * page_size
@@ -430,10 +463,14 @@ class MonitorRepository:
                       o.hit_result,o.cost_bps,o.due_at_ms,o.completed_at_ms
                FROM battle_predictions p
                JOIN prediction_outcomes o ON o.prediction_id=p.id
-               WHERE o.status='completed'
+               WHERE o.status='completed' AND p.result IN ('long','short')
+                 AND (? IS NULL OR p.result=?)
+                 AND (? IS NULL OR p.horizon_seconds=?)
+                 AND (? IS NULL OR (?='hit' AND o.directional_return_bps>0)
+                                OR (?='miss' AND o.directional_return_bps<=0))
                ORDER BY p.predicted_at_ms DESC,p.id DESC
                LIMIT ? OFFSET ?""",
-            (page_size, offset),
+            (*filter_params, page_size, offset),
         )
         numeric_fields = (
             "battle_score",
@@ -474,6 +511,21 @@ class MonitorRepository:
             "page_size": page_size,
             "pages": pages,
             "total": total,
+            "statistics": {
+                "total": total,
+                "long_count": int(totals.get("long_count") or 0),
+                "short_count": int(totals.get("short_count") or 0),
+                "hit_rate": (
+                    None
+                    if totals.get("hit_rate") is None
+                    else _finite_number(totals["hit_rate"])
+                ),
+                "avg_return_bps": (
+                    None
+                    if totals.get("avg_return_bps") is None
+                    else _finite_number(totals["avg_return_bps"])
+                ),
+            },
         }
 
     def alerts(self, user_id: int, limit: int) -> list[dict[str, Any]]:

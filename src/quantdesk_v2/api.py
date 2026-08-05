@@ -1425,9 +1425,18 @@ def monitor_intelligence(
 def monitor_prediction_history(
     request: Request,
     page: int = Query(default=1, ge=1),
+    direction: str | None = Query(default=None, pattern="^(long|short)$"),
+    horizon: int | None = None,
+    hit: str | None = Query(default=None, pattern="^(hit|miss)$"),
     _: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return _monitor(request).prediction_history(page, page_size=50)
+    return _monitor(request).prediction_history(
+        page,
+        page_size=50,
+        direction=direction,
+        horizon_seconds=horizon,
+        hit=hit,
+    )
 
 
 def _matching_strategies(db: Session, user_id: int) -> dict[str, list[dict[str, Any]]]:

@@ -12,7 +12,14 @@ class ContractMonitor extends HTMLElement {
       watchlist: new Set(),
       lastAlertId: 0,
       modal: { symbol: null, tf: "1h", opportunity: null },
-      history: { page: 1, pages: 1, total: 0, loading: false },
+      history: {
+        page: 1,
+        pages: 1,
+        total: 0,
+        loading: false,
+        statistics: null,
+        filters: { direction: "all", horizon: "all", hit: "all" },
+      },
       matrixSort: { key: "ai", direction: "desc" },
       sound: true,
       notifyOn: false,
@@ -34,7 +41,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-16">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-18">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -147,10 +154,23 @@ class ContractMonitor extends HTMLElement {
           <div class="modal-head prediction-history-head">
             <div>
               <strong id="prediction-history-title" class="modal-symbol">历史预测</strong>
-              <span class="dim">仅显示已出结果 · 按判断时间倒序 · 每页固定 50 条</span>
+              <span class="dim">仅显示已出结果的看多 / 看空预测 · 按判断时间倒序 · 每页固定 50 条</span>
             </div>
             <button id="prediction-history-close" type="button">关闭</button>
           </div>
+          <section class="prediction-history-overview" aria-label="历史预测统计与筛选">
+            <div class="prediction-history-stats">
+              <article><span>方向样本</span><strong id="history-stat-total">--</strong></article>
+              <article><span>方向命中率</span><strong id="history-stat-hit-rate">--</strong></article>
+              <article><span>成本后平均</span><strong id="history-stat-return">--</strong></article>
+              <article><span>看多 / 看空</span><strong id="history-stat-directions">--</strong></article>
+            </div>
+            <div class="prediction-history-filters">
+              <div><span>方向</span><button class="on" type="button" data-history-filter="direction" data-filter-value="all">全部</button><button type="button" data-history-filter="direction" data-filter-value="long">看多</button><button type="button" data-history-filter="direction" data-filter-value="short">看空</button></div>
+              <div><span>周期</span><button class="on" type="button" data-history-filter="horizon" data-filter-value="all">全部</button><button type="button" data-history-filter="horizon" data-filter-value="300">5m</button><button type="button" data-history-filter="horizon" data-filter-value="900">15m</button><button type="button" data-history-filter="horizon" data-filter-value="3600">1h</button></div>
+              <div><span>结果</span><button class="on" type="button" data-history-filter="hit" data-filter-value="all">全部</button><button type="button" data-history-filter="hit" data-filter-value="hit">命中</button><button type="button" data-history-filter="hit" data-filter-value="miss">未命中</button></div>
+            </div>
+          </section>
           <div class="prediction-history-table-wrap">
             <table class="prediction-history-table">
               <thead><tr>
@@ -448,6 +468,12 @@ class ContractMonitor extends HTMLElement {
     });
     this.qa("[data-history-page]").forEach((button) => {
       button.addEventListener("click", () => this.changePredictionHistoryPage(button.dataset.historyPage));
+    });
+    this.qa("[data-history-filter]").forEach((button) => {
+      button.addEventListener("click", () => this.setPredictionHistoryFilter(
+        button.dataset.historyFilter,
+        button.dataset.filterValue,
+      ));
     });
     this.q("#watchlist-import-close").addEventListener("click", () => this.closeWatchlistImport());
     this.q("#watchlist-import").addEventListener("click", (event) => {
@@ -1029,22 +1055,61 @@ class ContractMonitor extends HTMLElement {
     await this.loadPredictionHistory(target);
   }
 
+  async setPredictionHistoryFilter(name, value) {
+    if (this.state.history.loading || !["direction", "horizon", "hit"].includes(name)) return;
+    if (this.state.history.filters[name] === value) return;
+    this.state.history.filters[name] = value;
+    this.renderPredictionHistoryFilters();
+    await this.loadPredictionHistory(1);
+  }
+
+  renderPredictionHistoryFilters() {
+    this.qa("[data-history-filter]").forEach((button) => {
+      button.classList.toggle(
+        "on",
+        this.state.history.filters[button.dataset.historyFilter] === button.dataset.filterValue,
+      );
+    });
+  }
+
   async loadPredictionHistory(page) {
     const body = this.q("#prediction-history-body");
     this.state.history.loading = true;
     body.innerHTML = '<tr><td colspan="11" class="history-empty">正在加载历史预测…</td></tr>';
     try {
-      const data = await this.api(`/prediction-history?page=${Math.max(1, Number(page) || 1)}`);
+      const query = new URLSearchParams({ page: String(Math.max(1, Number(page) || 1)) });
+      const { direction, horizon, hit } = this.state.history.filters;
+      if (direction !== "all") query.set("direction", direction);
+      if (horizon !== "all") query.set("horizon", horizon);
+      if (hit !== "all") query.set("hit", hit);
+      const data = await this.api(`/prediction-history?${query}`);
       this.state.history.page = Number(data.page) || 1;
       this.state.history.pages = Number(data.pages) || 1;
       this.state.history.total = Number(data.total) || 0;
+      this.state.history.statistics = data.statistics || null;
       this.renderPredictionHistory(data.items || []);
+      this.renderPredictionHistoryStatistics();
     } catch (error) {
       body.innerHTML = `<tr><td colspan="11" class="history-empty history-error">${this.escape(error.message || "历史预测加载失败")}</td></tr>`;
     } finally {
       this.state.history.loading = false;
       this.renderPredictionHistoryPager();
     }
+  }
+
+  renderPredictionHistoryStatistics() {
+    const statistics = this.state.history.statistics || {};
+    const total = Number(statistics.total) || 0;
+    const hitRate = statistics.hit_rate == null ? "--" : `${(Number(statistics.hit_rate) * 100).toFixed(1)}%`;
+    const average = statistics.avg_return_bps == null
+      ? "--"
+      : `${Number(statistics.avg_return_bps) >= 0 ? "+" : ""}${Number(statistics.avg_return_bps).toFixed(2)} bps`;
+    this.q("#history-stat-total").textContent = total.toLocaleString("zh-CN");
+    this.q("#history-stat-hit-rate").textContent = hitRate;
+    this.q("#history-stat-return").textContent = average;
+    this.q("#history-stat-return").className = statistics.avg_return_bps == null
+      ? "history-neutral" : Number(statistics.avg_return_bps) >= 0 ? "history-hit" : "history-miss";
+    this.q("#history-stat-directions").innerHTML = `<span class="history-long">${Number(statistics.long_count || 0).toLocaleString("zh-CN")}</span> / <span class="history-short">${Number(statistics.short_count || 0).toLocaleString("zh-CN")}</span>`;
   }
 
   renderPredictionHistory(items) {
