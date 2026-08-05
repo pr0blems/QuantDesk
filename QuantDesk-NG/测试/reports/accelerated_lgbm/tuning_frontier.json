@@ -1,0 +1,62 @@
+{
+  "0.7525": {
+    "samples": 372,
+    "precision": 0.7526881720430108,
+    "direction_weight": 0.85,
+    "terminal_weight": 0,
+    "event_direction_weight": 0.15000000000000002,
+    "occurrence_weight": 0.75,
+    "occurrence_threshold": 0.8750000000000003,
+    "confidence_threshold": 0.7811713414481873
+  },
+  "0.755": {
+    "samples": 369,
+    "precision": 0.7560975609756098,
+    "direction_weight": 0.85,
+    "terminal_weight": 0,
+    "event_direction_weight": 0.15000000000000002,
+    "occurrence_weight": 0.75,
+    "occurrence_threshold": 0.8750000000000003,
+    "confidence_threshold": 0.7814592955448803
+  },
+  "0.7575": {
+    "samples": 324,
+    "precision": 0.7592592592592593,
+    "direction_weight": 0.7,
+    "terminal_weight": 0.15,
+    "event_direction_weight": 0.15000000000000005,
+    "occurrence_weight": 0.75,
+    "occurrence_threshold": 0.8500000000000003,
+    "confidence_threshold": 0.7893951245228679
+  },
+  "0.76": {
+    "samples": 321,
+    "precision": 0.7601246105919003,
+    "direction_weight": 0.7,
+    "terminal_weight": 0.15,
+    "event_direction_weight": 0.15000000000000005,
+    "occurrence_weight": 0.5,
+    "occurrence_threshold": 0.8500000000000003,
+    "confidence_threshold": 0.7893800948747287
+  },
+  "0.765": {
+    "samples": 305,
+    "precision": 0.7672131147540984,
+    "direction_weight": 0.7,
+    "terminal_weight": 0.15,
+    "event_direction_weight": 0.15000000000000005,
+    "occurrence_weight": 0.75,
+    "occurrence_threshold": 0.8500000000000003,
+    "confidence_threshold": 0.7904391718965315
+  },
+  "0.77": {
+    "samples": 301,
+    "precision": 0.770764119601329,
+    "direction_weight": 0.7,
+    "terminal_weight": 0.15,
+    "event_direction_weight": 0.15000000000000005,
+    "occurrence_weight": 0.5,
+    "occurrence_threshold": 0.8500000000000003,
+    "confidence_threshold": 0.7904391718965315
+  }
+}
