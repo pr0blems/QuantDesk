@@ -61,6 +61,34 @@ button { cursor: pointer; }
 .badge.err { color: var(--m-down); background: rgba(246, 70, 93, .13); }
 .badge.stale { color: var(--m-gold); background: rgba(240, 185, 11, .12); }
 
+.market-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--m-border); background: #10120f; }
+.market-tab { min-width: 220px; display: grid; gap: 1px; padding: 8px 16px; border: 0; border-right: 1px solid var(--m-border); border-bottom: 2px solid transparent; background: transparent; color: var(--m-dim); text-align: left; }
+.market-tab span { font-size: 13px; font-weight: 800; }
+.market-tab small { font-size: 9px; }
+.market-tab:hover { color: var(--m-text); background: rgba(255, 255, 255, .025); }
+.market-tab.active { border-bottom-color: var(--m-gold); background: color-mix(in srgb, var(--m-gold) 8%, transparent); color: var(--m-gold); }
+.market-view { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.us-market-view { padding: 7px; }
+.us-market-panel { min-height: 0; flex: 1; }
+.us-panel-title > div:first-child { display: grid; }
+.us-panel-title > div:first-child small { color: var(--m-dim); font-size: 9px; font-weight: 400; }
+.us-filters input { width: 140px; }
+.us-stock-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.us-stock-card { min-height: 174px; cursor: default; }
+.us-stock-card:hover { border-color: color-mix(in srgb, var(--m-gold) 45%, var(--m-border)); }
+.us-stock-card.unavailable { opacity: .68; }
+.us-source { flex: 0 0 auto; padding: 1px 5px; border: 1px solid color-mix(in srgb, var(--m-gold) 45%, transparent); color: var(--m-gold); font-size: 9px; }
+.us-session-row { display: flex; justify-content: space-between; gap: 8px; margin-top: 20px; color: var(--m-dim); }
+.us-session-row strong { color: var(--m-neutral); font-size: 11px; }
+.us-ohlc { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-top: 10px; }
+.us-ohlc span { min-width: 0; display: grid; gap: 2px; padding: 6px; background: var(--m-bg); }
+.us-ohlc em { color: var(--m-dim); font-size: 9px; font-style: normal; }
+.us-ohlc b { overflow: hidden; color: var(--m-text); font-size: 11px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; }
+.us-card-foot { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px; color: var(--m-dim); font-size: 9px; }
+.us-waiting { margin-top: 28px; color: var(--m-dim); font-size: 13px; }
+.us-empty { display: grid; gap: 5px; }
+.us-empty strong { color: var(--m-neutral); }
+
 .monitor-layout { flex: 1; min-height: 0; display: flex; gap: 7px; padding: 7px; }
 .intelligence-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--m-border); background: var(--m-border); }
 .intelligence-strip article { min-width: 0; padding: 8px 12px; background: var(--m-panel); }
@@ -283,6 +311,8 @@ button { cursor: pointer; }
 
 @media (max-width: 620px) {
   .monitor { border-radius: 8px; }
+  .market-tab { min-width: 0; flex: 1; padding: 8px 10px; }
+  .market-tab small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .monitor-head { display: grid; }
   .monitor-actions { justify-content: flex-start; }
   .intelligence-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -293,6 +323,7 @@ button { cursor: pointer; }
   .grid-panel { min-height: 75vh; }
   .contract-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
   .contract-card { padding-right: 10px; padding-left: 10px; }
+  .us-stock-grid { grid-template-columns: 1fr; }
   .band-card-head { gap: 5px; }
   .monitor-side { grid-template-columns: 1fr; }
   .modal { align-items: flex-start; padding: 6px; }

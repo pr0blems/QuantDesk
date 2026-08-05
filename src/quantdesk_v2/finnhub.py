@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from urllib.parse import urlencode, urlsplit
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_WEBHOOK_BYTES = 64 * 1024
 MARKET_STATUS_PATH = "/api/v1/stock/market-status"
+QUOTE_PATH = "/api/v1/quote"
 MarketSession = Literal["pre-market", "regular", "post-market"]
 Transport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
 
@@ -52,6 +54,22 @@ class FinnhubMarketStatusResult:
     cached: bool = False
     stale: bool = False
     error_category: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FinnhubQuote:
+    symbol: str
+    price: float
+    change: float | None
+    change_percent: float | None
+    day_high: float | None
+    day_low: float | None
+    day_open: float | None
+    previous_close: float | None
+    source_timestamp: int
+    fetched_at: datetime
+    volume: float | None = None
+    live: bool = False
 
 
 def _https_transport(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
@@ -116,13 +134,42 @@ class FinnhubClient:
             raise FinnhubClientError("not_configured")
         if exchange != "US":
             raise FinnhubClientError("rejected")
-        url = f"{self.base_url}{MARKET_STATUS_PATH}?{urlencode({'exchange': exchange})}"
+        payload = self._get_json(
+            MARKET_STATUS_PATH,
+            {"exchange": exchange},
+            user_agent="QuantDesk/2 FinnhubMarketStatus",
+        )
+        return _parse_market_status(payload, exchange)
+
+    def quote(self, symbol: str) -> FinnhubQuote:
+        normalized = symbol.strip().upper()
+        if not normalized or len(normalized) > 16 or not all(
+            character.isalnum() or character in {".", "-"} for character in normalized
+        ):
+            raise FinnhubClientError("rejected")
+        payload = self._get_json(
+            QUOTE_PATH,
+            {"symbol": normalized},
+            user_agent="QuantDesk/2 FinnhubUsQuotes",
+        )
+        return _parse_quote(payload, normalized)
+
+    def _get_json(
+        self,
+        path: str,
+        params: dict[str, str],
+        *,
+        user_agent: str,
+    ) -> Any:
+        if not self.configured:
+            raise FinnhubClientError("not_configured")
+        url = f"{self.base_url}{path}?{urlencode(params)}"
         try:
             status, body = self.transport(
                 url,
                 {
                     "Accept": "application/json",
-                    "User-Agent": "QuantDesk/2 FinnhubMarketStatus",
+                    "User-Agent": user_agent,
                     "X-Finnhub-Token": self.api_key,
                 },
                 self.timeout_seconds,
@@ -145,7 +192,7 @@ class FinnhubClient:
             payload = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise FinnhubClientError("invalid_response") from exc
-        return _parse_market_status(payload, exchange)
+        return payload
 
 
 def _parse_market_status(payload: Any, exchange: str) -> FinnhubMarketStatus:
@@ -178,6 +225,45 @@ def _parse_market_status(payload: Any, exchange: str) -> FinnhubMarketStatus:
         is_open=is_open,
         session=session,
         timezone=timezone,
+        source_timestamp=timestamp,
+        fetched_at=datetime.now(UTC),
+    )
+
+
+def _optional_finite_number(payload: dict[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise FinnhubClientError("invalid_response")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise FinnhubClientError("invalid_response")
+    return numeric
+
+
+def _parse_quote(payload: Any, symbol: str) -> FinnhubQuote:
+    if not isinstance(payload, dict):
+        raise FinnhubClientError("invalid_response")
+    price = _optional_finite_number(payload, "c")
+    timestamp = payload.get("t")
+    if (
+        price is None
+        or price <= 0
+        or isinstance(timestamp, bool)
+        or not isinstance(timestamp, int)
+        or timestamp <= 0
+    ):
+        raise FinnhubClientError("no_data")
+    return FinnhubQuote(
+        symbol=symbol,
+        price=price,
+        change=_optional_finite_number(payload, "d"),
+        change_percent=_optional_finite_number(payload, "dp"),
+        day_high=_optional_finite_number(payload, "h"),
+        day_low=_optional_finite_number(payload, "l"),
+        day_open=_optional_finite_number(payload, "o"),
+        previous_close=_optional_finite_number(payload, "pc"),
         source_timestamp=timestamp,
         fetched_at=datetime.now(UTC),
     )

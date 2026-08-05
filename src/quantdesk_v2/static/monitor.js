@@ -4,6 +4,10 @@ class ContractMonitor extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this.state = {
       overview: [],
+      activeMarket: "binance",
+      usQuotes: [],
+      usQuoteMeta: null,
+      usMarketStatus: null,
       intelligence: null,
       watchlist: new Set(),
       lastAlertId: 0,
@@ -28,13 +32,13 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260804-14">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-2">
       <div class="monitor">
         <header class="monitor-head">
-          <div class="monitor-logo">⚡ QuantDesk <small>币安 TradFi 合约监控</small></div>
+          <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
           <div class="monitor-actions">
             <span class="clock" id="monitor-clock"></span>
-            <span id="us-market-state" class="badge">美股状态…</span>
+            <span id="us-market-state" class="badge hidden">美股状态…</span>
             <span id="engine-state" class="badge">连接中…</span>
             <button id="btn-refresh" type="button">刷新</button>
             <button id="btn-notify" type="button">通知</button>
@@ -42,6 +46,15 @@ class ContractMonitor extends HTMLElement {
           </div>
         </header>
         <div id="error-banner" class="error-banner hidden"></div>
+        <nav class="market-tabs" role="tablist" aria-label="切换市场数据源">
+          <button class="market-tab active" type="button" role="tab" aria-selected="true" data-market="binance">
+            <span>币安 TradFi 合约</span><small>Binance Futures · USDT 合约</small>
+          </button>
+          <button class="market-tab" type="button" role="tab" aria-selected="false" data-market="finnhub">
+            <span>美股现货</span><small>Finnhub · US Equities</small>
+          </button>
+        </nav>
+        <div id="binance-market-view" class="market-view">
         <section id="intelligence-strip" class="intelligence-strip" aria-label="机会引擎反馈">
           <article><span>实时数据覆盖</span><strong id="intel-coverage">--</strong><small>盘口与逐笔成交</small></article>
           <article><span>活跃扫描器</span><strong id="intel-scanners">--</strong><small id="intel-opportunities">等待数据</small></article>
@@ -84,6 +97,24 @@ class ContractMonitor extends HTMLElement {
               <div id="news" class="news"></div>
             </section>
           </aside>
+        </div>
+        </div>
+        <div id="finnhub-market-view" class="market-view us-market-view hidden">
+          <section class="panel us-market-panel">
+            <div class="panel-title us-panel-title">
+              <div><span>美股现货行情 <em id="us-symbol-count">0/0</em></span><small>独立数据源：Finnhub，不使用 Binance 合约价格</small></div>
+              <div class="filters us-filters">
+                <input id="us-search" aria-label="搜索美股" placeholder="搜索股票…">
+                <select id="us-sort" aria-label="美股排序">
+                  <option value="pct">按涨跌幅</option>
+                  <option value="alpha">按代码</option>
+                  <option value="price">按价格</option>
+                </select>
+              </div>
+            </div>
+            <div id="us-market-summary" class="breadth">正在连接 Finnhub 美股行情…</div>
+            <div id="us-stock-grid" class="contract-grid us-stock-grid"></div>
+          </section>
         </div>
       </div>
       <div id="modal" class="modal hidden">
@@ -154,6 +185,7 @@ class ContractMonitor extends HTMLElement {
     this.timers.push(setInterval(() => this.pollNews(), 30000));
     this.timers.push(setInterval(() => this.pollIntelligence(), 15000));
     this.timers.push(setInterval(() => this.pollUsMarketStatus(), 30000));
+    this.timers.push(setInterval(() => this.pollUsQuotes(), 5000));
     this.timers.push(setInterval(() => this.updateClock(), 1000));
     this.updateClock();
   }
@@ -168,7 +200,7 @@ class ContractMonitor extends HTMLElement {
   async refreshAll() {
     await Promise.allSettled([
       this.pollOverview(), this.pollAlerts(), this.pollNews(), this.pollIntelligence(),
-      this.pollUsMarketStatus(),
+      this.pollUsMarketStatus(), this.pollUsQuotes(),
     ]);
   }
 
@@ -177,16 +209,19 @@ class ContractMonitor extends HTMLElement {
     try {
       if (typeof window.quantdeskApi !== "function") throw new Error("认证服务尚未就绪");
       const status = await window.quantdeskApi("/api/v2/market/us/status");
+      this.state.usMarketStatus = status;
       if (!status.configured) {
         badge.textContent = "美股状态未配置";
         badge.className = "badge stale";
         badge.title = "服务器尚未配置 Finnhub API Key";
+        this.renderUsMarketSummary();
         return;
       }
       if (!status.available) {
         badge.textContent = "美股状态异常";
         badge.className = "badge err";
         badge.title = `Finnhub：${status.error_category || "upstream"}`;
+        this.renderUsMarketSummary();
         return;
       }
       const labels = {
@@ -200,14 +235,141 @@ class ContractMonitor extends HTMLElement {
       badge.textContent = `${label}${status.stale ? " · 延迟" : ""}`;
       badge.className = status.stale ? "badge stale" : (status.session === "regular" ? "badge ok" : "badge");
       badge.title = `Finnhub · ${status.timezone || "America/New_York"}`;
+      this.renderUsMarketSummary();
     } catch (_) {
+      this.state.usMarketStatus = null;
       badge.textContent = "美股状态连接失败";
       badge.className = "badge err";
       badge.title = "无法读取服务器的美股市场状态";
+      this.renderUsMarketSummary();
     }
   }
 
+  switchMarket(market) {
+    if (!['binance', 'finnhub'].includes(market)) return;
+    this.state.activeMarket = market;
+    const isFinnhub = market === "finnhub";
+    this.q("#binance-market-view").classList.toggle("hidden", isFinnhub);
+    this.q("#finnhub-market-view").classList.toggle("hidden", !isFinnhub);
+    this.q("#engine-state").classList.toggle("hidden", isFinnhub);
+    this.q("#us-market-state").classList.toggle("hidden", !isFinnhub);
+    this.q(".monitor-logo small").textContent = isFinnhub
+      ? "Finnhub 美股现货"
+      : "币安 TradFi 合约监控";
+    this.qa(".market-tab").forEach((button) => {
+      const active = button.dataset.market === market;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    if (isFinnhub) {
+      this.renderUsMarketSummary();
+      this.renderUsGrid();
+    }
+  }
+
+  async pollUsQuotes() {
+    try {
+      if (typeof window.quantdeskApi !== "function") throw new Error("认证服务尚未就绪");
+      const data = await window.quantdeskApi("/api/v2/market/us/quotes");
+      const previousPrices = new Map(
+        this.state.usQuotes.map((item) => [item.symbol, Number(item.price)]),
+      );
+      this.state.usQuoteMeta = data;
+      this.state.usQuotes = Array.isArray(data.quotes) ? data.quotes : [];
+      this.state.usQuotes.forEach((item) => {
+        const previous = previousPrices.get(item.symbol);
+        const current = Number(item.price);
+        if (Number.isFinite(previous) && Number.isFinite(current) && current !== previous) {
+          item.priceMove = current > previous ? "up" : "down";
+        }
+      });
+      this.renderUsMarketSummary();
+      this.renderUsGrid();
+    } catch (error) {
+      this.state.usQuoteMeta = { configured: false, error: error.message || "连接失败" };
+      this.renderUsMarketSummary();
+      this.renderUsGrid();
+    }
+  }
+
+  renderUsMarketSummary() {
+    const element = this.q("#us-market-summary");
+    if (!element) return;
+    const meta = this.state.usQuoteMeta;
+    const status = this.state.usMarketStatus;
+    if (!meta?.configured) {
+      element.textContent = "Finnhub 尚未配置或连接失败；这里不会回退显示 Binance 合约数据。";
+      return;
+    }
+    const sessionLabels = {
+      "pre-market": "盘前交易",
+      regular: "正常交易",
+      "post-market": "盘后交易",
+    };
+    const session = status?.holiday
+      ? `休市 · ${status.holiday}`
+      : (sessionLabels[status?.session] || "休市");
+    const feed = meta.stream_connected ? "WebSocket 实时成交" : "REST 低频快照";
+    element.textContent = `美国市场：${session} · ${feed} · 已有报价 ${Number(meta.available) || 0}/${Number(meta.total) || 0}`;
+  }
+
+  renderUsGrid() {
+    const grid = this.q("#us-stock-grid");
+    if (!grid) return;
+    const keyword = this.q("#us-search").value.trim().toUpperCase();
+    const sort = this.q("#us-sort").value;
+    let items = this.state.usQuotes.filter((item) => !keyword || item.symbol.includes(keyword));
+    items.sort((left, right) => {
+      if (left.available !== right.available) return right.available ? 1 : -1;
+      if (sort === "alpha") return left.symbol.localeCompare(right.symbol);
+      if (sort === "price") return (right.price ?? -1) - (left.price ?? -1);
+      return (right.change_percent ?? -999) - (left.change_percent ?? -999);
+    });
+    this.q("#us-symbol-count").textContent = `${items.length}/${this.state.usQuotes.length}`;
+    if (!this.state.usQuoteMeta?.configured) {
+      grid.innerHTML = '<div class="empty us-empty"><strong>Finnhub 美股行情未配置</strong><span>请检查服务器 FINNHUB_API_KEY。币安合约数据不会显示在这个市场页。</span></div>';
+      return;
+    }
+    grid.innerHTML = items.map((item) => {
+      const pctClass = item.change_percent == null ? "dim" : item.change_percent > 0 ? "up" : item.change_percent < 0 ? "down" : "flat";
+      const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
+      const sourceLabel = item.live ? "实时成交" : item.available ? "报价快照" : "等待数据";
+      const timeLabel = item.source_timestamp
+        ? new Date(Number(item.source_timestamp) * 1000).toLocaleTimeString("zh-CN", { hour12: false })
+        : "--";
+      if (!item.available) {
+        return `<article class="contract-card us-stock-card unavailable">
+          <header class="band-card-head"><div class="symbol">${this.escape(item.symbol)}</div><span class="us-source">Finnhub</span></header>
+          <div class="us-waiting">等待 Finnhub 报价</div>
+          <footer class="us-card-foot"><span>${this.escape(item.error_category || "排队采集中")}</span><span>非 Binance 数据</span></footer>
+        </article>`;
+      }
+      return `<article class="contract-card us-stock-card ${moveClass}">
+        <header class="band-card-head">
+          <div class="symbol">${this.escape(item.symbol)}</div><span class="us-source">Finnhub</span>
+          <div class="price">${this.formatPrice(item.price)}</div>
+          <div class="pct ${pctClass}">${this.formatPercent(item.change_percent)}</div>
+        </header>
+        <div class="us-session-row"><strong>${sourceLabel}</strong><span>${item.stale ? "数据延迟" : timeLabel}</span></div>
+        <div class="us-ohlc">
+          <span><em>开盘</em><b>${this.formatPrice(item.day_open)}</b></span>
+          <span><em>最高</em><b>${this.formatPrice(item.day_high)}</b></span>
+          <span><em>最低</em><b>${this.formatPrice(item.day_low)}</b></span>
+          <span><em>昨收</em><b>${this.formatPrice(item.previous_close)}</b></span>
+        </div>
+        <footer class="us-card-foot"><span>US 现货</span><span>${item.live ? "WS" : "REST"}</span></footer>
+      </article>`;
+    }).join("") || '<div class="empty">没有符合条件的美股代码</div>';
+    items.forEach((item) => { item.priceMove = null; });
+  }
+
   bindEvents() {
+    this.qa(".market-tab").forEach((button) => {
+      button.addEventListener("click", () => this.switchMarket(button.dataset.market));
+    });
+    ["us-search", "us-sort"].forEach((id) => {
+      this.q(`#${id}`).addEventListener("input", () => this.renderUsGrid());
+    });
     ["search", "filter", "sort"].forEach((id) => {
       this.q(`#${id}`).addEventListener("input", () => this.renderGrid());
     });

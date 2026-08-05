@@ -40,6 +40,9 @@
 - 美股交易时段使用 Finnhub 官方 Market Status。将新生成的 Token 作为服务端环境变量
   `FINNHUB_API_KEY` 注入后重启服务；浏览器通过公开只读接口
   `GET /api/v2/market/us/status` 读取盘前、正常交易、盘后或休市状态，Token 不会下发前端。
+- `/monitor` 使用两个独立市场页签：Binance TradFi 合约继续读取 Binance 行情；美股现货只读取
+  Finnhub 服务端缓存及 `GET /api/v2/market/us/quotes`，不会用 Binance 合约价格回退或补位。
+  Finnhub 实时成交由单个服务端 WebSocket 连接接收，REST Quote 只作为低频快照补充。
 - Finnhub Dashboard 的 Webhook URL 填写
   `https://binance.taoz.chat/api/v2/integrations/finnhub/webhook`，并将 Dashboard 显示的 Secret
   配置为服务端 `FINNHUB_WEBHOOK_SECRET`。回调必须使用 POST 和 `X-Finnhub-Secret` 请求头。
@@ -49,7 +52,7 @@
 
 ## 主要页面
 
-- `/monitor`：合约监控
+- `/monitor`：Binance TradFi 合约与 Finnhub 美股现货双市场监控（数据源隔离）
 - `/paper`：多账户模拟盘
 - `/strategies`：用户策略与 AI 语义编辑
 - `/backtest`：策略数据回测

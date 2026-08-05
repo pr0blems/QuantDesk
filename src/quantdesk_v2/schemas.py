@@ -126,6 +126,36 @@ class FinnhubWebhookAcceptedOut(BaseModel):
     accepted: Literal[True] = True
 
 
+class FinnhubUsQuoteOut(BaseModel):
+    symbol: str
+    available: bool
+    price: float | None = None
+    change: float | None = None
+    change_percent: float | None = None
+    day_high: float | None = None
+    day_low: float | None = None
+    day_open: float | None = None
+    previous_close: float | None = None
+    source_timestamp: int | None = None
+    fetched_at: datetime | None = None
+    volume: float | None = None
+    live: bool = False
+    stale: bool = False
+    error_category: str | None = None
+
+
+class FinnhubUsQuotesOut(BaseModel):
+    configured: bool
+    source: Literal["finnhub"] = "finnhub"
+    exchange: Literal["US"] = "US"
+    total: int
+    available: int
+    stream_connected: bool
+    stream_error: str | None = None
+    updated_at: datetime | None = None
+    quotes: list[FinnhubUsQuoteOut]
+
+
 class AdminAlertRulesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

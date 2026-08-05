@@ -69,6 +69,7 @@ from .schemas import (
     BinancePerformanceOut,
     BinanceTradingState,
     DashboardPerformanceOut,
+    FinnhubUsQuotesOut,
     FinnhubWebhookAcceptedOut,
     FinnhubWebhookStatusOut,
     HealthOut,
@@ -815,6 +816,14 @@ def us_market_status(
     response.headers["Cache-Control"] = "public, max-age=5, stale-if-error=60"
     result = request.app.state.finnhub_market_status_service.status()
     return UsMarketStatusOut(**asdict(result))
+
+
+@router.get("/market/us/quotes", response_model=FinnhubUsQuotesOut)
+def us_market_quotes(request: Request, response: Response) -> FinnhubUsQuotesOut:
+    """Return the independent Finnhub US equity cache, never Binance contracts."""
+
+    response.headers["Cache-Control"] = "public, max-age=2, stale-if-error=30"
+    return FinnhubUsQuotesOut(**request.app.state.finnhub_us_quote_service.snapshot())
 
 
 @router.get(

@@ -222,6 +222,43 @@ def fetch_tickers() -> Any:
     return _get(f"{FAPI}/fapi/v1/ticker/24hr", timeout=20)
 
 
+def _public_symbol(symbol: str) -> str:
+    normalized = str(symbol).strip().upper()
+    if not 2 <= len(normalized) <= 32 or not normalized.isalnum():
+        raise ValueError("invalid Binance symbol")
+    return normalized
+
+
+def fetch_open_interest(symbol: str) -> dict[str, Any]:
+    query = urllib.parse.urlencode({"symbol": _public_symbol(symbol)})
+    payload = _get(f"{FAPI}/fapi/v1/openInterest?{query}", timeout=10, retries=1)
+    return payload if isinstance(payload, dict) else {}
+
+
+def fetch_global_long_short_ratio(symbol: str) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {"symbol": _public_symbol(symbol), "period": "5m", "limit": 2}
+    )
+    payload = _get(
+        f"{FAPI}/futures/data/globalLongShortAccountRatio?{query}",
+        timeout=10,
+        retries=1,
+    )
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
+def fetch_taker_buy_sell_ratio(symbol: str) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {"symbol": _public_symbol(symbol), "period": "5m", "limit": 2}
+    )
+    payload = _get(
+        f"{FAPI}/futures/data/takerlongshortRatio?{query}",
+        timeout=10,
+        retries=1,
+    )
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
 def fetch_klines(symbol: str, interval: str, limit: int = 300) -> list[tuple]:
     query = urllib.parse.urlencode(
         {"symbol": symbol, "interval": interval, "limit": limit}

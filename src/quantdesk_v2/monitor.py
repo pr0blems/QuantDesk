@@ -122,6 +122,44 @@ class MonitorRepository:
         for row in score_rows:
             scores.setdefault(row["symbol"], {})[row["tf"]] = row["score"]
 
+        try:
+            battle_rows = self._query(
+                """SELECT p.*,f.quality_score FROM battle_predictions p
+                   JOIN prediction_feature_snapshots f ON f.id=p.feature_snapshot_id
+                   WHERE p.current_marker=1 ORDER BY p.symbol,p.horizon_seconds"""
+            )
+        except Exception:
+            # Keep the monitor usable while a deployment is rolling through
+            # the battle-prediction migration.
+            battle_rows = []
+        horizon_names = {300: "5m", 900: "15m", 3_600: "1h"}
+        battles: dict[str, dict[str, dict[str, Any]]] = {}
+        now_ms = int(time.time() * 1_000)
+        for row in battle_rows:
+            horizon = horizon_names.get(
+                int(row["horizon_seconds"]), str(row["horizon_seconds"])
+            )
+            state = str(row["prediction_state"])
+            if int(row.get("valid_until_ms") or 0) < now_ms:
+                state = "data_insufficient"
+            battles.setdefault(str(row["symbol"]), {})[horizon] = {
+                "id": row.get("public_id"),
+                "horizon_seconds": int(row["horizon_seconds"]),
+                "state": state,
+                "result": row.get("result"),
+                "battle_score": _finite_number(row.get("battle_score")),
+                "long": round(float(row.get("long_probability") or 0) * 100, 1),
+                "short": round(float(row.get("short_probability") or 0) * 100, 1),
+                "neutral": round(float(row.get("neutral_probability") or 0) * 100, 1),
+                "confidence": {"low": "低", "medium": "中", "high": "高"}.get(
+                    str(row.get("confidence_label")), "低"
+                ),
+                "confidence_score": _finite_number(row.get("confidence_score")),
+                "data_quality": _finite_number(row.get("quality_score")),
+                "predicted_at_ms": int(row.get("predicted_at_ms") or 0),
+                "valid_until_ms": int(row.get("valid_until_ms") or 0),
+            }
+
         opportunity_rows = self._query(
             """
             SELECT o.* FROM market_opportunities o
@@ -176,6 +214,7 @@ class MonitorRepository:
                     "position": None,
                     "trending": base in trending,
                     "opportunity": opportunities.get(symbol),
+                    "battle": battles.get(symbol, {}),
                 }
             )
         return {

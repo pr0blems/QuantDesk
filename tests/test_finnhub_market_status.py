@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from quantdesk_v2 import finnhub
+from quantdesk_v2 import finnhub, finnhub_quotes
 from quantdesk_v2.config import Settings
 from quantdesk_v2.finnhub import (
     FinnhubClient,
@@ -16,7 +17,9 @@ from quantdesk_v2.finnhub import (
     FinnhubMarketStatus,
     FinnhubMarketStatusResult,
     FinnhubMarketStatusService,
+    FinnhubQuote,
 )
+from quantdesk_v2.finnhub_quotes import FinnhubUsQuoteService
 from quantdesk_v2.main import create_app
 
 Transport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
@@ -58,6 +61,39 @@ def test_market_status_uses_fixed_us_endpoint_and_header_auth() -> None:
     assert calls[0][1]["X-Finnhub-Token"] == "server-secret-token"
     assert "server-secret-token" not in calls[0][0]
     assert calls[0][2] == 4
+
+
+def test_quote_uses_finnhub_us_symbol_and_normalizes_snapshot() -> None:
+    calls: list[tuple[str, dict[str, str], float]] = []
+
+    def transport(url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
+        calls.append((url, headers, timeout))
+        return response(
+            200,
+            {
+                "c": 261.74,
+                "d": 2.29,
+                "dp": 0.8826,
+                "h": 263.31,
+                "l": 260.68,
+                "o": 261.07,
+                "pc": 259.45,
+                "t": 1_786_000_000,
+            },
+        )
+
+    quote = FinnhubClient(
+        "https://finnhub.io",
+        "server-secret-token",
+        transport=transport,
+    ).quote("aapl")
+
+    assert quote.symbol == "AAPL"
+    assert quote.price == 261.74
+    assert quote.previous_close == 259.45
+    assert calls[0][0] == "https://finnhub.io/api/v1/quote?symbol=AAPL"
+    assert calls[0][1]["X-Finnhub-Token"] == "server-secret-token"
+    assert "server-secret-token" not in calls[0][0]
 
 
 def test_market_status_redacts_rate_limit_and_invalid_responses() -> None:
@@ -124,6 +160,73 @@ def test_unconfigured_service_never_calls_transport() -> None:
     assert result.error_category == "not_configured"
 
 
+def test_us_quote_service_has_separate_equity_universe_and_stream_cache(monkeypatch) -> None:
+    monkeypatch.setattr(
+        finnhub_quotes,
+        "_load_us_symbols",
+        lambda _path: ("AAPL", "BRK.B"),
+    )
+    service = FinnhubUsQuoteService(
+        FinnhubClient("https://finnhub.io", "secret", transport=lambda *_: response(429, {})),
+        Path("unused.json"),
+        websocket_enabled=False,
+    )
+
+    assert service.symbols == ("AAPL", "BRK.B")
+    service._ingest_stream_message(
+        json.dumps(
+            {
+                "type": "trade",
+                "data": [{"s": "AAPL", "p": 262.1, "t": 1_786_000_000_123, "v": 10}],
+            }
+        )
+    )
+    snapshot = service.snapshot()
+
+    assert snapshot["source"] == "finnhub"
+    assert snapshot["exchange"] == "US"
+    assert snapshot["total"] == 2
+    assert snapshot["available"] == 1
+    assert snapshot["quotes"][0]["symbol"] == "AAPL"
+    assert snapshot["quotes"][0]["price"] == 262.1
+    assert snapshot["quotes"][0]["live"] is True
+
+
+def test_rest_quote_does_not_replace_equal_or_newer_stream_trade(monkeypatch) -> None:
+    monkeypatch.setattr(finnhub_quotes, "_load_us_symbols", lambda _path: ("AAPL",))
+    service = FinnhubUsQuoteService(
+        FinnhubClient("https://finnhub.io", "secret", transport=lambda *_: response(429, {})),
+        Path("unused.json"),
+        websocket_enabled=False,
+    )
+    service._ingest_stream_message(
+        json.dumps(
+            {
+                "type": "trade",
+                "data": [{"s": "AAPL", "p": 262.1, "t": 1_786_000_000_900, "v": 10}],
+            }
+        )
+    )
+    service._store_rest_quote(
+        FinnhubQuote(
+            symbol="AAPL",
+            price=261.5,
+            change=1.0,
+            change_percent=0.4,
+            day_high=263.0,
+            day_low=259.0,
+            day_open=260.0,
+            previous_close=260.5,
+            source_timestamp=1_786_000_000,
+            fetched_at=datetime.now(UTC),
+        )
+    )
+
+    quote = service.snapshot()["quotes"][0]
+    assert quote["price"] == 262.1
+    assert quote["live"] is True
+
+
 def test_public_us_market_status_route() -> None:
     settings = Settings(
         _env_file=None,
@@ -153,11 +256,16 @@ def test_public_us_market_status_route() -> None:
     app.state.finnhub_market_status_service = FakeService()
     with TestClient(app) as client:
         result = client.get("/api/v2/market/us/status")
+        quotes = client.get("/api/v2/market/us/quotes")
 
     assert result.status_code == 200
     assert result.headers["cache-control"] == "public, max-age=5, stale-if-error=60"
     assert result.json()["session"] == "regular"
     assert result.json()["is_open"] is True
+    assert quotes.status_code == 200
+    assert quotes.headers["cache-control"] == "public, max-age=2, stale-if-error=30"
+    assert quotes.json()["source"] == "finnhub"
+    assert quotes.json()["exchange"] == "US"
 
 
 def test_finnhub_webhook_readiness_and_authenticated_post() -> None:

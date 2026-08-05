@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     finnhub_timeout_seconds: float = 5.0
     finnhub_market_status_cache_seconds: int = 30
     finnhub_market_status_stale_seconds: int = 900
+    finnhub_quote_poll_seconds: float = 2.0
+    finnhub_quote_stale_seconds: int = 600
+    finnhub_websocket_enabled: bool = True
 
     monitor_symbols_config: Path = Path("config/tradfi_symbols.json")
 
@@ -177,6 +180,10 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "FINNHUB_MARKET_STATUS_STALE_SECONDS must be between the cache TTL and 3600"
             )
+        if not 1 <= self.finnhub_quote_poll_seconds <= 10:
+            raise RuntimeError("FINNHUB_QUOTE_POLL_SECONDS must be between 1 and 10")
+        if not 60 <= self.finnhub_quote_stale_seconds <= 3_600:
+            raise RuntimeError("FINNHUB_QUOTE_STALE_SECONDS must be between 60 and 3600")
         webhook_secret = self.finnhub_webhook_secret.get_secret_value()
         if webhook_secret and not 16 <= len(webhook_secret) <= 256:
             raise RuntimeError("FINNHUB_WEBHOOK_SECRET must contain 16 to 256 characters")

@@ -22,6 +22,7 @@ from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings, get_settings
 from .database import build_engine, engine
 from .finnhub import FinnhubClient, FinnhubMarketStatusService, FinnhubWebhookReceiver
+from .finnhub_quotes import FinnhubUsQuoteService
 from .strategy_routes import router as strategy_router
 
 FRONTEND_ROUTES = (
@@ -132,18 +133,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # The production ASGI app owns the market collectors and the
             # multi-account paper executor. Explicitly constructed apps are
             # used by tests/tools and must not start perpetual worker threads.
-            from . import live_engine, market_engine, market_store
+            from . import battle, live_engine, market_engine, market_store
 
             market_store.configure_engine(database_engine)
             initialize_admin_runtime(database_engine)
             market_engine.start()
+            battle.start()
             live_engine.configure(
                 runtime_settings,
                 app.state.binance_service,
                 app.state.binance_trading_client,
             )
             live_engine.start()
-        yield
+            app.state.finnhub_us_quote_service.start()
+        try:
+            yield
+        finally:
+            if settings is None:
+                app.state.finnhub_us_quote_service.stop()
 
     app = FastAPI(
         title="QuantDesk V2",
@@ -167,14 +174,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         recv_window_ms=runtime_settings.binance_futures_recv_window_ms,
         timeout_seconds=runtime_settings.binance_futures_timeout_seconds,
     )
+    finnhub_client = FinnhubClient(
+        runtime_settings.finnhub_base_url,
+        runtime_settings.finnhub_api_key.get_secret_value(),
+        timeout_seconds=runtime_settings.finnhub_timeout_seconds,
+    )
     app.state.finnhub_market_status_service = FinnhubMarketStatusService(
-        FinnhubClient(
-            runtime_settings.finnhub_base_url,
-            runtime_settings.finnhub_api_key.get_secret_value(),
-            timeout_seconds=runtime_settings.finnhub_timeout_seconds,
-        ),
+        finnhub_client,
         cache_seconds=runtime_settings.finnhub_market_status_cache_seconds,
         stale_seconds=runtime_settings.finnhub_market_status_stale_seconds,
+    )
+    app.state.finnhub_us_quote_service = FinnhubUsQuoteService(
+        finnhub_client,
+        runtime_settings.monitor_symbols_config,
+        poll_seconds=runtime_settings.finnhub_quote_poll_seconds,
+        stale_seconds=runtime_settings.finnhub_quote_stale_seconds,
+        websocket_enabled=runtime_settings.finnhub_websocket_enabled,
     )
     app.state.finnhub_webhook_receiver = FinnhubWebhookReceiver(
         runtime_settings.finnhub_webhook_secret.get_secret_value()
