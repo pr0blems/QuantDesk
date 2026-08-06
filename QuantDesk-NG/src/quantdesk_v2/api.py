@@ -48,6 +48,7 @@ from .models import (
     utcnow,
 )
 from .monitor import MonitorRepository, MonitorUnavailable
+from .saas import consume_daily_quota, ensure_entitlement, entitlement_snapshot, require_feature
 from .schemas import (
     AiModelConfigCreate,
     AiModelConfigOut,
@@ -211,10 +212,7 @@ def _sync_binance_symbols_to_watchlist(
             if not isinstance(symbol, str):
                 continue
             normalized = symbol.strip().upper()
-            if (
-                not _BINANCE_FUTURES_SYMBOL.fullmatch(normalized)
-                or normalized in active_symbols
-            ):
+            if not _BINANCE_FUTURES_SYMBOL.fullmatch(normalized) or normalized in active_symbols:
                 continue
             active_symbols.append(normalized)
 
@@ -232,9 +230,9 @@ def _sync_binance_symbols_to_watchlist(
     existing_set = set(existing_symbols)
     already_selected = [symbol for symbol in active_symbols if symbol in existing_set]
     available_slots = max(0, MAX_MONITOR_WATCHLIST_SYMBOLS - len(existing_symbols))
-    added_symbols = [
-        symbol for symbol in active_symbols if symbol not in existing_set
-    ][:available_slots]
+    added_symbols = [symbol for symbol in active_symbols if symbol not in existing_set][
+        :available_slots
+    ]
     synced_symbols = [*already_selected, *added_symbols]
     updated_symbols = [
         *synced_symbols,
@@ -737,6 +735,7 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
     db.add(user)
     try:
         db.flush()
+        ensure_entitlement(db, user.id)
         _audit(db, request, "user.register", user.id, "user", str(user.id))
         db.commit()
     except IntegrityError:
@@ -1686,6 +1685,14 @@ def update_monitor_watchlist(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[str]:
+    require_feature(db, user, "market_monitor")
+    entitlement = entitlement_snapshot(db, user.id)
+    max_symbols = int(entitlement["limits"].get("watchlist_symbols", 0))
+    if len(payload.symbols) > max_symbols:
+        raise HTTPException(
+            status_code=403,
+            detail=f"plan allows at most {max_symbols} watchlist symbols",
+        )
     repository = _monitor(request)
     unknown = sorted(set(payload.symbols) - repository.symbol_set)
     if unknown:
@@ -1786,12 +1793,15 @@ def create_paper_account(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    require_feature(db, user, "paper_trading")
+    entitlement = entitlement_snapshot(db, user.id)
     existing_count = db.scalar(
         select(func.count(PaperAccount.id)).where(
             PaperAccount.user_id == user.id, PaperAccount.status != "archived"
         )
     )
-    if int(existing_count or 0) >= 20:
+    plan_limit = int(entitlement["limits"].get("paper_accounts", 0))
+    if int(existing_count or 0) >= plan_limit:
         raise HTTPException(status_code=409, detail="paper account limit reached")
     strategy = get_user_strategy(db, user.id, payload.strategy_id)
     if strategy is None or strategy.status != "active":
@@ -1995,6 +2005,7 @@ def create_backtest(
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     user_id = user.id
+    require_feature(db, user, "backtest")
     ensure_user_default_strategies(db, user_id)
     selected = get_user_strategy(db, user_id, payload.strategy_id)
     database_strategy = (
@@ -2014,6 +2025,10 @@ def create_backtest(
         )
         if selected_revision_id is None:
             raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+    # Count only requests that passed tenant and strategy validation.  The
+    # counter is committed before the CPU-heavy replay so a concurrent worker
+    # cannot exceed the daily entitlement.
+    consume_daily_quota(db, user, "backtest_runs_day")
     db.commit()
     # Authentication only reads from MySQL. End that transaction before the CPU-heavy
     # synchronous replay so a pooled database connection is not held for the whole run.
