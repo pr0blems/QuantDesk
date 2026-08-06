@@ -82,6 +82,7 @@ const panelNames = {
   orders: "订单与持仓",
   risk: "风险控制",
   audit: "审计日志",
+  proxy: "代理管理",
 };
 
 const LOGIN_PATH = "/login";
@@ -96,6 +97,7 @@ const panelPaths = Object.freeze({
   orders: "/orders",
   risk: "/risk",
   audit: "/audit",
+  proxy: "/proxy",
 });
 const panelByPath = new Map(Object.entries(panelPaths).map(([panel, path]) => [path, panel]));
 panelByPath.set("/credentials", "settings");
@@ -330,6 +332,7 @@ function openPanel(name, { historyMode = "push" } = {}) {
   const paper = $("#paper-dashboard");
   const strategies = $("#strategy-center");
   const backtest = $("#backtest-workbench");
+  const proxy = $("#proxy-dashboard");
   if (monitor && selected === "monitor" && typeof monitor.start === "function") monitor.start();
   if (monitor && selected !== "monitor" && typeof monitor.pause === "function") monitor.pause();
   if (paper && selected === "paper" && typeof paper.start === "function") paper.start();
@@ -338,6 +341,8 @@ function openPanel(name, { historyMode = "push" } = {}) {
   if (strategies && selected !== "strategies" && typeof strategies.pause === "function") strategies.pause();
   if (backtest && selected === "backtest" && typeof backtest.start === "function") backtest.start();
   if (backtest && selected !== "backtest" && typeof backtest.pause === "function") backtest.pause();
+  if (proxy && selected === "proxy" && typeof proxy.start === "function") proxy.start();
+  if (proxy && selected !== "proxy" && typeof proxy.pause === "function") proxy.pause();
   if (selected === "overview" && isAuthenticated && authBootResolved) {
     refreshBinanceAccount(currentUserHasBinanceCredentials);
   }
@@ -367,12 +372,14 @@ function setAuthenticated(authenticated) {
     const paper = $("#paper-dashboard");
     const strategies = $("#strategy-center");
     const backtest = $("#backtest-workbench");
+    const proxy = $("#proxy-dashboard");
     if (monitor && typeof monitor.pause === "function") monitor.pause();
     if (paper && typeof paper.pause === "function") paper.pause();
     if (strategies && typeof strategies.resetSession === "function") strategies.resetSession();
     else if (strategies && typeof strategies.pause === "function") strategies.pause();
     if (backtest && typeof backtest.resetSession === "function") backtest.resetSession();
     else if (backtest && typeof backtest.pause === "function") backtest.pause();
+    if (proxy && typeof proxy.pause === "function") proxy.pause();
     closeSidebar();
   }
 }

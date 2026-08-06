@@ -1,0 +1,1368 @@
+{
+  "updated": "2026-08-03",
+  "count": 151,
+  "symbols": [
+    {
+      "symbol": "AAOIUSDT",
+      "pair": "AAOIUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780910700000
+    },
+    {
+      "symbol": "AAPLUSDT",
+      "pair": "AAPLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775483400000
+    },
+    {
+      "symbol": "ADBEUSDT",
+      "pair": "ADBEUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781169900000
+    },
+    {
+      "symbol": "ALABUSDT",
+      "pair": "ALABUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782135600000
+    },
+    {
+      "symbol": "AMATUSDT",
+      "pair": "AMATUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780909800000
+    },
+    {
+      "symbol": "AMDUSDT",
+      "pair": "AMDUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778074200000
+    },
+    {
+      "symbol": "AMZNUSDT",
+      "pair": "AMZNUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1770648000000
+    },
+    {
+      "symbol": "ANTHROPICUSDT",
+      "pair": "ANTHROPICUSDT",
+      "underlyingType": "PREMARKET",
+      "underlyingSubType": [
+        "Pre-IPO",
+        "TradFi"
+      ],
+      "onboardDate": 1780374600000
+    },
+    {
+      "symbol": "APPUSDT",
+      "pair": "APPUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783673100000
+    },
+    {
+      "symbol": "ARMUSDT",
+      "pair": "ARMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779802800000
+    },
+    {
+      "symbol": "ASMLUSDT",
+      "pair": "ASMLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781170800000
+    },
+    {
+      "symbol": "ASTSUSDT",
+      "pair": "ASTSUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780322100000
+    },
+    {
+      "symbol": "AVGOUSDT",
+      "pair": "AVGOUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1776692400000
+    },
+    {
+      "symbol": "AXTIUSDT",
+      "pair": "AXTIUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780911300000
+    },
+    {
+      "symbol": "BABAUSDT",
+      "pair": "BABAUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1776693000000
+    },
+    {
+      "symbol": "BBXUSDT",
+      "pair": "BBXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780321200000
+    },
+    {
+      "symbol": "BEUSDT",
+      "pair": "BEUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779803100000
+    },
+    {
+      "symbol": "BITOUSDT",
+      "pair": "BITOUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1785159600000
+    },
+    {
+      "symbol": "BMNRUSDT",
+      "pair": "BMNRUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781169300000
+    },
+    {
+      "symbol": "BNCUSDT",
+      "pair": "BNCUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783607100000
+    },
+    {
+      "symbol": "BOTUSDT",
+      "pair": "BOTUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783605600000
+    },
+    {
+      "symbol": "BRKBUSDT",
+      "pair": "BRKBUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779112200000
+    },
+    {
+      "symbol": "BSPUSDT",
+      "pair": "BSPUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782985800000
+    },
+    {
+      "symbol": "BXUSDT",
+      "pair": "BXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780909200000
+    },
+    {
+      "symbol": "BZUSDT",
+      "pair": "BZUSDT",
+      "underlyingType": "COMMODITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775034600000
+    },
+    {
+      "symbol": "CATUSDT",
+      "pair": "CATUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782984000000
+    },
+    {
+      "symbol": "CBRSUSDT",
+      "pair": "CBRSUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779183000000
+    },
+    {
+      "symbol": "CIENUSDT",
+      "pair": "CIENUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782136200000
+    },
+    {
+      "symbol": "CLUSDT",
+      "pair": "CLUSDT",
+      "underlyingType": "COMMODITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775034000000
+    },
+    {
+      "symbol": "COHRUSDT",
+      "pair": "COHRUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779803400000
+    },
+    {
+      "symbol": "COINUSDT",
+      "pair": "COINUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1770649200000
+    },
+    {
+      "symbol": "COPPERUSDT",
+      "pair": "COPPERUSDT",
+      "underlyingType": "COMMODITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1772787600000
+    },
+    {
+      "symbol": "COSTUSDT",
+      "pair": "COSTUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780995900000
+    },
+    {
+      "symbol": "CRCLUSDT",
+      "pair": "CRCLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1770648600000
+    },
+    {
+      "symbol": "CRDOUSDT",
+      "pair": "CRDOUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780910400000
+    },
+    {
+      "symbol": "CRMUSDT",
+      "pair": "CRMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780478100000
+    },
+    {
+      "symbol": "CRWDUSDT",
+      "pair": "CRWDUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780910100000
+    },
+    {
+      "symbol": "CRWVUSDT",
+      "pair": "CRWVUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779111000000
+    },
+    {
+      "symbol": "CSCOUSDT",
+      "pair": "CSCOUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778853000000
+    },
+    {
+      "symbol": "DELLUSDT",
+      "pair": "DELLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780477200000
+    },
+    {
+      "symbol": "DISUSDT",
+      "pair": "DISUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778852400000
+    },
+    {
+      "symbol": "DKNGUSDT",
+      "pair": "DKNGUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781082300000
+    },
+    {
+      "symbol": "DRAMUSDT",
+      "pair": "DRAMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779112800000
+    },
+    {
+      "symbol": "EBAYUSDT",
+      "pair": "EBAYUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780996800000
+    },
+    {
+      "symbol": "EWJUSDT",
+      "pair": "EWJUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi",
+        "ETF"
+      ],
+      "onboardDate": 1773927000000
+    },
+    {
+      "symbol": "EWTUSDT",
+      "pair": "EWTUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780321800000
+    },
+    {
+      "symbol": "EWYUSDT",
+      "pair": "EWYUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1773667800000
+    },
+    {
+      "symbol": "EWZUSDT",
+      "pair": "EWZUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781083500000
+    },
+    {
+      "symbol": "FLEXUSDT",
+      "pair": "FLEXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782984600000
+    },
+    {
+      "symbol": "FLNCUSDT",
+      "pair": "FLNCUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779112500000
+    },
+    {
+      "symbol": "FWDIUSDT",
+      "pair": "FWDIUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783607400000
+    },
+    {
+      "symbol": "GEVUSDT",
+      "pair": "GEVUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783672200000
+    },
+    {
+      "symbol": "GIGADEVUSDT",
+      "pair": "GIGADEVUSDT",
+      "underlyingType": "HK_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1785735000000
+    },
+    {
+      "symbol": "GLWUSDT",
+      "pair": "GLWUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781170200000
+    },
+    {
+      "symbol": "GMEUSDT",
+      "pair": "GMEUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781082900000
+    },
+    {
+      "symbol": "GOOGLUSDT",
+      "pair": "GOOGLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1774536600000
+    },
+    {
+      "symbol": "GSUSDT",
+      "pair": "GSUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1785315900000
+    },
+    {
+      "symbol": "HDUSDT",
+      "pair": "HDUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778853300000
+    },
+    {
+      "symbol": "HIMSUSDT",
+      "pair": "HIMSUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780996500000
+    },
+    {
+      "symbol": "HK0700USDT",
+      "pair": "HK0700USDT",
+      "underlyingType": "HK_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784689200000
+    },
+    {
+      "symbol": "HK1810USDT",
+      "pair": "HK1810USDT",
+      "underlyingType": "HK_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784689500000
+    },
+    {
+      "symbol": "HOODUSDT",
+      "pair": "HOODUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1770043500000
+    },
+    {
+      "symbol": "HPEUSDT",
+      "pair": "HPEUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780909500000
+    },
+    {
+      "symbol": "HYUNDAIUSDT",
+      "pair": "HYUNDAIUSDT",
+      "underlyingType": "KR_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780370400000
+    },
+    {
+      "symbol": "IBMUSDT",
+      "pair": "IBMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780477500000
+    },
+    {
+      "symbol": "INTCUSDT",
+      "pair": "INTCUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1770042600000
+    },
+    {
+      "symbol": "INTWUSDT",
+      "pair": "INTWUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783606200000
+    },
+    {
+      "symbol": "IRENUSDT",
+      "pair": "IRENUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780478400000
+    },
+    {
+      "symbol": "IWMUSDT",
+      "pair": "IWMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780911000000
+    },
+    {
+      "symbol": "JPMUSDT",
+      "pair": "JPMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779111600000
+    },
+    {
+      "symbol": "KLACUSDT",
+      "pair": "KLACUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782135300000
+    },
+    {
+      "symbol": "KORUUSDT",
+      "pair": "KORUUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782136500000
+    },
+    {
+      "symbol": "KSTRUSDT",
+      "pair": "KSTRUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782985500000
+    },
+    {
+      "symbol": "LITEUSDT",
+      "pair": "LITEUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778851800000
+    },
+    {
+      "symbol": "LLYUSDT",
+      "pair": "LLYUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780320600000
+    },
+    {
+      "symbol": "LRCXUSDT",
+      "pair": "LRCXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782135000000
+    },
+    {
+      "symbol": "METAUSDT",
+      "pair": "METAUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1774535400000
+    },
+    {
+      "symbol": "MINIMAXUSDT",
+      "pair": "MINIMAXUSDT",
+      "underlyingType": "HK_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784257200000
+    },
+    {
+      "symbol": "MRVLUSDT",
+      "pair": "MRVLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778853900000
+    },
+    {
+      "symbol": "MSFTUSDT",
+      "pair": "MSFTUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1776691800000
+    },
+    {
+      "symbol": "MSTRUSDT",
+      "pair": "MSTRUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1770647400000
+    },
+    {
+      "symbol": "MUUSDT",
+      "pair": "MUUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775568600000
+    },
+    {
+      "symbol": "MUUUSDT",
+      "pair": "MUUUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784192400000
+    },
+    {
+      "symbol": "MVLLUSDT",
+      "pair": "MVLLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782740100000
+    },
+    {
+      "symbol": "NATGASUSDT",
+      "pair": "NATGASUSDT",
+      "underlyingType": "COMMODITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775035200000
+    },
+    {
+      "symbol": "NBISUSDT",
+      "pair": "NBISUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779802200000
+    },
+    {
+      "symbol": "NFLXUSDT",
+      "pair": "NFLXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780995600000
+    },
+    {
+      "symbol": "NOKUSDT",
+      "pair": "NOKUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780321500000
+    },
+    {
+      "symbol": "NOWUSDT",
+      "pair": "NOWUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780477800000
+    },
+    {
+      "symbol": "NVDAUSDT",
+      "pair": "NVDAUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1774536000000
+    },
+    {
+      "symbol": "NVOUSDT",
+      "pair": "NVOUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780320900000
+    },
+    {
+      "symbol": "ONDSUSDT",
+      "pair": "ONDSUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780478700000
+    },
+    {
+      "symbol": "OPENAIUSDT",
+      "pair": "OPENAIUSDT",
+      "underlyingType": "PREMARKET",
+      "underlyingSubType": [
+        "Pre-IPO",
+        "TradFi"
+      ],
+      "onboardDate": 1779784200000
+    },
+    {
+      "symbol": "ORCLUSDT",
+      "pair": "ORCLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778852100000
+    },
+    {
+      "symbol": "PANWUSDT",
+      "pair": "PANWUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784625000000
+    },
+    {
+      "symbol": "PAYPUSDT",
+      "pair": "PAYPUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1774276200000
+    },
+    {
+      "symbol": "PENGUSDT",
+      "pair": "PENGUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784625300000
+    },
+    {
+      "symbol": "PLTRUSDT",
+      "pair": "PLTRUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1770649800000
+    },
+    {
+      "symbol": "POPMARTUSDT",
+      "pair": "POPMARTUSDT",
+      "underlyingType": "HK_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784773800000
+    },
+    {
+      "symbol": "PYPLUSDT",
+      "pair": "PYPLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1785315600000
+    },
+    {
+      "symbol": "QCOMUSDT",
+      "pair": "QCOMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778074500000
+    },
+    {
+      "symbol": "QNTXUSDT",
+      "pair": "QNTXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780042500000
+    },
+    {
+      "symbol": "QQQUSDT",
+      "pair": "QQQUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775482200000
+    },
+    {
+      "symbol": "RIVNUSDT",
+      "pair": "RIVNUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781082600000
+    },
+    {
+      "symbol": "RKLBUSDT",
+      "pair": "RKLBUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779113100000
+    },
+    {
+      "symbol": "SAMSUNGUSDT",
+      "pair": "SAMSUNGUSDT",
+      "underlyingType": "KR_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780369800000
+    },
+    {
+      "symbol": "SHAZUSDT",
+      "pair": "SHAZUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784624400000
+    },
+    {
+      "symbol": "SKHYNIXUSDT",
+      "pair": "SKHYNIXUSDT",
+      "underlyingType": "KR_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780369200000
+    },
+    {
+      "symbol": "SKHYUSDT",
+      "pair": "SKHYUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783698600000
+    },
+    {
+      "symbol": "SMCIUSDT",
+      "pair": "SMCIUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782135900000
+    },
+    {
+      "symbol": "SMHUSDT",
+      "pair": "SMHUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1785316200000
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "pair": "SNDKUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775569200000
+    },
+    {
+      "symbol": "SNOWUSDT",
+      "pair": "SNOWUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783672800000
+    },
+    {
+      "symbol": "SNXXUSDT",
+      "pair": "SNXXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783606500000
+    },
+    {
+      "symbol": "SOFIUSDT",
+      "pair": "SOFIUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784624700000
+    },
+    {
+      "symbol": "SONYUSDT",
+      "pair": "SONYUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782136800000
+    },
+    {
+      "symbol": "SOXLUSDT",
+      "pair": "SOXLUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778853600000
+    },
+    {
+      "symbol": "SOXSUSDT",
+      "pair": "SOXSUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784192700000
+    },
+    {
+      "symbol": "SPCXUSD1",
+      "pair": "SPCXUSD1",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784538000000
+    },
+    {
+      "symbol": "SPCXUSDT",
+      "pair": "SPCXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779338700000
+    },
+    {
+      "symbol": "SPYUSDT",
+      "pair": "SPYUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775482800000
+    },
+    {
+      "symbol": "SQQQUSDT",
+      "pair": "SQQQUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782740700000
+    },
+    {
+      "symbol": "STRCUSDT",
+      "pair": "STRCUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782983700000
+    },
+    {
+      "symbol": "STXXUSDT",
+      "pair": "STXXUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781170500000
+    },
+    {
+      "symbol": "TBTUSDT",
+      "pair": "TBTUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1785159300000
+    },
+    {
+      "symbol": "TENCENTUSDT",
+      "pair": "TENCENTUSDT",
+      "underlyingType": "HK_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784689800000
+    },
+    {
+      "symbol": "TERUSDT",
+      "pair": "TERUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782984900000
+    },
+    {
+      "symbol": "TMFUSDT",
+      "pair": "TMFUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1785159000000
+    },
+    {
+      "symbol": "TQQQUSDT",
+      "pair": "TQQQUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782740400000
+    },
+    {
+      "symbol": "TSLAUSDT",
+      "pair": "TSLAUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1769610600000
+    },
+    {
+      "symbol": "TSMUSDT",
+      "pair": "TSMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1775484000000
+    },
+    {
+      "symbol": "TTWOUSDT",
+      "pair": "TTWOUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782985200000
+    },
+    {
+      "symbol": "TXNUSDT",
+      "pair": "TXNUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1782984300000
+    },
+    {
+      "symbol": "TZAUSDT",
+      "pair": "TZAUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784193000000
+    },
+    {
+      "symbol": "UBERUSDT",
+      "pair": "UBERUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778852700000
+    },
+    {
+      "symbol": "URNMUSDT",
+      "pair": "URNMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1780996200000
+    },
+    {
+      "symbol": "USARUSDT",
+      "pair": "USARUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1778074800000
+    },
+    {
+      "symbol": "UVXYUSDT",
+      "pair": "UVXYUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781169600000
+    },
+    {
+      "symbol": "VRTUSDT",
+      "pair": "VRTUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783672500000
+    },
+    {
+      "symbol": "VUSDT",
+      "pair": "VUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779111900000
+    },
+    {
+      "symbol": "WDCUSDT",
+      "pair": "WDCUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779802500000
+    },
+    {
+      "symbol": "WENUSDT",
+      "pair": "WENUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783605900000
+    },
+    {
+      "symbol": "WMTUSDT",
+      "pair": "WMTUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1779111300000
+    },
+    {
+      "symbol": "XAGUSDT",
+      "pair": "XAGUSDT",
+      "underlyingType": "COMMODITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1767780000000
+    },
+    {
+      "symbol": "XAUUSDT",
+      "pair": "XAUUSDT",
+      "underlyingType": "COMMODITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1765440300000
+    },
+    {
+      "symbol": "XBIUSDT",
+      "pair": "XBIUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1783606800000
+    },
+    {
+      "symbol": "XLEUSDT",
+      "pair": "XLEUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781083200000
+    },
+    {
+      "symbol": "XPDUSDT",
+      "pair": "XPDUSDT",
+      "underlyingType": "COMMODITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1769768100000
+    },
+    {
+      "symbol": "XPTUSDT",
+      "pair": "XPTUSDT",
+      "underlyingType": "COMMODITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1769767200000
+    },
+    {
+      "symbol": "ZHIPUUSDT",
+      "pair": "ZHIPUUSDT",
+      "underlyingType": "HK_EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1784257500000
+    },
+    {
+      "symbol": "ZMUSDT",
+      "pair": "ZMUSDT",
+      "underlyingType": "EQUITY",
+      "underlyingSubType": [
+        "TradFi"
+      ],
+      "onboardDate": 1781082000000
+    }
+  ]
+}

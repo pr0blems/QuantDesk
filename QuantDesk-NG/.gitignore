@@ -41,6 +41,7 @@ reports/
 *.log
 *.tmp
 /config/api_keys.json
+/.runtime/
 
 # Machine-specific launchers and editor/OS metadata
 /autostart.vbs

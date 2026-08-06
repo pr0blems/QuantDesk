@@ -13,6 +13,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from quantdesk.prediction_validation import summarize_rows
+
 
 class MonitorUnavailable(RuntimeError):
     pass
@@ -395,7 +397,7 @@ class MonitorRepository:
         commissions = {
             str(row["symbol"]): float(row["taker_rate"]) for row in commission_rows
         }
-        horizon_names = {300: "5m", 900: "15m", 3_600: "1h", 7_200: "2h"}
+        horizon_names = {300: "5m", 900: "15m", 3_600: "1h", 7_200: "2h", 14_400: "4h"}
         battles: dict[str, dict[str, dict[str, Any]]] = {}
         now_ms = int(time.time() * 1_000)
         for row in battle_rows:
@@ -414,6 +416,13 @@ class MonitorRepository:
                 else None
             )
             horizon = horizon_names.get(int(row["horizon_seconds"]), str(row["horizon_seconds"]))
+            components = _json_object(row.get("components_json"))
+            data_health = components.get("data_health")
+            if not isinstance(data_health, dict):
+                data_health = {
+                    "status": "healthy" if _finite_number(row.get("quality_score")) >= 0.75 else "blocked",
+                    "quality_score": _finite_number(row.get("quality_score")),
+                }
             battles.setdefault(symbol, {})[horizon] = {
                 "id": row.get("public_id"),
                 "model_key": row.get("model_key"),
@@ -435,7 +444,9 @@ class MonitorRepository:
                 "edge_after_cost_bps": after_cost,
                 "fee_source": "binance_user_commission" if taker_rate is not None else "unavailable",
                 "reason_codes": _json_array(row.get("reason_codes_json")),
-                "components": _json_object(row.get("components_json")),
+                "components": components,
+                "data_health": data_health,
+                "invalid_conditions": components.get("invalid_conditions", []),
                 "predicted_at_ms": int(row.get("predicted_at_ms") or 0),
                 "valid_until_ms": int(row.get("valid_until_ms") or 0),
                 "stale": now_ms > int(row.get("valid_until_ms") or 0),
@@ -602,6 +613,26 @@ class MonitorRepository:
                             if underlying_has_market_data
                             else None
                         ),
+                        "pct_2m": (
+                            _optional_finite_number(underlying_quote.get("pct_2m"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "pct_5m": (
+                            _optional_finite_number(underlying_quote.get("pct_5m"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "pct_10m": (
+                            _optional_finite_number(underlying_quote.get("pct_10m"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "pct_24h": (
+                            _optional_finite_number(underlying_quote.get("pct_24h"))
+                            if underlying_has_market_data
+                            else None
+                        ),
                         "regular_market_price": (
                             _optional_finite_number(
                                 underlying_quote.get("regular_market_price")
@@ -672,6 +703,31 @@ class MonitorRepository:
             "items": items,
             "updated_at": latest,
             "stale": not latest or time.time() - latest > 30,
+        }
+
+    def prediction_validation(self, days: int = 30) -> dict[str, Any]:
+        """Return replayable forward-label quality, never an in-sample score."""
+
+        evaluated_until_ms = int(time.time() * 1_000)
+        window_start_ms = evaluated_until_ms - max(1, min(days, 90)) * 24 * 60 * 60 * 1_000
+        rows = self._query(
+            """SELECT p.model_key,p.model_version,p.horizon_seconds,p.result,
+                      p.long_probability,p.short_probability,o.actual_result,
+                      o.directional_return_bps,o.completed_at_ms
+                 FROM prediction_outcomes o JOIN battle_predictions p ON p.id=o.prediction_id
+                WHERE o.status='completed' AND o.completed_at_ms BETWEEN ? AND ?
+                ORDER BY o.completed_at_ms""",
+            (window_start_ms, evaluated_until_ms),
+        )
+        return {
+            "window_start_ms": window_start_ms,
+            "evaluated_until_ms": evaluated_until_ms,
+            "method": "forward_outcomes_only",
+            "items": summarize_rows(
+                rows,
+                window_start_ms=window_start_ms,
+                evaluated_until_ms=evaluated_until_ms,
+            ),
         }
 
     def opportunities(

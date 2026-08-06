@@ -133,11 +133,26 @@ def _sync_news_sources(db: Session) -> None:
 
 
 def initialize_admin_runtime(engine: Engine) -> None:
-    """Seed file-defined news sources before production workers start."""
+    """Seed file-defined news sources once, even when workers start together."""
 
-    with Session(engine) as db:
-        _sync_news_sources(db)
-        db.commit()
+    # Every worker invokes this during process startup.  On an empty database,
+    # a plain SELECT-count followed by INSERT can race and prevent the whole
+    # runtime from becoming ready.  A connection-scoped MySQL advisory lock
+    # serializes only this tiny initialization section; it is released even if
+    # the worker crashes before startup completes.
+    lock_name = "quantdesk-admin-runtime-seed"
+    with engine.connect() as lock_connection:
+        acquired = lock_connection.execute(
+            text("SELECT GET_LOCK(:lock_name, 15)"), {"lock_name": lock_name}
+        ).scalar_one()
+        if int(acquired or 0) != 1:
+            raise RuntimeError("admin runtime initialization lock timed out")
+        try:
+            with Session(engine) as db:
+                _sync_news_sources(db)
+                db.commit()
+        finally:
+            lock_connection.execute(text("SELECT RELEASE_LOCK(:lock_name)"), {"lock_name": lock_name})
 
 
 def _collector_out(row: CollectorStatus, now: int, paused: bool) -> dict[str, Any]:
@@ -294,6 +309,101 @@ def overview(
             "news_sentiment": news_sentiment,
         },
     }
+
+
+@router.get("/quality")
+def data_quality_overview(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return source freshness, coverage and archive health for operators."""
+
+    now_ms = int(time.time() * 1_000)
+    result: dict[str, Any] = {"generated_at": int(now_ms / 1_000), "sources": {}, "archives": {}}
+    current_specs = {
+        "market_microstructure": ("received_at", True),
+        "underlying_market_quotes": ("received_at_ms", False),
+        "social": ("ts", False),
+    }
+    for name, (column, seconds) in current_specs.items():
+        try:
+            rows = db.execute(text(f"SELECT {column} AS received_at FROM {name}")).mappings()
+            ages = []
+            for row in rows:
+                value = int(row["received_at"] or 0)
+                if not value:
+                    continue
+                if seconds or value < 10**12:
+                    value *= 1_000
+                ages.append(max(0, now_ms - value))
+            threshold = {
+                "market_microstructure": 15_000,
+                "underlying_market_quotes": 10 * 60_000,
+                "social": 30 * 60_000,
+            }[name]
+            stale = sum(age > threshold for age in ages)
+            result["sources"][name] = {
+                "rows": len(ages),
+                "fresh": len(ages) - stale,
+                "stale": stale,
+                "coverage_ratio": round((len(ages) - stale) / len(ages), 6) if ages else 0.0,
+                "max_age_ms": max(ages) if ages else None,
+                "avg_age_ms": round(sum(ages) / len(ages), 2) if ages else None,
+                "threshold_ms": threshold,
+                "health": "ok" if ages and stale == 0 else "warning" if ages else "missing",
+            }
+        except Exception:
+            result["sources"][name] = {
+                "rows": 0, "fresh": 0, "stale": 0, "coverage_ratio": 0.0,
+                "max_age_ms": None, "avg_age_ms": None, "threshold_ms": None,
+                "health": "missing",
+            }
+    for name in (
+        "market_microstructure_archive",
+        "underlying_market_quotes_archive",
+        "social_archive",
+    ):
+        try:
+            row = db.execute(
+                text(
+                    f"SELECT COUNT(*) total, MAX(bucket_ts) newest, "
+                    "AVG(source_age_ms) avg_age_ms, AVG(coverage_ratio) avg_coverage "
+                    f"FROM {name} WHERE bucket_size_seconds=60 AND bucket_ts>=:cutoff"
+                ),
+                {"cutoff": int(time.time()) - 86_400},
+            ).mappings().one()
+            result["archives"][name] = {
+                "rows_24h": int(row["total"] or 0),
+                "newest_bucket": row["newest"],
+                "avg_age_ms": round(float(row["avg_age_ms"] or 0), 2),
+                "avg_coverage_ratio": round(float(row["avg_coverage"] or 0), 6),
+                "health": "ok" if int(row["total"] or 0) else "missing",
+            }
+        except Exception:
+            result["archives"][name] = {
+                "rows_24h": 0, "newest_bucket": None,
+                "avg_age_ms": None, "avg_coverage_ratio": 0.0, "health": "missing",
+            }
+    try:
+        events = {
+            str(row["severity"]): int(row["total"] or 0)
+            for row in db.execute(
+                text(
+                    "SELECT severity,COUNT(*) total FROM market_data_quality_events "
+                    "WHERE event_time>=:cutoff GROUP BY severity"
+                ),
+                {"cutoff": int(time.time()) - 86_400},
+            ).mappings()
+        }
+    except Exception:
+        events = {}
+    result["events_24h"] = events
+    result["health"] = (
+        "critical" if events.get("critical", 0) else
+        "warning" if any(item["health"] != "ok" for item in result["sources"].values()) else
+        "ok"
+    )
+    return result
 
 
 @router.get("/alerts")

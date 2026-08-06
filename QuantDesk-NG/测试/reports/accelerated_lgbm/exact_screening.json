@@ -1,0 +1,22 @@
+{
+  "method": "exact_tuning_breakpoints",
+  "tuning": {
+    "precision": 0.75,
+    "samples": 388,
+    "coverage": 0.013755938452811459,
+    "direction_weight": 0.85,
+    "terminal_weight": 0,
+    "event_direction_weight": 0.15000000000000002,
+    "occurrence_weight": 0.5,
+    "occurrence_threshold": 0.8500000000000003,
+    "confidence_threshold": 0.7814511706521365
+  },
+  "locked_test": {
+    "precision": 0.7471074380165289,
+    "samples": 605,
+    "correct": 452,
+    "coverage": 0.013624898657778578,
+    "minimum_500_met": true,
+    "target_75_met": false
+  }
+}

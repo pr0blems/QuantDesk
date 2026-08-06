@@ -1672,3 +1672,192 @@ class OutboxEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error_code: Mapped[str | None] = mapped_column(String(64))
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class OptimizationRun(Base):
+    """Auditable parameter-search request; results must reference real backtests."""
+
+    __tablename__ = "optimization_runs"
+    __table_args__ = (
+        CheckConstraint("status IN ('draft','evaluating','proposed','approved','rejected','rolled_back')", name="valid_status"),
+        Index("ix_optimization_runs_user_created", "user_id", "created_at"),
+        {"comment": "策略参数优化的输入、候选和审批状态；不存储伪造的回测分数"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    baseline_backtest_run_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("backtest_runs.id", ondelete="SET NULL"))
+    parameter_space_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    objective_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="draft")
+    proposal_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    decision_reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class OptimizationCandidate(Base):
+    __tablename__ = "optimization_candidates"
+    __table_args__ = (
+        CheckConstraint("status IN ('accepted','rejected')", name="valid_status"),
+        UniqueConstraint("optimization_run_id", "backtest_run_id", name="uq_optimization_candidate_run_backtest"),
+        Index("ix_optimization_candidates_run_status", "optimization_run_id", "status"),
+        {"comment": "参数候选必须由已完成的真实回测结果支撑"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    optimization_run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("optimization_runs.id", ondelete="CASCADE"), nullable=False)
+    backtest_run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("backtest_runs.id", ondelete="RESTRICT"), nullable=False)
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evaluation_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class ModelEvidence(Base):
+    """Immutable evidence assertion. Providers cannot overwrite historical votes."""
+
+    __tablename__ = "model_evidence"
+    __table_args__ = (
+        CheckConstraint("direction IN ('long','short','neutral')", name="valid_direction"),
+        CheckConstraint("source_kind IN ('model','evidence')", name="valid_source_kind"),
+        CheckConstraint("probability >= 0 AND probability <= 1", name="valid_probability"),
+        CheckConstraint("quality_score >= 0 AND quality_score <= 1", name="valid_quality"),
+        UniqueConstraint("evidence_key", name="uq_model_evidence_key"),
+        Index("ix_model_evidence_symbol_horizon_asof", "symbol", "horizon_seconds", "as_of_ms"),
+        {"comment": "模型或已验证证据的只追加投票记录"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    evidence_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    horizon_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    probability: Mapped[Decimal] = mapped_column(Numeric(10, 8), nullable=False)
+    quality_score: Mapped[Decimal] = mapped_column(Numeric(10, 8), nullable=False)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class ModelRelease(Base):
+    __tablename__ = "model_releases"
+    __table_args__ = (
+        CheckConstraint("status IN ('shadow','approved','rejected','rolled_back')", name="valid_status"),
+        UniqueConstraint("model_key", "model_version", "horizon_seconds", name="uq_model_releases_version_horizon"),
+        Index("ix_model_releases_status_horizon", "status", "horizon_seconds"),
+        {"comment": "基于前瞻验证指标的模型发布门控和可回滚记录"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    model_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    horizon_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="shadow")
+    validation_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    gate_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    decision_reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class ProxySubscription(Base):
+    """A sanitized proxy subscription source.
+
+    The subscription body is intentionally never persisted.  When a source
+    requires HTTP authentication its value is stored only as Fernet ciphertext
+    in ``auth_encrypted``; routes never serialize that column.
+    """
+
+    __tablename__ = "proxy_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_proxy_subscriptions_public_id"),
+        Index("ix_proxy_subscriptions_enabled", "enabled"),
+        {"comment": "Sanitized proxy subscription metadata; no raw subscription content"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(96), nullable=False)
+    endpoint: Mapped[str | None] = mapped_column(Text)
+    auth_encrypted: Mapped[str | None] = mapped_column(Text)
+    auth_fingerprint: Mapped[str | None] = mapped_column(String(16))
+    source_format: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    refresh_interval_minutes: Mapped[int] = mapped_column(Integer, default=360, nullable=False)
+    last_imported_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(String(240))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class ProxyNode(Base):
+    """A directly usable HTTP CONNECT or SOCKS5 proxy endpoint."""
+
+    __tablename__ = "proxy_nodes"
+    __table_args__ = (
+        CheckConstraint("protocol IN ('http','socks5')", name="valid_protocol"),
+        CheckConstraint("port BETWEEN 1 AND 65535", name="valid_port"),
+        CheckConstraint(
+            "health_status IN ('unknown','healthy','unhealthy')", name="valid_health_status"
+        ),
+        UniqueConstraint("subscription_id", "protocol", "host", "port", name="uq_proxy_nodes_endpoint"),
+        Index("ix_proxy_nodes_enabled_health", "enabled", "health_status", "last_latency_ms"),
+        {"comment": "Proxy endpoint credentials are Fernet-encrypted and never serialized"},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    subscription_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("proxy_subscriptions.id", ondelete="SET NULL")
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    protocol: Mapped[str] = mapped_column(String(16), nullable=False)
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    username: Mapped[str | None] = mapped_column(String(128))
+    password_encrypted: Mapped[str | None] = mapped_column(Text)
+    credential_fingerprint: Mapped[str | None] = mapped_column(String(16))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    health_status: Mapped[str] = mapped_column(String(16), default="unknown", nullable=False)
+    last_latency_ms: Mapped[int | None] = mapped_column(Integer)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(String(240))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class ProxyRuntimeSetting(Base):
+    """Singleton proxy routing decision used by Binance collectors only."""
+
+    __tablename__ = "proxy_runtime_settings"
+    __table_args__ = (
+        CheckConstraint("selection_mode IN ('direct','manual','auto')", name="valid_selection_mode"),
+        {"comment": "Singleton routing state for server-side Binance collectors"},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    selection_mode: Mapped[str] = mapped_column(String(16), default="direct", nullable=False)
+    active_node_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("proxy_nodes.id", ondelete="SET NULL")
+    )
+    fallback_state: Mapped[str] = mapped_column(String(32), default="direct", nullable=False)
+    fallback_reason: Mapped[str | None] = mapped_column(String(240))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )

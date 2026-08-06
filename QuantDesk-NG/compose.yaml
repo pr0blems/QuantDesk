@@ -16,6 +16,7 @@ x-app: &app
   depends_on:
     migrate:
       condition: service_completed_successfully
+  stop_grace_period: 30s
 
 services:
   mysql:
@@ -25,12 +26,14 @@ services:
       MYSQL_DATABASE: ${DB_NAME:-quantdesk}
       MYSQL_USER: ${DB_USER:-quantdesk}
       MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      # The application never uses MySQL root. Let the image generate its
+      # one-time root password so a local .env only needs DB_PASSWORD.
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -50,29 +53,51 @@ services:
     ports:
       - "127.0.0.1:8200:8200"
     command: ["quantdesk-ng", "serve"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/api/v2/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
 
   worker-market:
     <<: *app
     healthcheck:
-      disable: true
+      test: ["CMD", "quantdesk-ng", "worker-health", "--role", "market"]
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
     command: ["quantdesk-ng", "worker", "--role", "market"]
 
   worker-news:
     <<: *app
     healthcheck:
-      disable: true
+      test: ["CMD", "quantdesk-ng", "worker-health", "--role", "news"]
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
     command: ["quantdesk-ng", "worker", "--role", "news"]
 
   worker-paper:
     <<: *app
     healthcheck:
-      disable: true
+      test: ["CMD", "quantdesk-ng", "worker-health", "--role", "paper"]
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
     command: ["quantdesk-ng", "worker", "--role", "paper"]
 
   worker-intelligence:
     <<: *app
     healthcheck:
-      disable: true
+      test: ["CMD", "quantdesk-ng", "worker-health", "--role", "intelligence"]
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
     command: ["quantdesk-ng", "worker", "--role", "intelligence"]
 
 volumes:

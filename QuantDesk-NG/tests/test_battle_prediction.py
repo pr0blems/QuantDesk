@@ -56,6 +56,17 @@ def test_battle_prediction_abstains_when_market_data_is_stale() -> None:
     assert "DATA_INSUFFICIENT" in result["reason_codes"]
 
 
+def test_four_hour_prediction_exposes_data_health_and_invalid_conditions() -> None:
+    healthy = battle.predict(_features(), 14_400)
+    stale_features = _features()
+    stale_features["micro_age_ms"] = 30_000
+    blocked = battle.predict(stale_features, 14_400)
+
+    assert healthy["components"]["data_health"]["status"] == "healthy"
+    assert blocked["components"]["data_health"]["status"] == "blocked"
+    assert "DATA_INSUFFICIENT" in blocked["components"]["invalid_conditions"]
+
+
 def test_feature_vector_normalizes_flashes_and_price_open_interest() -> None:
     now_ms = 1_800_000
     current = {
