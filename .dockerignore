@@ -11,3 +11,7 @@ __pycache__
 *.log
 reports
 tests
+web/node_modules
+web/dist
+web/.env.local
+web/.env.*.local

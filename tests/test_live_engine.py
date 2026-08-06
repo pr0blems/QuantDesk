@@ -240,6 +240,40 @@ def test_signal_freshness_requires_closed_bar_and_respects_exact_maximum_age(
     assert live_engine._signal_is_fresh(account, opened, policy) is False
 
 
+def test_live_signal_freshness_uses_frozen_legacy_timeframe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened = 1_700_000_000
+    account = {
+        "strategy_snapshot_json": {
+            "strategy_kind": "legacy_signal",
+            "timeframe": "1h",
+        },
+        "config_json": {},
+    }
+    policy = live_engine.policy_from_config({"max_signal_age_seconds": 18_000})
+
+    monkeypatch.setattr(live_engine.time, "time", lambda: opened + 3_599)
+    assert not live_engine._signal_is_fresh(account, opened, policy)
+    monkeypatch.setattr(live_engine.time, "time", lambda: opened + 3_601)
+    assert live_engine._signal_is_fresh(account, opened, policy)
+
+
+def test_live_execution_timeframe_uses_full_strategy_trigger_and_fails_closed() -> None:
+    account = {
+        "strategy_snapshot_json": {
+            "strategy_kind": "full_strategy",
+            "spec": {"timeframes": {"trigger": "15m"}},
+        }
+    }
+
+    assert live_engine._execution_timeframe_seconds(account) == 900
+
+    account["strategy_snapshot_json"]["spec"]["timeframes"]["trigger"] = "5m"
+    with pytest.raises(live_engine.StrategyEvaluationError):
+        live_engine._execution_timeframe_seconds(account)
+
+
 def test_full_strategy_signal_must_not_outlive_its_decision_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

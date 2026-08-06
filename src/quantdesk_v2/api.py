@@ -5,7 +5,6 @@ import json
 import math
 import uuid
 from collections.abc import Mapping
-from dataclasses import asdict
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from threading import Lock
@@ -13,7 +12,6 @@ from typing import Any
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     HTTPException,
     Query,
@@ -23,7 +21,7 @@ from fastapi import (
 )
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from . import __version__, battle
 from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
@@ -38,6 +36,11 @@ from .binance_performance import (
 from .binance_rate_limit import REST_RATE_LIMITER
 from .database import get_db
 from .dependencies import get_current_user
+from .interfaces.api.backtest_presenters import backtest_run_detail as _run_detail
+from .interfaces.api.backtests_read import router as backtests_read_router
+from .interfaces.api.finnhub import router as finnhub_router
+from .interfaces.api.health import router as health_router
+from .interfaces.api.monitor_public import router as monitor_public_router
 from .market_config import TRADFI_UNIVERSE_KEY, tradfi_symbols
 from .models import (
     AdminSetting,
@@ -70,10 +73,6 @@ from .schemas import (
     BinancePerformanceOut,
     BinanceTradingState,
     DashboardPerformanceOut,
-    FinnhubUsQuotesOut,
-    FinnhubWebhookAcceptedOut,
-    FinnhubWebhookStatusOut,
-    HealthOut,
     LiveAccountArmRequest,
     LiveAccountCreateRequest,
     LiveAccountStatusUpdate,
@@ -90,7 +89,6 @@ from .schemas import (
     RegisterRequest,
     TokenPair,
     UserOut,
-    UsMarketStatusOut,
 )
 from .security import (
     CredentialCipher,
@@ -109,6 +107,10 @@ from .strategy_catalog import (
     get_user_strategy,
     serialize_strategy_catalog,
     strategy_to_catalog_item,
+)
+from .strategy_evaluator import (
+    StrategyEvaluationError,
+    resolve_legacy_strategy_timeframe,
 )
 
 router = APIRouter(prefix="/api/v2")
@@ -528,96 +530,6 @@ def _backtest_error_status(message: str) -> int:
     return 503 if any(marker in message.lower() for marker in unavailable_markers) else 422
 
 
-def _run_summary(run: BacktestRun) -> dict[str, Any]:
-    return {
-        "id": run.id,
-        "run_id": run.id,
-        "strategy_id": run.strategy_id,
-        "strategy_name": run.strategy_name,
-        "symbol": run.symbol,
-        "timeframe": run.timeframe,
-        "status": run.status,
-        "start_at": _utc_iso(run.start_at),
-        "end_at": _utc_iso(run.end_at),
-        "start_date": run.start_at.date().isoformat(),
-        "end_date": run.end_at.date().isoformat(),
-        "initial_capital": _float_value(run.initial_capital),
-        "final_equity": _float_value(run.final_equity),
-        "net_profit": _float_value(run.net_profit),
-        "total_return_pct": _float_value(run.total_return_pct),
-        "max_drawdown_pct": _float_value(run.max_drawdown_pct),
-        "sharpe_ratio": _float_value(run.sharpe_ratio),
-        "win_rate_pct": _float_value(run.win_rate_pct),
-        "profit_factor": _float_value(run.profit_factor),
-        "trade_count": run.trade_count,
-        "metrics_json": _json_safe(run.metrics_json or {}),
-        "error": run.error,
-        "created_at": _utc_iso(run.created_at),
-        "completed_at": _utc_iso(run.completed_at) if run.completed_at else None,
-    }
-
-
-def _trade_response(trade: BacktestTrade) -> dict[str, Any]:
-    return {
-        **_json_safe(trade.metadata_json or {}),
-        "id": trade.id,
-        "side": trade.side,
-        "entry_ts": int(trade.entry_at.replace(tzinfo=UTC).timestamp()),
-        "exit_ts": int(trade.exit_at.replace(tzinfo=UTC).timestamp()),
-        "entry_at": _utc_iso(trade.entry_at),
-        "exit_at": _utc_iso(trade.exit_at),
-        "entry_price": _float_value(trade.entry_price),
-        "exit_price": _float_value(trade.exit_price),
-        "quantity": _float_value(trade.quantity),
-        "gross_pnl": _float_value(trade.gross_pnl),
-        "fees": _float_value(trade.fees),
-        "net_pnl": _float_value(trade.net_pnl),
-        "return_pct": _float_value(trade.return_pct),
-        "holding_bars": trade.holding_bars,
-        "exit_reason": trade.exit_reason,
-    }
-
-
-def _run_detail(run: BacktestRun) -> dict[str, Any]:
-    metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
-    stored_account = metadata.get("account") if isinstance(metadata.get("account"), dict) else {}
-    account = {
-        **_json_safe(stored_account),
-        "initial_capital": _float_value(run.initial_capital),
-        "final_equity": _float_value(run.final_equity),
-        "net_profit": _float_value(run.net_profit),
-    }
-    metrics = _json_safe(run.metrics_json or {})
-    metrics.update(
-        {
-            "net_profit": _float_value(run.net_profit),
-            "total_return_pct": _float_value(run.total_return_pct),
-            "max_drawdown_pct": _float_value(run.max_drawdown_pct),
-            "sharpe_ratio": _float_value(run.sharpe_ratio),
-            "win_rate_pct": _float_value(run.win_rate_pct),
-            "profit_factor": _float_value(run.profit_factor),
-            "trade_count": run.trade_count,
-        }
-    )
-    returned_count = metadata.get("response_trade_count")
-    if not isinstance(returned_count, int):
-        returned_count = (run.data_quality_json or {}).get("trades_returned")
-    if isinstance(returned_count, int) and returned_count >= 0:
-        response_trades = run.trades[-returned_count:] if returned_count else []
-    else:
-        response_trades = run.trades
-    return {
-        "run": _run_summary(run),
-        "result": {
-            "account": account,
-            "metrics": metrics,
-            "equity_curve": _json_safe(run.equity_curve_json or []),
-            "trades": [_trade_response(trade) for trade in response_trades],
-            "data_quality": _json_safe(run.data_quality_json or {}),
-        },
-    }
-
-
 def _issue_session(
     *, db: Session, request: Request, user: User, client_type: str
 ) -> tuple[UserSession, str, str, int]:
@@ -659,20 +571,7 @@ def _refresh_from_request(request: Request, body_token: str | None) -> str | Non
     return body_token or request.cookies.get(request.app.state.settings.refresh_cookie_name)
 
 
-@router.get("/health", response_model=HealthOut)
-def health(request: Request, db: Session = Depends(get_db)) -> HealthOut:
-    try:
-        db.execute(text("SELECT 1"))
-    except SQLAlchemyError:
-        raise HTTPException(status_code=503, detail="database unavailable") from None
-    settings = request.app.state.settings
-    return HealthOut(
-        status="ok",
-        database="ok",
-        version=__version__,
-        database_dialect=db.bind.dialect.name if db.bind else "unknown",
-        tls_required=settings.db_ssl_required,
-    )
+router.include_router(health_router)
 
 
 @router.post("/auth/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -810,74 +709,7 @@ def me(user: User = Depends(get_current_user)) -> UserOut:
     return _user_out(user)
 
 
-@router.get("/market/us/status", response_model=UsMarketStatusOut)
-def us_market_status(
-    request: Request,
-    response: Response,
-) -> UsMarketStatusOut:
-    """Return Finnhub's official US trading-session state through our server."""
-
-    response.headers["Cache-Control"] = "public, max-age=5, stale-if-error=60"
-    result = request.app.state.finnhub_market_status_service.status()
-    return UsMarketStatusOut(**asdict(result))
-
-
-@router.get("/market/us/quotes", response_model=FinnhubUsQuotesOut)
-def us_market_quotes(request: Request, response: Response) -> FinnhubUsQuotesOut:
-    """Return the independent Finnhub US equity cache, never Binance contracts."""
-
-    response.headers["Cache-Control"] = "public, max-age=2, stale-if-error=30"
-    return FinnhubUsQuotesOut(**request.app.state.finnhub_us_quote_service.snapshot())
-
-
-@router.get(
-    "/integrations/finnhub/webhook",
-    response_model=FinnhubWebhookStatusOut,
-)
-def finnhub_webhook_status(request: Request, response: Response) -> FinnhubWebhookStatusOut:
-    """Public readiness probe; callbacks themselves must use authenticated POST."""
-
-    response.headers["Cache-Control"] = "no-store"
-    snapshot = request.app.state.finnhub_webhook_receiver.snapshot()
-    return FinnhubWebhookStatusOut(
-        status="ready" if snapshot.configured else "not_configured",
-        configured=snapshot.configured,
-        received_events=snapshot.received_events,
-        last_received_at=snapshot.last_received_at,
-    )
-
-
-@router.post(
-    "/integrations/finnhub/webhook",
-    response_model=FinnhubWebhookAcceptedOut,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def receive_finnhub_webhook(
-    request: Request,
-    response: Response,
-    background_tasks: BackgroundTasks,
-) -> FinnhubWebhookAcceptedOut:
-    """Authenticate and acknowledge a Finnhub event before deferred processing."""
-
-    response.headers["Cache-Control"] = "no-store"
-    receiver = request.app.state.finnhub_webhook_receiver
-    if not receiver.configured:
-        raise HTTPException(status_code=503, detail="Finnhub webhook is not configured")
-    if not receiver.authenticated(request.headers.get("X-Finnhub-Secret")):
-        raise HTTPException(status_code=401, detail="invalid webhook authentication")
-    body = await request.body()
-    if len(body) > 64 * 1024:
-        raise HTTPException(status_code=413, detail="webhook body too large")
-    try:
-        payload = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise HTTPException(status_code=400, detail="invalid webhook JSON") from None
-    if not isinstance(payload, (dict, list)):
-        raise HTTPException(status_code=400, detail="invalid webhook event")
-    if isinstance(payload, list) and len(payload) > 1_000:
-        raise HTTPException(status_code=413, detail="too many webhook events")
-    background_tasks.add_task(receiver.record, body)
-    return FinnhubWebhookAcceptedOut()
+router.include_router(finnhub_router)
 
 
 @router.get("/me/binance-account", response_model=BinanceAccountSummary)
@@ -1401,28 +1233,7 @@ def delete_ai_model_config(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/monitor/overview")
-def monitor_overview(
-    request: Request,
-    user: User = Depends(get_current_user),
-) -> dict:
-    return _monitor(request).overview(user.monitor_watchlist or [])
-
-
-@router.get("/monitor/breadth")
-def monitor_breadth(
-    request: Request,
-    _: User = Depends(get_current_user),
-) -> dict:
-    return _monitor(request).breadth()
-
-
-@router.get("/monitor/intelligence")
-def monitor_intelligence(
-    request: Request,
-    _: User = Depends(get_current_user),
-) -> dict[str, Any]:
-    return _monitor(request).intelligence()
+router.include_router(monitor_public_router)
 
 
 def _prediction_algorithm_out(
@@ -1702,15 +1513,6 @@ def mark_monitor_alerts_read(
     return MessageOut(message="monitor alerts marked as read")
 
 
-@router.get("/monitor/news")
-def monitor_news(
-    request: Request,
-    limit: int = Query(default=60, ge=1, le=100),
-    _: User = Depends(get_current_user),
-) -> list[dict]:
-    return _monitor(request).news(limit)
-
-
 @router.get("/monitor/watchlist")
 def monitor_watchlist(user: User = Depends(get_current_user)) -> list[str]:
     return user.monitor_watchlist or []
@@ -1733,35 +1535,6 @@ def update_monitor_watchlist(
     _audit(db, request, "monitor.watchlist.update", user.id, "user", str(user.id))
     db.commit()
     return user.monitor_watchlist
-
-
-@router.get("/monitor/klines")
-def monitor_klines(
-    request: Request,
-    symbol: str,
-    tf: str = Query(default="1h", pattern="^(15m|1h|4h)$"),
-    limit: int = Query(default=120, ge=20, le=300),
-    _: User = Depends(get_current_user),
-) -> list[dict]:
-    return _monitor(request).klines(symbol, tf, limit)
-
-
-@router.get("/monitor/score")
-def monitor_score(
-    request: Request,
-    symbol: str,
-    _: User = Depends(get_current_user),
-) -> dict:
-    return _monitor(request).score_detail(symbol)
-
-
-@router.get("/monitor/report")
-def monitor_report(
-    request: Request,
-    symbol: str,
-    _: User = Depends(get_current_user),
-) -> dict:
-    return _monitor(request).report(symbol)
 
 
 def _paper_account_record(
@@ -1797,6 +1570,35 @@ def _paper_account_out(account: PaperAccount) -> dict[str, Any]:
         "created_at": account.created_at,
         "updated_at": account.updated_at,
     }
+
+
+def _execution_strategy_snapshot(strategy: UserStrategy) -> dict[str, Any]:
+    """Freeze the strategy inputs used by paper and live deployments."""
+
+    snapshot = {
+        "public_id": strategy.public_id,
+        "name": strategy.name,
+        "engine_key": strategy.engine_key,
+        "strategy_kind": strategy.strategy_kind,
+        "version": strategy.version,
+        "spec_schema_version": strategy.spec_schema_version,
+        "spec": strategy.spec_json,
+        "spec_hash": strategy.spec_hash,
+        "parameters": strategy.parameters_json,
+        "risk_defaults": strategy.risk_defaults_json,
+    }
+    if strategy.strategy_kind != "full_strategy":
+        try:
+            snapshot["timeframe"] = resolve_legacy_strategy_timeframe(
+                strategy.parameters_json,
+                strategy.risk_defaults_json,
+            )
+        except StrategyEvaluationError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="strategy execution timeframe is invalid",
+            ) from exc
+    return snapshot
 
 
 def _paper_response(data: dict) -> dict:
@@ -1996,6 +1798,11 @@ def create_paper_account(
         "stop_loss_pct": risk.get("stop_loss_pct", 3),
         "take_profit_pct": risk.get("take_profit_pct", 5),
         "max_holding_bars": risk.get("max_holding_bars", 12),
+        "signal_mode": (
+            "strategy_event_v2"
+            if strategy.strategy_kind == "full_strategy"
+            else "legacy_score_v1"
+        ),
     }
     for key in ("leverage", "max_positions", "position_size_pct", "margin_cap"):
         value = getattr(payload, key)
@@ -2008,18 +1815,7 @@ def create_paper_account(
         initial_balance=Decimal(str(payload.initial_balance)),
         balance=Decimal(str(payload.initial_balance)),
         config_json=config,
-        strategy_snapshot_json={
-            "public_id": strategy.public_id,
-            "name": strategy.name,
-            "engine_key": strategy.engine_key,
-            "strategy_kind": strategy.strategy_kind,
-            "version": strategy.version,
-            "spec_schema_version": strategy.spec_schema_version,
-            "spec": strategy.spec_json,
-            "spec_hash": strategy.spec_hash,
-            "parameters": strategy.parameters_json,
-            "risk_defaults": strategy.risk_defaults_json,
-        },
+        strategy_snapshot_json=_execution_strategy_snapshot(strategy),
     )
     db.add(account)
     try:
@@ -2256,18 +2052,7 @@ def create_live_account(
         name=payload.name,
         status="paused",
         config_json=config,
-        strategy_snapshot_json={
-            "public_id": strategy.public_id,
-            "name": strategy.name,
-            "engine_key": strategy.engine_key,
-            "strategy_kind": strategy.strategy_kind,
-            "version": strategy.version,
-            "spec_schema_version": strategy.spec_schema_version,
-            "spec": strategy.spec_json,
-            "spec_hash": strategy.spec_hash,
-            "parameters": strategy.parameters_json,
-            "risk_defaults": strategy.risk_defaults_json,
-        },
+        strategy_snapshot_json=_execution_strategy_snapshot(strategy),
         credential_version=user.binance_key_version,
     )
     db.add(account)
@@ -2579,18 +2364,7 @@ def update_live_account_strategy(
 
     account.strategy_id = strategy.id
     account.config_json = config
-    account.strategy_snapshot_json = {
-        "public_id": strategy.public_id,
-        "name": strategy.name,
-        "engine_key": strategy.engine_key,
-        "strategy_kind": strategy.strategy_kind,
-        "version": strategy.version,
-        "spec_schema_version": strategy.spec_schema_version,
-        "spec": strategy.spec_json,
-        "spec_hash": strategy.spec_hash,
-        "parameters": strategy.parameters_json,
-        "risk_defaults": strategy.risk_defaults_json,
-    }
+    account.strategy_snapshot_json = _execution_strategy_snapshot(strategy)
     account.armed_at = None
     account.last_error_code = None
 
@@ -3041,32 +2815,4 @@ def create_backtest(
     return _run_detail(run)
 
 
-@router.get("/backtests")
-def list_backtests(
-    limit: int = Query(default=12, ge=1, le=100),
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> dict[str, list[dict[str, Any]]]:
-    runs = db.scalars(
-        select(BacktestRun)
-        .where(BacktestRun.user_id == user.id)
-        .order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
-        .limit(limit)
-    ).all()
-    return {"items": [_run_summary(run) for run in runs]}
-
-
-@router.get("/backtests/{run_id}")
-def get_backtest(
-    run_id: int,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> dict[str, Any]:
-    run = db.scalar(
-        select(BacktestRun)
-        .options(selectinload(BacktestRun.trades))
-        .where(BacktestRun.id == run_id, BacktestRun.user_id == user.id)
-    )
-    if run is None:
-        raise HTTPException(status_code=404, detail="backtest run not found")
-    return _run_detail(run)
+router.include_router(backtests_read_router)

@@ -211,6 +211,12 @@ class Settings(BaseSettings):
     def static_dir(self) -> Path:
         return Path(__file__).resolve().parent / "static"
 
+    @property
+    def react_static_dir(self) -> Path:
+        """Optional production build of the incrementally migrated React UI."""
+
+        return Path(__file__).resolve().parent / "react_static"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

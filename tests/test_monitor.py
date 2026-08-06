@@ -17,9 +17,7 @@ from quantdesk_v2.strategy_catalog import (
 )
 
 
-def build_monitor_fixture(
-    engine: Engine, tmp_path
-) -> tuple[MonitorRepository, int, int]:
+def build_monitor_fixture(engine: Engine, tmp_path) -> tuple[MonitorRepository, int, int]:
     symbols = tmp_path / "symbols.json"
     symbols.write_text(
         json.dumps({"symbols": [{"symbol": "TESTUSDT", "underlyingType": "stock"}]}),
@@ -145,15 +143,12 @@ def build_monitor_fixture(
     return MonitorRepository(engine, symbols), user_id, account_id
 
 
-def test_monitor_overview_breadth_and_user_state(
-    mysql_test_engine, tmp_path, monkeypatch
-) -> None:
+def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         market_engine,
         "rolling_price_changes",
         lambda symbols, **_: {
-            symbol: {"pct_2m": 1.25, "pct_5m": -2.5, "pct_10m": 3.75}
-            for symbol in symbols
+            symbol: {"pct_2m": 1.25, "pct_5m": -2.5, "pct_10m": 3.75} for symbol in symbols
         },
     )
     repository, user_id, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
@@ -185,6 +180,7 @@ def test_monitor_overview_breadth_and_user_state(
 def test_monitor_detail_queries(mysql_test_engine, tmp_path) -> None:
     repository, _, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
     assert repository.klines("testusdt", "1h", 120)[0]["close"] == 101.5
+    assert repository.strategy_indicators("TESTUSDT", "1h")["count"] == 12
     assert repository.score_detail("TESTUSDT")["1h"]["score"] == 80
 
 

@@ -31,6 +31,13 @@ def _bind_params(sql: str, params: tuple[Any, ...]):
 _REPORT_LOCK = threading.Lock()
 _MARKET_MICROSTRUCTURE_STALE_SECONDS = 30
 _MAX_MARKET_CLOCK_SKEW_SECONDS = 5
+_UNDERLYING_SYMBOL_ALIASES = {
+    "BRKB": "BRK.B",
+    "PAYP": "PYPL",
+}
+_UNLISTED_UNDERLYINGS = {"ANTHROPIC", "CBRS", "OPENAI", "QNTX", "SPC", "SPCX"}
+_SPREAD_WATCH_BPS = 25
+_SPREAD_STRONG_BPS = 50
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -53,6 +60,233 @@ def _optional_finite_number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return numeric if math.isfinite(numeric) else None
+
+
+def _datetime_to_ms(value: Any) -> int:
+    if isinstance(value, datetime):
+        current = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return int(current.timestamp() * 1_000)
+    if isinstance(value, str):
+        try:
+            current = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+        current = current if current.tzinfo else current.replace(tzinfo=UTC)
+        return int(current.timestamp() * 1_000)
+    return 0
+
+
+def _underlying_market_state(status: dict[str, Any]) -> str:
+    if not status.get("available"):
+        return "unknown"
+    session = str(status.get("session") or "")
+    if session == "pre-market":
+        return "pre_market"
+    if session == "regular":
+        return "regular"
+    if session == "post-market":
+        return "after_hours"
+    return "closed" if status.get("is_open") is False else "unknown"
+
+
+def build_underlying_quote(
+    symbol: str,
+    symbol_metadata: dict[str, Any],
+    contract_price: float | None,
+    contract_timestamp: Any,
+    quote_by_symbol: dict[str, dict[str, Any]],
+    market_status: dict[str, Any],
+) -> dict[str, Any]:
+    """Map a TradFi contract to its spot quote and derive aligned basis state."""
+
+    base = symbol.removesuffix("USDT").removesuffix("USD1")
+    quote_symbol = _UNDERLYING_SYMBOL_ALIASES.get(base, base)
+    relation = "alias" if quote_symbol != base else "direct"
+    is_equity = str(symbol_metadata.get("underlyingType") or "").upper() == "EQUITY"
+    unsupported = base in _UNLISTED_UNDERLYINGS or not is_equity
+    quote = quote_by_symbol.get(quote_symbol, {}) if not unsupported else {}
+    available = bool(quote.get("available"))
+    quote_stale = bool(quote.get("stale"))
+    status = (
+        "unsupported"
+        if unsupported
+        else "stale"
+        if available and quote_stale
+        else "ok"
+        if available
+        else "unavailable"
+    )
+    contract_time_ms = int(contract_timestamp or 0)
+    if 0 < contract_time_ms < 100_000_000_000:
+        contract_time_ms *= 1_000
+    market_time_ms = int(quote.get("source_timestamp") or 0)
+    if 0 < market_time_ms < 100_000_000_000:
+        market_time_ms *= 1_000
+    alignment_delta_ms = (
+        abs(contract_time_ms - market_time_ms)
+        if contract_time_ms and market_time_ms
+        else None
+    )
+    market_state = _underlying_market_state(market_status) if available else "unavailable"
+    if not available or not contract_time_ms:
+        alignment_status = "unavailable"
+    elif market_state == "closed":
+        alignment_status = "closed"
+    elif status == "stale" or market_status.get("stale"):
+        alignment_status = "stale"
+    elif contract_time_ms // 60_000 == market_time_ms // 60_000:
+        alignment_status = "aligned"
+    else:
+        alignment_status = "lagging"
+
+    underlying_price = _optional_finite_number(quote.get("price")) if available else None
+    basis_comparable = (
+        contract_price is not None
+        and underlying_price is not None
+        and underlying_price > 0
+        and relation in {"direct", "alias"}
+        and status in {"ok", "stale"}
+    )
+    basis_bps = (
+        round((contract_price / underlying_price - 1) * 10_000, 2)
+        if basis_comparable
+        else None
+    )
+    alert_eligible = status == "ok" and alignment_status == "aligned"
+    spread_alert = (
+        "strong"
+        if alert_eligible
+        and basis_bps is not None
+        and abs(basis_bps) >= _SPREAD_STRONG_BPS
+        else "watch"
+        if alert_eligible
+        and basis_bps is not None
+        and abs(basis_bps) >= _SPREAD_WATCH_BPS
+        else "normal"
+        if alert_eligible and basis_bps is not None
+        else "disabled"
+    )
+    return {
+        "quote_symbol": None if unsupported else quote_symbol,
+        "relation": "unlisted" if base in _UNLISTED_UNDERLYINGS else relation,
+        "instrument_type": "equity" if is_equity else "unsupported",
+        "display_name": f"{quote_symbol} 现货" if not unsupported else None,
+        "source": "finnhub",
+        "status": status,
+        "market_state": market_state,
+        "currency": "USD" if available else None,
+        "exchange_name": "US",
+        "price": underlying_price,
+        "previous_close": _optional_finite_number(quote.get("previous_close")),
+        "change_pct": _optional_finite_number(quote.get("change_percent")),
+        "regular_market_price": underlying_price,
+        "day_open": _optional_finite_number(quote.get("day_open")),
+        "day_high": _optional_finite_number(quote.get("day_high")),
+        "day_low": _optional_finite_number(quote.get("day_low")),
+        "volume": _optional_finite_number(quote.get("volume")),
+        "market_time_ms": market_time_ms,
+        "received_at_ms": _datetime_to_ms(quote.get("fetched_at")),
+        "basis_bps": basis_bps,
+        "basis_comparable": basis_comparable,
+        "spread_alert": spread_alert,
+        "contract_time_ms": contract_time_ms,
+        "alignment_delta_ms": alignment_delta_ms,
+        "alignment_status": alignment_status,
+        "stale": status != "ok",
+    }
+
+
+def build_collected_underlying_quote(
+    row: dict[str, Any],
+    contract_price: float | None,
+    contract_timestamp: Any,
+) -> dict[str, Any]:
+    """Normalize a persisted Yahoo quote and calculate its aligned basis."""
+
+    status = str(row.get("status") or "unavailable")
+    has_market_data = bool(row.get("quote_symbol")) and status in {"ok", "stale"}
+    contract_time_ms = int(contract_timestamp or 0)
+    if 0 < contract_time_ms < 100_000_000_000:
+        contract_time_ms *= 1_000
+    market_time_ms = int(row.get("market_time_ms") or 0)
+    alignment_delta_ms = (
+        abs(contract_time_ms - market_time_ms)
+        if contract_time_ms and market_time_ms
+        else None
+    )
+    market_state = str(row.get("market_state") or "unknown")
+    if not has_market_data or not contract_time_ms:
+        alignment_status = "unavailable"
+    elif market_state == "closed":
+        alignment_status = "closed"
+    elif status == "stale":
+        alignment_status = "stale"
+    elif contract_time_ms // 60_000 == market_time_ms // 60_000:
+        alignment_status = "aligned"
+    else:
+        alignment_status = "lagging"
+
+    underlying_price = (
+        _optional_finite_number(row.get("price")) if has_market_data else None
+    )
+    currency = str(row.get("currency") or "") if has_market_data else ""
+    basis_comparable = (
+        contract_price is not None
+        and underlying_price is not None
+        and underlying_price > 0
+        and currency == "USD"
+        and str(row.get("relation") or "") in {"direct", "benchmark"}
+        and status in {"ok", "stale"}
+    )
+    basis_bps = (
+        round((contract_price / underlying_price - 1) * 10_000, 2)
+        if basis_comparable
+        else None
+    )
+    alert_eligible = status == "ok" and alignment_status == "aligned"
+    spread_alert = (
+        "strong"
+        if alert_eligible
+        and basis_bps is not None
+        and abs(basis_bps) >= _SPREAD_STRONG_BPS
+        else "watch"
+        if alert_eligible
+        and basis_bps is not None
+        and abs(basis_bps) >= _SPREAD_WATCH_BPS
+        else "normal"
+        if alert_eligible and basis_bps is not None
+        else "disabled"
+    )
+    return {
+        "quote_symbol": row.get("quote_symbol"),
+        "relation": row.get("relation"),
+        "instrument_type": row.get("instrument_type"),
+        "display_name": row.get("display_name") if has_market_data else None,
+        "source": row.get("source"),
+        "status": status,
+        "market_state": market_state if has_market_data else "unavailable",
+        "currency": currency or None,
+        "exchange_name": row.get("exchange_name") if has_market_data else None,
+        "price": underlying_price,
+        "previous_close": _optional_finite_number(row.get("previous_close")),
+        "change_pct": _optional_finite_number(row.get("change_pct")),
+        "regular_market_price": _optional_finite_number(
+            row.get("regular_market_price")
+        ),
+        "day_open": _optional_finite_number(row.get("day_open")),
+        "day_high": _optional_finite_number(row.get("day_high")),
+        "day_low": _optional_finite_number(row.get("day_low")),
+        "volume": _optional_finite_number(row.get("volume")),
+        "market_time_ms": market_time_ms if has_market_data else 0,
+        "received_at_ms": int(row.get("received_at_ms") or 0),
+        "basis_bps": basis_bps,
+        "basis_comparable": basis_comparable,
+        "spread_alert": spread_alert,
+        "contract_time_ms": contract_time_ms,
+        "alignment_delta_ms": alignment_delta_ms,
+        "alignment_status": alignment_status,
+        "stale": status != "ok",
+    }
 
 
 def _fresh_microstructure_metrics(
@@ -163,7 +397,13 @@ class MonitorRepository:
 
         market_store.configure_engine(self.engine)
 
-    def overview(self, watchlist: list[str]) -> dict[str, Any]:
+    def overview(
+        self,
+        watchlist: list[str],
+        *,
+        underlying_quotes: dict[str, Any] | None = None,
+        underlying_market_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         from . import market_engine
 
         now_seconds = int(time.time())
@@ -185,6 +425,14 @@ class MonitorRepository:
         except MonitorUnavailable:
             # Keep a rolling deployment usable until the new table is migrated.
             microstructure = {}
+        try:
+            underlying_by_contract = {
+                row["contract_symbol"]: row
+                for row in self._query("SELECT * FROM underlying_market_quotes")
+            }
+        except MonitorUnavailable:
+            # Fall back to the in-memory Finnhub source during rolling migration.
+            underlying_by_contract = {}
         score_rows = self._query(
             """
             SELECT s.symbol, s.tf, s.score FROM scores s
@@ -263,6 +511,13 @@ class MonitorRepository:
             trending = set()
 
         metadata = {item["symbol"]: item for item in self.symbols_meta}
+        quote_snapshot = underlying_quotes or {}
+        quote_by_symbol = {
+            str(item.get("symbol") or "").upper(): item
+            for item in quote_snapshot.get("quotes", [])
+            if isinstance(item, dict) and item.get("symbol")
+        }
+        market_status = underlying_market_status or {}
         selected = set(watchlist)
         weights = {"15m": 0.3, "1h": 0.4, "4h": 0.3}
         items = []
@@ -281,11 +536,31 @@ class MonitorRepository:
             )
             denominator = sum(weight for tf, weight in weights.items() if tf in tf_scores)
             base = symbol.replace("USDT", "").replace("USD1", "")
+            symbol_metadata = metadata.get(symbol, {})
+            price = _finite_number(ticker.get("price"))
+            collected_underlying = underlying_by_contract.get(symbol)
+            underlying_quote = (
+                build_collected_underlying_quote(
+                    collected_underlying,
+                    price,
+                    ticker.get("ts"),
+                )
+                if collected_underlying is not None
+                else build_underlying_quote(
+                    symbol,
+                    symbol_metadata,
+                    price,
+                    ticker.get("ts"),
+                    quote_by_symbol,
+                    market_status,
+                )
+            )
             items.append(
                 {
                     "symbol": symbol,
-                    "underlying": metadata.get(symbol, {}).get("underlyingType", ""),
-                    "price": _finite_number(ticker.get("price")),
+                    "underlying": symbol_metadata.get("underlyingType", ""),
+                    "underlying_quote": underlying_quote,
+                    "price": price,
                     "pct_2m": short_term.get("pct_2m"),
                     "pct_5m": short_term.get("pct_5m"),
                     "pct_10m": short_term.get("pct_10m"),
@@ -720,6 +995,12 @@ class MonitorRepository:
             (normalized, timeframe, limit),
         )
         return list(reversed(rows))
+
+    def strategy_indicators(self, symbol: str, timeframe: str) -> dict[str, Any]:
+        from .strategy_indicators import evaluate_strategy_indicators
+
+        candles = self.klines(symbol, timeframe, 120)
+        return evaluate_strategy_indicators(candles, timeframe)
 
     def score_detail(self, symbol: str) -> dict[str, Any]:
         normalized = self._validate_symbol(symbol)

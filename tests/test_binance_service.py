@@ -59,6 +59,7 @@ def test_concurrent_account_reads_are_coalesced() -> None:
     assert client.account_calls == 1
     assert len(results) == 2
     assert results[0] is results[1]
+    assert results[0].observed_at == results[0].updated_at
 
 
 def test_account_cache_is_isolated_by_complete_credentials() -> None:

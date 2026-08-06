@@ -68,6 +68,15 @@ class BinanceAccountSnapshot:
     updated_at: datetime
     unrealized_pnl_by_asset: tuple[tuple[str, Decimal], ...] = ()
     positions: tuple[dict[str, Any], ...] = ()
+    observed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        observed_at = self.observed_at or self.updated_at
+        if self.updated_at.tzinfo is None or self.updated_at.utcoffset() is None:
+            raise ValueError("updated_at must be timezone-aware")
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        object.__setattr__(self, "observed_at", observed_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -629,6 +638,7 @@ class BinanceAccountClient:
             unrealized_pnl=unrealized_pnl,
             currency="USD",
             updated_at=_updated_at(updated_ms, fallback_ms),
+            observed_at=_datetime_from_ms(fallback_ms),
             unrealized_pnl_by_asset=_unrealized_by_asset(balance_rows, ("umUnrealizedPNL",)),
             positions=_account_positions(positions, fallback_ms),
         )
@@ -670,6 +680,7 @@ class BinanceAccountClient:
             unrealized_pnl=_decimal_first(payload, ("totalUnrealizedProfit",), required=True),
             currency="USD",
             updated_at=_updated_at(_max_update_time(update_sources), fetched_ms),
+            observed_at=_datetime_from_ms(fetched_ms),
             unrealized_pnl_by_asset=_unrealized_by_asset(
                 [item for item in assets if isinstance(item, dict)]
                 if isinstance(assets, list)
@@ -689,11 +700,11 @@ class BinanceAccountClient:
         params: Iterable[tuple[str, str | int]] = (),
     ) -> tuple[dict[str, Any] | list[Any], int]:
         for attempt in range(2):
-            fetched_ms = current_time_ms() + self._clock_offsets_ms.get(base_url, 0)
+            request_ms = current_time_ms() + self._clock_offsets_ms.get(base_url, 0)
             query = signed_query(
                 api_secret,
                 self.recv_window_ms,
-                fetched_ms,
+                request_ms,
                 params,
             )
             url = f"{base_url}{path}?{query}"
@@ -707,6 +718,7 @@ class BinanceAccountClient:
                     )
                 )
                 REST_RATE_LIMITER.observe(status_code, response_headers, body)
+                fetched_ms = current_time_ms()
             except BinanceRestRateLimit:
                 raise BinanceAccountClientError("rate_limit", code=-1003) from None
             except BinanceAccountClientError:

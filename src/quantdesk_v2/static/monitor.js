@@ -11,7 +11,8 @@ class ContractMonitor extends HTMLElement {
       intelligence: null,
       watchlist: new Set(),
       lastAlertId: 0,
-      modal: { symbol: null, tf: "1h", opportunity: null },
+      spreadAlertStates: new Map(),
+      modal: { symbol: null, tf: "1h", opportunity: null, indicators: [], selectedIndicator: null },
       history: {
         page: 1,
         pages: 1,
@@ -44,7 +45,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260805-21">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260806-9">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -125,31 +126,82 @@ class ContractMonitor extends HTMLElement {
           </section>
         </div>
       </div>
-      <div id="modal" class="modal hidden">
-        <div class="modal-box">
-          <div class="modal-head">
-            <div>
-              <strong id="modal-symbol" class="modal-symbol"></strong>
-              <span id="modal-price" class="modal-price"></span>
-              <span id="modal-pct"></span>
-              <button id="modal-watch" class="watch" type="button" aria-label="切换自选">☆</button>
+      <div id="modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-box research-modal" role="dialog" aria-modal="true" aria-labelledby="modal-symbol">
+          <header class="modal-head research-modal-head">
+            <div class="research-identity">
+              <div class="research-title-line">
+                <span id="modal-market" class="research-market">美股映射合约</span>
+                <strong id="modal-symbol" class="modal-symbol"></strong>
+                <span id="modal-price" class="modal-price"></span>
+                <span id="modal-pct" class="research-change"></span>
+                <button id="modal-watch" class="watch" type="button" aria-label="切换自选" title="加入或移出自选">☆</button>
+              </div>
+              <p id="modal-source" class="research-source">数据源：Binance Futures · 量化结果仅供研究</p>
             </div>
-            <div>
-              <span class="tf-switch">
-                <button data-tf="15m" type="button">15m</button>
-                <button data-tf="1h" class="on" type="button">1h</button>
-                <button data-tf="4h" type="button">4h</button>
+            <div class="research-head-actions">
+              <span class="research-mode">量化研判</span>
+              <button id="modal-close" class="research-close" type="button" aria-label="关闭证券研究弹窗">关闭</button>
+            </div>
+          </header>
+
+          <section class="research-metrics" aria-label="标的关键行情">
+            <article><span>最新价</span><strong id="modal-metric-price">--</strong><small>实时合约报价</small></article>
+            <article><span>24h 涨跌</span><strong id="modal-metric-change">--</strong><small id="modal-metric-change-note">相对 24 小时前</small></article>
+            <article><span>24h 成交额</span><strong id="modal-metric-volume">--</strong><small>计价资产口径</small></article>
+            <article><span>订单池深度</span><strong id="modal-metric-depth">--</strong><small>买卖盘合计</small></article>
+            <article><span>5m 博弈</span><strong id="modal-metric-battle">--</strong><small>多空概率对比</small></article>
+            <article><span>机会质量</span><strong id="modal-metric-quality">--</strong><small id="modal-metric-quality-note">等待策略扫描</small></article>
+          </section>
+
+          <nav class="research-tabs" aria-label="研究内容导航">
+            <button class="on" type="button" data-modal-section="#modal-trend">趋势</button>
+            <button type="button" data-modal-section="#modal-indicator-section">策略指标</button>
+            <button type="button" data-modal-section="#modal-battle-section">多空预测</button>
+            <button type="button" data-modal-section="#modal-strategy-section">策略机会</button>
+            <button type="button" data-modal-section="#modal-report-section">研判报告</button>
+            <button type="button" data-modal-section="#modal-factor-section">评分因子</button>
+          </nav>
+
+          <section id="modal-trend" class="research-section research-trend">
+            <div class="research-section-head trend-toolbar">
+              <div>
+                <strong>趋势与成交量</strong>
+                <span>蜡烛图 · MA20 · MA50</span>
+              </div>
+              <span class="tf-switch" aria-label="图表周期">
+                <button data-tf="15m" type="button">15 分</button>
+                <button data-tf="1h" class="on" type="button">1 小时</button>
+                <button data-tf="4h" type="button">4 小时</button>
               </span>
-              <button id="modal-close" type="button">关闭</button>
             </div>
-          </div>
-          <canvas id="chart" class="chart" width="960" height="380"></canvas>
-          <div id="battle-detail" class="battle-detail"></div>
-          <div id="opportunity-detail" class="opportunity-detail"></div>
-          <div id="score-summary" class="score-summary"></div>
-          <div id="report" class="report"></div>
-          <div class="factor-title">因子明细（当前周期）</div>
-          <div id="factors" class="factors"></div>
+            <div id="modal-ohlc" class="research-ohlc"><span>正在加载当前周期行情…</span></div>
+            <canvas id="chart" class="chart" width="1280" height="430" aria-label="标的 K 线、均线与成交量图"></canvas>
+          </section>
+
+          <section id="modal-indicator-section" class="research-section strategy-indicator-section">
+            <div class="research-section-head">
+              <div><strong>策略指标</strong><span id="strategy-indicator-caption">当前周期：-- · 正在计算 12 项</span></div>
+            </div>
+            <div id="strategy-indicator-list" class="strategy-indicator-list" role="tablist" aria-label="选择策略指标"></div>
+            <div id="strategy-indicator-detail" class="strategy-indicator-detail"></div>
+          </section>
+          <section id="modal-battle-section" class="research-section">
+            <div id="battle-detail" class="battle-detail"></div>
+          </section>
+          <section id="modal-strategy-section" class="research-section">
+            <div class="research-section-head"><div><strong>策略机会</strong><span>条件、有效期与匹配策略</span></div></div>
+            <div id="opportunity-detail" class="opportunity-detail"></div>
+          </section>
+          <section id="modal-report-section" class="research-section">
+            <div class="research-section-head"><div><strong>多周期研判报告</strong><span>价格结构与新闻仅作辅助证据</span></div></div>
+            <div id="score-summary" class="score-summary"></div>
+            <div id="report" class="report"></div>
+          </section>
+          <section id="modal-factor-section" class="research-section">
+            <div class="research-section-head"><div><strong>评分因子</strong><span>当前图表周期的因子贡献</span></div></div>
+            <div id="factors" class="factors"></div>
+          </section>
         </div>
       </div>
       <div id="prediction-history-modal" class="modal hidden" aria-hidden="true">
@@ -511,6 +563,18 @@ class ContractMonitor extends HTMLElement {
     this.q("#modal").addEventListener("click", (event) => {
       if (event.target === this.q("#modal")) this.closeModal();
     });
+    this.qa("[data-modal-section]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const target = this.q(button.dataset.modalSection);
+        const box = this.q(".research-modal");
+        if (!target || !box) return;
+        this.qa("[data-modal-section]").forEach((item) => item.classList.toggle("on", item === button));
+        box.scrollTo({
+          top: Math.max(0, target.offsetTop - 118),
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        });
+      });
+    });
     this.qa(".tf-switch button").forEach((button) => {
       button.addEventListener("click", () => {
         this.state.modal.tf = button.dataset.tf;
@@ -553,6 +617,15 @@ class ContractMonitor extends HTMLElement {
       if (!button) return;
       if (button.dataset.opportunityAction === "shadow") this.createShadowIntent();
       else this.setOpportunityPreference(button.dataset.opportunityAction);
+    });
+    this.q("#strategy-indicator-list").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-strategy-indicator]");
+      if (!button) return;
+      this.state.modal.selectedIndicator = button.dataset.strategyIndicator;
+      this.renderStrategyIndicatorSelection();
+    });
+    this.shadowRoot.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !this.q("#modal").classList.contains("hidden")) this.closeModal();
     });
   }
 
@@ -720,6 +793,43 @@ class ContractMonitor extends HTMLElement {
     return new Date(milliseconds).toLocaleString("zh-CN", { hour12: false });
   }
 
+  underlyingRelationLabel(relation) {
+    return ({ direct: "直接映射", alias: "别名映射", benchmark: "参考标的", unlisted: "未上市" })[relation] || "现货映射";
+  }
+
+  underlyingMarketStateLabel(state) {
+    return ({
+      pre_market: "盘前",
+      regular: "交易中",
+      after_hours: "盘后",
+      closed: "已收盘",
+      unknown: "状态未知",
+      unavailable: "暂无行情",
+    })[state] || "状态未知";
+  }
+
+  underlyingAlignmentLabel(status) {
+    return ({
+      aligned: "时间已对齐",
+      lagging: "时间未对齐",
+      stale: "现货已延迟",
+      closed: "现货已收盘",
+      unavailable: "无法对齐",
+    })[status] || "无法对齐";
+  }
+
+  spreadAlertLabel(level) {
+    return ({ strong: "强价差提醒", watch: "价差关注", normal: "价差正常", disabled: "提醒暂停" })[level] || "提醒暂停";
+  }
+
+  formatAlignmentDelta(value) {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds)) return "";
+    if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
+    if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(1)}s`;
+    return `${(milliseconds / 60_000).toFixed(1)}m`;
+  }
+
   opportunityTone(direction) {
     return direction === "long" ? "strong-up" : direction === "short" ? "strong-down" : "neutral";
   }
@@ -792,6 +902,10 @@ class ContractMonitor extends HTMLElement {
     if (key === "confidence") return ai.confidence ?? -1;
     if (key === "watch") return item.watch ? 1 : 0;
     if (key === "symbol") return item.symbol;
+    if (key === "basis") {
+      const basis = Number(item.underlying_quote?.basis_bps);
+      return item.underlying_quote?.basis_comparable && Number.isFinite(basis) ? basis : null;
+    }
     if (key === "price") return Number(item.price) || 0;
     if (key === "pct2m") return Number(item.pct_2m) || 0;
     if (key === "pct5m") return Number(item.pct_5m) || 0;
@@ -852,6 +966,9 @@ class ContractMonitor extends HTMLElement {
       if (pinnedComparison !== 0) return pinnedComparison;
       const leftValue = this.matrixSortValue(left, this.state.matrixSort.key);
       const rightValue = this.matrixSortValue(right, this.state.matrixSort.key);
+      const leftMissing = leftValue == null;
+      const rightMissing = rightValue == null;
+      if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
       const comparison = typeof leftValue === "string"
         ? leftValue.localeCompare(rightValue, "zh-Hans")
         : leftValue - rightValue;
@@ -864,7 +981,9 @@ class ContractMonitor extends HTMLElement {
       ["price", "最新"], ["pct2m", "2m 涨跌"], ["pct5m", "5m 涨跌"], ["pct10m", "10m 涨跌"], ["pct24h", "24h"], ["score", "综合分"],
       ["battle", "5m 博弈"], ["book", "100档订单池"], ["force", "30m 力量"], ["score15m", "15m 分"], ["score1h", "1h 分"],
       ["opportunity", "机会"], ["volume", "成交额"],
-    ].map(([key, label]) => `<th><button type="button" data-matrix-sort="${key}" aria-label="按${label}排序">${label}<i aria-hidden="true">${this.matrixSortMark(key)}</i></button></th>`).join("");
+    ].map(([key, label]) => key === "symbol"
+      ? `<th class="matrix-symbol-head"><div class="matrix-dual-sort"><button type="button" data-matrix-sort="symbol" aria-label="按合约排序">合约<i aria-hidden="true">${this.matrixSortMark("symbol")}</i></button><button type="button" data-matrix-sort="basis" aria-label="按最新差价排序">差价<i aria-hidden="true">${this.matrixSortMark("basis")}</i></button></div></th>`
+      : `<th><button type="button" data-matrix-sort="${key}" aria-label="按${label}排序">${label}<i aria-hidden="true">${this.matrixSortMark(key)}</i></button></th>`).join("");
     const rows = items.map((item) => {
       const ai = this.aiConclusion(item);
       const opportunity = item.opportunity;
@@ -889,8 +1008,28 @@ class ContractMonitor extends HTMLElement {
       const opportunityText = opportunity
         ? `${this.opportunityLabel(opportunity.direction)} ${Number(opportunity.quality_score).toFixed(0)}`
         : "--";
+      const underlying = item.underlying_quote || {};
+      const underlyingChange = underlying.change_pct == null ? null : Number(underlying.change_pct);
+      const underlyingChangeClass = !Number.isFinite(underlyingChange)
+        ? "flat"
+        : underlyingChange > 0 ? "up" : underlyingChange < 0 ? "down" : "flat";
+      const basis = Number(underlying.basis_bps);
+      const basisToneClass = Number.isFinite(basis)
+        ? basis > 0 ? "premium" : basis < 0 ? "discount" : "flat"
+        : "flat";
+      const basisText = underlying.basis_comparable && Number.isFinite(basis)
+        ? `最新差价 ${basis >= 0 ? "+" : ""}${basis.toFixed(1)} bps`
+        : "";
+      const spreadAlert = underlying.spread_alert || (underlying.basis_comparable ? "normal" : "disabled");
+      const spreadAlertClass = spreadAlert === "strong" ? "strong" : spreadAlert === "watch" ? "watch" : "normal";
+      const alignmentText = `${this.underlyingAlignmentLabel(underlying.alignment_status)} ${this.formatAlignmentDelta(underlying.alignment_delta_ms)}`.trim();
+      const underlyingSymbol = underlying.quote_symbol || item.symbol.replace(/(?:USDT|USD1)$/, "");
+      const underlyingStatus = underlying.status === "ok"
+        ? this.underlyingMarketStateLabel(underlying.market_state)
+        : underlying.status === "unsupported" ? "暂无公开行情" : underlying.status === "stale" ? "行情延迟" : "行情采集中";
+      const underlyingTime = underlying.market_time_ms ? this.barTimeString(underlying.market_time_ms) : "--";
       const moveClass = item.priceMove === "up" ? "tick-up" : item.priceMove === "down" ? "tick-down" : "";
-      return `<tr class="matrix-row matrix-${ai.tone} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
+      const mainRow = `<tr class="matrix-row matrix-${ai.tone} ${moveClass}" data-symbol="${this.escape(item.symbol)}">
         <td class="matrix-ai"><span>${ai.label}</span></td>
         <td class="matrix-confidence" title="5 分钟 AI 结论信心"><svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="base" width="100" height="6"></rect><rect class="fill" width="${ai.confidence || 0}" height="6"></rect></svg><b>${ai.confidence == null ? "--" : `${ai.confidence}%`}</b></td>
         <td><button class="matrix-watch ${item.watch ? "on" : ""}" type="button" data-watch-symbol="${this.escape(item.symbol)}" aria-label="${item.watch ? "取消自选" : "加入自选"}">${item.watch ? "★" : "☆"}</button></td>
@@ -909,6 +1048,19 @@ class ContractMonitor extends HTMLElement {
         <td class="matrix-opportunity ${opportunity?.direction || "none"}">${this.escape(opportunityText)}</td>
         <td>${this.formatCompact(item.quote_volume)}</td>
       </tr>`;
+      const underlyingRow = `<tr class="underlying-row underlying-${ai.tone}" data-underlying-symbol="${this.escape(item.symbol)}">
+        <td class="underlying-kind"><span class="underlying-branch" aria-hidden="true">↳</span>现货</td>
+        <td class="underlying-relation-cell"><em class="underlying-relation">${this.escape(this.underlyingRelationLabel(underlying.relation))}</em></td>
+        <td></td>
+        <td class="underlying-symbol-cell"><div class="underlying-symbol-line"><strong>${this.escape(underlyingSymbol)}</strong><small>${this.escape(underlying.display_name || item.annotation || "对应现货")}</small>${basisText ? `<span class="underlying-inline-basis ${basisToneClass} ${spreadAlertClass}" title="计算公式：(合约最新价 / 现货最新价 - 1) × 10000 bps">${this.escape(basisText)}</span>` : ""}</div></td>
+        <td class="underlying-price-cell">${this.formatPrice(underlying.price)}</td>
+        <td class="underlying-change-cell ${underlyingChangeClass}">${this.formatPercent(Number.isFinite(underlyingChange) ? underlyingChange : null)}</td>
+        <td class="underlying-market-cell" colspan="4"><span class="underlying-state ${underlying.stale ? "stale" : ""}">${this.escape(underlyingStatus)}</span><span>量 ${underlying.volume == null ? "--" : this.formatCompact(underlying.volume)}</span></td>
+        <td class="underlying-basis-cell" colspan="3"></td>
+        <td class="underlying-alignment-cell" colspan="2" title="合约与现货的行情时间对齐状态">↔ ${this.escape(alignmentText)}</td>
+        <td class="underlying-time-cell" colspan="2" title="现货行情时间 ${this.escape(underlyingTime)}">${this.escape(underlying.exchange_name || "--")} · ${this.escape(underlying.currency || "--")} · ${this.escape(underlyingTime)}</td>
+      </tr>`;
+      return mainRow + underlyingRow;
     }).join("");
     this.q("#contract-grid").innerHTML = rows
       ? `<table class="contract-matrix"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`
@@ -939,6 +1091,7 @@ class ContractMonitor extends HTMLElement {
       });
       this.state.watchlist = new Set(watchlist);
       this.state.overview.forEach((item) => { item.watch = this.state.watchlist.has(item.symbol); });
+      if (previousPrices.size) this.state.overview.forEach((item) => this.maybeNotifySpreadAlert(item));
       this.updateWatchlistUi();
       this.renderGrid();
       const breadthElement = this.q("#breadth");
@@ -1089,12 +1242,35 @@ class ContractMonitor extends HTMLElement {
 
   async openModal(symbol) {
     this.state.modal.symbol = symbol;
-    this.q("#modal").classList.remove("hidden");
+    const modal = this.q("#modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.q(".research-modal").scrollTop = 0;
+    this.qa("[data-modal-section]").forEach((button, index) => button.classList.toggle("on", index === 0));
+    this.q("#modal-close").focus({ preventScroll: true });
     await this.refreshModal();
   }
 
+  maybeNotifySpreadAlert(item) {
+    const quote = item.underlying_quote || {};
+    const level = quote.spread_alert || "disabled";
+    const previous = this.state.spreadAlertStates.get(item.symbol);
+    this.state.spreadAlertStates.set(item.symbol, level);
+    if (!quote.basis_comparable || !["watch", "strong"].includes(level) || level === previous) return;
+    const basis = Number(quote.basis_bps);
+    const direction = basis >= 0 ? "溢价" : "折价";
+    const message = `${item.symbol} ${direction} ${Number.isFinite(basis) ? `${basis >= 0 ? "+" : ""}${basis.toFixed(1)} bps` : "异常"}，${this.underlyingAlignmentLabel(quote.alignment_status)}`;
+    this.beep(level === "strong" ? 1180 : 760, level === "strong" ? 3 : 2);
+    if (this.state.notifyOn && "Notification" in window && Notification.permission === "granted") {
+      new Notification("QuantDesk 价差提醒", { body: message });
+    }
+  }
+
   closeModal() {
-    this.q("#modal").classList.add("hidden");
+    const modal = this.q("#modal");
+    this.q("#modal-close").blur();
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
   }
 
   async openPredictionHistory() {
@@ -1438,19 +1614,33 @@ class ContractMonitor extends HTMLElement {
     this.q("#modal-symbol").textContent = symbol;
     this.q("#modal-price").textContent = this.formatPrice(overview.price);
     this.q("#modal-pct").textContent = this.formatPercent(overview.pct_24h);
-    this.q("#modal-pct").className = overview.pct_24h > 0 ? "up" : overview.pct_24h < 0 ? "down" : "flat";
+    this.q("#modal-pct").className = `research-change ${overview.pct_24h > 0 ? "up" : overview.pct_24h < 0 ? "down" : "flat"}`;
     this.q("#modal-watch").textContent = overview.watch ? "★" : "☆";
     this.q("#modal-watch").classList.toggle("on", Boolean(overview.watch));
     this.qa(".tf-switch button").forEach((button) => button.classList.toggle("on", button.dataset.tf === timeframe));
+    this.renderModalSummary(overview);
+    this.q("#modal-ohlc").innerHTML = "<span>正在加载当前周期行情…</span>";
+    this.q("#strategy-indicator-caption").textContent = `当前周期：${timeframe} · 正在计算 12 项`;
+    this.q("#strategy-indicator-list").innerHTML = '<span class="strategy-indicator-loading">策略指标计算中…</span>';
+    this.q("#strategy-indicator-detail").innerHTML = "";
     try {
       const encoded = encodeURIComponent(symbol);
-      const [klines, scores, report, opportunities] = await Promise.all([
+      const [klines, scores, report, opportunities, indicatorScan] = await Promise.all([
         this.api(`/klines?symbol=${encoded}&tf=${timeframe}&limit=120`),
         this.api(`/score?symbol=${encoded}`),
         this.api(`/report?symbol=${encoded}`),
         this.api(`/opportunities?symbol=${encoded}&limit=1&include_ignored=true`),
+        this.api(`/strategy-indicators?symbol=${encoded}&tf=${timeframe}`).catch((error) => ({
+          timeframe,
+          count: 12,
+          triggered_count: 0,
+          items: [],
+          error: error.message || "策略指标加载失败",
+        })),
       ]);
       this.state.modal.opportunity = opportunities.items?.[0] || null;
+      this.renderStrategyIndicators(indicatorScan);
+      this.renderModalSummary(overview, klines, report, this.state.modal.opportunity);
       this.drawChart(this.q("#chart"), klines);
       this.renderBattle(overview.battle || {});
       this.renderOpportunity(this.state.modal.opportunity);
@@ -1458,8 +1648,115 @@ class ContractMonitor extends HTMLElement {
       this.renderReport(report);
       this.renderFactors(scores[timeframe]);
     } catch (error) {
+      this.q("#modal-ohlc").innerHTML = '<span class="down">当前周期行情加载失败</span>';
       this.q("#report").innerHTML = `<div class="error-banner">${this.escape(error.message || "详情加载失败")}</div>`;
     }
+  }
+
+  renderStrategyIndicators(scan) {
+    const items = Array.isArray(scan?.items) ? scan.items : [];
+    this.state.modal.indicators = items;
+    const timeframeLabel = { "15m": "15 分", "1h": "1 小时", "4h": "4 小时" }[scan?.timeframe || this.state.modal.tf] || this.state.modal.tf;
+    const caption = this.q("#strategy-indicator-caption");
+    if (!items.length) {
+      caption.textContent = `当前周期：${timeframeLabel} · 12 项指标暂不可用`;
+      this.q("#strategy-indicator-list").innerHTML = `<span class="strategy-indicator-loading error">${this.escape(scan?.error || "暂无足够数据")}</span>`;
+      this.q("#strategy-indicator-detail").innerHTML = "";
+      return;
+    }
+    caption.textContent = `当前周期：${timeframeLabel} · 已触发 ${Number(scan.triggered_count) || 0}/${Number(scan.count) || items.length} · ${Number(scan.candle_count) || 0} 根 K 线`;
+    const selectedExists = items.some((item) => item.key === this.state.modal.selectedIndicator);
+    if (!selectedExists) {
+      this.state.modal.selectedIndicator = items.find((item) => item.triggered)?.key || items[0].key;
+    }
+    this.q("#strategy-indicator-list").innerHTML = items.map((item) => {
+      const selected = item.key === this.state.modal.selectedIndicator;
+      const statusLabel = item.status === "triggered" ? "已触发" : item.status === "insufficient" ? "数据不足" : "未触发";
+      return `<button type="button" role="tab" aria-selected="${selected}" class="strategy-indicator-chip ${this.escape(item.status)} ${selected ? "on" : ""}" data-strategy-indicator="${this.escape(item.key)}"><i aria-hidden="true"></i><span>${this.escape(item.name)}</span><small>${statusLabel}</small></button>`;
+    }).join("");
+    this.renderStrategyIndicatorSelection();
+  }
+
+  renderStrategyIndicatorSelection() {
+    const items = this.state.modal.indicators || [];
+    const selected = items.find((item) => item.key === this.state.modal.selectedIndicator) || items[0];
+    this.qa("[data-strategy-indicator]").forEach((button) => {
+      const active = button.dataset.strategyIndicator === selected?.key;
+      button.classList.toggle("on", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    const detail = this.q("#strategy-indicator-detail");
+    if (!selected) {
+      detail.innerHTML = "";
+      return;
+    }
+    const statusLabel = selected.status === "triggered" ? "已触发" : selected.status === "insufficient" ? "数据不足" : "当前未触发";
+    const metrics = (selected.metrics || []).map((metric) => `<article><span>${this.escape(metric.label)}</span><strong>${this.escape(metric.value)}</strong></article>`).join("");
+    detail.innerHTML = `<article class="strategy-indicator-detail-card ${this.escape(selected.status)}">
+      <header><div><strong>${this.escape(selected.name)}</strong><span>${this.escape(selected.category || "策略指标")}</span></div><b>${statusLabel}</b></header>
+      <p>${this.escape(selected.description || "")}</p>
+      <div class="strategy-indicator-summary">${this.escape(selected.summary || "")}</div>
+      <div class="strategy-indicator-metrics">${metrics}</div>
+    </article>`;
+  }
+
+  renderModalSummary(overview, klines = [], report = null, opportunity = null) {
+    const numeric = (value) => value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
+    const setMetric = (selector, value, tone = "") => {
+      const element = this.q(selector);
+      element.textContent = value;
+      element.classList.remove("metric-up", "metric-down", "metric-neutral");
+      if (tone) element.classList.add(`metric-${tone}`);
+    };
+    const underlying = String(overview.underlying || overview.annotation || "");
+    const equityMapped = /stock|equity|tradfi/i.test(underlying);
+    this.q("#modal-market").textContent = equityMapped ? "美股映射合约" : "永续合约";
+    this.q("#modal-source").textContent = `数据源：Binance Futures · ${equityMapped ? "美股映射 USDT 合约" : "USDT 永续合约"} · 量化结果仅供研究`;
+
+    const pct = numeric(overview.pct_24h);
+    const pctTone = pct != null ? (pct > 0 ? "up" : pct < 0 ? "down" : "neutral") : "neutral";
+    setMetric("#modal-metric-price", this.formatPrice(overview.price));
+    setMetric("#modal-metric-change", this.formatPercent(overview.pct_24h), pctTone);
+    const quoteVolume = numeric(overview.quote_volume);
+    setMetric("#modal-metric-volume", quoteVolume == null ? "--" : `${this.formatCompact(quoteVolume)} USDT`);
+
+    const bidDepth = numeric(overview.bid_depth_notional);
+    const askDepth = numeric(overview.ask_depth_notional);
+    const depth = bidDepth != null && askDepth != null ? bidDepth + askDepth : null;
+    setMetric("#modal-metric-depth", depth == null ? "--" : `${this.formatCompact(depth)} USDT`);
+
+    const battle = overview.battle?.["5m"];
+    const battleText = battle && battle.state !== "data_insufficient"
+      ? `多 ${Number(battle.long || 0).toFixed(0)} / 空 ${Number(battle.short || 0).toFixed(0)}`
+      : "数据采集中";
+    const battleTone = battle?.result === "long" ? "up" : battle?.result === "short" ? "down" : "neutral";
+    setMetric("#modal-metric-battle", battleText, battleTone);
+
+    const matchedOpportunity = opportunity || overview.opportunity;
+    const quality = numeric(matchedOpportunity?.quality_score);
+    const score = numeric(report?.combined ?? overview.score);
+    const qualityValue = quality != null ? quality.toFixed(1) : score != null ? this.formatScore(score) : "--";
+    const qualityTone = quality != null
+      ? (matchedOpportunity?.direction === "long" ? "up" : matchedOpportunity?.direction === "short" ? "down" : "neutral")
+      : score != null ? (score > 15 ? "up" : score < -15 ? "down" : "neutral") : "neutral";
+    setMetric("#modal-metric-quality", qualityValue, qualityTone);
+    this.q("#modal-metric-quality-note").textContent = quality != null
+      ? `${this.opportunityLabel(matchedOpportunity.direction)} · ${matchedOpportunity.status || "有效"}`
+      : score != null ? "综合量化评分" : "等待策略扫描";
+
+    if (!Array.isArray(klines) || klines.length === 0) return;
+    const current = klines[klines.length - 1];
+    const previous = klines.length > 1 ? klines[klines.length - 2] : current;
+    const barChange = Number(previous.close) ? (Number(current.close) / Number(previous.close) - 1) * 100 : null;
+    const timeframeLabel = { "15m": "15 分", "1h": "1 小时", "4h": "4 小时" }[this.state.modal.tf] || this.state.modal.tf;
+    this.q("#modal-ohlc").innerHTML = `
+      <strong>${this.escape(timeframeLabel)} · ${this.barTimeString(current.open_time || current.ts || current.time)}</strong>
+      <span>开 <b>${this.formatPrice(current.open)}</b></span>
+      <span>高 <b>${this.formatPrice(current.high)}</b></span>
+      <span>低 <b>${this.formatPrice(current.low)}</b></span>
+      <span>收 <b>${this.formatPrice(current.close)}</b></span>
+      <span class="${barChange > 0 ? "up" : barChange < 0 ? "down" : "flat"}">${barChange == null ? "--" : this.formatPercent(barChange)}</span>
+      <span>量 <b>${this.formatCompact(current.volume)}</b></span>`;
   }
 
   renderBattle(battles) {
@@ -1617,24 +1914,33 @@ class ContractMonitor extends HTMLElement {
 
   drawChart(canvas, klines) {
     const context = canvas.getContext("2d");
-    const width = canvas.width;
-    const height = canvas.height;
+    const bounds = canvas.getBoundingClientRect();
+    const width = Math.max(320, Math.round(bounds.width || 1280));
+    const height = width < 700 ? 330 : 430;
+    const density = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    canvas.width = Math.round(width * density);
+    canvas.height = Math.round(height * density);
+    canvas.style.height = `${height}px`;
+    context.setTransform(density, 0, 0, density, 0, 0);
     context.clearRect(0, 0, width, height);
     if (!klines.length) {
       context.fillStyle = "#77808f";
+      context.font = "12px sans-serif";
       context.fillText("数据加载中…", 20, 30);
       return;
     }
+    const lightTheme = document.documentElement.dataset.theme === "light";
     const padding = { left: 10, right: 70, top: 10, bottom: 46 };
-    const volumeHeight = 36;
+    const volumeHeight = 46;
     const priceHeight = height - padding.top - padding.bottom - volumeHeight;
     const high = Math.max(...klines.map((item) => item.high));
     const low = Math.min(...klines.map((item) => item.low));
     const range = high - low || 1;
     const x = (index) => padding.left + (index + 0.5) * (width - padding.left - padding.right) / klines.length;
     const y = (value) => padding.top + (high - value) / range * priceHeight;
-    context.strokeStyle = "#1e2530";
-    context.fillStyle = "#77808f";
+    context.lineWidth = 1;
+    context.strokeStyle = lightTheme ? "#e1e5dd" : "#203330";
+    context.fillStyle = lightTheme ? "#747c71" : "#809795";
     context.font = "11px sans-serif";
     for (let index = 0; index <= 4; index += 1) {
       const value = high - range * index / 4;
@@ -1659,8 +1965,8 @@ class ContractMonitor extends HTMLElement {
       }
       context.stroke();
     };
-    movingAverage(20, "#f0b90b");
-    movingAverage(50, "#b37feb");
+    movingAverage(20, lightTheme ? "#9a7a14" : "#c7aa42");
+    movingAverage(50, lightTheme ? "#7255aa" : "#9a79ce");
     const candleWidth = Math.max(2, (width - padding.left - padding.right) / klines.length * 0.6);
     const maxVolume = Math.max(...klines.map((item) => item.volume)) || 1;
     klines.forEach((item, index) => {

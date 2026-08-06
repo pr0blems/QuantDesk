@@ -162,6 +162,7 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
             },
         )
         assert created.status_code == 201
+        assert created.json()["config"]["signal_mode"] == "legacy_score_v1"
         public_account_id = created.json()["id"]
 
         account = client.get(

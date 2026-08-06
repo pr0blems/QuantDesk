@@ -133,12 +133,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # The production ASGI app owns the market collectors and the
             # multi-account paper executor. Explicitly constructed apps are
             # used by tests/tools and must not start perpetual worker threads.
-            from . import battle, live_engine, market_engine, market_store
+            from . import battle, live_engine, market_engine, market_store, underlying_quotes
 
             market_store.configure_engine(database_engine)
             initialize_admin_runtime(database_engine)
             market_engine.start()
             battle.start()
+            underlying_quotes.start()
             live_engine.configure(
                 runtime_settings,
                 app.state.binance_service,
@@ -151,6 +152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             if settings is None:
                 app.state.finnhub_us_quote_service.stop()
+                underlying_quotes.stop()
 
     app = FastAPI(
         title="QuantDesk V2",
@@ -262,6 +264,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             methods=["GET"],
             include_in_schema=False,
             name="frontend_credentials_redirect",
+        )
+
+    if runtime_settings.react_static_dir.is_dir():
+        # The React application uses hash routing and is intentionally exposed
+        # under a canary path while the existing frontend remains the default.
+        app.mount(
+            "/next",
+            StaticFiles(directory=runtime_settings.react_static_dir, html=True),
+            name="react_frontend",
         )
 
     return app

@@ -231,6 +231,109 @@ def test_full_strategy_signal_reads_declared_timeframes(
     assert recorded == [("TESTUSDT", "LONG_ENTRY")]
 
 
+def test_legacy_signal_reads_its_frozen_timeframe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["strategy_snapshot_json"]["timeframe"] = "1h"
+    requested: list[tuple[str, str, int]] = []
+
+    def get_klines(symbol: str, timeframe: str, limit: int) -> list[dict]:
+        requested.append((symbol, timeframe, limit))
+        return [
+            {
+                "open_time": index * 3_600,
+                "open": 100 + index,
+                "high": 101 + index,
+                "low": 99 + index,
+                "close": 100 + index,
+                "volume": 10,
+            }
+            for index in range(3)
+        ]
+
+    monkeypatch.setattr(paper.store, "get_klines", get_klines)
+
+    direction, atr, basis, signal_time, _ = paper._strategy_signal(account, "TESTUSDT")
+
+    assert requested == [("TESTUSDT", "1h", 600)]
+    assert direction == 0
+    assert atr is None
+    assert signal_time == 2 * 3_600
+    assert "周期：1h" in basis
+
+
+def test_legacy_paper_score_mode_restores_persistent_threshold_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["config_json"]["signal_mode"] = paper.LEGACY_PAPER_SIGNAL_MODE
+    rows = [
+        {
+            "open_time": index * 4 * 3_600,
+            "open": 100,
+            "high": 102,
+            "low": 99,
+            "close": 100 + index / 10,
+            "volume": 10,
+        }
+        for index in range(160)
+    ]
+    candles = [
+        paper.StrategyCandle(
+            ts=item["open_time"],
+            open=item["open"],
+            high=item["high"],
+            low=item["low"],
+            close=item["close"],
+            volume=item["volume"],
+        )
+        for item in rows
+    ]
+    monkeypatch.setattr(
+        paper.store,
+        "query",
+        lambda sql, params=(): [{"score": 74, "detail": "[]", "open_time": rows[-1]["open_time"]}],
+    )
+    monkeypatch.setattr(paper, "_candles", lambda symbol, timeframe: (candles, rows))
+
+    direction, atr, basis, signal_time, evidence = paper._paper_strategy_signal(
+        account, "TESTUSDT", 125
+    )
+
+    assert direction == 1
+    assert atr is not None
+    assert signal_time == rows[-1]["open_time"]
+    assert evidence["signal_mode"] == paper.LEGACY_PAPER_SIGNAL_MODE
+    assert evidence["score"] == 74
+    assert any("4h 评分：+74" in item for item in basis)
+
+
+def test_legacy_paper_signal_remains_valid_until_a_new_score_replaces_it() -> None:
+    account = _account()
+    account["config_json"]["signal_mode"] = paper.LEGACY_PAPER_SIGNAL_MODE
+    policy = paper._paper_risk_policy(account)
+    bar_open = 1_700_000_000
+
+    assert not paper._paper_signal_is_fresh(
+        account, bar_open, {}, bar_open + 4 * 3_600 - 1, policy
+    )
+    assert paper._paper_signal_is_fresh(
+        account, bar_open, {}, bar_open + 4 * 3_600, policy
+    )
+    assert paper._paper_signal_is_fresh(
+        account, bar_open, {}, bar_open + 24 * 3_600, policy
+    )
+
+
+def test_paper_ticker_freshness_tolerates_database_clock_drift() -> None:
+    account = _account()
+    policy = paper._paper_risk_policy(account)
+    prices = _fresh_prices("TESTUSDT", 100, 1_700_000_008)
+
+    assert paper._price_is_fresh(prices, "TESTUSDT", 1_700_000_000, policy)
+
+
 def test_full_strategy_signal_persistence_is_tenant_scoped_and_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -744,6 +847,20 @@ def test_legacy_signal_requires_a_closed_recent_four_hour_bar() -> None:
     )
     assert not paper._signal_is_fresh(
         account, bar_open, {}, bar_open + 5 * 3600 + 1, policy
+    )
+
+
+def test_legacy_signal_freshness_uses_its_frozen_timeframe() -> None:
+    account = _account()
+    account["strategy_snapshot_json"]["timeframe"] = "1h"
+    policy = paper._paper_risk_policy(account)
+    bar_open = 1_700_000_000
+
+    assert not paper._signal_is_fresh(
+        account, bar_open, {}, bar_open + 3600 - 1, policy
+    )
+    assert paper._signal_is_fresh(
+        account, bar_open, {}, bar_open + 3600 + 30, policy
     )
 
 

@@ -30,7 +30,7 @@ PRIORITY_SYMBOLS = (
     "QQQ",
     "JPM",
 )
-SYMBOL_ALIASES = {"BRKB": "BRK.B"}
+SYMBOL_ALIASES = {"BRKB": "BRK.B", "PAYP": "PYPL"}
 SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,15}$")
 
 

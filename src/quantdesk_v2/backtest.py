@@ -5,7 +5,6 @@ import json
 import math
 from bisect import bisect_right
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +13,19 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from .market_data_client import fetch_klines_range
+from .strategy_evaluator import (
+    DEFAULT_STRATEGY_EVALUATOR,
+    SUPPORTED_STRATEGY_TIMEFRAMES,
+    StrategyCandle,
+    bollinger_bands,
+    cross_signals,
+    exponential_moving_average,
+    optional_exponential_moving_average,
+    relative_strength_index,
+    rsi_value,
+    simple_moving_average,
+    zero_cross_signals,
+)
 from .strategy_runtime import (
     StrategyMarketDataError,
     StrategySpecError,
@@ -43,7 +55,7 @@ MAX_BARS = 50_000
 MAX_EQUITY_POINTS = 1_500
 MAX_RETURNED_TRADES = 5_000
 MAINTENANCE_MARGIN_RATE = 0.005
-SUPPORTED_BACKTEST_TIMEFRAMES = ("15m", "1h", "4h")
+SUPPORTED_BACKTEST_TIMEFRAMES = SUPPORTED_STRATEGY_TIMEFRAMES
 
 
 STRATEGY_TEMPLATES: tuple[dict[str, Any], ...] = (
@@ -225,14 +237,18 @@ _REQUIRED_CONFIG = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class _Candle:
-    ts: int
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
+# Private aliases are retained for compatibility with older internal callers.
+# New execution modes must import these public primitives from
+# ``strategy_evaluator`` instead of reaching into the backtest module.
+_Candle = StrategyCandle
+_sma = simple_moving_average
+_ema = exponential_moving_average
+_ema_optional = optional_exponential_moving_average
+_rsi = relative_strength_index
+_bollinger = bollinger_bands
+_cross_signals = cross_signals
+_zero_cross_signals = zero_cross_signals
+_rsi_value = rsi_value
 
 
 class BacktestRepository:
@@ -977,7 +993,9 @@ def _run_engine(
     risk_proposals: list[dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     if signals is None:
-        signals = _build_signals(config["strategy_id"], candles, config["params"])
+        signals = DEFAULT_STRATEGY_EVALUATOR.evaluate(
+            config["strategy_id"], candles, config["params"]
+        )
     if len(signals) != len(candles):
         raise BacktestUnavailable("strategy signal count does not match trigger candles")
     if risk_proposals is not None and len(risk_proposals) != len(candles):
@@ -1273,202 +1291,9 @@ def _run_engine(
 def _build_signals(
     strategy_id: str, candles: list[_Candle], params: dict[str, int | float]
 ) -> list[int]:
-    closes = [item.close for item in candles]
-    signals = [0] * len(candles)
-    if strategy_id == "ma_cross":
-        fast = _sma(closes, int(params["fast_period"]))
-        slow = _sma(closes, int(params["slow_period"]))
-        return _cross_signals(fast, slow)
-    if strategy_id == "macd_momentum":
-        fast = _ema(closes, int(params["fast_period"]))
-        slow = _ema(closes, int(params["slow_period"]))
-        macd = [
-            fast_value - slow_value if fast_value is not None and slow_value is not None else None
-            for fast_value, slow_value in zip(fast, slow, strict=True)
-        ]
-        signal_line = _ema_optional(macd, int(params["signal_period"]))
-        histogram = [
-            value - signal if value is not None and signal is not None else None
-            for value, signal in zip(macd, signal_line, strict=True)
-        ]
-        return _zero_cross_signals(histogram)
-    if strategy_id == "rsi_reversal":
-        rsi = _rsi(closes, int(params["period"]))
-        oversold = float(params["oversold"])
-        overbought = float(params["overbought"])
-        for index in range(1, len(candles)):
-            previous, current = rsi[index - 1], rsi[index]
-            if previous is None or current is None:
-                continue
-            if previous <= oversold < current:
-                signals[index] = 1
-            elif previous >= overbought > current:
-                signals[index] = -1
-        return signals
-    if strategy_id == "bollinger_reversion":
-        middle, lower, upper = _bollinger(closes, int(params["period"]), float(params["stddev"]))
-        del middle
-        for index in range(1, len(candles)):
-            if lower[index - 1] is None or lower[index] is None:
-                continue
-            if closes[index - 1] < lower[index - 1] and closes[index] >= lower[index]:
-                signals[index] = 1
-            elif closes[index - 1] > upper[index - 1] and closes[index] <= upper[index]:
-                signals[index] = -1
-        return signals
+    """Compatibility wrapper for callers that used the former private helper."""
 
-    fast = _sma(closes, int(params["fast_period"]))
-    slow = _sma(closes, int(params["slow_period"]))
-    macd_fast = _ema(closes, 12)
-    macd_slow = _ema(closes, 26)
-    rsi = _rsi(closes, int(params["rsi_period"]))
-    _, lower, upper = _bollinger(closes, 20, 2)
-    scores: list[float | None] = [None] * len(candles)
-    for index, close in enumerate(closes):
-        if fast[index] is None or slow[index] is None:
-            continue
-        score = 1 if fast[index] > slow[index] else -1
-        if macd_fast[index] is not None and macd_slow[index] is not None:
-            score += 1 if macd_fast[index] > macd_slow[index] else -1
-        if rsi[index] is not None:
-            if rsi[index] <= 35:
-                score += 1
-            elif rsi[index] >= 65:
-                score -= 1
-        if lower[index] is not None:
-            if close < lower[index]:
-                score += 1
-            elif close > upper[index]:
-                score -= 1
-        scores[index] = score
-    threshold = float(params["threshold"])
-    for index, score in enumerate(scores):
-        if score is None:
-            continue
-        previous = scores[index - 1] if index else None
-        if score >= threshold and (previous is None or previous < threshold):
-            signals[index] = 1
-        elif score <= -threshold and (previous is None or previous > -threshold):
-            signals[index] = -1
-    return signals
-
-
-def _sma(values: list[float], period: int) -> list[float | None]:
-    result: list[float | None] = [None] * len(values)
-    rolling = 0.0
-    for index, value in enumerate(values):
-        rolling += value
-        if index >= period:
-            rolling -= values[index - period]
-        if index >= period - 1:
-            result[index] = rolling / period
-    return result
-
-
-def _ema(values: list[float], period: int) -> list[float | None]:
-    result: list[float | None] = [None] * len(values)
-    if len(values) < period:
-        return result
-    seed = sum(values[:period]) / period
-    result[period - 1] = seed
-    alpha = 2 / (period + 1)
-    previous = seed
-    for index in range(period, len(values)):
-        previous = values[index] * alpha + previous * (1 - alpha)
-        result[index] = previous
-    return result
-
-
-def _ema_optional(values: list[float | None], period: int) -> list[float | None]:
-    result: list[float | None] = [None] * len(values)
-    valid = [(index, value) for index, value in enumerate(values) if value is not None]
-    if len(valid) < period:
-        return result
-    seed_values = [float(value) for _, value in valid[:period]]
-    seed = sum(seed_values) / period
-    seed_index = valid[period - 1][0]
-    result[seed_index] = seed
-    alpha = 2 / (period + 1)
-    previous = seed
-    for index, value in valid[period:]:
-        previous = float(value) * alpha + previous * (1 - alpha)
-        result[index] = previous
-    return result
-
-
-def _rsi(values: list[float], period: int) -> list[float | None]:
-    result: list[float | None] = [None] * len(values)
-    if len(values) <= period:
-        return result
-    gains = [max(values[index] - values[index - 1], 0) for index in range(1, len(values))]
-    losses = [max(values[index - 1] - values[index], 0) for index in range(1, len(values))]
-    average_gain = sum(gains[:period]) / period
-    average_loss = sum(losses[:period]) / period
-    result[period] = _rsi_value(average_gain, average_loss)
-    for index in range(period + 1, len(values)):
-        average_gain = (average_gain * (period - 1) + gains[index - 1]) / period
-        average_loss = (average_loss * (period - 1) + losses[index - 1]) / period
-        result[index] = _rsi_value(average_gain, average_loss)
-    return result
-
-
-def _rsi_value(average_gain: float, average_loss: float) -> float:
-    if average_loss == 0:
-        return 100.0 if average_gain else 50.0
-    ratio = average_gain / average_loss
-    return 100 - 100 / (1 + ratio)
-
-
-def _bollinger(
-    values: list[float], period: int, multiplier: float
-) -> tuple[list[float | None], list[float | None], list[float | None]]:
-    middle: list[float | None] = [None] * len(values)
-    lower: list[float | None] = [None] * len(values)
-    upper: list[float | None] = [None] * len(values)
-    rolling = 0.0
-    rolling_squared = 0.0
-    for index, value in enumerate(values):
-        rolling += value
-        rolling_squared += value * value
-        if index >= period:
-            removed = values[index - period]
-            rolling -= removed
-            rolling_squared -= removed * removed
-        if index >= period - 1:
-            mean = rolling / period
-            variance = max(0.0, rolling_squared / period - mean * mean)
-            deviation = math.sqrt(variance) * multiplier
-            middle[index] = mean
-            lower[index] = mean - deviation
-            upper[index] = mean + deviation
-    return middle, lower, upper
-
-
-def _cross_signals(fast: list[float | None], slow: list[float | None]) -> list[int]:
-    signals = [0] * len(fast)
-    for index in range(1, len(fast)):
-        values = (fast[index - 1], slow[index - 1], fast[index], slow[index])
-        if any(value is None for value in values):
-            continue
-        previous_fast, previous_slow, current_fast, current_slow = values
-        if previous_fast <= previous_slow and current_fast > current_slow:
-            signals[index] = 1
-        elif previous_fast >= previous_slow and current_fast < current_slow:
-            signals[index] = -1
-    return signals
-
-
-def _zero_cross_signals(values: list[float | None]) -> list[int]:
-    signals = [0] * len(values)
-    for index in range(1, len(values)):
-        previous, current = values[index - 1], values[index]
-        if previous is None or current is None:
-            continue
-        if previous <= 0 < current:
-            signals[index] = 1
-        elif previous >= 0 > current:
-            signals[index] = -1
-    return signals
+    return DEFAULT_STRATEGY_EVALUATOR.evaluate(strategy_id, candles, params)
 
 
 def _liquidation_price(entry_price: float, direction: int, leverage: int) -> float:

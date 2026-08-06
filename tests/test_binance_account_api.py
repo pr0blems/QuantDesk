@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -503,6 +504,39 @@ def test_timestamp_error_synchronizes_binance_clock_and_retries_once(
     assert snapshot.account_type == "UM_FUTURE"
     assert snapshot.wallet_balance == 100
     assert calls == ["/fapi/v3/account", "/fapi/v1/time", "/fapi/v3/account"]
+
+
+def test_account_snapshot_separates_source_update_from_fetch_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_updated_ms = FIXED_TIME_MS - 60_000
+    fetch_completed_ms = FIXED_TIME_MS + 250
+    clock_values = iter((FIXED_TIME_MS, fetch_completed_ms))
+
+    def transport(url: str, headers: dict[str, str], _: float) -> tuple[int, bytes]:
+        assert_signed_request(url, headers)
+        return response(
+            200,
+            {
+                "totalWalletBalance": "100",
+                "availableBalance": "90",
+                "totalUnrealizedProfit": "1",
+                "assets": [{"asset": "USDT", "updateTime": source_updated_ms}],
+                "positions": [],
+            },
+        )
+
+    monkeypatch.setattr(binance_client, "current_time_ms", lambda: next(clock_values))
+    client = binance_client.BinanceAccountClient(
+        "https://fapi.binance.com",
+        "https://papi.binance.com",
+        transport=transport,
+    )
+
+    snapshot = client.account(API_KEY, API_SECRET)
+
+    assert snapshot.updated_at == datetime.fromtimestamp(source_updated_ms / 1_000, UTC)
+    assert snapshot.observed_at == datetime.fromtimestamp(fetch_completed_ms / 1_000, UTC)
 
 
 def test_portfolio_open_orders_uses_um_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:

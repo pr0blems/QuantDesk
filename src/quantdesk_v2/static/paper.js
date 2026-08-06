@@ -560,6 +560,7 @@ class PaperDashboard extends HTMLElement {
     const positions = Array.isArray(data.positions) ? data.positions : [];
     const trades = Array.isArray(data.trades) ? data.trades : [];
     const rules = data.rules || {};
+    const closedTotal = stats.closed_total ?? stats.trades ?? 0;
     const canReset = Boolean(data.permissions?.can_reset);
 
     this.q("#paper-subtitle").textContent = `${accountMeta.name || "当前模拟盘"} · ${accountMeta.strategy_name || accountMeta.engine_key || "独立策略"} · ${this.number(account.start, 0)} USDT 起步 · ${this.number(account.leverage, 0)}x 杠杆`;
@@ -580,7 +581,7 @@ class PaperDashboard extends HTMLElement {
     this.renderMetric("equity", `${this.number(account.equity)} U`, `收益率 ${this.signed(account.ret_pct)}%`, this.tone(account.ret_pct));
     this.renderMetric("balance", `${this.number(account.balance)} U`, `占用保证金 ${this.number(account.used_margin)} U（${this.number(account.margin_usage, 1)}%）`, "neutral");
     this.renderMetric("upnl", `${this.signed(account.upnl)} U`, `今日盈亏 ${this.signed(account.today_pnl)} U`, this.tone(account.upnl));
-    this.renderMetric("realized", `${this.signed(stats.realized)} U`, `共 ${this.number(stats.trades, 0)} 笔（${this.number(stats.wins, 0)}胜/${this.number(stats.losses, 0)}负）`, this.tone(stats.realized));
+    this.renderMetric("realized", `${this.signed(stats.realized)} U`, `开仓 ${this.number(stats.entries, 0)} 次 · 已平仓 ${this.number(closedTotal, 0)} 笔（近百笔 ${this.number(stats.wins, 0)}胜/${this.number(stats.losses, 0)}负）`, this.tone(stats.realized));
     this.renderMetric("win-rate", Number(stats.trades) ? `${this.number(stats.win_rate, 1)}%` : "--", `盈亏比 ${stats.profit_factor ?? "--"}`, "warning");
     const riskSummary = account.risk_per_trade_pct != null
       ? ` · 单笔风险 ${this.number(account.risk_per_trade_pct, 2)}%`

@@ -52,6 +52,7 @@
 
 ## 主要页面
 
+- `/next/`：React + TypeScript 新前端灰度入口；迁移完成前保留旧前端为默认入口
 - `/monitor`：Binance TradFi 合约与 Finnhub 美股现货双市场监控（数据源隔离）
 - `/paper`：多账户模拟盘
 - `/strategies`：用户策略与 AI 语义编辑
@@ -66,6 +67,9 @@
 - MySQL/MariaDB 必须启用 TLS、证书主机名校验和 CA 验证。
 - 数据库防火墙仅允许应用服务器访问 3306。
 - Binance API Key 禁止提现权限，并绑定应用出口 IP。
+- 实盘账户注册必须保存交易所稳定 UID 作为 `physical_account_id`；`account_scope` 仅是 ownership alias，禁止用 API Key 哈希或该 alias 代替物理账户身份。
+- 统一 LIVE 执行内核仍处于灰度门禁：durable OCO/protection group 完成前拒绝新增 LIVE 止盈保护单，STOP 只占一个保护槽，不得提前切换旧实盘写路径。
+- 成交后的“新鲜账户快照 observe/settle → STOP”保护编排、未保护窗口监控和失败 safe-close 尚未完成；完成并演练前不得宣称 live-ready。
 - `JWT_SECRET`、`CREDENTIAL_MASTER_KEY` 和数据库密码应由密钥管理系统注入；`OPENAI_API_KEY` 仅作为未配置用户模型时的可选服务端回退密钥。
 
 详细部署和测试说明见 [V2 运行说明](docs/V2运行说明.md)。

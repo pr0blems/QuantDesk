@@ -21,6 +21,7 @@ from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings
+from .domain.protection import ProtectionCoverage, ProtectionPlan
 from .live_risk import (
     OpenPositionRisk,
     account_loss_limits,
@@ -39,6 +40,11 @@ from .live_risk import (
 from .market_config import tradfi_symbols
 from .paper_engine import _exit_levels, _strategy_signal, build_entry_basis_snapshot
 from .security import CredentialCipher, SecurityError
+from .strategy_evaluator import (
+    StrategyEvaluationError,
+    resolve_legacy_strategy_timeframe,
+    strategy_timeframe_seconds,
+)
 
 _settings: Settings | None = None
 _account_service: BinanceAccountService | None = None
@@ -785,31 +791,43 @@ def _place_protection(
 ) -> bool:
     if _trading_client is None:
         return False
-    created: list[dict[str, Any]] = []
-    for action, order_type, trigger in (
-        ("stop", "STOP_MARKET", stop),
-        ("take_profit", "TAKE_PROFIT_MARKET", target),
-    ):
-        signal_key = (
-            f"live:{account['deployment_id']}:{symbol}:{position_side}:{signal_time}:{action}"
+    try:
+        plan = ProtectionPlan.create(
+            symbol=symbol,
+            close_side=side,
+            position_side=position_side,
+            quantity=quantity,
+            signal_time=signal_time,
+            stop=stop,
+            target=target,
         )
+    except (TypeError, ValueError):
+        return False
+    created: list[dict[str, Any]] = []
+    for protection in plan.orders:
+        action = protection.action.value
+        order_type = protection.order_type.value
+        trigger = protection.trigger_price
+        signal_key = plan.signal_key(account["deployment_id"], protection.action)
         intent = _create_intent(
             account,
             signal_key=signal_key,
-            symbol=symbol,
+            symbol=plan.symbol,
             action=action,
-            side=side,
-            position_side=position_side,
+            side=plan.close_side.value,
+            position_side=plan.position_side.value,
             order_type=order_type,
-            quantity=quantity,
+            quantity=plan.quantity,
             request_json={
-                "symbol": symbol,
-                "side": side,
-                "position_side": position_side,
+                "symbol": plan.symbol,
+                "side": plan.close_side.value,
+                "position_side": plan.position_side.value,
                 "type": order_type,
                 "stop_price": format(trigger, "f"),
-                "quantity": format(quantity, "f") if quantity is not None else None,
-                "close_position": quantity is None,
+                "quantity": (
+                    format(plan.quantity, "f") if plan.quantity is not None else None
+                ),
+                "close_position": plan.quantity is None,
                 "working_type": "MARK_PRICE",
             },
         )
@@ -827,13 +845,13 @@ def _place_protection(
             response = _trading_client.place_close_trigger(
                 api_key,
                 api_secret,
-                symbol=symbol,
-                side=side,  # type: ignore[arg-type]
+                symbol=plan.symbol,
+                side=plan.close_side.value,  # type: ignore[arg-type]
                 order_type=order_type,  # type: ignore[arg-type]
                 stop_price=trigger,
                 client_order_id=intent["client_order_id"],
-                position_side=position_side,  # type: ignore[arg-type]
-                quantity=quantity,
+                position_side=plan.position_side.value,  # type: ignore[arg-type]
+                quantity=plan.quantity,
             )
         except BinanceAccountClientError as exc:
             if exc.category in {"timeout", "network", "upstream"}:
@@ -984,7 +1002,10 @@ def _protection_counts(
         if opened is None or int(row["id"]) <= int(opened["id"]):
             continue
         actions.setdefault(key, set()).add(str(row["action"]))
-    return {key: len(value) for key, value in actions.items()}
+    return {
+        key: len(ProtectionCoverage.from_actions(value).actions)
+        for key, value in actions.items()
+    }
 
 
 def _cancel_orphan_protections(
@@ -1330,7 +1351,10 @@ def _signal_is_fresh(
 ) -> bool:
     snapshot = account.get("strategy_snapshot_json") or {}
     if snapshot.get("strategy_kind") == "legacy_signal":
-        timeframe_seconds = 4 * 60 * 60
+        try:
+            timeframe_seconds = _execution_timeframe_seconds(account)
+        except (StrategyEvaluationError, TypeError, ValueError):
+            return False
         closed = closed_bar_signal_freshness(
             signal_time,
             timeframe_seconds=timeframe_seconds,
@@ -1361,6 +1385,26 @@ def _signal_is_fresh(
     while valid_until >= 100_000_000_000:
         valid_until /= 1000
     return math.isfinite(valid_until) and time.time() <= valid_until
+
+
+def _execution_timeframe_seconds(account: dict[str, Any]) -> int:
+    """Resolve the immutable trigger interval used by holding/freshness rules."""
+
+    snapshot = account.get("strategy_snapshot_json") or {}
+    if snapshot.get("strategy_kind") == "full_strategy":
+        spec = snapshot.get("spec")
+        timeframes = spec.get("timeframes") if isinstance(spec, dict) else None
+        trigger = timeframes.get("trigger") if isinstance(timeframes, dict) else None
+        if not isinstance(trigger, str):
+            raise StrategyEvaluationError("full strategy trigger timeframe is unavailable")
+        return strategy_timeframe_seconds(trigger)
+    timeframe = resolve_legacy_strategy_timeframe(
+        snapshot,
+        account.get("config_json")
+        if isinstance(account.get("config_json"), dict)
+        else None,
+    )
+    return strategy_timeframe_seconds(timeframe)
 
 
 def _signal_exit_levels(
@@ -1787,6 +1831,11 @@ def _tick_account(account: dict[str, Any]) -> None:
         return
     config = account["config_json"]
     policy = policy_from_config(config)
+    try:
+        execution_timeframe_seconds = _execution_timeframe_seconds(account)
+    except (StrategyEvaluationError, TypeError, ValueError):
+        _fail_account(account, "strategy_timeframe_invalid")
+        return
     configured_mode = str(config.get("position_mode") or "one_way")
     current_mode = _cached_position_mode(account, api_key, api_secret)
     if current_mode != configured_mode:
@@ -1859,7 +1908,8 @@ def _tick_account(account: dict[str, Any]) -> None:
             if (
                 max_holding_bars
                 and opened_at is not None
-                and time.time() - opened_at >= max_holding_bars * 4 * 60 * 60
+                and time.time() - opened_at
+                >= max_holding_bars * execution_timeframe_seconds
             ):
                 positions_changed = (
                     _close_position(account, api_key, api_secret, position, "max_holding_bars")
