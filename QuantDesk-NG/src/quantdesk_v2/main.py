@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -17,6 +18,12 @@ from .admin import router as admin_router
 from .api import router
 from .config import Settings, get_settings
 from .database import build_engine, engine
+from .metrics import MetricsMiddleware, RuntimeMetrics
+from .metrics import router as metrics_router
+from .optimization_governance import router as optimization_governance_router
+from .proxy_routes import router as proxy_router
+from .reliability import router as reliability_router
+from .saas import router as saas_router
 from .strategy_routes import router as strategy_router
 
 FRONTEND_ROUTES = (
@@ -30,6 +37,7 @@ FRONTEND_ROUTES = (
     "/orders",
     "/risk",
     "/audit",
+    "/proxy",
 )
 
 _SENSITIVE_VALIDATION_MARKERS = (
@@ -43,6 +51,9 @@ _SENSITIVE_VALIDATION_MARKERS = (
     "authorization",
     "cookie",
     "credential",
+    # Proxy subscription payloads can contain node passwords even when their
+    # field name is simply ``content``; never reflect them in validation errors.
+    "content",
 )
 
 
@@ -134,6 +145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = runtime_settings
     app.state.database_engine = database_engine
+    app.state.metrics = RuntimeMetrics()
     app.add_exception_handler(RequestValidationError, _safe_request_validation_error)
     app.add_middleware(
         TrustedHostMiddleware,
@@ -150,9 +162,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         SecurityHeadersMiddleware,
         max_request_bytes=runtime_settings.max_request_bytes,
     )
+    app.add_middleware(MetricsMiddleware)
     app.include_router(router)
     app.include_router(admin_router)
+    app.include_router(reliability_router)
+    app.include_router(proxy_router)
+    app.include_router(optimization_governance_router)
     app.include_router(strategy_router)
+    app.include_router(saas_router)
+    app.include_router(metrics_router)
+
+    def public_v1_openapi() -> JSONResponse:
+        """Publish only the stable external contract, never internal workbench routes."""
+
+        schema = get_openapi(
+            title="QuantDesk External API",
+            version="v1",
+            description="Stable API contract for external integrations.",
+            routes=saas_router.routes,
+        )
+        return JSONResponse(schema)
+
+    app.add_api_route(
+        "/api/v1/openapi.json",
+        public_v1_openapi,
+        methods=["GET"],
+        include_in_schema=False,
+        name="public_v1_openapi",
+    )
 
     if runtime_settings.static_dir.is_dir():
         app.mount(

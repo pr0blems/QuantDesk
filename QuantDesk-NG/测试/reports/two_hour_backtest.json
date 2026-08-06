@@ -1,0 +1,854 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-08-05T09:09:19.634164+00:00",
+  "method": "lightgbm_multihead_train_calibrate_tune_locked_test",
+  "sample_minutes": 15,
+  "label": {
+    "horizon_seconds": 7200,
+    "terminal": "close at t+2h versus close at prediction time",
+    "event": "first touch of a past-volatility-only dynamic barrier",
+    "barrier_floor_bps": 20,
+    "barrier_cap_bps": 500
+  },
+  "features": [
+    "ret_1",
+    "ret_3",
+    "ret_6",
+    "ret_12",
+    "ret_24",
+    "trend_6_24",
+    "trend_24_72",
+    "realized_vol_12",
+    "realized_vol_24",
+    "realized_vol_96",
+    "atr_bps_14",
+    "rsi_14",
+    "volume_z_24",
+    "volume_z_96",
+    "trade_z_24",
+    "taker_ratio",
+    "taker_ratio_6",
+    "taker_impulse",
+    "body_bps",
+    "range_bps",
+    "upper_wick_bps",
+    "lower_wick_bps",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "is_us_regular",
+    "is_us_premarket",
+    "is_us_afterhours",
+    "is_weekend",
+    "barrier_bps",
+    "event_trigger_strength",
+    "external_event",
+    "external_earnings",
+    "external_periodic",
+    "external_sentiment",
+    "external_quality",
+    "external_text_score",
+    "external_guidance_score",
+    "external_growth_score",
+    "global_ret_1",
+    "global_ret_24",
+    "group_ret_1",
+    "group_ret_24",
+    "relative_ret_24",
+    "underlying_available",
+    "underlying_ret_1",
+    "underlying_ret_3",
+    "underlying_ret_6",
+    "underlying_ret_12",
+    "underlying_ret_24",
+    "underlying_trend_6_24",
+    "underlying_volume_z_24",
+    "contract_underlying_gap_1",
+    "contract_underlying_gap_24",
+    "metrics_available",
+    "oi_change_1",
+    "oi_change_3",
+    "oi_change_12",
+    "oi_value_z_24",
+    "top_account_bias",
+    "top_position_bias",
+    "global_account_bias",
+    "metrics_taker_bias",
+    "top_account_impulse_3",
+    "top_position_impulse_3",
+    "global_account_impulse_3",
+    "metrics_taker_impulse_3",
+    "top_global_disagreement",
+    "market_EQUITY",
+    "market_HK_EQUITY",
+    "market_KR_EQUITY",
+    "market_COMMODITY",
+    "market_PREMARKET"
+  ],
+  "data": {
+    "rows": 993911,
+    "symbols": 151,
+    "external_events": 413,
+    "underlying_rows": 84373,
+    "futures_metrics_rows": 895662,
+    "market_types": [
+      "COMMODITY",
+      "EQUITY",
+      "HK_EQUITY",
+      "KR_EQUITY",
+      "PREMARKET"
+    ],
+    "first_time_ms": 1765440900000,
+    "last_time_ms": 1785793500000
+  },
+  "split_boundaries": {
+    "train_end_ms": 1776634200000,
+    "calibration_end_ms": 1779687000000,
+    "tuning_end_ms": 1782739800000,
+    "test_end_ms": 1785793500000
+  },
+  "split_rows": {
+    "train": 126045,
+    "calibration": 123406,
+    "tuning": 292052,
+    "test": 450912
+  },
+  "fit_rows": {
+    "terminal_train": 126045,
+    "terminal_calibration": 123406,
+    "event_train": 46235,
+    "event_calibration": 46273,
+    "direction_train": 39761,
+    "direction_calibration": 40428
+  },
+  "feature_coverage_by_split": {
+    "train": {
+      "rows": 126045,
+      "external_events": 41,
+      "earnings_events": 5,
+      "earnings_surprise_events": 2,
+      "underlying_rows": 8639,
+      "futures_metrics_rows": 110399
+    },
+    "calibration": {
+      "rows": 123406,
+      "external_events": 76,
+      "earnings_events": 17,
+      "earnings_surprise_events": 17,
+      "underlying_rows": 10799,
+      "futures_metrics_rows": 108156
+    },
+    "tuning": {
+      "rows": 292052,
+      "external_events": 130,
+      "earnings_events": 6,
+      "earnings_surprise_events": 6,
+      "underlying_rows": 25341,
+      "futures_metrics_rows": 260348
+    },
+    "test": {
+      "rows": 450912,
+      "external_events": 163,
+      "earnings_events": 37,
+      "earnings_surprise_events": 27,
+      "underlying_rows": 39351,
+      "futures_metrics_rows": 415342
+    }
+  },
+  "official_test_rows": 56333,
+  "official_test_symbols": 151,
+  "official_test_days": 36,
+  "event_threshold": {
+    "samples": 748,
+    "precision": 0.7553475935828877,
+    "coverage": 0.02704461638585581,
+    "direction_weight": 0.5,
+    "terminal_weight": 0.15,
+    "event_direction_weight": 0.35,
+    "occurrence_weight": 1.0,
+    "occurrence_threshold": 0.7500000000000002,
+    "confidence_threshold": 0.7271943776577914,
+    "target_precision": 0.755
+  },
+  "terminal_test": {
+    "samples": 56333,
+    "accuracy": 0.5390623613157475,
+    "brier": 0.24731779893196096,
+    "predicted_up": 40307,
+    "predicted_down": 16026,
+    "confusion_matrix": [
+      [
+        8649,
+        18589
+      ],
+      [
+        7377,
+        21718
+      ]
+    ]
+  },
+  "event_test": {
+    "samples": 1053,
+    "precision": 0.7540360873694207,
+    "coverage": 0.024328820294810777,
+    "actual_event_rate": 0.8583013723949909,
+    "directional_recall": 0.021373388247328328,
+    "predicted_up": 697,
+    "predicted_down": 356,
+    "candidate_rows": 44404,
+    "candidate_symbols": 151,
+    "external_event_rows": 42
+  },
+  "macro_symbol_terminal_accuracy": 0.5393233168654089,
+  "qualification": {
+    "all_contracts_present": true,
+    "minimum_event_samples_met": true,
+    "minimum_observation_days_met": true,
+    "minimum_semantic_training_events_met": false,
+    "event_precision_target_met": true,
+    "qualified": false
+  },
+  "group_test": {
+    "COMMODITY": {
+      "samples": 3392,
+      "symbols": 8,
+      "terminal_accuracy": 0.5247641509433962
+    },
+    "EQUITY": {
+      "samples": 49787,
+      "symbols": 131,
+      "terminal_accuracy": 0.5413260489686063
+    },
+    "HK_EQUITY": {
+      "samples": 1034,
+      "symbols": 7,
+      "terminal_accuracy": 0.5444874274661509
+    },
+    "KR_EQUITY": {
+      "samples": 1272,
+      "symbols": 3,
+      "terminal_accuracy": 0.5078616352201258
+    },
+    "PREMARKET": {
+      "samples": 848,
+      "symbols": 2,
+      "terminal_accuracy": 0.5035377358490566
+    }
+  },
+  "symbol_terminal_metrics": {
+    "AAOIUSDT": {
+      "samples": 424,
+      "accuracy": 0.5377358490566038
+    },
+    "AAPLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5566037735849056
+    },
+    "ADBEUSDT": {
+      "samples": 424,
+      "accuracy": 0.5448113207547169
+    },
+    "ALABUSDT": {
+      "samples": 424,
+      "accuracy": 0.5636792452830188
+    },
+    "AMATUSDT": {
+      "samples": 424,
+      "accuracy": 0.5518867924528302
+    },
+    "AMDUSDT": {
+      "samples": 424,
+      "accuracy": 0.5259433962264151
+    },
+    "AMZNUSDT": {
+      "samples": 424,
+      "accuracy": 0.5589622641509434
+    },
+    "ANTHROPICUSDT": {
+      "samples": 424,
+      "accuracy": 0.5141509433962265
+    },
+    "APPUSDT": {
+      "samples": 294,
+      "accuracy": 0.5578231292517006
+    },
+    "ARMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5471698113207547
+    },
+    "ASMLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5518867924528302
+    },
+    "ASTSUSDT": {
+      "samples": 424,
+      "accuracy": 0.5235849056603774
+    },
+    "AVGOUSDT": {
+      "samples": 424,
+      "accuracy": 0.5235849056603774
+    },
+    "AXTIUSDT": {
+      "samples": 424,
+      "accuracy": 0.5165094339622641
+    },
+    "BABAUSDT": {
+      "samples": 424,
+      "accuracy": 0.5047169811320755
+    },
+    "BBXUSDT": {
+      "samples": 424,
+      "accuracy": 0.5141509433962265
+    },
+    "BEUSDT": {
+      "samples": 424,
+      "accuracy": 0.49292452830188677
+    },
+    "BITOUSDT": {
+      "samples": 88,
+      "accuracy": 0.5
+    },
+    "BMNRUSDT": {
+      "samples": 424,
+      "accuracy": 0.5424528301886793
+    },
+    "BNCUSDT": {
+      "samples": 303,
+      "accuracy": 0.5445544554455446
+    },
+    "BOTUSDT": {
+      "samples": 304,
+      "accuracy": 0.5197368421052632
+    },
+    "BRKBUSDT": {
+      "samples": 424,
+      "accuracy": 0.5566037735849056
+    },
+    "BSPUSDT": {
+      "samples": 390,
+      "accuracy": 0.517948717948718
+    },
+    "BXUSDT": {
+      "samples": 424,
+      "accuracy": 0.535377358490566
+    },
+    "BZUSDT": {
+      "samples": 424,
+      "accuracy": 0.5259433962264151
+    },
+    "CATUSDT": {
+      "samples": 390,
+      "accuracy": 0.5487179487179488
+    },
+    "CBRSUSDT": {
+      "samples": 424,
+      "accuracy": 0.5707547169811321
+    },
+    "CIENUSDT": {
+      "samples": 424,
+      "accuracy": 0.5448113207547169
+    },
+    "CLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5495283018867925
+    },
+    "COHRUSDT": {
+      "samples": 424,
+      "accuracy": 0.5330188679245284
+    },
+    "COINUSDT": {
+      "samples": 424,
+      "accuracy": 0.5518867924528302
+    },
+    "COPPERUSDT": {
+      "samples": 424,
+      "accuracy": 0.5400943396226415
+    },
+    "COSTUSDT": {
+      "samples": 424,
+      "accuracy": 0.5731132075471698
+    },
+    "CRCLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5212264150943396
+    },
+    "CRDOUSDT": {
+      "samples": 424,
+      "accuracy": 0.5448113207547169
+    },
+    "CRMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5919811320754716
+    },
+    "CRWDUSDT": {
+      "samples": 424,
+      "accuracy": 0.5400943396226415
+    },
+    "CRWVUSDT": {
+      "samples": 424,
+      "accuracy": 0.5683962264150944
+    },
+    "CSCOUSDT": {
+      "samples": 424,
+      "accuracy": 0.5400943396226415
+    },
+    "DELLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5566037735849056
+    },
+    "DISUSDT": {
+      "samples": 424,
+      "accuracy": 0.5566037735849056
+    },
+    "DKNGUSDT": {
+      "samples": 424,
+      "accuracy": 0.5471698113207547
+    },
+    "DRAMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5117924528301887
+    },
+    "EBAYUSDT": {
+      "samples": 424,
+      "accuracy": 0.5235849056603774
+    },
+    "EWJUSDT": {
+      "samples": 424,
+      "accuracy": 0.49292452830188677
+    },
+    "EWTUSDT": {
+      "samples": 424,
+      "accuracy": 0.5400943396226415
+    },
+    "EWYUSDT": {
+      "samples": 424,
+      "accuracy": 0.5542452830188679
+    },
+    "EWZUSDT": {
+      "samples": 424,
+      "accuracy": 0.5212264150943396
+    },
+    "FLEXUSDT": {
+      "samples": 390,
+      "accuracy": 0.6025641025641025
+    },
+    "FLNCUSDT": {
+      "samples": 424,
+      "accuracy": 0.5235849056603774
+    },
+    "FWDIUSDT": {
+      "samples": 303,
+      "accuracy": 0.49834983498349833
+    },
+    "GEVUSDT": {
+      "samples": 294,
+      "accuracy": 0.5714285714285714
+    },
+    "GIGADEVUSDT": {
+      "samples": 8,
+      "accuracy": 0.625
+    },
+    "GLWUSDT": {
+      "samples": 424,
+      "accuracy": 0.5141509433962265
+    },
+    "GMEUSDT": {
+      "samples": 424,
+      "accuracy": 0.6037735849056604
+    },
+    "GOOGLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5778301886792453
+    },
+    "GSUSDT": {
+      "samples": 66,
+      "accuracy": 0.6212121212121212
+    },
+    "HDUSDT": {
+      "samples": 424,
+      "accuracy": 0.5023584905660378
+    },
+    "HIMSUSDT": {
+      "samples": 424,
+      "accuracy": 0.5589622641509434
+    },
+    "HK0700USDT": {
+      "samples": 153,
+      "accuracy": 0.5882352941176471
+    },
+    "HK1810USDT": {
+      "samples": 153,
+      "accuracy": 0.5032679738562091
+    },
+    "HOODUSDT": {
+      "samples": 424,
+      "accuracy": 0.5188679245283019
+    },
+    "HPEUSDT": {
+      "samples": 424,
+      "accuracy": 0.5542452830188679
+    },
+    "HYUNDAIUSDT": {
+      "samples": 424,
+      "accuracy": 0.49764150943396224
+    },
+    "IBMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5377358490566038
+    },
+    "INTCUSDT": {
+      "samples": 424,
+      "accuracy": 0.5259433962264151
+    },
+    "INTWUSDT": {
+      "samples": 303,
+      "accuracy": 0.48184818481848185
+    },
+    "IRENUSDT": {
+      "samples": 424,
+      "accuracy": 0.5400943396226415
+    },
+    "IWMUSDT": {
+      "samples": 424,
+      "accuracy": 0.49764150943396224
+    },
+    "JPMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5613207547169812
+    },
+    "KLACUSDT": {
+      "samples": 424,
+      "accuracy": 0.5259433962264151
+    },
+    "KORUUSDT": {
+      "samples": 424,
+      "accuracy": 0.5212264150943396
+    },
+    "KSTRUSDT": {
+      "samples": 390,
+      "accuracy": 0.5256410256410257
+    },
+    "LITEUSDT": {
+      "samples": 424,
+      "accuracy": 0.5259433962264151
+    },
+    "LLYUSDT": {
+      "samples": 424,
+      "accuracy": 0.5542452830188679
+    },
+    "LRCXUSDT": {
+      "samples": 424,
+      "accuracy": 0.5589622641509434
+    },
+    "METAUSDT": {
+      "samples": 424,
+      "accuracy": 0.5731132075471698
+    },
+    "MINIMAXUSDT": {
+      "samples": 213,
+      "accuracy": 0.5352112676056338
+    },
+    "MRVLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5070754716981132
+    },
+    "MSFTUSDT": {
+      "samples": 424,
+      "accuracy": 0.5660377358490566
+    },
+    "MSTRUSDT": {
+      "samples": 424,
+      "accuracy": 0.5117924528301887
+    },
+    "MUUSDT": {
+      "samples": 424,
+      "accuracy": 0.5400943396226415
+    },
+    "MUUUSDT": {
+      "samples": 222,
+      "accuracy": 0.5315315315315315
+    },
+    "MVLLUSDT": {
+      "samples": 424,
+      "accuracy": 0.4740566037735849
+    },
+    "NATGASUSDT": {
+      "samples": 424,
+      "accuracy": 0.5330188679245284
+    },
+    "NBISUSDT": {
+      "samples": 424,
+      "accuracy": 0.5283018867924528
+    },
+    "NFLXUSDT": {
+      "samples": 424,
+      "accuracy": 0.5801886792452831
+    },
+    "NOKUSDT": {
+      "samples": 424,
+      "accuracy": 0.5589622641509434
+    },
+    "NOWUSDT": {
+      "samples": 424,
+      "accuracy": 0.5377358490566038
+    },
+    "NVDAUSDT": {
+      "samples": 424,
+      "accuracy": 0.5165094339622641
+    },
+    "NVOUSDT": {
+      "samples": 424,
+      "accuracy": 0.5872641509433962
+    },
+    "ONDSUSDT": {
+      "samples": 424,
+      "accuracy": 0.5966981132075472
+    },
+    "OPENAIUSDT": {
+      "samples": 424,
+      "accuracy": 0.49292452830188677
+    },
+    "ORCLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5801886792452831
+    },
+    "PANWUSDT": {
+      "samples": 162,
+      "accuracy": 0.5555555555555556
+    },
+    "PAYPUSDT": {
+      "samples": 424,
+      "accuracy": 0.5471698113207547
+    },
+    "PENGUSDT": {
+      "samples": 162,
+      "accuracy": 0.5679012345679012
+    },
+    "PLTRUSDT": {
+      "samples": 424,
+      "accuracy": 0.6061320754716981
+    },
+    "POPMARTUSDT": {
+      "samples": 141,
+      "accuracy": 0.5390070921985816
+    },
+    "PYPLUSDT": {
+      "samples": 66,
+      "accuracy": 0.4696969696969697
+    },
+    "QCOMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5235849056603774
+    },
+    "QNTXUSDT": {
+      "samples": 424,
+      "accuracy": 0.5495283018867925
+    },
+    "QQQUSDT": {
+      "samples": 424,
+      "accuracy": 0.5306603773584906
+    },
+    "RIVNUSDT": {
+      "samples": 424,
+      "accuracy": 0.589622641509434
+    },
+    "RKLBUSDT": {
+      "samples": 424,
+      "accuracy": 0.5424528301886793
+    },
+    "SAMSUNGUSDT": {
+      "samples": 424,
+      "accuracy": 0.5212264150943396
+    },
+    "SHAZUSDT": {
+      "samples": 162,
+      "accuracy": 0.5555555555555556
+    },
+    "SKHYNIXUSDT": {
+      "samples": 424,
+      "accuracy": 0.5047169811320755
+    },
+    "SKHYUSDT": {
+      "samples": 291,
+      "accuracy": 0.5085910652920962
+    },
+    "SMCIUSDT": {
+      "samples": 424,
+      "accuracy": 0.5872641509433962
+    },
+    "SMHUSDT": {
+      "samples": 66,
+      "accuracy": 0.6060606060606061
+    },
+    "SNDKUSDT": {
+      "samples": 424,
+      "accuracy": 0.535377358490566
+    },
+    "SNOWUSDT": {
+      "samples": 294,
+      "accuracy": 0.5714285714285714
+    },
+    "SNXXUSDT": {
+      "samples": 303,
+      "accuracy": 0.528052805280528
+    },
+    "SOFIUSDT": {
+      "samples": 162,
+      "accuracy": 0.6111111111111112
+    },
+    "SONYUSDT": {
+      "samples": 424,
+      "accuracy": 0.5259433962264151
+    },
+    "SOXLUSDT": {
+      "samples": 424,
+      "accuracy": 0.5047169811320755
+    },
+    "SOXSUSDT": {
+      "samples": 222,
+      "accuracy": 0.5045045045045045
+    },
+    "SPCXUSD1": {
+      "samples": 174,
+      "accuracy": 0.5229885057471264
+    },
+    "SPCXUSDT": {
+      "samples": 424,
+      "accuracy": 0.5801886792452831
+    },
+    "SPYUSDT": {
+      "samples": 424,
+      "accuracy": 0.535377358490566
+    },
+    "SQQQUSDT": {
+      "samples": 424,
+      "accuracy": 0.5566037735849056
+    },
+    "STRCUSDT": {
+      "samples": 390,
+      "accuracy": 0.5871794871794872
+    },
+    "STXXUSDT": {
+      "samples": 424,
+      "accuracy": 0.5188679245283019
+    },
+    "TBTUSDT": {
+      "samples": 88,
+      "accuracy": 0.4318181818181818
+    },
+    "TENCENTUSDT": {
+      "samples": 153,
+      "accuracy": 0.5359477124183006
+    },
+    "TERUSDT": {
+      "samples": 390,
+      "accuracy": 0.541025641025641
+    },
+    "TMFUSDT": {
+      "samples": 88,
+      "accuracy": 0.5
+    },
+    "TQQQUSDT": {
+      "samples": 424,
+      "accuracy": 0.5
+    },
+    "TSLAUSDT": {
+      "samples": 424,
+      "accuracy": 0.5259433962264151
+    },
+    "TSMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5212264150943396
+    },
+    "TTWOUSDT": {
+      "samples": 390,
+      "accuracy": 0.5538461538461539
+    },
+    "TXNUSDT": {
+      "samples": 390,
+      "accuracy": 0.5358974358974359
+    },
+    "TZAUSDT": {
+      "samples": 222,
+      "accuracy": 0.481981981981982
+    },
+    "UBERUSDT": {
+      "samples": 424,
+      "accuracy": 0.5306603773584906
+    },
+    "URNMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5424528301886793
+    },
+    "USARUSDT": {
+      "samples": 424,
+      "accuracy": 0.5636792452830188
+    },
+    "UVXYUSDT": {
+      "samples": 424,
+      "accuracy": 0.5259433962264151
+    },
+    "VRTUSDT": {
+      "samples": 294,
+      "accuracy": 0.5272108843537415
+    },
+    "VUSDT": {
+      "samples": 424,
+      "accuracy": 0.5636792452830188
+    },
+    "WDCUSDT": {
+      "samples": 424,
+      "accuracy": 0.49292452830188677
+    },
+    "WENUSDT": {
+      "samples": 303,
+      "accuracy": 0.5544554455445545
+    },
+    "WMTUSDT": {
+      "samples": 424,
+      "accuracy": 0.5424528301886793
+    },
+    "XAGUSDT": {
+      "samples": 424,
+      "accuracy": 0.5471698113207547
+    },
+    "XAUUSDT": {
+      "samples": 424,
+      "accuracy": 0.4882075471698113
+    },
+    "XBIUSDT": {
+      "samples": 303,
+      "accuracy": 0.5544554455445545
+    },
+    "XLEUSDT": {
+      "samples": 424,
+      "accuracy": 0.5495283018867925
+    },
+    "XPDUSDT": {
+      "samples": 424,
+      "accuracy": 0.5047169811320755
+    },
+    "XPTUSDT": {
+      "samples": 424,
+      "accuracy": 0.5094339622641509
+    },
+    "ZHIPUUSDT": {
+      "samples": 213,
+      "accuracy": 0.5586854460093896
+    },
+    "ZMUSDT": {
+      "samples": 424,
+      "accuracy": 0.5471698113207547
+    }
+  },
+  "limitations": [
+    "market features include OHLCV, taker flow, open interest and long-short ratios",
+    "matched underlying prices are joined at the same or earlier five-minute timestamp",
+    "historical news, social and order-book snapshots are not fabricated",
+    "multi-head weights and thresholds are selected on tuning data only",
+    "correlated contracts are reported by symbol and market group as well as pooled"
+  ],
+  "candidate_model_dir": "C:\\Users\\User\\Desktop\\币安量化测试\\QuantDesk-NG\\reports\\two_hour_models\\candidates\\20260805T090919Z",
+  "champion_promoted": false
+}

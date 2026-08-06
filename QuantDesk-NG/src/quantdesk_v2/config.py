@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     app_allowed_origins: str = "http://127.0.0.1:8200,http://localhost:8200"
     app_cookie_secure: bool = False
     max_request_bytes: int = 1_048_576
+    app_version: str = "0.2.0"
+    metrics_enabled: bool = True
+    metrics_token: SecretStr = SecretStr("")
 
     # API processes never own perpetual jobs. Workers are started explicitly
     # with `quantdesk-ng worker --role ...` and coordinate through DB leases.
@@ -111,6 +114,8 @@ class Settings(BaseSettings):
                 raise RuntimeError("Production database TLS must verify identity with DB_SSL_CA")
             if not self.app_cookie_secure:
                 raise RuntimeError("Production cookies must be Secure")
+            if self.metrics_enabled and not self.metrics_token.get_secret_value():
+                raise RuntimeError("METRICS_TOKEN is required when production metrics are enabled")
 
     def _validate_fernet_key(self) -> None:
         raw = self.credential_master_key.get_secret_value().encode("ascii", errors="ignore")

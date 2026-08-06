@@ -1,0 +1,24 @@
+{
+  "method": "buffered_exact_tuning",
+  "tuning_target": 0.755,
+  "tuning": {
+    "samples": 369,
+    "precision": 0.7560975609756098,
+    "direction_weight": 0.85,
+    "terminal_weight": 0,
+    "event_direction_weight": 0.15000000000000002,
+    "occurrence_weight": 0.75,
+    "occurrence_threshold": 0.8750000000000003,
+    "confidence_threshold": 0.7814592955448803
+  },
+  "locked_test": {
+    "samples": 553,
+    "correct": 416,
+    "precision": 0.7522603978300181,
+    "coverage": 0.012453832988019097,
+    "up": 368,
+    "down": 185,
+    "minimum_500_met": true,
+    "target_75_met": true
+  }
+}

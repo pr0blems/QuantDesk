@@ -35,6 +35,8 @@ BacktestTimeframe = Literal[
 BacktestRunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 BacktestTradeSide = Literal["long", "short"]
 AiProviderCode = Literal["openai", "deepseek", "doubao", "qwen", "kimi", "minimax"]
+ProxyProtocol = Literal["http", "socks5"]
+ProxySelectionMode = Literal["direct", "manual", "auto"]
 
 
 def _bounded_numeric_map(value: dict[str, int | float], field_name: str) -> dict[str, int | float]:
@@ -96,6 +98,45 @@ class UserOut(BaseModel):
     binance_key_fingerprint: str | None
     binance_key_updated_at: datetime | None
     created_at: datetime
+
+
+class ProxySubscriptionCreate(BaseModel):
+    """Import content is secret so it cannot surface in validation logs."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=96)
+    content: SecretStr = Field(min_length=8, max_length=2_000_000)
+    endpoint: str | None = Field(default=None, max_length=2048)
+    authorization: SecretStr | None = Field(default=None, max_length=1024)
+    enabled: bool = True
+    refresh_interval_minutes: int = Field(default=360, ge=15, le=10_080)
+
+
+class ProxyNodeCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=160)
+    protocol: ProxyProtocol
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    username: str | None = Field(default=None, max_length=128)
+    password: SecretStr | None = Field(default=None, max_length=512)
+    enabled: bool = True
+
+
+class ProxyRuntimeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    selection_mode: ProxySelectionMode
+    active_node_id: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def require_manual_node(self) -> Self:
+        if self.enabled and self.selection_mode == "manual" and self.active_node_id is None:
+            raise ValueError("manual proxy selection requires active_node_id")
+        return self
 
 
 class AdminAlertRulesUpdate(BaseModel):

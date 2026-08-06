@@ -46,6 +46,25 @@ def _proxy_address() -> tuple[str, int] | None:
     return parsed.hostname, port or 8080
 
 
+def _managed_proxy() -> tuple[bool, tuple[str, str, int, str | None, str | None] | None]:
+    """Resolve an administrator-selected collector proxy without blocking direct fallback.
+
+    Importing the web application here is intentionally lazy: the legacy market
+    module can still be used in offline tooling, while worker processes gain the
+    encrypted proxy selection stored by the V2 control plane.
+    """
+
+    try:
+        from quantdesk_v2.proxy_management import collector_proxy_state
+
+        configured, proxy = collector_proxy_state()
+        if proxy is None:
+            return configured, None
+        return configured, (proxy.protocol, proxy.host, proxy.port, proxy.username, proxy.password)
+    except Exception:
+        return True, None
+
+
 def _read_http_headers(sock: socket.socket) -> bytes:
     response = bytearray()
     while b"\r\n\r\n" not in response:
@@ -84,15 +103,28 @@ def _connect() -> ssl.SSLSocket:
     if WS_HOST not in _WS_ALLOWED_HOSTS or not WS_PATH.startswith("/"):
         raise RuntimeError("WebSocket target is outside the Binance allowlist")
 
-    proxy = _proxy_address()
-    raw_socket = socket.create_connection(proxy or (WS_HOST, 443), timeout=15)
+    proxy_configured, managed_proxy = _managed_proxy()
+    system_proxy = _proxy_address() if managed_proxy is None and not proxy_configured else None
+    proxy_target = (
+        (managed_proxy[1], managed_proxy[2]) if managed_proxy else system_proxy
+    )
+    raw_socket = socket.create_connection(proxy_target or (WS_HOST, 443), timeout=15)
     active_socket: socket.socket = raw_socket
     try:
-        if proxy:
+        if managed_proxy and managed_proxy[0] == "socks5":
+            _socks5_connect(active_socket, WS_HOST, 443, managed_proxy[3], managed_proxy[4])
+        elif proxy_target:
+            authorization = None
+            if managed_proxy and managed_proxy[3] and managed_proxy[4]:
+                authorization = base64.b64encode(
+                    f"{managed_proxy[3]}:{managed_proxy[4]}".encode("ascii")
+                ).decode("ascii")
             connect_request = (
                 f"CONNECT {WS_HOST}:443 HTTP/1.1\r\n"
                 f"Host: {WS_HOST}:443\r\n"
-                "Proxy-Connection: Keep-Alive\r\n\r\n"
+                "Proxy-Connection: Keep-Alive\r\n"
+                + (f"Proxy-Authorization: Basic {authorization}\r\n" if authorization else "")
+                + "\r\n"
             )
             active_socket.sendall(connect_request.encode("ascii"))
             proxy_response = _read_http_headers(active_socket)
@@ -132,6 +164,47 @@ def _connect() -> ssl.SSLSocket:
     except BaseException:
         active_socket.close()
         raise
+
+
+def _socks5_connect(
+    sock: socket.socket, host: str, port: int, username: str | None, password: str | None
+) -> None:
+    if username and password:
+        sock.sendall(b"\x05\x01\x02")
+    else:
+        sock.sendall(b"\x05\x01\x00")
+    method_response = _recv_exact(sock, 2)
+    if method_response[0] != 5 or method_response[1] == 255:
+        raise ConnectionError("SOCKS5 authentication method unavailable")
+    if method_response[1] == 2:
+        if not username or not password:
+            raise ConnectionError("SOCKS5 proxy requires credentials")
+        user_bytes, password_bytes = username.encode("ascii"), password.encode("ascii")
+        if len(user_bytes) > 255 or len(password_bytes) > 255:
+            raise ConnectionError("SOCKS5 credentials are too long")
+        sock.sendall(
+            bytes((1, len(user_bytes)))
+            + user_bytes
+            + bytes((len(password_bytes),))
+            + password_bytes
+        )
+        if _recv_exact(sock, 2) != b"\x01\x00":
+            raise ConnectionError("SOCKS5 authentication failed")
+    elif method_response[1] != 0:
+        raise ConnectionError("SOCKS5 selected unsupported authentication")
+    host_bytes = host.encode("ascii")
+    sock.sendall(
+        b"\x05\x01\x00\x03" + bytes((len(host_bytes),)) + host_bytes + port.to_bytes(2, "big")
+    )
+    header = _recv_exact(sock, 4)
+    if header[0] != 5 or header[1] != 0:
+        raise ConnectionError("SOCKS5 proxy rejected Binance CONNECT tunnel")
+    address_size = {1: 4, 4: 16}.get(header[3])
+    if header[3] == 3:
+        address_size = _recv_exact(sock, 1)[0]
+    if address_size is None:
+        raise ConnectionError("SOCKS5 proxy returned invalid address type")
+    _recv_exact(sock, address_size + 2)
 
 
 def _recv_exact(sock: socket.socket, length: int) -> bytes:

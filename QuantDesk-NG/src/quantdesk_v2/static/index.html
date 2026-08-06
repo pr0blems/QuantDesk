@@ -81,6 +81,7 @@
         <a class="nav-item" href="/orders" data-panel-target="orders"><span>单</span>订单与持仓<i>只读</i></a>
         <p>安全与管理</p>
         <a class="nav-item" href="/settings" data-panel-target="settings"><span>设</span>系统设置</a>
+        <a class="nav-item" href="/proxy" data-panel-target="proxy"><span>网</span>代理管理<i>BINANCE</i></a>
         <a class="nav-item" href="/risk" data-panel-target="risk"><span>风</span>风险控制<i>规划中</i></a>
         <a class="nav-item" href="/audit" data-panel-target="audit"><span>审</span>审计日志<i>规划中</i></a>
       </nav>
@@ -323,6 +324,10 @@
           </div>
         </section>
 
+        <section class="workspace-panel hidden" data-panel="proxy">
+          <proxy-dashboard id="proxy-dashboard"></proxy-dashboard>
+        </section>
+
         <section class="workspace-panel hidden" data-panel="risk">
           <div class="page-heading"><div><span class="eyebrow">RISK CONTROL</span><h1>风险控制</h1><p>用户、策略和标的三级风险边界</p></div></div>
           <article class="card empty-state"><span>风</span><h2>风控规则正在规划</h2><p>将覆盖仓位上限、每日亏损、最大回撤、行情过期和全局 Kill Switch。</p></article>
@@ -337,10 +342,11 @@
     </div>
   </section>
 
-  <script src="/assets/monitor.js?v=20260806-15" defer></script>
+  <script src="/assets/monitor.js?v=20260806-17" defer></script>
   <script src="/assets/paper.js?v=20260804-6" defer></script>
   <script src="/assets/strategies.js?v=20260804-1" defer></script>
   <script src="/assets/backtest.js?v=20260804-5" defer></script>
+  <script src="/assets/proxy.js?v=20260806-1" defer></script>
   <script src="/assets/app.js?v=20260804-7" defer></script>
 </body>
 </html>
