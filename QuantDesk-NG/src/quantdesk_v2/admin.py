@@ -133,11 +133,26 @@ def _sync_news_sources(db: Session) -> None:
 
 
 def initialize_admin_runtime(engine: Engine) -> None:
-    """Seed file-defined news sources before production workers start."""
+    """Seed file-defined news sources once, even when workers start together."""
 
-    with Session(engine) as db:
-        _sync_news_sources(db)
-        db.commit()
+    # Every worker invokes this during process startup.  On an empty database,
+    # a plain SELECT-count followed by INSERT can race and prevent the whole
+    # runtime from becoming ready.  A connection-scoped MySQL advisory lock
+    # serializes only this tiny initialization section; it is released even if
+    # the worker crashes before startup completes.
+    lock_name = "quantdesk-admin-runtime-seed"
+    with engine.connect() as lock_connection:
+        acquired = lock_connection.execute(
+            text("SELECT GET_LOCK(:lock_name, 15)"), {"lock_name": lock_name}
+        ).scalar_one()
+        if int(acquired or 0) != 1:
+            raise RuntimeError("admin runtime initialization lock timed out")
+        try:
+            with Session(engine) as db:
+                _sync_news_sources(db)
+                db.commit()
+        finally:
+            lock_connection.execute(text("SELECT RELEASE_LOCK(:lock_name)"), {"lock_name": lock_name})
 
 
 def _collector_out(row: CollectorStatus, now: int, paused: bool) -> dict[str, Any]:

@@ -144,14 +144,24 @@ try {
         Write-Host "      Started $role worker."
     }
 
-    Start-Sleep -Seconds 2
-    $workerStatus = Get-WorkerStatusText
-    $missingWorkers = @()
-    foreach ($role in @("market", "news", "paper", "intelligence")) {
-        if (-not (Test-WorkerActive -StatusText $workerStatus -Role $role)) {
-            $missingWorkers += $role
-            Show-LogTail -Path (Join-Path $logDir "$role-worker.err.log")
+    $missingWorkers = @("market", "news", "paper", "intelligence")
+    # Initial source seeding and the first market subscriptions can take longer
+    # than two seconds on a clean local database.  Keep the launcher patient
+    # while still failing deterministically instead of declaring healthy
+    # workers missing before they can acquire their leases.
+    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+        Start-Sleep -Seconds 1
+        $workerStatus = Get-WorkerStatusText
+        $missingWorkers = @()
+        foreach ($role in @("market", "news", "paper", "intelligence")) {
+            if (-not (Test-WorkerActive -StatusText $workerStatus -Role $role)) {
+                $missingWorkers += $role
+            }
         }
+        if ($missingWorkers.Count -eq 0) { break }
+    }
+    foreach ($role in $missingWorkers) {
+        Show-LogTail -Path (Join-Path $logDir "$role-worker.err.log")
     }
     if ($missingWorkers.Count -gt 0) {
         throw "Workers did not become active: $($missingWorkers -join ', ')."

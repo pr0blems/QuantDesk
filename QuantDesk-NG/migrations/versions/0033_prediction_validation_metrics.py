@@ -1,6 +1,6 @@
 """Add replayable leakage-safe prediction validation metrics.
 
-Revision ID: 0033_prediction_validation_metrics
+Revision ID: 0033_prediction_validation
 Revises: 0032_underlying_aligned_windows
 """
 
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0033_prediction_validation_metrics"
+revision: str = "0033_prediction_validation"
 down_revision: str | None = "0032_underlying_aligned_windows"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
