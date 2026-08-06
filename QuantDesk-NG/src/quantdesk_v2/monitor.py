@@ -375,6 +375,10 @@ class MonitorRepository:
                FROM market_microstructure"""
         )
         depth_by_symbol = {str(row["symbol"]): row for row in depth_rows}
+        underlying_rows = self._query("SELECT * FROM underlying_market_quotes")
+        underlying_by_symbol = {
+            str(row["contract_symbol"]): row for row in underlying_rows
+        }
         battle_rows = self._query(
             """SELECT p.*,f.quality_score FROM battle_predictions p
                JOIN prediction_feature_snapshots f ON f.id=p.feature_snapshot_id
@@ -391,7 +395,7 @@ class MonitorRepository:
         commissions = {
             str(row["symbol"]): float(row["taker_rate"]) for row in commission_rows
         }
-        horizon_names = {300: "5m", 900: "15m", 3_600: "1h"}
+        horizon_names = {300: "5m", 900: "15m", 3_600: "1h", 7_200: "2h"}
         battles: dict[str, dict[str, dict[str, Any]]] = {}
         now_ms = int(time.time() * 1_000)
         for row in battle_rows:
@@ -412,6 +416,8 @@ class MonitorRepository:
             horizon = horizon_names.get(int(row["horizon_seconds"]), str(row["horizon_seconds"]))
             battles.setdefault(symbol, {})[horizon] = {
                 "id": row.get("public_id"),
+                "model_key": row.get("model_key"),
+                "model_version": int(row.get("model_version") or 0),
                 "horizon_seconds": int(row["horizon_seconds"]),
                 "state": row.get("prediction_state"),
                 "result": row.get("result"),
@@ -429,6 +435,7 @@ class MonitorRepository:
                 "edge_after_cost_bps": after_cost,
                 "fee_source": "binance_user_commission" if taker_rate is not None else "unavailable",
                 "reason_codes": _json_array(row.get("reason_codes_json")),
+                "components": _json_object(row.get("components_json")),
                 "predicted_at_ms": int(row.get("predicted_at_ms") or 0),
                 "valid_until_ms": int(row.get("valid_until_ms") or 0),
                 "stale": now_ms > int(row.get("valid_until_ms") or 0),
@@ -499,12 +506,145 @@ class MonitorRepository:
             denominator = sum(weight for tf, weight in weights.items() if tf in tf_scores)
             base = symbol.replace("USDT", "").replace("USD1", "")
             symbol_metadata = metadata.get(symbol, {})
+            underlying_quote = underlying_by_symbol.get(symbol, {})
+            underlying_status = str(underlying_quote.get("status") or "pending")
+            underlying_has_market_data = bool(underlying_quote.get("quote_symbol")) and (
+                underlying_status in {"ok", "stale"}
+            )
+            contract_time_ms = int(ticker.get("ts") or 0)
+            if contract_time_ms and contract_time_ms < 100_000_000_000:
+                contract_time_ms *= 1_000
+            underlying_time_ms = int(underlying_quote.get("market_time_ms") or 0)
+            alignment_delta_ms = (
+                abs(contract_time_ms - underlying_time_ms)
+                if contract_time_ms and underlying_time_ms
+                else None
+            )
+            if not underlying_has_market_data or not contract_time_ms:
+                alignment_status = "unavailable"
+            elif str(underlying_quote.get("market_state") or "") == "closed":
+                alignment_status = "closed"
+            elif underlying_status == "stale":
+                alignment_status = "stale"
+            elif (
+                alignment_delta_ms is not None
+                and contract_time_ms // 60_000 == underlying_time_ms // 60_000
+            ):
+                alignment_status = "aligned"
+            else:
+                alignment_status = "lagging"
+            underlying_price = (
+                _optional_finite_number(underlying_quote.get("price"))
+                if underlying_has_market_data
+                else None
+            )
+            underlying_currency = (
+                str(underlying_quote.get("currency") or "")
+                if underlying_has_market_data
+                else ""
+            )
+            basis_comparable = (
+                price is not None
+                and underlying_price is not None
+                and underlying_price > 0
+                and underlying_currency == "USD"
+                and str(underlying_quote.get("relation") or "")
+                in {"direct", "benchmark"}
+                and alignment_status == "aligned"
+                and underlying_status == "ok"
+            )
+            basis_bps = (
+                round((price / underlying_price - 1) * 10_000, 2)
+                if basis_comparable
+                else None
+            )
+            spread_alert = (
+                "strong"
+                if basis_bps is not None and abs(basis_bps) >= 50
+                else "watch"
+                if basis_bps is not None and abs(basis_bps) >= 25
+                else "normal"
+                if basis_bps is not None
+                else "disabled"
+            )
             items.append(
                 {
                     "symbol": symbol,
                     "annotation": self.contract_annotations.get(symbol)
                     or _contract_annotation(symbol, symbol_metadata),
                     "underlying": symbol_metadata.get("underlyingType", ""),
+                    "underlying_quote": {
+                        "quote_symbol": underlying_quote.get("quote_symbol"),
+                        "relation": underlying_quote.get("relation"),
+                        "instrument_type": underlying_quote.get("instrument_type"),
+                        "display_name": underlying_quote.get("display_name")
+                        if underlying_has_market_data
+                        else None,
+                        "source": underlying_quote.get("source"),
+                        "status": underlying_status,
+                        "market_state": (
+                            underlying_quote.get("market_state") or "unknown"
+                            if underlying_has_market_data
+                            else "unavailable"
+                        ),
+                        "currency": underlying_currency or None,
+                        "exchange_name": underlying_quote.get("exchange_name")
+                        if underlying_has_market_data
+                        else None,
+                        "price": underlying_price,
+                        "previous_close": (
+                            _optional_finite_number(underlying_quote.get("previous_close"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "change_pct": (
+                            _optional_finite_number(underlying_quote.get("change_pct"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "regular_market_price": (
+                            _optional_finite_number(
+                                underlying_quote.get("regular_market_price")
+                            )
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "day_open": (
+                            _optional_finite_number(underlying_quote.get("day_open"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "day_high": (
+                            _optional_finite_number(underlying_quote.get("day_high"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "day_low": (
+                            _optional_finite_number(underlying_quote.get("day_low"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "volume": (
+                            _optional_finite_number(underlying_quote.get("volume"))
+                            if underlying_has_market_data
+                            else None
+                        ),
+                        "market_time_ms": (
+                            int(underlying_quote.get("market_time_ms") or 0)
+                            if underlying_has_market_data
+                            else 0
+                        ),
+                        "received_at_ms": int(
+                            underlying_quote.get("received_at_ms") or 0
+                        ),
+                        "basis_bps": basis_bps,
+                        "basis_comparable": basis_comparable,
+                        "spread_alert": spread_alert,
+                        "contract_time_ms": contract_time_ms,
+                        "alignment_delta_ms": alignment_delta_ms,
+                        "alignment_status": alignment_status,
+                        "stale": underlying_status != "ok",
+                    },
                     "price": price,
                     "pct_2m": price_changes[120],
                     "pct_5m": price_changes[300],
@@ -1024,6 +1164,16 @@ def _finite_number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return numeric if math.isfinite(numeric) else 0.0
+
+
+def _optional_finite_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 def _timezone_label(offset_minutes: int) -> str:

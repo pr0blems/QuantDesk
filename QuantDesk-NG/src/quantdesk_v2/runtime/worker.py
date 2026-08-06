@@ -14,6 +14,8 @@ from quantdesk import (
     realtime,
     social,
     store,
+    two_hour_online,
+    underlying_quotes,
 )
 from quantdesk import engine as market_engine
 
@@ -33,6 +35,7 @@ WORKER_ROLES: dict[str, tuple[tuple[str, WorkerTarget], ...]] = {
         ("price", market_engine.price_loop),
         ("ticker", market_engine.ticker_loop),
         ("kline", market_engine.kline_loop),
+        ("underlying-quotes", underlying_quotes.quote_loop),
     ),
     "news": (
         ("news", news.news_loop),
@@ -40,7 +43,11 @@ WORKER_ROLES: dict[str, tuple[tuple[str, WorkerTarget], ...]] = {
         ("social", social.social_loop),
     ),
     "paper": (("paper", paper.paper_loop),),
-    "intelligence": (("outcome-labeler", outcomes.outcome_loop), ("shadow", shadow_loop)),
+    "intelligence": (
+        ("outcome-labeler", outcomes.outcome_loop),
+        ("shadow", shadow_loop),
+        ("two-hour-model", two_hour_online.prediction_loop),
+    ),
 }
 
 

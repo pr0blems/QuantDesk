@@ -840,6 +840,44 @@ class MarketMicrostructure(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
+class UnderlyingMarketQuote(Base):
+    __tablename__ = "underlying_market_quotes"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ok','stale','unavailable','unsupported')",
+            name="status",
+        ),
+        Index("ix_underlying_market_quotes_time", "market_time_ms"),
+        {"comment": "合约对应股票、ETF、商品或原生市场标的的当前行情"},
+    )
+
+    contract_symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    quote_symbol: Mapped[str | None] = mapped_column(String(32))
+    relation: Mapped[str] = mapped_column(String(24), nullable=False)
+    instrument_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(191))
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    market_state: Mapped[str] = mapped_column(String(24), nullable=False)
+    currency: Mapped[str | None] = mapped_column(String(12))
+    exchange_name: Mapped[str | None] = mapped_column(String(64))
+    price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    previous_close: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    change_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    regular_market_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    day_open: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    day_high: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    day_low: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    volume: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    market_time_ms: Mapped[int | None] = mapped_column(BigInteger)
+    received_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    quality_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 class MarketDataQualityEvent(Base):
     __tablename__ = "market_data_quality_events"
     __table_args__ = (

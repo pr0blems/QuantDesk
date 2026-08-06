@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from quantdesk_v2.models import PaperAccount, User
-from quantdesk_v2.monitor import MonitorRepository
+from quantdesk_v2.monitor import MonitorRepository, _optional_finite_number
 from quantdesk_v2.strategy_catalog import (
     ensure_user_default_strategies,
     strategy_snapshot,
@@ -37,6 +37,13 @@ def test_contract_annotation_catalog_covers_every_configured_contract() -> None:
         for annotation in annotations.values()
         for placeholder in ("标的", "待确认", "关联合约", "未配置")
     )
+
+
+def test_optional_market_quote_number_preserves_missing_values() -> None:
+    assert _optional_finite_number(None) is None
+    assert _optional_finite_number("") is None
+    assert _optional_finite_number("nan") is None
+    assert _optional_finite_number(Decimal("12.5")) == 12.5
 
 
 def build_monitor_fixture(engine: Engine, tmp_path) -> tuple[MonitorRepository, int, int]:
@@ -91,8 +98,24 @@ def build_monitor_fixture(engine: Engine, tmp_path) -> tuple[MonitorRepository, 
                 "price": 101.5,
                 "pct_24h": 2.25,
                 "quote_volume": 5_000,
-                "ts": 2_000_000_000,
+            "ts": int(time.time()),
             },
+        )
+        connection.execute(
+            text(
+                """INSERT INTO underlying_market_quotes(
+                       contract_symbol,quote_symbol,relation,instrument_type,display_name,
+                       source,status,market_state,currency,exchange_name,price,previous_close,
+                       change_pct,regular_market_price,day_open,day_high,day_low,volume,
+                       market_time_ms,received_at_ms,quality_json,created_at,updated_at
+                   ) VALUES(
+                       'TESTUSDT','TEST','direct','us_equity','Test Corp','yahoo_chart',
+                       'ok','regular','USD','NMS',100,98.5,1.52284264,100,
+                       99,101,98,1000000,:now_ms,:now_ms,JSON_OBJECT(),
+                       CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+                   )"""
+            ),
+            {"now_ms": int(time.time() * 1_000)},
         )
         now = int(time.time())
         connection.execute(
@@ -206,6 +229,17 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) ->
     assert overview["items"][0]["pct_5m"] == pytest.approx(1.5)
     assert overview["items"][0]["pct_10m"] == pytest.approx((101.5 - 99.5) / 99.5 * 100)
     assert overview["items"][0]["quote_volume"] == 5_000
+    assert overview["items"][0]["underlying_quote"]["quote_symbol"] == "TEST"
+    assert overview["items"][0]["underlying_quote"]["price"] == 100
+    assert overview["items"][0]["underlying_quote"]["basis_bps"] == pytest.approx(150)
+    assert overview["items"][0]["underlying_quote"]["spread_alert"] == "strong"
+    assert overview["items"][0]["underlying_quote"]["alignment_status"] in {
+        "aligned",
+        "lagging",
+        "stale",
+        "closed",
+        "unavailable",
+    }
     assert overview["items"][0]["bid_depth_notional"] == 250_000
     assert overview["items"][0]["ask_depth_notional"] == 175_000
     assert overview["items"][0]["depth_levels"] == 100
@@ -219,6 +253,31 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path) ->
     repository.mark_alerts_read(user_id)
     assert repository.alerts(user_id, 10)[0]["read"] is True
     assert repository.latest_alert_id(user_id) == 1
+
+
+def test_monitor_masks_legacy_quote_values_for_unsupported_mapping(
+    mysql_test_engine, tmp_path
+) -> None:
+    repository, _, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
+    with mysql_test_engine.begin() as connection:
+        connection.execute(
+            text(
+                """UPDATE underlying_market_quotes
+                   SET quote_symbol=NULL, relation='unlisted', status='unsupported',
+                       market_state='unavailable'
+                   WHERE contract_symbol='TESTUSDT'"""
+            )
+        )
+
+    quote = repository.overview(["TESTUSDT"])["items"][0]["underlying_quote"]
+
+    assert quote["status"] == "unsupported"
+    assert quote["price"] is None
+    assert quote["change_pct"] is None
+    assert quote["volume"] is None
+    assert quote["display_name"] is None
+    assert quote["exchange_name"] is None
+    assert quote["market_time_ms"] == 0
 
 
 def test_monitor_battle_prediction_uses_real_user_commission(

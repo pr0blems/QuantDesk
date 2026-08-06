@@ -33,6 +33,9 @@ build/
 !/config/contract_annotations.json
 /data/*.db*
 /data/*.sqlite*
+/data/*.joblib
+/data/*.manifest.json
+/data/forward_eval/
 /src/data/
 reports/
 *.log
