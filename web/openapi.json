@@ -2492,7 +2492,7 @@
           "leverage": {
             "anyOf": [
               {
-                "maximum": 50.0,
+                "maximum": 20.0,
                 "minimum": 1.0,
                 "type": "integer"
               },
@@ -2518,7 +2518,7 @@
           "max_positions": {
             "anyOf": [
               {
-                "maximum": 50.0,
+                "maximum": 20.0,
                 "minimum": 1.0,
                 "type": "integer"
               },
@@ -2597,6 +2597,159 @@
         "title": "PaperAccountStatusUpdate",
         "type": "object"
       },
+      "PaperAccountStrategyUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "leverage": {
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Leverage",
+            "type": "integer"
+          },
+          "margin_cap": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 0.95,
+            "title": "Margin Cap",
+            "type": "number"
+          },
+          "max_positions": {
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max Positions",
+            "type": "integer"
+          },
+          "position_size_pct": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 100.0,
+            "title": "Position Size Pct",
+            "type": "number"
+          },
+          "strategy_id": {
+            "maxLength": 36,
+            "minLength": 36,
+            "title": "Strategy Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "strategy_id",
+          "leverage",
+          "max_positions",
+          "position_size_pct",
+          "margin_cap"
+        ],
+        "title": "PaperAccountStrategyUpdate",
+        "type": "object"
+      },
+      "PredictionAlgorithmEnabledFeatures": {
+        "additionalProperties": false,
+        "properties": {
+          "aggressive_flow": {
+            "title": "Aggressive Flow",
+            "type": "boolean"
+          },
+          "book_imbalance": {
+            "title": "Book Imbalance",
+            "type": "boolean"
+          },
+          "book_imbalance_5": {
+            "title": "Book Imbalance 5",
+            "type": "boolean"
+          },
+          "flash_imbalance": {
+            "title": "Flash Imbalance",
+            "type": "boolean"
+          },
+          "kline_bollinger_breakout": {
+            "title": "Kline Bollinger Breakout",
+            "type": "boolean"
+          },
+          "kline_low_volume_pullback": {
+            "title": "Kline Low Volume Pullback",
+            "type": "boolean"
+          },
+          "kline_ma_golden_cross": {
+            "title": "Kline Ma Golden Cross",
+            "type": "boolean"
+          },
+          "kline_macd_golden_cross_volume": {
+            "title": "Kline Macd Golden Cross Volume",
+            "type": "boolean"
+          },
+          "kline_moving_average_bull": {
+            "title": "Kline Moving Average Bull",
+            "type": "boolean"
+          },
+          "kline_moving_average_pullback_bounce": {
+            "title": "Kline Moving Average Pullback Bounce",
+            "type": "boolean"
+          },
+          "kline_new_low_reversal": {
+            "title": "Kline New Low Reversal",
+            "type": "boolean"
+          },
+          "kline_oversold_bounce": {
+            "title": "Kline Oversold Bounce",
+            "type": "boolean"
+          },
+          "kline_oversold_reversal": {
+            "title": "Kline Oversold Reversal",
+            "type": "boolean"
+          },
+          "kline_price_volume_rise": {
+            "title": "Kline Price Volume Rise",
+            "type": "boolean"
+          },
+          "kline_strong_gap_open": {
+            "title": "Kline Strong Gap Open",
+            "type": "boolean"
+          },
+          "kline_trend_breakout": {
+            "title": "Kline Trend Breakout",
+            "type": "boolean"
+          },
+          "price_oi_impulse": {
+            "title": "Price Oi Impulse",
+            "type": "boolean"
+          },
+          "taker_flow": {
+            "title": "Taker Flow",
+            "type": "boolean"
+          },
+          "trend": {
+            "title": "Trend",
+            "type": "boolean"
+          },
+          "velocity": {
+            "title": "Velocity",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "aggressive_flow",
+          "book_imbalance",
+          "book_imbalance_5",
+          "velocity",
+          "flash_imbalance",
+          "taker_flow",
+          "price_oi_impulse",
+          "trend",
+          "kline_bollinger_breakout",
+          "kline_moving_average_pullback_bounce",
+          "kline_trend_breakout",
+          "kline_price_volume_rise",
+          "kline_new_low_reversal",
+          "kline_low_volume_pullback",
+          "kline_strong_gap_open",
+          "kline_moving_average_bull",
+          "kline_ma_golden_cross",
+          "kline_macd_golden_cross_volume",
+          "kline_oversold_bounce",
+          "kline_oversold_reversal"
+        ],
+        "title": "PredictionAlgorithmEnabledFeatures",
+        "type": "object"
+      },
       "PredictionAlgorithmHorizons": {
         "additionalProperties": false,
         "properties": {
@@ -2618,6 +2771,21 @@
         "title": "PredictionAlgorithmHorizons",
         "type": "object"
       },
+      "PredictionAlgorithmOptimizationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_config_version": {
+            "minimum": 0.0,
+            "title": "Expected Config Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_config_version"
+        ],
+        "title": "PredictionAlgorithmOptimizationRequest",
+        "type": "object"
+      },
       "PredictionAlgorithmUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -2632,6 +2800,9 @@
             "minimum": 0.05,
             "title": "Direction Threshold",
             "type": "number"
+          },
+          "enabled_features": {
+            "$ref": "#/components/schemas/PredictionAlgorithmEnabledFeatures"
           },
           "funding_crowding_penalty": {
             "maximum": 0.5,
@@ -2654,6 +2825,7 @@
           "min_data_quality",
           "account_crowding_penalty",
           "funding_crowding_penalty",
+          "enabled_features",
           "weights"
         ],
         "title": "PredictionAlgorithmUpdate",
@@ -2684,6 +2856,78 @@
             "maximum": 1.0,
             "minimum": 0.0,
             "title": "Flash Imbalance",
+            "type": "number"
+          },
+          "kline_bollinger_breakout": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Bollinger Breakout",
+            "type": "number"
+          },
+          "kline_low_volume_pullback": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Low Volume Pullback",
+            "type": "number"
+          },
+          "kline_ma_golden_cross": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Ma Golden Cross",
+            "type": "number"
+          },
+          "kline_macd_golden_cross_volume": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Macd Golden Cross Volume",
+            "type": "number"
+          },
+          "kline_moving_average_bull": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Moving Average Bull",
+            "type": "number"
+          },
+          "kline_moving_average_pullback_bounce": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Moving Average Pullback Bounce",
+            "type": "number"
+          },
+          "kline_new_low_reversal": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline New Low Reversal",
+            "type": "number"
+          },
+          "kline_oversold_bounce": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Oversold Bounce",
+            "type": "number"
+          },
+          "kline_oversold_reversal": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Oversold Reversal",
+            "type": "number"
+          },
+          "kline_price_volume_rise": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Price Volume Rise",
+            "type": "number"
+          },
+          "kline_strong_gap_open": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Strong Gap Open",
+            "type": "number"
+          },
+          "kline_trend_breakout": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kline Trend Breakout",
             "type": "number"
           },
           "price_oi_impulse": {
@@ -2719,7 +2963,19 @@
           "flash_imbalance",
           "taker_flow",
           "price_oi_impulse",
-          "trend"
+          "trend",
+          "kline_bollinger_breakout",
+          "kline_moving_average_pullback_bounce",
+          "kline_trend_breakout",
+          "kline_price_volume_rise",
+          "kline_new_low_reversal",
+          "kline_low_volume_pullback",
+          "kline_strong_gap_open",
+          "kline_moving_average_bull",
+          "kline_ma_golden_cross",
+          "kline_macd_golden_cross_volume",
+          "kline_oversold_bounce",
+          "kline_oversold_reversal"
         ],
         "title": "PredictionAlgorithmWeights",
         "type": "object"
@@ -6737,6 +6993,174 @@
         "summary": "Update Monitor Prediction Algorithm"
       }
     },
+    "/api/v2/monitor/prediction-algorithm/ai-history": {
+      "get": {
+        "description": "List saved and rejected DeepSeek optimization audit records.",
+        "operationId": "monitor_prediction_algorithm_ai_history_api_v2_monitor_prediction_algorithm_ai_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Monitor Prediction Algorithm Ai History Api V2 Monitor Prediction Algorithm Ai History Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Monitor Prediction Algorithm Ai History"
+      }
+    },
+    "/api/v2/monitor/prediction-algorithm/ai-history/{audit_id}": {
+      "get": {
+        "description": "Return one historical DeepSeek trace with its version-level analysis.",
+        "operationId": "monitor_prediction_algorithm_ai_history_detail_api_v2_monitor_prediction_algorithm_ai_history__audit_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "audit_id",
+            "required": true,
+            "schema": {
+              "title": "Audit Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Monitor Prediction Algorithm Ai History Detail Api V2 Monitor Prediction Algorithm Ai History  Audit Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Monitor Prediction Algorithm Ai History Detail"
+      }
+    },
+    "/api/v2/monitor/prediction-algorithm/ai-trace": {
+      "get": {
+        "description": "Return the auditable prompt and rationale for the current AI-saved version.",
+        "operationId": "monitor_prediction_algorithm_ai_trace_api_v2_monitor_prediction_algorithm_ai_trace_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Monitor Prediction Algorithm Ai Trace Api V2 Monitor Prediction Algorithm Ai Trace Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Monitor Prediction Algorithm Ai Trace"
+      }
+    },
+    "/api/v2/monitor/prediction-algorithm/optimize": {
+      "post": {
+        "operationId": "optimize_monitor_prediction_algorithm_api_v2_monitor_prediction_algorithm_optimize_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PredictionAlgorithmOptimizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Optimize Monitor Prediction Algorithm Api V2 Monitor Prediction Algorithm Optimize Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Optimize Monitor Prediction Algorithm"
+      }
+    },
     "/api/v2/monitor/prediction-history": {
       "get": {
         "operationId": "monitor_prediction_history_api_v2_monitor_prediction_history_get",
@@ -6898,6 +7322,53 @@
         "summary": "Monitor Prediction History"
       }
     },
+    "/api/v2/monitor/prediction-history/{prediction_id}/algorithm": {
+      "get": {
+        "operationId": "monitor_prediction_algorithm_snapshot_api_v2_monitor_prediction_history__prediction_id__algorithm_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prediction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Prediction Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Monitor Prediction Algorithm Snapshot Api V2 Monitor Prediction History  Prediction Id  Algorithm Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Monitor Prediction Algorithm Snapshot"
+      }
+    },
     "/api/v2/monitor/report": {
       "get": {
         "operationId": "monitor_report_api_v2_monitor_report_get",
@@ -6988,6 +7459,63 @@
           }
         ],
         "summary": "Monitor Score"
+      }
+    },
+    "/api/v2/monitor/strategy-indicators": {
+      "get": {
+        "operationId": "monitor_strategy_indicators_api_v2_monitor_strategy_indicators_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tf",
+            "required": false,
+            "schema": {
+              "default": "1h",
+              "pattern": "^(15m|1h|4h)$",
+              "title": "Tf",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Monitor Strategy Indicators Api V2 Monitor Strategy Indicators Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Monitor Strategy Indicators"
       }
     },
     "/api/v2/monitor/watchlist": {
@@ -7254,6 +7782,63 @@
           }
         ],
         "summary": "Update Paper Account Status"
+      }
+    },
+    "/api/v2/paper/accounts/{account_id}/strategy": {
+      "put": {
+        "description": "Atomically replace the paper strategy snapshot and future-entry limits.",
+        "operationId": "update_paper_account_strategy_api_v2_paper_accounts__account_id__strategy_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaperAccountStrategyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Paper Account Strategy Api V2 Paper Accounts  Account Id  Strategy Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Paper Account Strategy"
       }
     },
     "/api/v2/paper/reset": {

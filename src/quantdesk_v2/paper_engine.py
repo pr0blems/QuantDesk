@@ -229,7 +229,15 @@ def _paper_risk_policy(
 
     raw = account.get("config_json")
     config = raw if isinstance(raw, dict) else {}
-    policy = policy_from_config(config)
+    policy_config = dict(config)
+    # Paper exposes only ``leverage``.  A shared-risk migration persisted the
+    # unrelated 10x live default as ``risk_max_leverage`` and silently overrode
+    # configured 20x paper accounts.  The visible paper setting is authoritative;
+    # stop-distance safety may still lower individual entries.
+    policy_config["risk_max_leverage"] = max(
+        1, min(int(config.get("leverage", DEFAULT_LEVERAGE)), 20)
+    )
+    policy = policy_from_config(policy_config)
     if "round_trip_cost_bps" not in config:
         configured_cost = Decimal(
             str(

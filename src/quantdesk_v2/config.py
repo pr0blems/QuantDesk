@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr = SecretStr("")
     openai_strategy_model: str = "gpt-5.6-luna"
     openai_strategy_timeout_seconds: float = 20.0
+    deepseek_optimizer_timeout_seconds: float = 120.0
+    deepseek_optimizer_max_tokens: int = 16_000
 
     # Finnhub is called only by the server. Never expose this token to static
     # JavaScript or accept an arbitrary upstream URL from a request.

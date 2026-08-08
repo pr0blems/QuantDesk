@@ -165,6 +165,9 @@ export function MonitorPage() {
         min_data_quality: Number(form.get("min_data_quality")),
         account_crowding_penalty: Number(form.get("account_crowding_penalty")),
         funding_crowding_penalty: Number(form.get("funding_crowding_penalty")),
+        enabled_features: asObject(
+          algorithmConfig.enabled_features,
+        ) as PredictionAlgorithmUpdate["enabled_features"],
         weights: parsedWeights as PredictionAlgorithmUpdate["weights"],
       };
       setWorking(true);

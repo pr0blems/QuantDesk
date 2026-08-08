@@ -32,6 +32,8 @@ import type {
   OpportunityPreferenceUpdate,
   PaperAccountCreateRequest,
   PaperAccountStatusUpdate,
+  PaperAccountStrategyUpdate,
+  PredictionAlgorithmOptimizationRequest,
   PredictionAlgorithmUpdate,
   RegisterInput,
   StrategyAiApplyRequest,
@@ -165,6 +167,11 @@ export const monitorApi = {
   markAlertsRead: () => apiRequest<ApiObject>("/monitor/alerts/read", { method: "POST" }),
   news: (limit = 60) => apiRequest<ApiObject>(withQuery("/monitor/news", { limit })),
   predictionAlgorithm: () => apiRequest<ApiObject>("/monitor/prediction-algorithm"),
+  optimizePredictionAlgorithm: (input: PredictionAlgorithmOptimizationRequest) =>
+    apiRequest<ApiObject>("/monitor/prediction-algorithm/optimize", {
+      method: "POST",
+      body: jsonBody(input),
+    }),
   updatePredictionAlgorithm: (input: PredictionAlgorithmUpdate) =>
     apiRequest<ApiObject>("/monitor/prediction-algorithm", { method: "PUT", body: jsonBody(input) }),
   predictionHistory: (values: Record<string, QueryValue>) =>
@@ -188,6 +195,8 @@ export const paperApi = {
     apiRequest<ApiObject>("/paper/accounts", { method: "POST", body: jsonBody(input) }),
   update: (accountId: string, input: PaperAccountStatusUpdate) =>
     apiRequest<ApiObject>(`/paper/accounts/${encodeURIComponent(accountId)}`, { method: "PATCH", body: jsonBody(input) }),
+  updateStrategy: (accountId: string, input: PaperAccountStrategyUpdate) =>
+    apiRequest<ApiObject>(`/paper/accounts/${encodeURIComponent(accountId)}/strategy`, { method: "PUT", body: jsonBody(input) }),
   reset: (accountId: string) =>
     apiRequest<ApiObject>(withQuery("/paper/reset", { account_id: accountId }), { method: "POST" }),
 };

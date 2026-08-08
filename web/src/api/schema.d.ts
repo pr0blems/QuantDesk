@@ -1056,6 +1056,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/monitor/prediction-algorithm/ai-history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Monitor Prediction Algorithm Ai History
+         * @description List saved and rejected DeepSeek optimization audit records.
+         */
+        get: operations["monitor_prediction_algorithm_ai_history_api_v2_monitor_prediction_algorithm_ai_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/monitor/prediction-algorithm/ai-history/{audit_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Monitor Prediction Algorithm Ai History Detail
+         * @description Return one historical DeepSeek trace with its version-level analysis.
+         */
+        get: operations["monitor_prediction_algorithm_ai_history_detail_api_v2_monitor_prediction_algorithm_ai_history__audit_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/monitor/prediction-algorithm/ai-trace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Monitor Prediction Algorithm Ai Trace
+         * @description Return the auditable prompt and rationale for the current AI-saved version.
+         */
+        get: operations["monitor_prediction_algorithm_ai_trace_api_v2_monitor_prediction_algorithm_ai_trace_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/monitor/prediction-algorithm/optimize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Optimize Monitor Prediction Algorithm */
+        post: operations["optimize_monitor_prediction_algorithm_api_v2_monitor_prediction_algorithm_optimize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/monitor/prediction-history": {
         parameters: {
             query?: never;
@@ -1065,6 +1142,23 @@ export interface paths {
         };
         /** Monitor Prediction History */
         get: operations["monitor_prediction_history_api_v2_monitor_prediction_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/monitor/prediction-history/{prediction_id}/algorithm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Monitor Prediction Algorithm Snapshot */
+        get: operations["monitor_prediction_algorithm_snapshot_api_v2_monitor_prediction_history__prediction_id__algorithm_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1099,6 +1193,23 @@ export interface paths {
         };
         /** Monitor Score */
         get: operations["monitor_score_api_v2_monitor_score_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/monitor/strategy-indicators": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Monitor Strategy Indicators */
+        get: operations["monitor_strategy_indicators_api_v2_monitor_strategy_indicators_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1175,6 +1286,26 @@ export interface paths {
         head?: never;
         /** Update Paper Account Status */
         patch: operations["update_paper_account_status_api_v2_paper_accounts__account_id__patch"];
+        trace?: never;
+    };
+    "/api/v2/paper/accounts/{account_id}/strategy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update Paper Account Strategy
+         * @description Atomically replace the paper strategy snapshot and future-entry limits.
+         */
+        put: operations["update_paper_account_strategy_api_v2_paper_accounts__account_id__strategy_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v2/paper/reset": {
@@ -2308,11 +2439,72 @@ export interface components {
             /** Status */
             status?: ("active" | "paused" | "archived") | null;
         };
+        /** PaperAccountStrategyUpdate */
+        PaperAccountStrategyUpdate: {
+            /** Leverage */
+            leverage: number;
+            /** Margin Cap */
+            margin_cap: number;
+            /** Max Positions */
+            max_positions: number;
+            /** Position Size Pct */
+            position_size_pct: number;
+            /** Strategy Id */
+            strategy_id: string;
+        };
+        /** PredictionAlgorithmEnabledFeatures */
+        PredictionAlgorithmEnabledFeatures: {
+            /** Aggressive Flow */
+            aggressive_flow: boolean;
+            /** Book Imbalance */
+            book_imbalance: boolean;
+            /** Book Imbalance 5 */
+            book_imbalance_5: boolean;
+            /** Flash Imbalance */
+            flash_imbalance: boolean;
+            /** Kline Bollinger Breakout */
+            kline_bollinger_breakout: boolean;
+            /** Kline Low Volume Pullback */
+            kline_low_volume_pullback: boolean;
+            /** Kline Ma Golden Cross */
+            kline_ma_golden_cross: boolean;
+            /** Kline Macd Golden Cross Volume */
+            kline_macd_golden_cross_volume: boolean;
+            /** Kline Moving Average Bull */
+            kline_moving_average_bull: boolean;
+            /** Kline Moving Average Pullback Bounce */
+            kline_moving_average_pullback_bounce: boolean;
+            /** Kline New Low Reversal */
+            kline_new_low_reversal: boolean;
+            /** Kline Oversold Bounce */
+            kline_oversold_bounce: boolean;
+            /** Kline Oversold Reversal */
+            kline_oversold_reversal: boolean;
+            /** Kline Price Volume Rise */
+            kline_price_volume_rise: boolean;
+            /** Kline Strong Gap Open */
+            kline_strong_gap_open: boolean;
+            /** Kline Trend Breakout */
+            kline_trend_breakout: boolean;
+            /** Price Oi Impulse */
+            price_oi_impulse: boolean;
+            /** Taker Flow */
+            taker_flow: boolean;
+            /** Trend */
+            trend: boolean;
+            /** Velocity */
+            velocity: boolean;
+        };
         /** PredictionAlgorithmHorizons */
         PredictionAlgorithmHorizons: {
             "15m": components["schemas"]["PredictionAlgorithmWeights"];
             "1h": components["schemas"]["PredictionAlgorithmWeights"];
             "5m": components["schemas"]["PredictionAlgorithmWeights"];
+        };
+        /** PredictionAlgorithmOptimizationRequest */
+        PredictionAlgorithmOptimizationRequest: {
+            /** Expected Config Version */
+            expected_config_version: number;
         };
         /** PredictionAlgorithmUpdate */
         PredictionAlgorithmUpdate: {
@@ -2320,6 +2512,7 @@ export interface components {
             account_crowding_penalty: number;
             /** Direction Threshold */
             direction_threshold: number;
+            enabled_features: components["schemas"]["PredictionAlgorithmEnabledFeatures"];
             /** Funding Crowding Penalty */
             funding_crowding_penalty: number;
             /** Min Data Quality */
@@ -2336,6 +2529,30 @@ export interface components {
             book_imbalance_5: number;
             /** Flash Imbalance */
             flash_imbalance: number;
+            /** Kline Bollinger Breakout */
+            kline_bollinger_breakout: number;
+            /** Kline Low Volume Pullback */
+            kline_low_volume_pullback: number;
+            /** Kline Ma Golden Cross */
+            kline_ma_golden_cross: number;
+            /** Kline Macd Golden Cross Volume */
+            kline_macd_golden_cross_volume: number;
+            /** Kline Moving Average Bull */
+            kline_moving_average_bull: number;
+            /** Kline Moving Average Pullback Bounce */
+            kline_moving_average_pullback_bounce: number;
+            /** Kline New Low Reversal */
+            kline_new_low_reversal: number;
+            /** Kline Oversold Bounce */
+            kline_oversold_bounce: number;
+            /** Kline Oversold Reversal */
+            kline_oversold_reversal: number;
+            /** Kline Price Volume Rise */
+            kline_price_volume_rise: number;
+            /** Kline Strong Gap Open */
+            kline_strong_gap_open: number;
+            /** Kline Trend Breakout */
+            kline_trend_breakout: number;
             /** Price Oi Impulse */
             price_oi_impulse: number;
             /** Taker Flow */
@@ -4690,6 +4907,129 @@ export interface operations {
             };
         };
     };
+    monitor_prediction_algorithm_ai_history_api_v2_monitor_prediction_algorithm_ai_history_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    monitor_prediction_algorithm_ai_history_detail_api_v2_monitor_prediction_algorithm_ai_history__audit_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                audit_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    monitor_prediction_algorithm_ai_trace_api_v2_monitor_prediction_algorithm_ai_trace_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    optimize_monitor_prediction_algorithm_api_v2_monitor_prediction_algorithm_optimize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PredictionAlgorithmOptimizationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     monitor_prediction_history_api_v2_monitor_prediction_history_get: {
         parameters: {
             query?: {
@@ -4704,6 +5044,39 @@ export interface operations {
             };
             header?: never;
             path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    monitor_prediction_algorithm_snapshot_api_v2_monitor_prediction_history__prediction_id__algorithm_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prediction_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -4767,6 +5140,40 @@ export interface operations {
         parameters: {
             query: {
                 symbol: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    monitor_strategy_indicators_api_v2_monitor_strategy_indicators_get: {
+        parameters: {
+            query: {
+                symbol: string;
+                tf?: string;
             };
             header?: never;
             path?: never;
@@ -4952,6 +5359,43 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["PaperAccountStatusUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_paper_account_strategy_api_v2_paper_accounts__account_id__strategy_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PaperAccountStrategyUpdate"];
             };
         };
         responses: {

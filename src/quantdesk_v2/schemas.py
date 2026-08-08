@@ -629,6 +629,18 @@ class PredictionAlgorithmWeights(BaseModel):
     taker_flow: float = Field(ge=0, le=1)
     price_oi_impulse: float = Field(ge=0, le=1)
     trend: float = Field(ge=0, le=1)
+    kline_bollinger_breakout: float = Field(ge=0, le=1)
+    kline_moving_average_pullback_bounce: float = Field(ge=0, le=1)
+    kline_trend_breakout: float = Field(ge=0, le=1)
+    kline_price_volume_rise: float = Field(ge=0, le=1)
+    kline_new_low_reversal: float = Field(ge=0, le=1)
+    kline_low_volume_pullback: float = Field(ge=0, le=1)
+    kline_strong_gap_open: float = Field(ge=0, le=1)
+    kline_moving_average_bull: float = Field(ge=0, le=1)
+    kline_ma_golden_cross: float = Field(ge=0, le=1)
+    kline_macd_golden_cross_volume: float = Field(ge=0, le=1)
+    kline_oversold_bounce: float = Field(ge=0, le=1)
+    kline_oversold_reversal: float = Field(ge=0, le=1)
 
     @model_validator(mode="after")
     def weights_must_sum_to_one(self) -> Self:
@@ -636,6 +648,31 @@ class PredictionAlgorithmWeights(BaseModel):
         if not math.isclose(total, 1.0, abs_tol=0.001):
             raise ValueError("prediction weights must sum to 1")
         return self
+
+
+class PredictionAlgorithmEnabledFeatures(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    aggressive_flow: bool
+    book_imbalance: bool
+    book_imbalance_5: bool
+    velocity: bool
+    flash_imbalance: bool
+    taker_flow: bool
+    price_oi_impulse: bool
+    trend: bool
+    kline_bollinger_breakout: bool
+    kline_moving_average_pullback_bounce: bool
+    kline_trend_breakout: bool
+    kline_price_volume_rise: bool
+    kline_new_low_reversal: bool
+    kline_low_volume_pullback: bool
+    kline_strong_gap_open: bool
+    kline_moving_average_bull: bool
+    kline_ma_golden_cross: bool
+    kline_macd_golden_cross_volume: bool
+    kline_oversold_bounce: bool
+    kline_oversold_reversal: bool
 
 
 class AdminNewsAiBatchCreate(BaseModel):
@@ -659,7 +696,28 @@ class PredictionAlgorithmUpdate(BaseModel):
     min_data_quality: float = Field(ge=0.5, le=1)
     account_crowding_penalty: float = Field(ge=0, le=0.5)
     funding_crowding_penalty: float = Field(ge=0, le=0.5)
+    enabled_features: PredictionAlgorithmEnabledFeatures
     weights: PredictionAlgorithmHorizons
+
+    @model_validator(mode="after")
+    def enabled_features_need_positive_weight(self) -> Self:
+        enabled = self.enabled_features
+        enabled_names = [
+            name for name in type(enabled).model_fields if getattr(enabled, name)
+        ]
+        if not enabled_names:
+            raise ValueError("at least one prediction feature must be enabled")
+        for horizon in ("five_minutes", "fifteen_minutes", "one_hour"):
+            weights = getattr(self.weights, horizon)
+            if not any(getattr(weights, name) > 0 for name in enabled_names):
+                raise ValueError("enabled prediction features need positive weight")
+        return self
+
+
+class PredictionAlgorithmOptimizationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_config_version: int = Field(ge=0)
 
 
 class PaperAccountCreateRequest(BaseModel):
@@ -668,8 +726,8 @@ class PaperAccountCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     strategy_id: str = Field(min_length=36, max_length=36)
     initial_balance: float = Field(default=10_000, gt=0, le=1_000_000_000)
-    leverage: int | None = Field(default=None, ge=1, le=50)
-    max_positions: int | None = Field(default=None, ge=1, le=50)
+    leverage: int | None = Field(default=None, ge=1, le=20)
+    max_positions: int | None = Field(default=None, ge=1, le=20)
     position_size_pct: float | None = Field(default=None, gt=0, le=100)
     margin_cap: float | None = Field(default=None, gt=0, le=0.95)
 
@@ -685,6 +743,16 @@ class PaperAccountStatusUpdate(BaseModel):
         if self.status is None and self.name is None:
             raise ValueError("at least one paper account field is required")
         return self
+
+
+class PaperAccountStrategyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    strategy_id: str = Field(min_length=36, max_length=36)
+    leverage: int = Field(ge=1, le=20)
+    max_positions: int = Field(ge=1, le=20)
+    position_size_pct: float = Field(gt=0, le=100)
+    margin_cap: float = Field(gt=0, le=0.95)
 
 
 class LiveAccountCreateRequest(BaseModel):

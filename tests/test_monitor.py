@@ -180,8 +180,31 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path, mo
 def test_monitor_detail_queries(mysql_test_engine, tmp_path) -> None:
     repository, _, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
     assert repository.klines("testusdt", "1h", 120)[0]["close"] == 101.5
-    assert repository.strategy_indicators("TESTUSDT", "1h")["count"] == 12
+    indicator_scan = repository.strategy_indicators("TESTUSDT", "1h")
+    assert indicator_scan["count"] == 12
+    assert indicator_scan["prediction_features"]["count"] == 8
+    assert indicator_scan["total_count"] == 20
     assert repository.score_detail("TESTUSDT")["1h"]["score"] == 80
+
+
+def test_prediction_optimizer_history_selects_latest_rows_then_restores_time_order(
+    mysql_test_engine, tmp_path, monkeypatch
+) -> None:
+    repository, _, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
+    captured: list[str] = []
+
+    def capture_query(sql: str, _params: tuple[object, ...]):
+        captured.append(sql)
+        return []
+
+    monkeypatch.setattr(repository, "_query", capture_query)
+
+    assert repository.prediction_algorithm_history() == []
+    sql = captured[0]
+    assert sql.index("ORDER BY p.predicted_at_ms DESC,p.id DESC") < sql.index("LIMIT 50000")
+    assert sql.index("LIMIT 50000") < sql.index(
+        "ORDER BY recent.predicted_at_ms ASC,recent.prediction_row_id ASC"
+    )
 
 
 def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_path) -> None:
@@ -192,7 +215,7 @@ def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_pat
                 """INSERT INTO prediction_feature_snapshots(
                        symbol,as_of_ms,feature_schema_version,features_json,
                        quality_score,created_at
-                   ) VALUES('TESTUSDT',1000,4,'{}',0.9,CURRENT_TIMESTAMP)"""
+                   ) VALUES('TESTUSDT',1000,4,'{"aggressive_flow":0.5}',0.9,CURRENT_TIMESTAMP)"""
             )
         ).lastrowid
         prediction_id = connection.execute(
@@ -207,12 +230,26 @@ def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_pat
                    ) VALUES(
                        '22222222-2222-2222-2222-222222222222',:feature_id,'TESTUSDT',300,NULL,
                        'heuristic','long',0.4,0.6,0.2,0.2,0.55,
-                       'medium',12,100,2,15,10,'[]','{}','battle-ensemble',1,
+                       'medium',12,100,2,15,10,'["AGGRESSIVE_FLOW"]',
+                       '{"algorithm_config_version":7,"aggressive_flow":0.1}',
+                       'battle-ensemble',1,
                        1000,2000,CURRENT_TIMESTAMP
                    )"""
             ),
             {"feature_id": feature_id},
         ).lastrowid
+        connection.execute(
+            text(
+                """INSERT INTO prediction_algorithm_snapshots(
+                       prediction_id,algorithm_config_json,created_at)
+                   VALUES(
+                       :prediction_id,
+                       '{"config_version":7,"direction_threshold":0.18,"min_data_quality":0.7,"account_crowding_penalty":0.08,"funding_crowding_penalty":0.04,"weights":{"5m":{"aggressive_flow":1.0},"15m":{"aggressive_flow":1.0},"1h":{"aggressive_flow":1.0}}}',
+                       CURRENT_TIMESTAMP
+                   )"""
+            ),
+            {"prediction_id": prediction_id},
+        )
         connection.execute(
             text(
                 """INSERT INTO prediction_outcomes(
@@ -292,6 +329,9 @@ def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_pat
         "stop_bps": 10.0,
         "model_key": "battle-ensemble",
         "model_version": 1,
+        "feature_schema_version": 4,
+        "algorithm_config_version": 7,
+        "algorithm_snapshot_available": True,
         "predicted_at_ms": 1000,
         "valid_until_ms": 2000,
         "status": "completed",
@@ -307,6 +347,27 @@ def test_prediction_history_returns_settlement_fields(mysql_test_engine, tmp_pat
         "completed_at_ms": 2000,
         "direction_hit": True,
     }
+
+    snapshot = repository.prediction_algorithm_snapshot("22222222-2222-2222-2222-222222222222")
+    assert snapshot is not None
+    assert snapshot["algorithm_snapshot_available"] is True
+    assert snapshot["algorithm_config_version"] == 7
+    assert snapshot["algorithm_config"]["direction_threshold"] == 0.18
+    assert snapshot["feature_schema_version"] == 4
+    assert snapshot["features"]["aggressive_flow"] == 0.5
+    assert snapshot["components"]["aggressive_flow"] == 0.1
+    assert snapshot["reason_codes"] == ["AGGRESSIVE_FLOW"]
+    assert repository.prediction_algorithm_snapshot("44444444-4444-4444-4444-444444444444") is None
+
+    algorithm_history = repository.prediction_algorithm_history()
+    assert len(algorithm_history) == 1
+    assert algorithm_history[0]["symbol"] == "TESTUSDT"
+    assert algorithm_history[0]["prediction_result"] == "long"
+    assert algorithm_history[0]["confidence_label"] == "medium"
+    assert float(algorithm_history[0]["directional_return_bps"]) == 98.0
+    assert float(algorithm_history[0]["max_favorable_bps"]) == 120.0
+    assert float(algorithm_history[0]["max_adverse_bps"]) == -20.0
+    assert algorithm_history[0]["hit_result"] == "neither"
 
     assert history["hourly_statistics"] == [
         {

@@ -33,6 +33,19 @@ def _features(direction: float = 1.0) -> dict[str, float]:
     }
 
 
+def _with_kline_strategies(
+    features: dict[str, object], timeframe: str = "15m"
+) -> dict[str, object]:
+    features["kline_strategies"] = {
+        timeframe: {
+            "triggered_count": len(battle.KLINE_STRATEGY_FEATURES),
+            "available_count": len(battle.KLINE_STRATEGY_FEATURES),
+            "values": {name: 1.0 for name in battle.KLINE_STRATEGY_FEATURES},
+        }
+    }
+    return features
+
+
 @pytest.mark.parametrize("horizon", battle.HORIZONS)
 def test_battle_prediction_is_three_way_and_explicitly_heuristic(horizon: int) -> None:
     bullish = battle.predict(_features(), horizon)
@@ -62,7 +75,7 @@ def test_battle_prediction_abstains_when_market_data_is_stale() -> None:
 
 
 def test_custom_direction_threshold_changes_new_prediction_only() -> None:
-    features = _features(0.3)
+    features = _with_kline_strategies(_features(0.3))
     config = battle.default_algorithm_config()
     config["direction_threshold"] = 0.5
     config["config_version"] = 7
@@ -81,6 +94,75 @@ def test_prediction_algorithm_schema_rejects_invalid_weight_total() -> None:
 
     with pytest.raises(ValueError, match="weights must sum to 1"):
         PredictionAlgorithmUpdate.model_validate(config)
+
+
+def test_default_algorithm_has_eight_market_and_twelve_kline_features() -> None:
+    config = battle.default_algorithm_config()
+
+    assert len(battle.MARKET_ALGORITHM_FEATURES) == 8
+    assert len(battle.KLINE_STRATEGY_FEATURES) == 12
+    assert len(battle.ALGORITHM_FEATURES) == 20
+    for weights in config["weights"].values():
+        assert sum(weights.values()) == pytest.approx(1.0)
+        assert sum(weights[name] for name in battle.MARKET_ALGORITHM_FEATURES) == pytest.approx(
+            0.76
+        )
+        assert sum(weights[name] for name in battle.KLINE_STRATEGY_FEATURES) == pytest.approx(0.24)
+
+
+def test_legacy_eight_feature_config_is_migrated_without_losing_relative_weights() -> None:
+    legacy = battle.default_algorithm_config()
+    for horizon in legacy["weights"]:
+        legacy["weights"][horizon] = {
+            name: battle.DEFAULT_ALGORITHM_CONFIG["weights"][horizon][name] / 0.76
+            for name in battle.MARKET_ALGORITHM_FEATURES
+        }
+
+    migrated = battle.normalize_algorithm_config(legacy)
+
+    for weights in migrated["weights"].values():
+        assert sum(weights.values()) == pytest.approx(1.0)
+        assert all(weights[name] == pytest.approx(0.02) for name in battle.KLINE_STRATEGY_FEATURES)
+
+
+def test_triggered_kline_strategies_contribute_to_prediction_score() -> None:
+    plain = battle.predict(_features(0.1), 900)
+    enhanced = battle.predict(_with_kline_strategies(_features(0.1)), 900)
+
+    assert enhanced["battle_score"] > plain["battle_score"]
+    assert enhanced["components"]["kline_strategy_triggered_count"] == 12
+    assert enhanced["components"]["kline_bollinger_breakout"] == pytest.approx(0.02)
+
+
+def test_kline_strategy_scan_maps_only_complete_triggers_to_one() -> None:
+    candles = [
+        {
+            "open_time": index * 900_000,
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.0,
+            "volume": 100.0,
+        }
+        for index in range(79)
+    ]
+    candles.append(
+        {
+            "open_time": 79 * 900_000,
+            "open": 120.0,
+            "high": 132.0,
+            "low": 119.0,
+            "close": 130.0,
+            "volume": 200.0,
+        }
+    )
+
+    result = battle.evaluate_kline_strategy_features(candles, "15m")
+
+    assert result["candle_count"] == 80
+    assert result["values"]["kline_bollinger_breakout"] == 1.0
+    assert result["values"]["kline_trend_breakout"] == 1.0
+    assert result["values"]["kline_new_low_reversal"] == 0.0
 
 
 def test_runtime_algorithm_config_reads_persisted_version(
@@ -261,19 +343,18 @@ def test_battle_migration_preserves_model_and_feature_versions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     migration_path = (
-        Path(__file__).parents[1]
-        / "migrations"
-        / "versions"
-        / "0022_battle_prediction.py"
+        Path(__file__).parents[1] / "migrations" / "versions" / "0022_battle_prediction.py"
     )
-    spec = importlib.util.spec_from_file_location("battle_prediction_migration_0022", migration_path)
+    spec = importlib.util.spec_from_file_location(
+        "battle_prediction_migration_0022", migration_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
     assert module.MODEL_KEY == battle.MODEL_KEY
-    assert module.MODEL_VERSION == battle.MODEL_VERSION
-    assert module.FEATURE_SCHEMA_VERSION == battle.FEATURE_SCHEMA_VERSION
+    assert module.MODEL_VERSION == 1
+    assert module.FEATURE_SCHEMA_VERSION == 4
 
     metadata = MetaData()
     tables: dict[str, Table] = {}
@@ -320,6 +401,123 @@ def test_battle_migration_preserves_model_and_feature_versions(
         "prediction_model_versions.model_key",
         "prediction_model_versions.version",
     )
+
+
+def test_kline_strategy_migration_registers_current_model_version() -> None:
+    migration_path = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "0035_battle_kline_strategy_features.py"
+    )
+    spec = importlib.util.spec_from_file_location("battle_kline_features_0035", migration_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.MODEL_KEY == battle.MODEL_KEY
+    assert module.MODEL_VERSION == battle.MODEL_VERSION
+    assert module.FEATURE_SCHEMA_VERSION == battle.FEATURE_SCHEMA_VERSION
+
+
+def test_kline_strategy_migration_downgrade_deletes_derived_data_before_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration_path = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "0035_battle_kline_strategy_features.py"
+    )
+    spec = importlib.util.spec_from_file_location("battle_kline_features_0035", migration_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    executed: list[object] = []
+    bind = SimpleNamespace(
+        dialect=SimpleNamespace(name="mysql"),
+        execute=lambda _statement: [
+            SimpleNamespace(_mapping={"Column_name": "model_key"}),
+            SimpleNamespace(_mapping={"Column_name": "version"}),
+        ],
+    )
+    fake_op = SimpleNamespace(
+        get_bind=lambda: bind,
+        execute=lambda statement: executed.append(statement),
+    )
+    monkeypatch.setattr(module, "op", fake_op)
+
+    module.downgrade()
+
+    statements = [" ".join(str(statement).split()) for statement in executed]
+    assert len(statements) == 3
+    assert statements[0].startswith("DELETE FROM battle_predictions")
+    assert "model_key=:model_key AND model_version=:model_version" in statements[0]
+    assert statements[1].startswith(
+        "DELETE feature FROM prediction_feature_snapshots AS feature"
+    )
+    assert "feature.feature_schema_version=:feature_schema_version" in statements[1]
+    assert "prediction.id IS NULL" in statements[1]
+    assert statements[2].startswith("DELETE FROM prediction_model_versions")
+
+    parameters = [statement.compile().params for statement in executed]
+    assert parameters == [
+        {"model_key": module.MODEL_KEY, "model_version": module.MODEL_VERSION},
+        {"feature_schema_version": module.FEATURE_SCHEMA_VERSION},
+        {"model_key": module.MODEL_KEY, "model_version": module.MODEL_VERSION},
+    ]
+
+
+def test_prediction_algorithm_snapshot_migration_adds_one_to_one_snapshot_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration_path = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "0036_prediction_algorithm_snapshot.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "prediction_algorithm_snapshot_0036", migration_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    metadata = MetaData()
+    tables: dict[str, Table] = {}
+
+    def capture_table(name: str, *elements: object, **kwargs: object) -> Table:
+        table = Table(name, metadata, *elements, **kwargs)
+        tables[name] = table
+        return table
+
+    fake_op = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="mysql")),
+        create_table=capture_table,
+    )
+    monkeypatch.setattr(module, "op", fake_op)
+    monkeypatch.setattr(
+        module.sa, "inspect", lambda _bind: SimpleNamespace(has_table=lambda _name: False)
+    )
+
+    module.upgrade()
+
+    assert module.down_revision == "0035_battle_kline_features"
+    snapshot_table = tables["prediction_algorithm_snapshots"]
+    assert tuple(snapshot_table.primary_key.columns.keys()) == ("prediction_id",)
+    assert snapshot_table.c.algorithm_config_json.nullable is False
+    prediction_fk = next(
+        constraint
+        for constraint in snapshot_table.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+        and constraint.name == "fk_prediction_algorithm_snapshots_prediction"
+    )
+    assert tuple(prediction_fk.columns.keys()) == ("prediction_id",)
+    assert tuple(element.target_fullname for element in prediction_fk.elements) == (
+        "battle_predictions.id",
+    )
+    assert prediction_fk.ondelete == "CASCADE"
 
 
 def _pending_outcome(**overrides: object) -> dict[str, object]:

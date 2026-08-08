@@ -16,7 +16,7 @@ window.quantdeskApi = (path, options = {}) => {
 };
 
 for (const source of [
-  "/assets/monitor.js?v=20260806-9",
+  "/assets/monitor.js?v=20260808-15",
   "/assets/paper.js?v=20260805-1",
   "/assets/live.js?v=20260804-10",
   "/assets/backtest.js?v=20260804-5",

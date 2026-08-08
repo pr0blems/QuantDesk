@@ -18,6 +18,7 @@ export type RegisterInput = components["schemas"]["RegisterRequest"];
 export type BacktestRunRequest = components["schemas"]["BacktestRunRequest"];
 export type PaperAccountCreateRequest = components["schemas"]["PaperAccountCreateRequest"];
 export type PaperAccountStatusUpdate = components["schemas"]["PaperAccountStatusUpdate"];
+export type PaperAccountStrategyUpdate = components["schemas"]["PaperAccountStrategyUpdate"];
 export type StrategyCreateRequest = components["schemas"]["StrategyCreateRequest"];
 export type StrategyUpdateRequest = components["schemas"]["StrategyUpdateRequest"];
 export type StrategyAiPreviewRequest = components["schemas"]["StrategyAiPreviewRequest"];
@@ -31,6 +32,8 @@ export type AiModelConfigCreate = components["schemas"]["AiModelConfigCreate"];
 export type AiModelConfigUpdate = components["schemas"]["AiModelConfigUpdate"];
 export type MonitorWatchlistUpdate = components["schemas"]["MonitorWatchlistUpdate"];
 export type OpportunityPreferenceUpdate = components["schemas"]["OpportunityPreferenceUpdate"];
+export type PredictionAlgorithmOptimizationRequest =
+  components["schemas"]["PredictionAlgorithmOptimizationRequest"];
 export type PredictionAlgorithmUpdate = components["schemas"]["PredictionAlgorithmUpdate"];
 export type AdminAlertRulesUpdate = components["schemas"]["AdminAlertRulesUpdate"];
 export type AdminCleanupRequest = components["schemas"]["AdminCleanupRequest"];

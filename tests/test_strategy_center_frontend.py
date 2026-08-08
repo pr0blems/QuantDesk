@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -62,3 +61,17 @@ def test_strategy_custom_element_initializes_after_construction() -> None:
     assert "this.bindEvents()" not in constructor
     assert "this.renderShell()" in connected
     assert "this.bindEvents()" in connected
+
+
+def test_paper_strategy_editor_preserves_an_unavailable_current_strategy() -> None:
+    page = (ROOT / "web/src/pages/PaperPage.tsx").read_text(encoding="utf-8")
+
+    assert 'const selectedStrategyId = selected ? stringValue(selected.strategy_id, "") : "";' in page
+    assert "const selectedStrategyAvailable = activeStrategies.some(" in page
+    assert 'defaultValue={selectedStrategyId}' in page
+    assert "selectedStrategyId && !selectedStrategyAvailable" in page
+    assert "<option value={selectedStrategyId}>" in page
+    assert "当前绑定（已归档或不可用）" in page
+    assert page.index("selectedStrategyId && !selectedStrategyAvailable") < page.index(
+        "activeStrategies.map", page.index("defaultValue={selectedStrategyId}")
+    )

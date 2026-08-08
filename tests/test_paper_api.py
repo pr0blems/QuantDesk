@@ -119,13 +119,11 @@ def build_test_client(mysql_test_engine: Engine):
 
 
 def _register_and_login(client: TestClient, username: str) -> dict[str, str]:
-    assert (
-        client.post(
-            "/api/v2/auth/register",
-            json={"username": username, "password": "correct horse battery staple"},
-        ).status_code
-        == 201
+    registered = client.post(
+        "/api/v2/auth/register",
+        json={"username": username, "password": "correct horse battery staple"},
     )
+    assert registered.status_code == 201
     login = client.post(
         "/api/v2/auth/login",
         json={
@@ -135,7 +133,10 @@ def _register_and_login(client: TestClient, username: str) -> dict[str, str]:
         },
     )
     assert login.status_code == 200
-    return {"Authorization": f"Bearer {login.json()['access_token']}"}
+    return {
+        "Authorization": f"Bearer {login.json()['access_token']}",
+        "X-QuantDesk-User-ID": str(registered.json()["id"]),
+    }
 
 
 def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
@@ -163,6 +164,7 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
         )
         assert created.status_code == 201
         assert created.json()["config"]["signal_mode"] == "legacy_score_v1"
+        assert created.json()["config"]["risk_max_leverage"] == 20
         public_account_id = created.json()["id"]
 
         account = client.get(
@@ -209,6 +211,23 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
         assert renamed.status_code == 200
         assert renamed.json()["name"] == "Alice renamed paper"
 
+        adjusted = client.put(
+            f"/api/v2/paper/accounts/{public_account_id}/strategy",
+            headers=alice_headers,
+            json={
+                "strategy_id": strategy_id,
+                "leverage": 20,
+                "max_positions": 20,
+                "position_size_pct": 8,
+                "margin_cap": 0.7,
+            },
+        )
+        assert adjusted.status_code == 200
+        assert adjusted.json()["strategy_id"] == strategy_id
+        assert adjusted.json()["config"]["leverage"] == 20
+        assert adjusted.json()["config"]["risk_max_leverage"] == 20
+        assert adjusted.json()["config"]["max_positions"] == 20
+
         archived = client.patch(
             f"/api/v2/paper/accounts/{public_account_id}",
             headers=alice_headers,
@@ -226,3 +245,9 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
                 db.query(AuditLog).filter(AuditLog.action == "paper.account.rename").one()
             )
             assert rename_audit.resource_id == public_account_id
+            strategy_audit = (
+                db.query(AuditLog)
+                .filter(AuditLog.action == "paper.account.strategy.update")
+                .one()
+            )
+            assert strategy_audit.resource_id == public_account_id

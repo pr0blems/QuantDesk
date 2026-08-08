@@ -12,6 +12,7 @@ import math
 import threading
 import time
 import uuid
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -19,8 +20,8 @@ from . import market_data_client as binance_client
 from . import market_store as store
 
 MODEL_KEY = "battle-ensemble"
-MODEL_VERSION = 1
-FEATURE_SCHEMA_VERSION = 4
+MODEL_VERSION = 2
+FEATURE_SCHEMA_VERSION = 5
 COLLECTION_SECONDS = 300
 HORIZONS = (300, 900, 3_600)
 HORIZON_TIMEFRAME = {300: "15m", 900: "15m", 3_600: "1h"}
@@ -35,7 +36,7 @@ _start_lock = threading.Lock()
 _started = False
 _positioning_blocked_until = 0.0
 ALGORITHM_SETTING_KEY = "battle_prediction_algorithm"
-ALGORITHM_FEATURES = (
+MARKET_ALGORITHM_FEATURES = (
     "aggressive_flow",
     "book_imbalance",
     "book_imbalance_5",
@@ -45,41 +46,60 @@ ALGORITHM_FEATURES = (
     "price_oi_impulse",
     "trend",
 )
+KLINE_STRATEGY_FEATURES = (
+    "kline_bollinger_breakout",
+    "kline_moving_average_pullback_bounce",
+    "kline_trend_breakout",
+    "kline_price_volume_rise",
+    "kline_new_low_reversal",
+    "kline_low_volume_pullback",
+    "kline_strong_gap_open",
+    "kline_moving_average_bull",
+    "kline_ma_golden_cross",
+    "kline_macd_golden_cross_volume",
+    "kline_oversold_bounce",
+    "kline_oversold_reversal",
+)
+ALGORITHM_FEATURES = (*MARKET_ALGORITHM_FEATURES, *KLINE_STRATEGY_FEATURES)
 DEFAULT_ALGORITHM_CONFIG: dict[str, Any] = {
     "direction_threshold": 0.18,
     "min_data_quality": 0.70,
     "account_crowding_penalty": 0.08,
     "funding_crowding_penalty": 0.04,
+    "enabled_features": {name: True for name in ALGORITHM_FEATURES},
     "weights": {
         "5m": {
-            "aggressive_flow": 0.25,
-            "book_imbalance": 0.15,
-            "book_imbalance_5": 0.10,
-            "velocity": 0.17,
-            "flash_imbalance": 0.10,
-            "taker_flow": 0.14,
-            "price_oi_impulse": 0.05,
-            "trend": 0.04,
+            "aggressive_flow": 0.19,
+            "book_imbalance": 0.11,
+            "book_imbalance_5": 0.08,
+            "velocity": 0.13,
+            "flash_imbalance": 0.08,
+            "taker_flow": 0.11,
+            "price_oi_impulse": 0.04,
+            "trend": 0.02,
+            **{name: 0.02 for name in KLINE_STRATEGY_FEATURES},
         },
         "15m": {
-            "aggressive_flow": 0.19,
-            "book_imbalance": 0.08,
-            "book_imbalance_5": 0.05,
-            "velocity": 0.10,
-            "flash_imbalance": 0.09,
-            "taker_flow": 0.15,
-            "price_oi_impulse": 0.14,
-            "trend": 0.20,
+            "aggressive_flow": 0.14,
+            "book_imbalance": 0.06,
+            "book_imbalance_5": 0.04,
+            "velocity": 0.08,
+            "flash_imbalance": 0.07,
+            "taker_flow": 0.11,
+            "price_oi_impulse": 0.11,
+            "trend": 0.15,
+            **{name: 0.02 for name in KLINE_STRATEGY_FEATURES},
         },
         "1h": {
-            "aggressive_flow": 0.10,
-            "book_imbalance": 0.04,
-            "book_imbalance_5": 0.03,
-            "velocity": 0.05,
-            "flash_imbalance": 0.04,
-            "taker_flow": 0.15,
-            "price_oi_impulse": 0.19,
-            "trend": 0.40,
+            "aggressive_flow": 0.08,
+            "book_imbalance": 0.03,
+            "book_imbalance_5": 0.02,
+            "velocity": 0.04,
+            "flash_imbalance": 0.03,
+            "taker_flow": 0.11,
+            "price_oi_impulse": 0.15,
+            "trend": 0.30,
+            **{name: 0.02 for name in KLINE_STRATEGY_FEATURES},
         },
     },
 }
@@ -129,17 +149,47 @@ def normalize_algorithm_config(value: Any) -> dict[str, Any]:
         if math.isfinite(candidate) and lower <= candidate <= upper:
             result[name] = candidate
     configured_weights = value.get("weights")
-    if not isinstance(configured_weights, dict):
-        return result
-    for horizon in ("5m", "15m", "1h"):
-        candidate = configured_weights.get(horizon)
-        if not isinstance(candidate, dict):
-            continue
-        weights = {name: _number(candidate.get(name), math.nan) for name in ALGORITHM_FEATURES}
-        if all(math.isfinite(weight) and 0 <= weight <= 1 for weight in weights.values()) and math.isclose(
-            sum(weights.values()), 1.0, abs_tol=0.001
-        ):
-            result["weights"][horizon] = weights
+    if isinstance(configured_weights, dict):
+        for horizon in ("5m", "15m", "1h"):
+            candidate = configured_weights.get(horizon)
+            if not isinstance(candidate, dict):
+                continue
+            weights = {
+                name: _number(candidate.get(name), math.nan) for name in ALGORITHM_FEATURES
+            }
+            if all(
+                math.isfinite(weight) and 0 <= weight <= 1 for weight in weights.values()
+            ) and math.isclose(sum(weights.values()), 1.0, abs_tol=0.001):
+                result["weights"][horizon] = weights
+                continue
+            legacy_weights = {
+                name: _number(candidate.get(name), math.nan) for name in MARKET_ALGORITHM_FEATURES
+            }
+            if (
+                all(name not in candidate for name in KLINE_STRATEGY_FEATURES)
+                and all(
+                    math.isfinite(weight) and 0 <= weight <= 1
+                    for weight in legacy_weights.values()
+                )
+                and math.isclose(sum(legacy_weights.values()), 1.0, abs_tol=0.001)
+            ):
+                result["weights"][horizon] = {
+                    **{name: round(weight * 0.76, 6) for name, weight in legacy_weights.items()},
+                    **{name: 0.02 for name in KLINE_STRATEGY_FEATURES},
+                }
+    configured_enabled = value.get("enabled_features")
+    if isinstance(configured_enabled, dict):
+        enabled = dict(result["enabled_features"])
+        for name in ALGORITHM_FEATURES:
+            candidate = configured_enabled.get(name)
+            if isinstance(candidate, bool):
+                enabled[name] = candidate
+        has_active_weight = all(
+            any(enabled[name] and result["weights"][horizon][name] > 0 for name in ALGORITHM_FEATURES)
+            for horizon in ("5m", "15m", "1h")
+        )
+        if has_active_weight:
+            result["enabled_features"] = enabled
     return result
 
 
@@ -269,6 +319,48 @@ def build_feature_vector(
     return features, quality
 
 
+def evaluate_kline_strategy_features(
+    candles: Sequence[Mapping[str, Any]], timeframe: str
+) -> dict[str, Any]:
+    """Convert the twelve latest-bar K-line strategies into ensemble inputs."""
+
+    from .strategy_indicators import evaluate_strategy_indicators
+
+    scan = evaluate_strategy_indicators(candles, timeframe)
+    by_key = {str(item.get("key")): item for item in scan.get("items", [])}
+    values: dict[str, float] = {}
+    statuses: dict[str, str] = {}
+    for feature_name in KLINE_STRATEGY_FEATURES:
+        indicator_key = feature_name.removeprefix("kline_")
+        item = by_key.get(indicator_key, {})
+        values[feature_name] = 1.0 if item.get("triggered") is True else 0.0
+        statuses[feature_name] = str(item.get("status") or "insufficient")
+    return {
+        "timeframe": timeframe,
+        "candle_count": int(scan.get("candle_count") or 0),
+        "triggered_count": sum(value == 1.0 for value in values.values()),
+        "available_count": sum(status != "insufficient" for status in statuses.values()),
+        "values": values,
+        "statuses": statuses,
+    }
+
+
+def _load_kline_strategy_features(symbol: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for timeframe in sorted(set(HORIZON_TIMEFRAME.values())):
+        try:
+            rows = store.query(
+                """SELECT open_time,open,high,low,close,volume FROM klines
+                   WHERE symbol=? AND tf=? ORDER BY open_time DESC LIMIT 120""",
+                (symbol, timeframe),
+            )
+        except Exception:
+            rows = []
+        candles = list(reversed([dict(row) for row in rows]))
+        payload[timeframe] = evaluate_kline_strategy_features(candles, timeframe)
+    return payload
+
+
 def predict(
     features: dict[str, Any],
     horizon_seconds: int,
@@ -286,15 +378,23 @@ def predict(
     if algorithm_config and "config_version" in algorithm_config:
         config["config_version"] = int(algorithm_config["config_version"] or 0)
     quality = _clip(_number(features.get("data_quality")), 0.0, 1.0)
-    trend = (
-        _number(features.get("trend_15m"))
-        if horizon_seconds in {300, 900}
-        else 0.65 * _number(features.get("trend_1h")) + 0.35 * _number(features.get("trend_4h"))
-    )
     weights = config["weights"][HORIZON_NAMES[horizon_seconds]]
-    values = {name: _number(features.get(name)) for name in weights if name != "trend"}
-    values["trend"] = trend
-    contributions = {name: values[name] * weight for name, weight in weights.items()}
+    enabled_features = config["enabled_features"]
+    active_weight_total = sum(
+        weight for name, weight in weights.items() if enabled_features.get(name, True)
+    )
+    effective_weights = {
+        name: (weight / active_weight_total if enabled_features.get(name, True) else 0.0)
+        for name, weight in weights.items()
+    }
+    values = algorithm_feature_values(features, horizon_seconds)
+    kline_payload = features.get("kline_strategies")
+    kline_by_timeframe = kline_payload if isinstance(kline_payload, Mapping) else {}
+    kline_scan = kline_by_timeframe.get(HORIZON_TIMEFRAME[horizon_seconds])
+    kline_scan = kline_scan if isinstance(kline_scan, Mapping) else {}
+    contributions = {
+        name: values[name] * weight for name, weight in effective_weights.items()
+    }
     crowding_penalty = -config["account_crowding_penalty"] * _number(
         features.get("account_crowding")
     )
@@ -349,8 +449,13 @@ def predict(
         "account_crowding_penalty": round(crowding_penalty, 6),
         "funding_penalty": round(funding_penalty, 6),
         "algorithm_config_version": int(config.get("config_version") or 0),
+        "algorithm_feature_enabled_count": sum(bool(value) for value in enabled_features.values()),
+        "algorithm_active_weight_total": round(active_weight_total, 6),
         "direction_threshold": config["direction_threshold"],
         "min_data_quality": config["min_data_quality"],
+        "kline_strategy_timeframe": HORIZON_TIMEFRAME[horizon_seconds],
+        "kline_strategy_triggered_count": int(kline_scan.get("triggered_count") or 0),
+        "kline_strategy_available_count": int(kline_scan.get("available_count") or 0),
         # Collected for shadow evaluation only. A future calibrated model may
         # assign a non-zero weight after leakage-safe forward validation.
         "verified_event_pressure_shadow": round(
@@ -373,6 +478,38 @@ def predict(
         "reason_codes": reason_codes,
         "components": components,
     }
+
+
+def algorithm_feature_values(
+    features: Mapping[str, Any], horizon_seconds: int
+) -> dict[str, float]:
+    """Return the exact twenty inputs consumed by one prediction horizon."""
+
+    if horizon_seconds not in HORIZONS:
+        raise ValueError("unsupported battle prediction horizon")
+    trend = (
+        _number(features.get("trend_15m"))
+        if horizon_seconds in {300, 900}
+        else 0.65 * _number(features.get("trend_1h"))
+        + 0.35 * _number(features.get("trend_4h"))
+    )
+    kline_payload = features.get("kline_strategies")
+    kline_by_timeframe = kline_payload if isinstance(kline_payload, Mapping) else {}
+    kline_scan = kline_by_timeframe.get(HORIZON_TIMEFRAME[horizon_seconds])
+    kline_scan = kline_scan if isinstance(kline_scan, Mapping) else {}
+    raw_kline_values = kline_scan.get("values")
+    kline_values = raw_kline_values if isinstance(raw_kline_values, Mapping) else {}
+    values = {
+        name: _number(
+            kline_values.get(name)
+            if name in KLINE_STRATEGY_FEATURES
+            else features.get(name)
+        )
+        for name in ALGORITHM_FEATURES
+        if name != "trend"
+    }
+    values["trend"] = trend
+    return values
 
 
 def _positioning_snapshot(
@@ -539,9 +676,7 @@ def create_predictions(symbol: str, as_of_ms: int | None = None) -> int:
     scores = {str(row["tf"]): _number(row["score"]) for row in score_rows}
     ticker_rows = store.query("SELECT price,pct_24h,ts FROM ticker WHERE symbol=?", (symbol,))
     ticker = dict(ticker_rows[0]) if ticker_rows else {}
-    micro = _market_microstructure(symbol, now_ms) or _local_microstructure(
-        scores, ticker, now_ms
-    )
+    micro = _market_microstructure(symbol, now_ms) or _local_microstructure(scores, ticker, now_ms)
     try:
         movement_rows = store.query(
             """SELECT SUM(up_count) up_count,SUM(down_count) down_count
@@ -566,6 +701,7 @@ def create_predictions(symbol: str, as_of_ms: int | None = None) -> int:
         down_count=int(movement.get("down_count") or 0),
         now_ms=now_ms,
     )
+    features["kline_strategies"] = _load_kline_strategy_features(symbol)
     features.update(
         {
             "verified_event_pressure": 0.0,
@@ -649,6 +785,12 @@ def create_predictions(symbol: str, as_of_ms: int | None = None) -> int:
                 ),
             )
             prediction_id = int(transaction.query("SELECT LAST_INSERT_ID() id")[0]["id"])
+            transaction.execute(
+                """INSERT INTO prediction_algorithm_snapshots(
+                       prediction_id,algorithm_config_json,created_at)
+                   VALUES(?,?,CURRENT_TIMESTAMP)""",
+                (prediction_id, json.dumps(algorithm_config, ensure_ascii=False)),
+            )
             transaction.execute(
                 """INSERT INTO prediction_outcomes(
                        prediction_id,status,cost_bps,due_at_ms,label_version,created_at,updated_at)
@@ -813,9 +955,7 @@ def update_prediction_outcomes(limit: int = 2_000) -> dict[str, int]:
             )
             completed += 1
         elif has_new_pre_horizon_sample:
-            updated_rows.append(
-                (favorable, adverse, price, observed_at_ms, row["id"])
-            )
+            updated_rows.append((favorable, adverse, price, observed_at_ms, row["id"]))
             updated += 1
         elif now_ms >= due_at_ms + OUTCOME_GRACE_MS:
             unavailable_rows.append((row["id"],))

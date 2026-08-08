@@ -13,6 +13,19 @@ class ContractMonitor extends HTMLElement {
       lastAlertId: 0,
       spreadAlertStates: new Map(),
       modal: { symbol: null, tf: "1h", opportunity: null, indicators: [], selectedIndicator: null },
+      chart: {
+        klines: [],
+        signals: [],
+        series: null,
+        visibleCount: 90,
+        rightOffset: 0,
+        hoverIndex: null,
+        hoverY: null,
+        dragging: false,
+        dragStartX: 0,
+        dragStartOffset: 0,
+        overlays: new Set(["ma20", "ma50", "ma60", "boll", "volma", "signals"]),
+      },
       history: {
         page: 1,
         pages: 1,
@@ -23,7 +36,11 @@ class ContractMonitor extends HTMLElement {
         timeRange: { startMs: null, endMs: null },
         filters: { direction: "all", horizon: "all", hit: "all" },
       },
-      algorithm: { data: null, loading: false },
+      predictionConfig: { id: null, loading: false },
+      algorithm: {
+        data: null, loading: false, optimizing: false, optimization: null, trace: null,
+        historyRecords: [],
+      },
       matrixSort: { key: "ai", direction: "desc" },
       sound: true,
       notifyOn: false,
@@ -32,6 +49,8 @@ class ContractMonitor extends HTMLElement {
     this.newsTimer = null;
     this.running = false;
     this.audioContext = null;
+    this.chartResizeObserver = null;
+    this.chartGeometry = null;
     this.renderShell();
   }
 
@@ -41,11 +60,12 @@ class ContractMonitor extends HTMLElement {
 
   disconnectedCallback() {
     this.pause();
+    this.chartResizeObserver?.disconnect();
   }
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260806-9">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260808-15">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -167,7 +187,7 @@ class ContractMonitor extends HTMLElement {
             <div class="research-section-head trend-toolbar">
               <div>
                 <strong>趋势与成交量</strong>
-                <span>蜡烛图 · MA20 · MA50</span>
+                <span>拖拽浏览 · 滚轮缩放 · 悬停查看逐根数据</span>
               </div>
               <span class="tf-switch" aria-label="图表周期">
                 <button data-tf="15m" type="button">15 分</button>
@@ -175,15 +195,38 @@ class ContractMonitor extends HTMLElement {
                 <button data-tf="4h" type="button">4 小时</button>
               </span>
             </div>
+            <div class="chart-overlay-toolbar" role="toolbar" aria-label="图表叠加指标">
+              <span>叠加指标</span>
+              <button class="on" type="button" data-chart-overlay="ma20" aria-pressed="true"><i class="legend-line ma20"></i>MA20</button>
+              <button class="on" type="button" data-chart-overlay="ma50" aria-pressed="true"><i class="legend-line ma50"></i>MA50</button>
+              <button class="on" type="button" data-chart-overlay="ma60" aria-pressed="true"><i class="legend-line ma60"></i>MA60</button>
+              <button class="on" type="button" data-chart-overlay="boll" aria-pressed="true"><i class="legend-line boll"></i>BOLL</button>
+              <button class="on" type="button" data-chart-overlay="volma" aria-pressed="true"><i class="legend-line volma"></i>VOL MA20</button>
+              <button class="on" type="button" data-chart-overlay="signals" aria-pressed="true"><i class="legend-signal buy">买</i><i class="legend-signal sell">卖</i>历史买卖点</button>
+              <button class="chart-reset" type="button" data-chart-action="reset">复位到最新</button>
+              <small id="chart-range">--</small>
+            </div>
+            <div class="chart-signal-note"><b>时间口径：</b>图中买点是历史 MA 金叉/布林上破，卖点是历史 MA 死叉/布林下破；下方 12 项策略指标只判断最新一根 K 线。</div>
             <div id="modal-ohlc" class="research-ohlc"><span>正在加载当前周期行情…</span></div>
-            <canvas id="chart" class="chart" width="1280" height="430" aria-label="标的 K 线、均线与成交量图"></canvas>
+            <div id="chart-stage" class="chart-stage">
+              <canvas id="chart" class="chart" width="1280" height="500" tabindex="0" aria-label="可拖拽缩放的 K 线、叠加指标、成交量和买卖点图"></canvas>
+              <div id="chart-tooltip" class="chart-tooltip hidden" aria-hidden="true"></div>
+              <div class="chart-gesture-hint">拖拽左右浏览 · 滚轮缩放 · 双击复位</div>
+            </div>
           </section>
 
           <section id="modal-indicator-section" class="research-section strategy-indicator-section">
             <div class="research-section-head">
-              <div><strong>策略指标</strong><span id="strategy-indicator-caption">当前周期：-- · 正在计算 12 项</span></div>
+              <div><strong>策略与预测指标</strong><span id="indicator-total-caption">共 20 项 · 正在读取真实数据</span></div>
             </div>
-            <div id="strategy-indicator-list" class="strategy-indicator-list" role="tablist" aria-label="选择策略指标"></div>
+            <div class="strategy-indicator-group">
+              <div class="strategy-indicator-group-head"><strong>K 线策略</strong><span id="strategy-indicator-caption">最新一根 K 线：-- · 正在计算 12 项</span></div>
+              <div id="strategy-indicator-list" class="strategy-indicator-list" role="tablist" aria-label="选择 K 线策略指标"></div>
+            </div>
+            <div class="strategy-indicator-group prediction-feature-group">
+              <div class="strategy-indicator-group-head"><strong>预测因子</strong><span id="prediction-feature-caption">最新预测快照：-- · 正在读取 8 项</span></div>
+              <div id="prediction-feature-list" class="strategy-indicator-list prediction-feature-list" role="tablist" aria-label="选择预测因子"></div>
+            </div>
             <div id="strategy-indicator-detail" class="strategy-indicator-detail"></div>
           </section>
           <section id="modal-battle-section" class="research-section">
@@ -236,9 +279,9 @@ class ContractMonitor extends HTMLElement {
               <thead><tr>
                 <th>判断时间</th><th>合约 / 周期</th><th>开盘价格</th><th>预测方向 / 评分</th>
                 <th>多 / 空 / 中概率</th><th>置信度</th><th>结算时间</th><th>结算价格</th>
-                <th>结算标签 / 状态</th><th>方向命中 / 成本后收益</th><th>最大有利 / 不利</th>
+                <th>结算标签 / 状态</th><th>方向命中 / 成本后收益</th><th>最大有利 / 不利</th><th>操作</th>
               </tr></thead>
-              <tbody id="prediction-history-body"><tr><td colspan="11" class="history-empty">点击后加载历史记录</td></tr></tbody>
+              <tbody id="prediction-history-body"><tr><td colspan="12" class="history-empty">点击后加载历史记录</td></tr></tbody>
             </table>
           </div>
           <footer class="prediction-history-footer">
@@ -253,6 +296,20 @@ class ContractMonitor extends HTMLElement {
           </footer>
         </div>
       </div>
+      <div id="prediction-config-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-box prediction-config-box" role="dialog" aria-modal="true" aria-labelledby="prediction-config-title">
+          <div class="modal-head prediction-config-head">
+            <div>
+              <strong id="prediction-config-title" class="modal-symbol">历史预测指标</strong>
+              <span id="prediction-config-version" class="dim">正在读取该条预测的配置…</span>
+            </div>
+            <button id="prediction-config-close" type="button">关闭</button>
+          </div>
+          <div id="prediction-config-content" class="prediction-config-content" aria-live="polite">
+            <p class="prediction-config-loading">正在加载预测指标…</p>
+          </div>
+        </div>
+      </div>
       <div id="prediction-algorithm-modal" class="modal hidden" aria-hidden="true">
         <div class="modal-box prediction-algorithm-box" role="dialog" aria-modal="true" aria-labelledby="prediction-algorithm-title">
           <div class="modal-head prediction-algorithm-head">
@@ -260,14 +317,20 @@ class ContractMonitor extends HTMLElement {
               <strong id="prediction-algorithm-title" class="modal-symbol">当前预测算法</strong>
               <span id="prediction-algorithm-version" class="dim">正在读取配置…</span>
             </div>
-            <button id="prediction-algorithm-close" type="button">关闭</button>
+            <div class="prediction-algorithm-head-actions">
+              <button id="prediction-algorithm-ai-trace" class="hidden" type="button">查看AI过程</button>
+              <button id="prediction-algorithm-ai-history" class="hidden" type="button" disabled>查看历史分析记录</button>
+              <button id="prediction-algorithm-optimize" class="primary" type="button">AI优化算法</button>
+              <button id="prediction-algorithm-close" type="button">关闭</button>
+            </div>
           </div>
           <section class="algorithm-rules" aria-label="算法规则说明">
-            <article><strong>综合评分</strong><span>各特征标准化到 -1～+1，按周期权重加总，再扣除账户拥挤与资金费率拥挤惩罚。</span></article>
+            <article><strong>综合评分</strong><span>8 个市场因子标准化到 -1～+1；12 项 K 线策略触发记 +1、否则记 0。20 项按周期权重加总后再扣除拥挤惩罚。</span></article>
             <article><strong>方向判断</strong><span>评分达到正阈值判为看多，低于负阈值判为看空，阈值之间保持中性。</span></article>
             <article><strong>数据门槛</strong><span>数据质量不足、微观行情过期或持仓数据过期时强制中性，不参与方向命中率。</span></article>
             <article><strong>结算规则</strong><span>分别在 5m、15m、1h 观察窗口结算，方向收益扣除价差成本后大于 0 记为命中。</span></article>
           </section>
+          <section id="prediction-algorithm-optimization" class="algorithm-optimization hidden" aria-live="polite"></section>
           <form id="prediction-algorithm-form" class="prediction-algorithm-form">
             <section class="algorithm-parameters">
               <label><span>方向阈值</span><input type="number" min="0.05" max="0.5" step="0.01" data-algorithm-scalar="direction_threshold"><small>越高越谨慎，中性预测越多</small></label>
@@ -279,14 +342,28 @@ class ContractMonitor extends HTMLElement {
               <table class="algorithm-weight-table">
                 <thead><tr><th>评分特征</th><th>5m 权重</th><th>15m 权重</th><th>1h 权重</th><th>规则含义</th></tr></thead>
                 <tbody>
-                  <tr><th>主动成交流</th><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="1h"></td><td>主动买入与主动卖出强弱</td></tr>
-                  <tr><th>订单簿失衡</th><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="1h"></td><td>完整深度买卖盘力量差</td></tr>
-                  <tr><th>近五档失衡</th><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="1h"></td><td>盘口近端流动性倾斜</td></tr>
-                  <tr><th>价格速度</th><td><input type="number" data-algorithm-weight="velocity" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="velocity" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="velocity" data-horizon="1h"></td><td>最近一分钟价格变化速度</td></tr>
-                  <tr><th>闪动失衡</th><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="1h"></td><td>30 分钟上涨与下跌闪动差</td></tr>
-                  <tr><th>Taker 流向</th><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="1h"></td><td>Binance 主动买卖量比</td></tr>
-                  <tr><th>价格 × 持仓量</th><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="1h"></td><td>价格变化与未平仓量联合冲量</td></tr>
-                  <tr><th>周期趋势</th><td><input type="number" data-algorithm-weight="trend" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="trend" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="trend" data-horizon="1h"></td><td>15m 趋势；1h 使用 1h 与 4h 组合</td></tr>
+                  <tr class="algorithm-feature-group"><th colspan="5">市场与微观因子 · 8 项</th></tr>
+                  <tr><th>主动成交流 <button type="button" data-algorithm-enabled="aggressive_flow">启用</button></th><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="aggressive_flow" data-horizon="1h"></td><td>主动买入与主动卖出强弱</td></tr>
+                  <tr><th>订单簿失衡 <button type="button" data-algorithm-enabled="book_imbalance">启用</button></th><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="book_imbalance" data-horizon="1h"></td><td>完整深度买卖盘力量差</td></tr>
+                  <tr><th>近五档失衡 <button type="button" data-algorithm-enabled="book_imbalance_5">启用</button></th><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="book_imbalance_5" data-horizon="1h"></td><td>盘口近端流动性倾斜</td></tr>
+                  <tr><th>价格速度 <button type="button" data-algorithm-enabled="velocity">启用</button></th><td><input type="number" data-algorithm-weight="velocity" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="velocity" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="velocity" data-horizon="1h"></td><td>最近一分钟价格变化速度</td></tr>
+                  <tr><th>闪动失衡 <button type="button" data-algorithm-enabled="flash_imbalance">启用</button></th><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="flash_imbalance" data-horizon="1h"></td><td>30 分钟上涨与下跌闪动差</td></tr>
+                  <tr><th>Taker 流向 <button type="button" data-algorithm-enabled="taker_flow">启用</button></th><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="taker_flow" data-horizon="1h"></td><td>Binance 主动买卖量比</td></tr>
+                  <tr><th>价格 × 持仓量 <button type="button" data-algorithm-enabled="price_oi_impulse">启用</button></th><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="price_oi_impulse" data-horizon="1h"></td><td>价格变化与未平仓量联合冲量</td></tr>
+                  <tr><th>周期趋势 <button type="button" data-algorithm-enabled="trend">启用</button></th><td><input type="number" data-algorithm-weight="trend" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="trend" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="trend" data-horizon="1h"></td><td>15m 趋势；1h 使用 1h 与 4h 组合</td></tr>
+                  <tr class="algorithm-feature-group"><th colspan="5">K 线策略信号 · 12 项（触发 +1，未触发或数据不足 0）</th></tr>
+                  <tr><th>布林突破 <button type="button" data-algorithm-enabled="kline_bollinger_breakout">启用</button></th><td><input type="number" data-algorithm-weight="kline_bollinger_breakout" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_bollinger_breakout" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_bollinger_breakout" data-horizon="1h"></td><td>最新收盘由布林带内向上突破上轨</td></tr>
+                  <tr><th>均线回踩反弹 <button type="button" data-algorithm-enabled="kline_moving_average_pullback_bounce">启用</button></th><td><input type="number" data-algorithm-weight="kline_moving_average_pullback_bounce" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_moving_average_pullback_bounce" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_moving_average_pullback_bounce" data-horizon="1h"></td><td>多头趋势中回踩并收复 MA20</td></tr>
+                  <tr><th>趋势突破 <button type="button" data-algorithm-enabled="kline_trend_breakout">启用</button></th><td><input type="number" data-algorithm-weight="kline_trend_breakout" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_trend_breakout" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_trend_breakout" data-horizon="1h"></td><td>突破 20 期结构高点并获得量能确认</td></tr>
+                  <tr><th>量价齐升 <button type="button" data-algorithm-enabled="kline_price_volume_rise">启用</button></th><td><input type="number" data-algorithm-weight="kline_price_volume_rise" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_price_volume_rise" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_price_volume_rise" data-horizon="1h"></td><td>价格上涨且成交量同步放大</td></tr>
+                  <tr><th>新低反转 <button type="button" data-algorithm-enabled="kline_new_low_reversal">启用</button></th><td><input type="number" data-algorithm-weight="kline_new_low_reversal" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_new_low_reversal" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_new_low_reversal" data-horizon="1h"></td><td>创新低后收复前低并转强</td></tr>
+                  <tr><th>缩量回踩 <button type="button" data-algorithm-enabled="kline_low_volume_pullback">启用</button></th><td><input type="number" data-algorithm-weight="kline_low_volume_pullback" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_low_volume_pullback" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_low_volume_pullback" data-horizon="1h"></td><td>上升趋势中缩量回踩 MA20</td></tr>
+                  <tr><th>强势高开 <button type="button" data-algorithm-enabled="kline_strong_gap_open">启用</button></th><td><input type="number" data-algorithm-weight="kline_strong_gap_open" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_strong_gap_open" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_strong_gap_open" data-horizon="1h"></td><td>周期高开至少 2% 且收盘保持强势</td></tr>
+                  <tr><th>均线多头 <button type="button" data-algorithm-enabled="kline_moving_average_bull">启用</button></th><td><input type="number" data-algorithm-weight="kline_moving_average_bull" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_moving_average_bull" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_moving_average_bull" data-horizon="1h"></td><td>价格与 MA10、MA20、MA50 多头排列</td></tr>
+                  <tr><th>MA 金叉 <button type="button" data-algorithm-enabled="kline_ma_golden_cross">启用</button></th><td><input type="number" data-algorithm-weight="kline_ma_golden_cross" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_ma_golden_cross" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_ma_golden_cross" data-horizon="1h"></td><td>MA20 最新上穿 MA60</td></tr>
+                  <tr><th>MACD 金叉放量 <button type="button" data-algorithm-enabled="kline_macd_golden_cross_volume">启用</button></th><td><input type="number" data-algorithm-weight="kline_macd_golden_cross_volume" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_macd_golden_cross_volume" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_macd_golden_cross_volume" data-horizon="1h"></td><td>MACD 最新金叉并获得量能确认</td></tr>
+                  <tr><th>超跌反弹 <button type="button" data-algorithm-enabled="kline_oversold_bounce">启用</button></th><td><input type="number" data-algorithm-weight="kline_oversold_bounce" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_oversold_bounce" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_oversold_bounce" data-horizon="1h"></td><td>RSI 低位恢复并出现价格反弹</td></tr>
+                  <tr><th>超跌反转 <button type="button" data-algorithm-enabled="kline_oversold_reversal">启用</button></th><td><input type="number" data-algorithm-weight="kline_oversold_reversal" data-horizon="5m"></td><td><input type="number" data-algorithm-weight="kline_oversold_reversal" data-horizon="15m"></td><td><input type="number" data-algorithm-weight="kline_oversold_reversal" data-horizon="1h"></td><td>RSI 从极端超卖区上穿确认</td></tr>
                 </tbody>
                 <tfoot><tr><th>权重合计</th><td id="algorithm-sum-5m">--</td><td id="algorithm-sum-15m">--</td><td id="algorithm-sum-1h">--</td><td>每个周期必须等于 1.000</td></tr></tfoot>
               </table>
@@ -298,6 +375,66 @@ class ContractMonitor extends HTMLElement {
               <button id="prediction-algorithm-save" class="primary" type="submit">保存全局算法</button>
             </footer>
           </form>
+        </div>
+      </div>
+      <div id="prediction-ai-history-modal" class="modal prediction-ai-history-modal hidden" aria-hidden="true">
+        <div class="modal-box prediction-ai-history-box" role="dialog" aria-modal="true" aria-labelledby="prediction-ai-history-title">
+          <div class="modal-head prediction-ai-history-head">
+            <div>
+              <strong id="prediction-ai-history-title" class="modal-symbol">AI 历史分析记录</strong>
+              <span class="dim">DeepSeek 调优成功与失败审计</span>
+            </div>
+            <button id="prediction-ai-history-close" type="button">关闭</button>
+          </div>
+          <div class="prediction-ai-history-table-wrap">
+            <table class="prediction-ai-history-table">
+              <thead><tr><th>分析时间</th><th>配置版本</th><th>状态</th><th>模型</th><th>样本数</th><th>Token</th><th>优化周期</th><th>分析摘要</th><th>操作</th></tr></thead>
+              <tbody id="prediction-ai-history-body"><tr><td colspan="9" class="ai-history-empty">点击后加载历史分析记录</td></tr></tbody>
+            </table>
+          </div>
+          <footer id="prediction-ai-history-summary" class="prediction-ai-history-summary">最多显示最近 50 条记录</footer>
+        </div>
+      </div>
+      <div id="prediction-ai-trace-modal" class="modal prediction-ai-trace-modal hidden" aria-hidden="true">
+        <div class="modal-box prediction-ai-trace-box" role="dialog" aria-modal="true" aria-labelledby="prediction-ai-trace-title">
+          <div class="modal-head prediction-ai-trace-head">
+            <div>
+              <strong id="prediction-ai-trace-title" class="modal-symbol">DeepSeek 提示词与推理摘要</strong>
+              <span id="prediction-ai-trace-version" class="dim">尚无 AI 优化记录</span>
+            </div>
+            <button id="prediction-ai-trace-close" type="button">关闭</button>
+          </div>
+          <div id="prediction-ai-trace-content" class="prediction-ai-trace-content">
+            <section class="prediction-ai-trace-notice">这里展示可审计的模型推理摘要，不展示原始隐藏思维链。提示词已排除 API Key 和隐藏验证集。</section>
+            <section class="prediction-ai-trace-section prediction-ai-history-section">
+              <h4>数据库版本历史分析（实际投喂）</h4>
+              <div id="prediction-ai-history-analysis" class="prediction-ai-history-analysis"></div>
+            </section>
+            <section class="prediction-ai-trace-section">
+              <h4>DeepSeek 推理摘要</h4>
+              <ol id="prediction-ai-reasoning-steps"></ol>
+            </section>
+            <section class="prediction-ai-trace-section">
+              <h4>系统提示词</h4>
+              <pre id="prediction-ai-system-prompt"></pre>
+            </section>
+            <section class="prediction-ai-trace-section">
+              <h4>用户提示词（实际提交 JSON）</h4>
+              <pre id="prediction-ai-user-prompt"></pre>
+            </section>
+            <section class="prediction-ai-trace-section">
+              <h4>请求参数</h4>
+              <pre id="prediction-ai-request-options"></pre>
+            </section>
+            <section class="prediction-ai-trace-section">
+              <h4>DeepSeek 原始返回</h4>
+              <pre id="prediction-ai-raw-output"></pre>
+            </section>
+            <section class="prediction-ai-trace-section">
+              <h4>服务端安全校正</h4>
+              <pre id="prediction-ai-normalization"></pre>
+            </section>
+          </div>
         </div>
       </div>
       <div id="watchlist-import" class="modal hidden">
@@ -581,10 +718,43 @@ class ContractMonitor extends HTMLElement {
         this.refreshModal();
       });
     });
+    this.qa("[data-chart-overlay]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const overlay = button.dataset.chartOverlay;
+        if (this.state.chart.overlays.has(overlay)) this.state.chart.overlays.delete(overlay);
+        else this.state.chart.overlays.add(overlay);
+        const enabled = this.state.chart.overlays.has(overlay);
+        button.classList.toggle("on", enabled);
+        button.setAttribute("aria-pressed", String(enabled));
+        this.drawChart();
+      });
+    });
+    this.q('[data-chart-action="reset"]').addEventListener("click", () => this.resetChartViewport());
+    const chart = this.q("#chart");
+    chart.addEventListener("pointerdown", (event) => this.handleChartPointerDown(event));
+    chart.addEventListener("pointermove", (event) => this.handleChartPointerMove(event));
+    chart.addEventListener("pointerup", (event) => this.handleChartPointerUp(event));
+    chart.addEventListener("pointercancel", (event) => this.handleChartPointerUp(event));
+    chart.addEventListener("pointerleave", () => this.handleChartPointerLeave());
+    chart.addEventListener("wheel", (event) => this.handleChartWheel(event), { passive: false });
+    chart.addEventListener("dblclick", () => this.resetChartViewport());
+    chart.addEventListener("keydown", (event) => this.handleChartKeydown(event));
+    if (typeof ResizeObserver !== "undefined") {
+      this.chartResizeObserver = new ResizeObserver(() => this.drawChart());
+      this.chartResizeObserver.observe(this.q("#chart-stage"));
+    }
     this.q("#modal-watch").addEventListener("click", () => this.toggleWatchlist());
     this.q("#prediction-history-close").addEventListener("click", () => this.closePredictionHistory());
     this.q("#prediction-history-modal").addEventListener("click", (event) => {
       if (event.target === this.q("#prediction-history-modal")) this.closePredictionHistory();
+    });
+    this.q("#prediction-history-body").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-prediction-config]");
+      if (button) this.openHistoricalPredictionConfig(button.dataset.predictionConfig);
+    });
+    this.q("#prediction-config-close").addEventListener("click", () => this.closeHistoricalPredictionConfig());
+    this.q("#prediction-config-modal").addEventListener("click", (event) => {
+      if (event.target === this.q("#prediction-config-modal")) this.closeHistoricalPredictionConfig();
     });
     this.qa("[data-history-page]").forEach((button) => {
       button.addEventListener("click", () => this.changePredictionHistoryPage(button.dataset.historyPage));
@@ -599,10 +769,29 @@ class ContractMonitor extends HTMLElement {
     this.q("#history-time-recent").addEventListener("click", () => this.setRecentPredictionHistoryRange());
     this.q("#history-time-all").addEventListener("click", () => this.clearPredictionHistoryTimeRange());
     this.q("#prediction-algorithm-close").addEventListener("click", () => this.closePredictionAlgorithm());
+    this.q("#prediction-algorithm-ai-trace").addEventListener("click", () => this.openPredictionAiTrace());
+    this.q("#prediction-algorithm-ai-history").addEventListener("click", () => this.openPredictionAiHistory());
+    this.q("#prediction-algorithm-optimize").addEventListener("click", () => this.optimizePredictionAlgorithm());
     this.q("#prediction-algorithm-modal").addEventListener("click", (event) => {
       if (event.target === this.q("#prediction-algorithm-modal")) this.closePredictionAlgorithm();
     });
+    this.q("#prediction-ai-trace-close").addEventListener("click", () => this.closePredictionAiTrace());
+    this.q("#prediction-ai-trace-modal").addEventListener("click", (event) => {
+      if (event.target === this.q("#prediction-ai-trace-modal")) this.closePredictionAiTrace();
+    });
+    this.q("#prediction-ai-history-close").addEventListener("click", () => this.closePredictionAiHistory());
+    this.q("#prediction-ai-history-modal").addEventListener("click", (event) => {
+      if (event.target === this.q("#prediction-ai-history-modal")) this.closePredictionAiHistory();
+    });
+    this.q("#prediction-ai-history-body").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-ai-history-audit]");
+      if (button) this.openPredictionAiHistoryDetail(button.dataset.aiHistoryAudit, button);
+    });
     this.q("#prediction-algorithm-form").addEventListener("input", () => this.renderAlgorithmWeightSums());
+    this.q("#prediction-algorithm-form").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-algorithm-enabled]");
+      if (button) this.toggleAlgorithmFeature(button);
+    });
     this.q("#prediction-algorithm-defaults").addEventListener("click", () => this.restoreDefaultAlgorithm());
     this.q("#prediction-algorithm-form").addEventListener("submit", (event) => this.savePredictionAlgorithm(event));
     this.q("#watchlist-import-close").addEventListener("click", () => this.closeWatchlistImport());
@@ -618,7 +807,7 @@ class ContractMonitor extends HTMLElement {
       if (button.dataset.opportunityAction === "shadow") this.createShadowIntent();
       else this.setOpportunityPreference(button.dataset.opportunityAction);
     });
-    this.q("#strategy-indicator-list").addEventListener("click", (event) => {
+    this.q("#modal-indicator-section").addEventListener("click", (event) => {
       const button = event.target.closest("[data-strategy-indicator]");
       if (!button) return;
       this.state.modal.selectedIndicator = button.dataset.strategyIndicator;
@@ -1282,9 +1471,103 @@ class ContractMonitor extends HTMLElement {
   }
 
   closePredictionHistory() {
+    this.closeHistoricalPredictionConfig();
     const modal = this.q("#prediction-history-modal");
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
+  }
+
+  async openHistoricalPredictionConfig(predictionId) {
+    if (!predictionId || this.state.predictionConfig.loading) return;
+    const modal = this.q("#prediction-config-modal");
+    const content = this.q("#prediction-config-content");
+    this.state.predictionConfig = { id: predictionId, loading: true };
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.q("#prediction-config-title").textContent = "历史预测指标";
+    this.q("#prediction-config-version").textContent = "正在读取该条预测的不可变配置快照…";
+    content.innerHTML = '<p class="prediction-config-loading">正在加载预测指标…</p>';
+    try {
+      const data = await this.api(`/prediction-history/${encodeURIComponent(predictionId)}/algorithm`);
+      if (this.state.predictionConfig.id !== predictionId) return;
+      this.renderHistoricalPredictionConfig(data);
+    } catch (error) {
+      if (this.state.predictionConfig.id !== predictionId) return;
+      content.innerHTML = `<p class="prediction-config-warning error">${this.escape(error.message || "预测指标加载失败")}</p>`;
+      this.q("#prediction-config-version").textContent = "配置读取失败";
+    } finally {
+      if (this.state.predictionConfig.id === predictionId) this.state.predictionConfig.loading = false;
+    }
+  }
+
+  closeHistoricalPredictionConfig() {
+    const modal = this.q("#prediction-config-modal");
+    if (!modal) return;
+    this.state.predictionConfig = { id: null, loading: false };
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  renderHistoricalPredictionConfig(data) {
+    const horizonKey = ({ 300: "5m", 900: "15m", 3600: "1h" })[Number(data.horizon_seconds)] || `${data.horizon_seconds}s`;
+    const version = `模型 ${data.model_key || "--"} v${data.model_version ?? "--"} · 特征 v${data.feature_schema_version ?? "--"} · 配置 v${data.algorithm_config_version ?? 0}`;
+    this.q("#prediction-config-title").textContent = `${data.symbol || "--"} · ${horizonKey} 预测指标`;
+    this.q("#prediction-config-version").textContent = `${version} · ${this.barTimeString(data.predicted_at_ms)}`;
+    const labels = {
+      aggressive_flow: "主动成交流", book_imbalance: "订单簿失衡", book_imbalance_5: "近五档失衡",
+      velocity: "价格速度", flash_imbalance: "闪动失衡", taker_flow: "Taker 流向",
+      price_oi_impulse: "价格 × 持仓量", trend: "周期趋势",
+      kline_bollinger_breakout: "布林突破", kline_moving_average_pullback_bounce: "均线回踩反弹",
+      kline_trend_breakout: "趋势突破", kline_price_volume_rise: "量价齐升",
+      kline_new_low_reversal: "新低反转", kline_low_volume_pullback: "缩量回踩",
+      kline_strong_gap_open: "强势高开", kline_moving_average_bull: "均线多头",
+      kline_ma_golden_cross: "MA 金叉", kline_macd_golden_cross_volume: "MACD 金叉放量",
+      kline_oversold_bounce: "超跌反弹", kline_oversold_reversal: "超跌反转",
+    };
+    const featureKeys = Object.keys(labels);
+    const config = data.algorithm_config;
+    const components = data.components || {};
+    const features = data.features || {};
+    const timeframe = components.kline_strategy_timeframe || (horizonKey === "1h" ? "1h" : "15m");
+    const klineValues = features.kline_strategies?.[timeframe]?.values || {};
+    const inputValue = (key) => {
+      if (key.startsWith("kline_")) return klineValues[key];
+      if (key === "trend") return horizonKey === "1h"
+        ? 0.65 * Number(features.trend_1h || 0) + 0.35 * Number(features.trend_4h || 0)
+        : features.trend_15m;
+      return features[key];
+    };
+    const number = (value, digits = 3) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
+    const weight = (period, key) => config ? number(config.weights?.[period]?.[key], 3) : "--";
+    const rows = (keys, group) => `<tr class="prediction-config-group"><th colspan="7">${group}</th></tr>${keys.map((key) => {
+      const contribution = Number(components[key]);
+      const contributionClass = !Number.isFinite(contribution) ? "" : contribution > 0 ? "positive" : contribution < 0 ? "negative" : "neutral";
+      return `<tr><th>${labels[key]}<small>${key}</small></th><td>${key.startsWith("kline_") ? "K 线策略" : "市场因子"}</td><td>${weight("5m", key)}</td><td>${weight("15m", key)}</td><td>${weight("1h", key)}</td><td>${number(inputValue(key), 4)}</td><td class="${contributionClass}">${number(components[key], 4)}</td></tr>`;
+    }).join("")}`;
+    const warning = data.algorithm_snapshot_available
+      ? '<p class="prediction-config-warning ok">完整快照：以下参数就是生成这条预测时实际使用的配置，后续修改全局算法不会改变它。</p>'
+      : '<p class="prediction-config-warning">旧数据未保存完整算法配置，不能用当前全局配置冒充。以下权重显示“--”，仍保留当时的模型/特征版本及指标贡献。</p>';
+    const scalarCards = config ? `<section class="prediction-config-scalars">
+      <article><span>方向阈值</span><strong>${number(config.direction_threshold, 3)}</strong></article>
+      <article><span>最低数据质量</span><strong>${number(config.min_data_quality, 3)}</strong></article>
+      <article><span>账户拥挤惩罚</span><strong>${number(config.account_crowding_penalty, 3)}</strong></article>
+      <article><span>资金费率惩罚</span><strong>${number(config.funding_crowding_penalty, 3)}</strong></article>
+    </section>` : "";
+    const reasons = (data.reason_codes || []).length
+      ? data.reason_codes.map((item) => `<span>${this.escape(item)}</span>`).join("") : "<span>无</span>";
+    this.q("#prediction-config-content").innerHTML = `${warning}
+      <section class="prediction-config-meta">
+        <article><span>预测结果</span><strong>${({ long: "看多", short: "看空", neutral: "中性" })[data.prediction_result] || "--"}</strong></article>
+        <article><span>综合评分</span><strong>${number(data.battle_score, 3)}</strong></article>
+        <article><span>数据质量</span><strong>${number(data.quality_score, 3)}</strong></article>
+        <article><span>快照状态</span><strong>${data.algorithm_snapshot_available ? "完整" : "历史缺失"}</strong></article>
+      </section>
+      ${scalarCards}
+      <div class="prediction-config-table-wrap"><table class="prediction-config-table">
+        <thead><tr><th>预测指标</th><th>类型</th><th>5m 权重</th><th>15m 权重</th><th>1h 权重</th><th>${horizonKey} 输入值</th><th>${horizonKey} 实际贡献</th></tr></thead>
+        <tbody>${rows(featureKeys.slice(0, 8), "市场与微观因子 · 8 项")}${rows(featureKeys.slice(8), "K 线策略信号 · 12 项")}</tbody>
+      </table></div>
+      <section class="prediction-config-reasons"><strong>当时的主要原因码</strong><div>${reasons}</div></section>`;
   }
 
   async openPredictionAlgorithm() {
@@ -1300,9 +1583,188 @@ class ContractMonitor extends HTMLElement {
     modal.setAttribute("aria-hidden", "true");
   }
 
+  async loadPredictionAiTrace() {
+    const button = this.q("#prediction-algorithm-ai-trace");
+    button.classList.add("hidden");
+    this.state.algorithm.trace = null;
+    try {
+      const trace = await this.api("/prediction-algorithm/ai-trace");
+      this.state.algorithm.trace = trace;
+      button.classList.remove("hidden");
+    } catch (_) {
+      // A manual/default algorithm version legitimately has no DeepSeek trace.
+    }
+  }
+
+  async openPredictionAiHistory() {
+    if (!this.state.algorithm.data?.editable) return;
+    const modal = this.q("#prediction-ai-history-modal");
+    const body = this.q("#prediction-ai-history-body");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    body.innerHTML = '<tr><td colspan="9" class="ai-history-empty">正在读取历史分析记录…</td></tr>';
+    this.q("#prediction-ai-history-summary").textContent = "正在读取审计日志…";
+    try {
+      const data = await this.api("/prediction-algorithm/ai-history?limit=50");
+      const items = Array.isArray(data.items) ? data.items : [];
+      this.state.algorithm.historyRecords = items;
+      this.renderPredictionAiHistory(items);
+      this.q("#prediction-ai-history-summary").textContent = `显示最近 ${items.length} 条 / 共 ${Number(data.total) || 0} 条分析记录`;
+    } catch (error) {
+      body.innerHTML = `<tr><td colspan="9" class="ai-history-empty error">${this.escape(error.message || "历史分析记录加载失败")}</td></tr>`;
+      this.q("#prediction-ai-history-summary").textContent = "读取失败";
+    }
+  }
+
+  renderPredictionAiHistory(items) {
+    const body = this.q("#prediction-ai-history-body");
+    if (!items.length) {
+      body.innerHTML = '<tr><td colspan="9" class="ai-history-empty">暂无 DeepSeek 历史分析记录</td></tr>';
+      return;
+    }
+    body.innerHTML = items.map((item) => {
+      const saved = item.status !== "rejected" && item.saved_config_version != null;
+      const status = saved ? "已保存" : "未保存";
+      const version = saved
+        ? `v${Number(item.source_config_version) || 0} → v${Number(item.saved_config_version) || 0}`
+        : `v${Number(item.source_config_version) || 0}`;
+      const created = item.created_at
+        ? new Date(item.created_at).toLocaleString("zh-CN", { hour12: false }) : "--";
+      const horizons = Array.isArray(item.optimized_horizons) && item.optimized_horizons.length
+        ? item.optimized_horizons.join(" / ") : "--";
+      return `<tr>
+        <td>${this.escape(created)}</td>
+        <td><strong>${this.escape(version)}</strong></td>
+        <td><span class="ai-history-status ${saved ? "saved" : "rejected"}">${status}</span><small>${this.escape(item.failure_category || "")}</small></td>
+        <td>${this.escape(item.response_model || item.model_name || "--")}</td>
+        <td>${Number(item.sample_count).toLocaleString("zh-CN")}</td>
+        <td>${Number.isFinite(Number(item.total_tokens)) ? Number(item.total_tokens).toLocaleString("zh-CN") : "--"}</td>
+        <td>${this.escape(horizons)}</td>
+        <td class="ai-history-summary-cell">${this.escape(item.summary || "--")}</td>
+        <td><button class="ai-history-detail" type="button" data-ai-history-audit="${Number(item.audit_id)}">查看详情</button></td>
+      </tr>`;
+    }).join("");
+  }
+
+  async openPredictionAiHistoryDetail(auditId, button) {
+    if (!auditId || button.disabled) return;
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = "读取中…";
+    try {
+      const trace = await this.api(`/prediction-algorithm/ai-history/${encodeURIComponent(auditId)}`);
+      this.openPredictionAiTrace(trace);
+    } catch (error) {
+      button.textContent = error.message || "读取失败";
+      return;
+    } finally {
+      button.disabled = false;
+    }
+    button.textContent = original;
+  }
+
+  closePredictionAiHistory() {
+    const modal = this.q("#prediction-ai-history-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  openPredictionAiTrace(trace = null) {
+    const data = trace || this.state.algorithm.trace;
+    if (!data) return;
+    const prompt = data.submitted_prompt || {};
+    let userPrompt = String(prompt.user || "");
+    let promptPayload = null;
+    try {
+      promptPayload = JSON.parse(userPrompt);
+      userPrompt = JSON.stringify(promptPayload, null, 2);
+    } catch (_) {
+      // Preserve the exact submitted text when it is not JSON.
+    }
+    const tokens = Number(data.usage?.total_tokens);
+    const created = data.created_at
+      ? ` · ${new Date(data.created_at).toLocaleString("zh-CN", { hour12: false })}` : "";
+    const versionLabel = data.status === "rejected"
+      ? `配置 v${Number(data.source_config_version) || 0} · 本次未保存`
+      : `配置 v${Number(data.source_config_version) || 0} → v${Number(data.saved_config_version) || 0}`;
+    this.q("#prediction-ai-trace-version").textContent = `${data.model_name || "DeepSeek"} · ${versionLabel}${Number.isFinite(tokens) ? ` · ${tokens} tokens` : ""}${created}`;
+    const steps = Array.isArray(data.reasoning_steps) ? data.reasoning_steps : [];
+    this.q("#prediction-ai-reasoning-steps").innerHTML = steps.length
+      ? steps.map((step) => `<li>${this.escape(step)}</li>`).join("")
+      : `<li>${this.escape(data.summary || "DeepSeek 未返回可展示的推理摘要。")}</li>`;
+    const submittedHistory = promptPayload?.training_statistics?.history;
+    const submittedHorizonItems = submittedHistory?.horizons
+      && typeof submittedHistory.horizons === "object"
+      ? Object.values(submittedHistory.horizons) : [];
+    const submittedHasAnalysis = submittedHorizonItems.length > 0
+      && submittedHorizonItems.every((item) => item?.training_history_analysis?.summary);
+    const recomputed = data.database_history_analysis;
+    const history = submittedHasAnalysis
+      ? submittedHistory
+      : recomputed?.available ? recomputed.history : null;
+    const horizons = history?.horizons && typeof history.horizons === "object"
+      ? Object.entries(history.horizons) : [];
+    const number = (value, digits = 2) => Number.isFinite(Number(value))
+      ? Number(value).toFixed(digits) : "--";
+    const percent = (value) => Number.isFinite(Number(value))
+      ? `${(Number(value) * 100).toFixed(1)}%` : "--";
+    const bps = (value) => Number.isFinite(Number(value))
+      ? `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)} bps` : "--";
+    this.q("#prediction-ai-history-analysis").innerHTML = horizons.length
+      ? `
+        <p>${submittedHasAnalysis ? "当时实际提交给 DeepSeek" : "旧审计记录 · 按源版本及审计截止时间从数据库回算"} · 精确配置 v${Number(promptPayload?.training_statistics?.algorithm?.config_version ?? recomputed?.source_config_version) || 0} · 数据库已结算 ${Number(history.sample_count) || 0} 条 · 较早 75% 训练，最近 25% 隐藏验证</p>
+        <div>${horizons.map(([horizon, item]) => {
+          const summary = item?.training_history_analysis?.summary || {};
+          const drift = item?.training_history_analysis?.chronological_drift?.newest_25_percent || {};
+          return `
+            <article>
+              <header><strong>${this.escape(horizon)}</strong><span>训练 ${Number(item.training_count) || 0} / 总计 ${Number(item.sample_count) || 0} · 隐藏 ${Number(item.validation_count_reserved) || 0}</span></header>
+              <dl>
+                <div><dt>方向样本 / 命中率</dt><dd>${Number(summary.directional_count) || 0} / ${percent(summary.hit_rate)}</dd></div>
+                <div><dt>平均方向收益</dt><dd>${bps(summary.avg_directional_return_bps)}</dd></div>
+                <div><dt>平均最大有利 / 不利</dt><dd>${bps(summary.avg_max_favorable_bps)} / ${bps(summary.avg_max_adverse_bps)}</dd></div>
+                <div><dt>收益因子 / 最大顺序回撤</dt><dd>${number(summary.profit_factor)} / ${bps(summary.max_sequential_drawdown_bps)}</dd></div>
+                <div><dt>置信度 / 校准差</dt><dd>${percent(summary.avg_confidence_score)} / ${percent(summary.confidence_calibration_gap)}</dd></div>
+                <div><dt>训练集近期 25% 收益</dt><dd>${bps(drift.avg_directional_return_bps)}</dd></div>
+              </dl>
+            </article>`;
+        }).join("")}</div>`
+      : `<p>无法取得这个配置版本的实际历史值：${this.escape(recomputed?.reason || "审计数据不完整")}。</p>`;
+    this.q("#prediction-ai-system-prompt").textContent = String(prompt.system || "--");
+    this.q("#prediction-ai-user-prompt").textContent = userPrompt || "--";
+    this.q("#prediction-ai-request-options").textContent = JSON.stringify({
+      model: prompt.model || data.model_name || "--",
+      ...(prompt.request_options || {}),
+      model_attempts: data.model_attempts || [],
+    }, null, 2);
+    this.q("#prediction-ai-raw-output").textContent = JSON.stringify(
+      data.raw_model_output || {}, null, 2,
+    );
+    this.q("#prediction-ai-normalization").textContent = JSON.stringify(
+      data.normalization || { applied: false }, null, 2,
+    );
+    const modal = this.q("#prediction-ai-trace-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  closePredictionAiTrace() {
+    const modal = this.q("#prediction-ai-trace-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
   async loadPredictionAlgorithm() {
     const message = this.q("#prediction-algorithm-message");
+    const optimizationPanel = this.q("#prediction-algorithm-optimization");
     this.state.algorithm.loading = true;
+    this.state.algorithm.optimization = null;
+    this.state.algorithm.trace = null;
+    this.q("#prediction-algorithm-ai-trace").classList.add("hidden");
+    this.q("#prediction-algorithm-ai-history").classList.add("hidden");
+    this.q("#prediction-algorithm-ai-history").disabled = true;
+    optimizationPanel.innerHTML = "";
+    optimizationPanel.classList.add("hidden");
     message.textContent = "正在读取当前算法…";
     try {
       const data = await this.api("/prediction-algorithm");
@@ -1310,11 +1772,16 @@ class ContractMonitor extends HTMLElement {
       this.populatePredictionAlgorithm(data.config);
       const source = data.source === "custom" ? "自定义配置" : "系统默认配置";
       const updated = data.updated_at ? ` · 更新于 ${new Date(data.updated_at).toLocaleString("zh-CN", { hour12: false })}` : "";
-      this.q("#prediction-algorithm-version").textContent = `${data.model_key} v${data.model_version} · 配置版本 ${data.config_version} · ${source}${updated}`;
+      this.q("#prediction-algorithm-version").textContent = `${data.model_key} v${data.model_version} · ${Number(data.feature_count) || 20} 项特征 · 配置版本 ${data.config_version} · ${source}${updated}`;
       this.qa("#prediction-algorithm-form input").forEach((input) => { input.disabled = !data.editable; });
+      this.qa("[data-algorithm-enabled]").forEach((button) => { button.disabled = !data.editable; });
       this.q("#prediction-algorithm-defaults").disabled = !data.editable;
       this.q("#prediction-algorithm-save").disabled = !data.editable;
+      this.q("#prediction-algorithm-optimize").disabled = !data.editable;
+      this.q("#prediction-algorithm-ai-history").classList.toggle("hidden", !data.editable);
+      this.q("#prediction-algorithm-ai-history").disabled = !data.editable;
       message.textContent = data.editable ? "修改后需保存才会生效。" : "当前账号可查看规则，但只有管理员可以调整全局算法。";
+      if (data.editable) await this.loadPredictionAiTrace();
     } catch (error) {
       message.textContent = error.message || "预测算法加载失败";
     } finally {
@@ -1330,10 +1797,26 @@ class ContractMonitor extends HTMLElement {
     this.qa("[data-algorithm-weight]").forEach((input) => {
       input.min = "0";
       input.max = "1";
-      input.step = "0.01";
-      input.value = Number(config.weights?.[input.dataset.horizon]?.[input.dataset.algorithmWeight] || 0).toFixed(2);
+      input.step = "0.0001";
+      input.value = Number(config.weights?.[input.dataset.horizon]?.[input.dataset.algorithmWeight] || 0).toFixed(4);
+    });
+    this.qa("[data-algorithm-enabled]").forEach((button) => {
+      const enabled = config.enabled_features?.[button.dataset.algorithmEnabled] !== false;
+      button.setAttribute("aria-pressed", String(enabled));
+      button.textContent = enabled ? "启用" : "停用";
+      button.classList.toggle("on", enabled);
+      button.closest("tr")?.classList.toggle("algorithm-feature-disabled", !enabled);
     });
     this.renderAlgorithmWeightSums();
+  }
+
+  toggleAlgorithmFeature(button) {
+    if (button.disabled || this.state.algorithm.loading || this.state.algorithm.optimizing) return;
+    const enabled = button.getAttribute("aria-pressed") !== "true";
+    button.setAttribute("aria-pressed", String(enabled));
+    button.textContent = enabled ? "启用" : "停用";
+    button.classList.toggle("on", enabled);
+    button.closest("tr")?.classList.toggle("algorithm-feature-disabled", !enabled);
   }
 
   renderAlgorithmWeightSums() {
@@ -1347,13 +1830,17 @@ class ContractMonitor extends HTMLElement {
   }
 
   collectPredictionAlgorithm() {
-    const config = { weights: { "5m": {}, "15m": {}, "1h": {} } };
+    const config = { enabled_features: {}, weights: { "5m": {}, "15m": {}, "1h": {} } };
     this.qa("[data-algorithm-scalar]").forEach((input) => {
       config[input.dataset.algorithmScalar] = Number(input.value);
     });
     this.qa("[data-algorithm-weight]").forEach((input) => {
       config.weights[input.dataset.horizon][input.dataset.algorithmWeight] = Number(input.value);
     });
+    this.qa("[data-algorithm-enabled]").forEach((button) => {
+      config.enabled_features[button.dataset.algorithmEnabled] = button.getAttribute("aria-pressed") === "true";
+    });
+    if (!Object.values(config.enabled_features).some(Boolean)) throw new Error("至少需要启用一个预测指标");
     for (const horizon of ["5m", "15m", "1h"]) {
       const total = Object.values(config.weights[horizon]).reduce((sum, value) => sum + value, 0);
       if (Math.abs(total - 1) > 0.001) throw new Error(`${horizon} 权重合计必须等于 1.000`);
@@ -1368,9 +1855,91 @@ class ContractMonitor extends HTMLElement {
     this.q("#prediction-algorithm-message").textContent = "已填入系统默认参数，点击“保存全局算法”后生效。";
   }
 
+  renderAlgorithmOptimization(data) {
+    const panel = this.q("#prediction-algorithm-optimization");
+    const percent = (value) => Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : "--";
+    const bps = (value) => Number.isFinite(Number(value)) ? `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)} bps` : "--";
+    const featureLabels = {
+      aggressive_flow: "主动成交流", book_imbalance: "订单簿失衡", book_imbalance_5: "近五档失衡",
+      velocity: "价格速度", flash_imbalance: "闪动失衡", taker_flow: "Taker 流向",
+      price_oi_impulse: "价格 × 持仓量", trend: "周期趋势", kline_bollinger_breakout: "布林突破",
+      kline_moving_average_pullback_bounce: "均线回踩反弹", kline_trend_breakout: "趋势突破",
+      kline_price_volume_rise: "量价齐升", kline_new_low_reversal: "新低反转",
+      kline_low_volume_pullback: "缩量回踩", kline_strong_gap_open: "强势高开",
+      kline_moving_average_bull: "均线多头", kline_ma_golden_cross: "MA 金叉",
+      kline_macd_golden_cross_volume: "MACD 金叉放量", kline_oversold_bounce: "超跌反弹",
+      kline_oversold_reversal: "超跌反转",
+    };
+    const statusLabels = {
+      optimized: "通过验证，已保存新版本",
+      no_validated_improvement: "验证集未改善，保持原权重",
+      insufficient_samples: "样本不足，保持原权重",
+    };
+    const horizonCards = (data.horizons || []).map((item) => {
+      const changes = (item.changes || []).filter((change) => Math.abs(Number(change.delta)) >= 0.0005).slice(0, 5);
+      const changeHtml = changes.length ? changes.map((change) => `<li><span>${this.escape(featureLabels[change.feature] || change.feature)}</span><b>${Number(change.before).toFixed(4)} → ${Number(change.after).toFixed(4)}</b><em class="${Number(change.delta) >= 0 ? "up" : "down"}">${Number(change.delta) >= 0 ? "+" : ""}${Number(change.delta).toFixed(4)}</em></li>`).join("") : "<li><span>没有通过验证的安全调整</span></li>";
+      return `<article class="algorithm-optimization-card ${item.status === "optimized" ? "accepted" : "held"}">
+        <header><strong>${this.escape(item.horizon)}</strong><span>${this.escape(statusLabels[item.status] || item.status)}</span></header>
+        <div class="algorithm-optimization-metrics">
+          <span>样本 <b>${Number(item.sample_count) || 0}</b></span>
+          <span>验证 <b>${Number(item.validation_count) || 0}</b></span>
+          <span>命中 <b>${percent(item.baseline?.hit_rate)} → ${percent(item.optimized?.hit_rate)}</b></span>
+          <span>覆盖 <b>${percent(item.baseline?.coverage)} → ${percent(item.optimized?.coverage)}</b></span>
+          <span>净效用 <b>${bps(item.baseline?.utility_bps)} → ${bps(item.optimized?.utility_bps)}</b></span>
+        </div><ul>${changeHtml}</ul></article>`;
+    }).join("");
+    const start = data.history_start_ms ? this.barTimeString(data.history_start_ms) : "--";
+    const end = data.history_end_ms ? this.barTimeString(data.history_end_ms) : "--";
+    panel.innerHTML = `<header class="algorithm-optimization-summary">
+      <div><strong>DeepSeek AI 优化结果</strong><span>${this.escape(data.model_name || "DeepSeek")} · v${Number(data.source_config_version) || 0} → v${Number(data.saved_config_version) || 0}</span></div>
+      <p>已统计当前版本 ${Number(data.sample_count) || 0} 条已结算完整快照（${start} — ${end}），仅将训练集聚合统计投喂给 DeepSeek，验证集不会发送给模型。通过时间外验证的权重已经保存为新版本。${data.summary ? ` ${this.escape(data.summary)}` : ""}</p>
+    </header><div class="algorithm-optimization-grid">${horizonCards}</div>`;
+    panel.classList.remove("hidden");
+  }
+
+  async optimizePredictionAlgorithm() {
+    const data = this.state.algorithm.data;
+    if (!data?.editable || this.state.algorithm.loading || this.state.algorithm.optimizing) return;
+    if (!window.confirm(`将统计当前算法 v${data.config_version} 的已结算历史数据，调用 DeepSeek 计算权重；只有通过时间外验证才会自动保存为新版本。确定继续吗？`)) return;
+    const button = this.q("#prediction-algorithm-optimize");
+    const saveButton = this.q("#prediction-algorithm-save");
+    const panel = this.q("#prediction-algorithm-optimization");
+    const message = this.q("#prediction-algorithm-message");
+    this.state.algorithm.optimizing = true;
+    button.disabled = true;
+    saveButton.disabled = true;
+    button.textContent = "DeepSeek调优中…";
+    panel.innerHTML = '<p class="algorithm-optimization-loading">正在统计当前版本历史数据、调用 DeepSeek 计算权重并执行隐藏验证集校验；thinking 模式预算最长约 120 秒，若未形成完整 JSON 将自动使用非思考模式重试…</p>';
+    panel.classList.remove("hidden");
+    message.textContent = "DeepSeek 返回且通过服务端验证后，将自动创建并保存新版本。";
+    try {
+      const result = await this.api("/prediction-algorithm/optimize", {
+        method: "POST",
+        body: JSON.stringify({ expected_config_version: data.config_version }),
+      });
+      this.state.algorithm.optimization = result;
+      this.state.algorithm.trace = result;
+      this.q("#prediction-algorithm-ai-trace").classList.remove("hidden");
+      this.state.algorithm.data = result.algorithm;
+      this.populatePredictionAlgorithm(result.algorithm.config);
+      this.renderAlgorithmOptimization(result);
+      this.q("#prediction-algorithm-version").textContent = `${result.algorithm.model_key} v${result.algorithm.model_version} · ${Number(result.algorithm.feature_count) || 20} 项特征 · 配置版本 ${result.algorithm.config_version} · DeepSeek 优化`;
+      message.textContent = `DeepSeek 调优完成：算法 v${data.config_version} 已升级并保存为 v${result.saved_config_version}，将在 5 秒内用于后续预测。`;
+    } catch (error) {
+      panel.innerHTML = `<p class="algorithm-optimization-error">${this.escape(error.message || "AI 优化失败")}</p>`;
+      message.textContent = `${error.message || "AI 优化失败"}；当前算法版本未修改。`;
+      await this.loadPredictionAiTrace();
+    } finally {
+      this.state.algorithm.optimizing = false;
+      button.disabled = !this.state.algorithm.data?.editable;
+      saveButton.disabled = !this.state.algorithm.data?.editable;
+      button.textContent = "AI优化算法";
+    }
+  }
+
   async savePredictionAlgorithm(event) {
     event.preventDefault();
-    if (this.state.algorithm.loading || !this.state.algorithm.data?.editable) return;
+    if (this.state.algorithm.loading || this.state.algorithm.optimizing || !this.state.algorithm.data?.editable) return;
     const message = this.q("#prediction-algorithm-message");
     let config;
     try {
@@ -1384,10 +1953,18 @@ class ContractMonitor extends HTMLElement {
     this.q("#prediction-algorithm-save").disabled = true;
     message.textContent = "正在保存全局算法…";
     try {
-      const data = await this.api("/prediction-algorithm", { method: "PUT", body: JSON.stringify(config) });
+      const data = await this.api("/prediction-algorithm", {
+        method: "PUT",
+        headers: { "X-QuantDesk-Algorithm-Version": String(this.state.algorithm.data.config_version) },
+        body: JSON.stringify(config),
+      });
       this.state.algorithm.data = data;
+      this.state.algorithm.optimization = null;
+      this.state.algorithm.trace = null;
+      this.q("#prediction-algorithm-ai-trace").classList.add("hidden");
       this.populatePredictionAlgorithm(data.config);
-      this.q("#prediction-algorithm-version").textContent = `${data.model_key} v${data.model_version} · 配置版本 ${data.config_version} · 自定义配置`;
+      this.q("#prediction-algorithm-optimization").classList.add("hidden");
+      this.q("#prediction-algorithm-version").textContent = `${data.model_key} v${data.model_version} · ${Number(data.feature_count) || 20} 项特征 · 配置版本 ${data.config_version} · 自定义配置`;
       message.textContent = "保存成功，新配置将在 5 秒内用于后续预测。";
     } catch (error) {
       message.textContent = error.message || "预测算法保存失败";
@@ -1489,7 +2066,7 @@ class ContractMonitor extends HTMLElement {
   async loadPredictionHistory(page) {
     const body = this.q("#prediction-history-body");
     this.state.history.loading = true;
-    body.innerHTML = '<tr><td colspan="11" class="history-empty">正在加载历史预测…</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" class="history-empty">正在加载历史预测…</td></tr>';
     try {
       const query = new URLSearchParams({ page: String(Math.max(1, Number(page) || 1)) });
       const { direction, horizon, hit } = this.state.history.filters;
@@ -1511,7 +2088,7 @@ class ContractMonitor extends HTMLElement {
       this.renderPredictionHistory(data.items || []);
       this.renderPredictionHistoryStatistics();
     } catch (error) {
-      body.innerHTML = `<tr><td colspan="11" class="history-empty history-error">${this.escape(error.message || "历史预测加载失败")}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="12" class="history-empty history-error">${this.escape(error.message || "历史预测加载失败")}</td></tr>`;
     } finally {
       this.state.history.loading = false;
       this.renderPredictionHistoryPager();
@@ -1564,7 +2141,7 @@ class ContractMonitor extends HTMLElement {
   renderPredictionHistory(items) {
     const body = this.q("#prediction-history-body");
     if (!items.length) {
-      body.innerHTML = '<tr><td colspan="11" class="history-empty">暂无历史预测记录</td></tr>';
+      body.innerHTML = '<tr><td colspan="12" class="history-empty">暂无历史预测记录</td></tr>';
       return;
     }
     const directionLabel = (value) => ({ long: "看多", short: "看空", neutral: "中性" })[value] || "--";
@@ -1592,6 +2169,7 @@ class ContractMonitor extends HTMLElement {
         <td><strong>${settled ? directionLabel(item.actual_result) : "--"}</strong><small>${statusLabel(item.status)} · ${settled ? barrierLabel(item.hit_result) : "等待结算"}</small></td>
         <td><strong class="${hitClass}">${hit}</strong><small>${bps(item.directional_return_bps)}</small></td>
         <td><span>${bps(item.max_favorable_bps)}</span><small>${bps(item.max_adverse_bps)}</small></td>
+        <td><button class="history-prediction-config" type="button" data-prediction-config="${this.escape(item.public_id)}">预测指标</button><small>模型 v${item.model_version ?? "--"} · 特征 v${item.feature_schema_version ?? "--"}<br>配置 v${item.algorithm_config_version ?? 0}${item.algorithm_snapshot_available ? " · 已存档" : " · 旧数据"}</small></td>
       </tr>`;
     }).join("");
   }
@@ -1620,13 +2198,16 @@ class ContractMonitor extends HTMLElement {
     this.qa(".tf-switch button").forEach((button) => button.classList.toggle("on", button.dataset.tf === timeframe));
     this.renderModalSummary(overview);
     this.q("#modal-ohlc").innerHTML = "<span>正在加载当前周期行情…</span>";
-    this.q("#strategy-indicator-caption").textContent = `当前周期：${timeframe} · 正在计算 12 项`;
+    this.q("#indicator-total-caption").textContent = "共 20 项 · 正在读取真实数据";
+    this.q("#strategy-indicator-caption").textContent = `最新一根 K 线：${timeframe} · 正在计算 12 项`;
     this.q("#strategy-indicator-list").innerHTML = '<span class="strategy-indicator-loading">策略指标计算中…</span>';
+    this.q("#prediction-feature-caption").textContent = "最新预测快照：-- · 正在读取 8 项";
+    this.q("#prediction-feature-list").innerHTML = '<span class="strategy-indicator-loading">预测因子读取中…</span>';
     this.q("#strategy-indicator-detail").innerHTML = "";
     try {
       const encoded = encodeURIComponent(symbol);
       const [klines, scores, report, opportunities, indicatorScan] = await Promise.all([
-        this.api(`/klines?symbol=${encoded}&tf=${timeframe}&limit=120`),
+        this.api(`/klines?symbol=${encoded}&tf=${timeframe}&limit=300`),
         this.api(`/score?symbol=${encoded}`),
         this.api(`/report?symbol=${encoded}`),
         this.api(`/opportunities?symbol=${encoded}&limit=1&include_ignored=true`),
@@ -1635,13 +2216,15 @@ class ContractMonitor extends HTMLElement {
           count: 12,
           triggered_count: 0,
           items: [],
+          prediction_features: { count: 8, items: [] },
           error: error.message || "策略指标加载失败",
         })),
       ]);
-      this.state.modal.opportunity = opportunities.items?.[0] || null;
+      const opportunityItems = Array.isArray(opportunities.items) ? opportunities.items : [];
+      this.state.modal.opportunity = opportunityItems[0] || null;
       this.renderStrategyIndicators(indicatorScan);
       this.renderModalSummary(overview, klines, report, this.state.modal.opportunity);
-      this.drawChart(this.q("#chart"), klines);
+      this.setChartData(klines);
       this.renderBattle(overview.battle || {});
       this.renderOpportunity(this.state.modal.opportunity);
       this.renderScoreSummary(scores, report);
@@ -1654,27 +2237,47 @@ class ContractMonitor extends HTMLElement {
   }
 
   renderStrategyIndicators(scan) {
-    const items = Array.isArray(scan?.items) ? scan.items : [];
+    const strategyItems = Array.isArray(scan?.items) ? scan.items : [];
+    const featureScan = scan?.prediction_features || {};
+    const featureItems = Array.isArray(featureScan.items) ? featureScan.items : [];
+    const items = [...strategyItems, ...featureItems];
     this.state.modal.indicators = items;
     const timeframeLabel = { "15m": "15 分", "1h": "1 小时", "4h": "4 小时" }[scan?.timeframe || this.state.modal.tf] || this.state.modal.tf;
     const caption = this.q("#strategy-indicator-caption");
+    const featureCaption = this.q("#prediction-feature-caption");
+    this.q("#indicator-total-caption").textContent = `共 ${Number(scan?.total_count) || items.length || 20} 项 · K 线策略与预测引擎同源展示`;
     if (!items.length) {
-      caption.textContent = `当前周期：${timeframeLabel} · 12 项指标暂不可用`;
+      caption.textContent = `最新一根 K 线：${timeframeLabel} · 12 项指标暂不可用`;
       this.q("#strategy-indicator-list").innerHTML = `<span class="strategy-indicator-loading error">${this.escape(scan?.error || "暂无足够数据")}</span>`;
+      featureCaption.textContent = "最新预测快照：-- · 8 项因子暂不可用";
+      this.q("#prediction-feature-list").innerHTML = `<span class="strategy-indicator-loading error">${this.escape(scan?.error || "暂无预测快照")}</span>`;
       this.q("#strategy-indicator-detail").innerHTML = "";
       return;
     }
-    caption.textContent = `当前周期：${timeframeLabel} · 已触发 ${Number(scan.triggered_count) || 0}/${Number(scan.count) || items.length} · ${Number(scan.candle_count) || 0} 根 K 线`;
+    caption.textContent = `最新一根 K 线：${timeframeLabel} · 已触发 ${Number(scan.triggered_count) || 0}/${Number(scan.count) || strategyItems.length} · 基于 ${Number(scan.candle_count) || 0} 根历史 K 线`;
+    const quality = featureScan.quality_score == null ? Number.NaN : Number(featureScan.quality_score);
+    const qualityLabel = Number.isFinite(quality) ? `${(quality * 100).toFixed(1)}%` : "--";
+    const snapshotTime = featureScan.as_of_ms ? this.barTimeString(featureScan.as_of_ms) : "--";
+    featureCaption.textContent = `最新预测快照：${snapshotTime} · 偏多 ${Number(featureScan.bullish_count) || 0} / 偏空 ${Number(featureScan.bearish_count) || 0} / 中性 ${Number(featureScan.neutral_count) || 0} · 质量 ${qualityLabel}`;
     const selectedExists = items.some((item) => item.key === this.state.modal.selectedIndicator);
     if (!selectedExists) {
-      this.state.modal.selectedIndicator = items.find((item) => item.triggered)?.key || items[0].key;
+      this.state.modal.selectedIndicator = strategyItems.find((item) => item.triggered)?.key || featureItems.find((item) => ["bullish", "bearish"].includes(item.status))?.key || items[0].key;
     }
-    this.q("#strategy-indicator-list").innerHTML = items.map((item) => {
+    const renderItems = (list) => list.map((item) => {
       const selected = item.key === this.state.modal.selectedIndicator;
-      const statusLabel = item.status === "triggered" ? "已触发" : item.status === "insufficient" ? "数据不足" : "未触发";
+      const statusLabel = this.indicatorStatusLabel(item.status);
       return `<button type="button" role="tab" aria-selected="${selected}" class="strategy-indicator-chip ${this.escape(item.status)} ${selected ? "on" : ""}" data-strategy-indicator="${this.escape(item.key)}"><i aria-hidden="true"></i><span>${this.escape(item.name)}</span><small>${statusLabel}</small></button>`;
     }).join("");
+    this.q("#strategy-indicator-list").innerHTML = renderItems(strategyItems) || '<span class="strategy-indicator-loading error">K 线策略暂不可用</span>';
+    this.q("#prediction-feature-list").innerHTML = renderItems(featureItems) || '<span class="strategy-indicator-loading error">暂无预测快照</span>';
     this.renderStrategyIndicatorSelection();
+  }
+
+  indicatorStatusLabel(status, detail = false) {
+    const labels = detail
+      ? { triggered: "最新一根已触发", not_triggered: "最新一根未触发", bullish: "当前偏多", bearish: "当前偏空", neutral: "当前中性", insufficient: "数据不足" }
+      : { triggered: "已触发", not_triggered: "未触发", bullish: "偏多", bearish: "偏空", neutral: "中性", insufficient: "数据不足" };
+    return labels[status] || "未触发";
   }
 
   renderStrategyIndicatorSelection() {
@@ -1690,7 +2293,7 @@ class ContractMonitor extends HTMLElement {
       detail.innerHTML = "";
       return;
     }
-    const statusLabel = selected.status === "triggered" ? "已触发" : selected.status === "insufficient" ? "数据不足" : "当前未触发";
+    const statusLabel = this.indicatorStatusLabel(selected.status, true);
     const metrics = (selected.metrics || []).map((metric) => `<article><span>${this.escape(metric.label)}</span><strong>${this.escape(metric.value)}</strong></article>`).join("");
     detail.innerHTML = `<article class="strategy-indicator-detail-card ${this.escape(selected.status)}">
       <header><div><strong>${this.escape(selected.name)}</strong><span>${this.escape(selected.category || "策略指标")}</span></div><b>${statusLabel}</b></header>
@@ -1912,79 +2515,533 @@ class ContractMonitor extends HTMLElement {
     this.q("#modal-watch").classList.toggle("on", Boolean(selected?.watch));
   }
 
-  drawChart(canvas, klines) {
+  setChartData(rawKlines) {
+    const klines = (Array.isArray(rawKlines) ? rawKlines : []).map((item) => ({
+      ...item,
+      open_time: Number(item.open_time || item.ts || item.time || 0),
+      open: Number(item.open),
+      high: Number(item.high),
+      low: Number(item.low),
+      close: Number(item.close),
+      volume: Number(item.volume) || 0,
+    })).filter((item) => item.open_time > 0 && [item.open, item.high, item.low, item.close].every(Number.isFinite));
+    const closes = klines.map((item) => item.close);
+    const volumes = klines.map((item) => item.volume);
+    const ma20 = this.chartMovingAverage(closes, 20);
+    const ma50 = this.chartMovingAverage(closes, 50);
+    const series = {
+      ma20,
+      ma50,
+      ma60: this.chartMovingAverage(closes, 60),
+      volma20: this.chartMovingAverage(volumes, 20),
+      boll: this.chartBollinger(closes, 20, 2),
+    };
+    this.state.chart.klines = klines;
+    this.state.chart.series = series;
+    this.state.chart.signals = this.buildChartSignals(klines, series);
+    this.state.chart.visibleCount = Math.min(90, klines.length || 90);
+    this.state.chart.rightOffset = 0;
+    this.state.chart.hoverIndex = null;
+    this.state.chart.hoverY = null;
+    this.q("#chart-tooltip").classList.add("hidden");
+    this.drawChart();
+  }
+
+  chartMovingAverage(values, period) {
+    const output = Array(values.length).fill(null);
+    let total = 0;
+    for (let index = 0; index < values.length; index += 1) {
+      total += Number(values[index]) || 0;
+      if (index >= period) total -= Number(values[index - period]) || 0;
+      if (index >= period - 1) output[index] = total / period;
+    }
+    return output;
+  }
+
+  chartBollinger(values, period, multiplier) {
+    const middle = this.chartMovingAverage(values, period);
+    const upper = Array(values.length).fill(null);
+    const lower = Array(values.length).fill(null);
+    for (let index = period - 1; index < values.length; index += 1) {
+      const mean = middle[index];
+      let variance = 0;
+      for (let offset = index - period + 1; offset <= index; offset += 1) {
+        variance += (values[offset] - mean) ** 2;
+      }
+      const deviation = Math.sqrt(variance / period) * multiplier;
+      upper[index] = mean + deviation;
+      lower[index] = mean - deviation;
+    }
+    return { middle, upper, lower };
+  }
+
+  normalizeChartTime(value) {
+    const numeric = Number(value) || 0;
+    return numeric >= 100000000000 ? numeric : numeric * 1000;
+  }
+
+  nearestChartIndex(klines, timestamp) {
+    const target = this.normalizeChartTime(timestamp);
+    if (!target || !klines.length) return -1;
+    const first = this.normalizeChartTime(klines[0].open_time);
+    const last = this.normalizeChartTime(klines[klines.length - 1].open_time);
+    const interval = klines.length > 1
+      ? Math.max(1, this.normalizeChartTime(klines[1].open_time) - first)
+      : 3_600_000;
+    if (target < first || target >= last + interval) return -1;
+    let low = 0;
+    let high = klines.length - 1;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const time = this.normalizeChartTime(klines[middle].open_time);
+      if (time <= target) low = middle + 1;
+      else high = middle - 1;
+    }
+    return Math.max(0, high);
+  }
+
+  buildChartSignals(klines, series) {
+    const grouped = new Map();
+    const add = (index, side, name, source, summary = "", quality = null) => {
+      if (index < 0 || index >= klines.length || !["buy", "sell"].includes(side)) return;
+      const key = `${index}:${side}`;
+      const signal = grouped.get(key) || { index, side, names: [], sources: [], summaries: [], quality: null };
+      if (name && !signal.names.includes(name)) signal.names.push(name);
+      if (source && !signal.sources.includes(source)) signal.sources.push(source);
+      if (summary && !signal.summaries.includes(summary)) signal.summaries.push(summary);
+      if (Number.isFinite(Number(quality))) signal.quality = Math.max(signal.quality || 0, Number(quality));
+      grouped.set(key, signal);
+    };
+
+    for (let index = 1; index < klines.length; index += 1) {
+      const previousMa20 = series.ma20[index - 1];
+      const previousMa60 = series.ma60[index - 1];
+      const ma20 = series.ma20[index];
+      const ma60 = series.ma60[index];
+      if ([previousMa20, previousMa60, ma20, ma60].every(Number.isFinite)) {
+        if (previousMa20 <= previousMa60 && ma20 > ma60) {
+          add(index, "buy", "MA金叉", "MA20 上穿 MA60", "与下方 MA金叉策略指标使用相同周期");
+        } else if (previousMa20 >= previousMa60 && ma20 < ma60) {
+          add(index, "sell", "MA死叉", "MA20 下穿 MA60", "MA金叉规则的反向离场信号");
+        }
+      }
+      const upper = series.boll.upper[index];
+      const lower = series.boll.lower[index];
+      const previousUpper = series.boll.upper[index - 1];
+      const previousLower = series.boll.lower[index - 1];
+      if ([upper, previousUpper].every(Number.isFinite)
+        && klines[index - 1].close <= previousUpper && klines[index].close > upper) {
+        add(index, "buy", "布林突破", "收盘突破 BOLL 上轨", "与下方布林突破策略指标使用相同规则");
+      }
+      if ([lower, previousLower].every(Number.isFinite)
+        && klines[index - 1].close >= previousLower && klines[index].close < lower) {
+        add(index, "sell", "布林跌破", "收盘跌破 BOLL 下轨", "布林突破规则的反向离场信号");
+      }
+    }
+    return [...grouped.values()].sort((left, right) => left.index - right.index || left.side.localeCompare(right.side));
+  }
+
+  resetChartViewport() {
+    const chart = this.state.chart;
+    chart.visibleCount = Math.min(90, chart.klines.length || 90);
+    chart.rightOffset = 0;
+    chart.hoverIndex = null;
+    chart.hoverY = null;
+    this.q("#chart-tooltip").classList.add("hidden");
+    this.drawChart();
+  }
+
+  clampChartViewport() {
+    const chart = this.state.chart;
+    const maximumVisible = Math.max(1, chart.klines.length);
+    const minimumVisible = Math.min(24, maximumVisible);
+    chart.visibleCount = Math.max(minimumVisible, Math.min(maximumVisible, Math.round(chart.visibleCount || maximumVisible)));
+    chart.rightOffset = Math.max(0, Math.min(Math.max(0, maximumVisible - chart.visibleCount), Math.round(chart.rightOffset || 0)));
+  }
+
+  handleChartPointerDown(event) {
+    if (event.button !== 0 || !this.state.chart.klines.length) return;
+    event.preventDefault();
+    const canvas = this.q("#chart");
+    canvas.focus({ preventScroll: true });
+    canvas.setPointerCapture?.(event.pointerId);
+    this.state.chart.dragging = true;
+    this.state.chart.dragStartX = event.clientX;
+    this.state.chart.dragStartOffset = this.state.chart.rightOffset;
+    canvas.classList.add("dragging");
+  }
+
+  handleChartPointerMove(event) {
+    const chart = this.state.chart;
+    const geometry = this.chartGeometry;
+    if (!geometry || !chart.klines.length) return;
+    if (chart.dragging) {
+      const delta = event.clientX - chart.dragStartX;
+      chart.rightOffset = chart.dragStartOffset + Math.round(delta / Math.max(1, geometry.candleStep));
+      this.clampChartViewport();
+      chart.hoverIndex = null;
+      this.q("#chart-tooltip").classList.add("hidden");
+      this.drawChart();
+      return;
+    }
+    const bounds = this.q("#chart").getBoundingClientRect();
+    const pointX = event.clientX - bounds.left;
+    const pointY = event.clientY - bounds.top;
+    if (pointX < geometry.padding.left || pointX > geometry.plotRight
+      || pointY < geometry.padding.top || pointY > geometry.volumeBottom) {
+      if (chart.hoverIndex != null) {
+        chart.hoverIndex = null;
+        chart.hoverY = null;
+        this.q("#chart-tooltip").classList.add("hidden");
+        this.drawChart();
+      }
+      return;
+    }
+    const localIndex = Math.max(0, Math.min(geometry.visible.length - 1,
+      Math.floor((pointX - geometry.padding.left) / geometry.candleStep)));
+    chart.hoverIndex = geometry.start + localIndex;
+    chart.hoverY = pointY;
+    this.drawChart();
+  }
+
+  handleChartPointerUp(event) {
+    const canvas = this.q("#chart");
+    if (this.state.chart.dragging) canvas.releasePointerCapture?.(event.pointerId);
+    this.state.chart.dragging = false;
+    canvas.classList.remove("dragging");
+  }
+
+  handleChartPointerLeave() {
+    if (this.state.chart.dragging) return;
+    this.state.chart.hoverIndex = null;
+    this.state.chart.hoverY = null;
+    this.q("#chart-tooltip").classList.add("hidden");
+    const klines = this.state.chart.klines;
+    if (klines.length) this.renderChartOhlc(klines.length - 1);
+    this.drawChart();
+  }
+
+  handleChartWheel(event) {
+    if (!this.state.chart.klines.length) return;
+    event.preventDefault();
+    const chart = this.state.chart;
+    if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      chart.rightOffset += Math.sign(event.deltaX || event.deltaY) * 6;
+      this.clampChartViewport();
+      this.drawChart();
+      return;
+    }
+    const oldVisible = chart.visibleCount;
+    const bounds = this.q("#chart").getBoundingClientRect();
+    const geometry = this.chartGeometry;
+    const ratio = geometry
+      ? Math.max(0, Math.min(1, (event.clientX - bounds.left - geometry.padding.left) / Math.max(1, geometry.plotWidth)))
+      : 0.5;
+    const oldEnd = chart.klines.length - chart.rightOffset;
+    const oldStart = Math.max(0, oldEnd - oldVisible);
+    const anchor = oldStart + ratio * oldVisible;
+    chart.visibleCount += event.deltaY > 0 ? 12 : -12;
+    this.clampChartViewport();
+    const nextStart = anchor - ratio * chart.visibleCount;
+    chart.rightOffset = chart.klines.length - (nextStart + chart.visibleCount);
+    this.clampChartViewport();
+    this.drawChart();
+  }
+
+  handleChartKeydown(event) {
+    const chart = this.state.chart;
+    const key = event.key;
+    if (!["ArrowLeft", "ArrowRight", "+", "=", "-", "_", "Home"].includes(key)) return;
+    event.preventDefault();
+    if (key === "Home") {
+      this.resetChartViewport();
+      return;
+    }
+    if (key === "ArrowLeft") chart.rightOffset += 5;
+    else if (key === "ArrowRight") chart.rightOffset -= 5;
+    else chart.visibleCount += ["+", "="].includes(key) ? -10 : 10;
+    this.clampChartViewport();
+    this.drawChart();
+  }
+
+  chartTimeLabel(timestamp, detailed = false) {
+    const date = new Date(this.normalizeChartTime(timestamp));
+    if (!Number.isFinite(date.getTime())) return "--";
+    const options = detailed
+      ? { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }
+      : { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false };
+    return date.toLocaleString("zh-CN", options).replace(/\//g, "-");
+  }
+
+  renderChartOhlc(index) {
+    const klines = this.state.chart.klines;
+    const current = klines[index];
+    if (!current) return;
+    const previous = index > 0 ? klines[index - 1] : current;
+    const barChange = Number(previous.close) ? (current.close / previous.close - 1) * 100 : null;
+    const timeframeLabel = { "15m": "15 分", "1h": "1 小时", "4h": "4 小时" }[this.state.modal.tf] || this.state.modal.tf;
+    this.q("#modal-ohlc").innerHTML = `
+      <strong>${this.escape(timeframeLabel)} · ${this.chartTimeLabel(current.open_time, true)}</strong>
+      <span>开 <b>${this.formatPrice(current.open)}</b></span>
+      <span>高 <b>${this.formatPrice(current.high)}</b></span>
+      <span>低 <b>${this.formatPrice(current.low)}</b></span>
+      <span>收 <b>${this.formatPrice(current.close)}</b></span>
+      <span class="${barChange > 0 ? "up" : barChange < 0 ? "down" : "flat"}">${barChange == null ? "--" : this.formatPercent(barChange)}</span>
+      <span>量 <b>${this.formatCompact(current.volume)}</b></span>`;
+  }
+
+  updateChartTooltip(geometry) {
+    const tooltip = this.q("#chart-tooltip");
+    const index = this.state.chart.hoverIndex;
+    const candle = this.state.chart.klines[index];
+    if (index == null || !candle || index < geometry.start || index >= geometry.end) {
+      tooltip.classList.add("hidden");
+      tooltip.setAttribute("aria-hidden", "true");
+      return;
+    }
+    const previous = index > 0 ? this.state.chart.klines[index - 1] : candle;
+    const change = previous.close ? (candle.close / previous.close - 1) * 100 : 0;
+    const signals = this.state.chart.signals.filter((signal) => signal.index === index);
+    const signalRows = signals.map((signal) => `<div class="tooltip-signal ${signal.side}"><b>${signal.side === "buy" ? "买" : "卖"}</b><span><em>历史触发</em>${this.escape(signal.names.join(" / "))}</span></div>`).join("");
+    tooltip.innerHTML = `
+      <strong>${this.chartTimeLabel(candle.open_time, true)}</strong>
+      <div class="tooltip-ohlc"><span>开 ${this.formatPrice(candle.open)}</span><span>高 ${this.formatPrice(candle.high)}</span><span>低 ${this.formatPrice(candle.low)}</span><span>收 ${this.formatPrice(candle.close)}</span></div>
+      <div class="tooltip-change ${change > 0 ? "up" : change < 0 ? "down" : "flat"}">${this.formatPercent(change)} <span>成交量 ${this.formatCompact(candle.volume)}</span></div>
+      ${signalRows}`;
+    const localIndex = index - geometry.start;
+    const candleX = geometry.x(localIndex);
+    const positionLeft = candleX > geometry.width * 0.64 ? candleX - 220 : candleX + 14;
+    const pointerY = Math.max(geometry.padding.top + 8, Math.min(geometry.priceBottom - 108, this.state.chart.hoverY || geometry.padding.top + 30));
+    tooltip.style.left = `${Math.max(8, positionLeft)}px`;
+    tooltip.style.top = `${pointerY}px`;
+    tooltip.classList.remove("hidden");
+    tooltip.setAttribute("aria-hidden", "false");
+    this.renderChartOhlc(index);
+  }
+
+  drawChart() {
+    const canvas = this.q("#chart");
+    if (!canvas) return;
     const context = canvas.getContext("2d");
     const bounds = canvas.getBoundingClientRect();
-    const width = Math.max(320, Math.round(bounds.width || 1280));
-    const height = width < 700 ? 330 : 430;
+    const width = Math.max(320, Math.round(bounds.width || this.q("#chart-stage")?.clientWidth || 1280));
+    const height = width < 700 ? 370 : 500;
     const density = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
     canvas.width = Math.round(width * density);
     canvas.height = Math.round(height * density);
     canvas.style.height = `${height}px`;
     context.setTransform(density, 0, 0, density, 0, 0);
     context.clearRect(0, 0, width, height);
-    if (!klines.length) {
+    const chart = this.state.chart;
+    if (!chart.klines.length || !chart.series) {
       context.fillStyle = "#77808f";
       context.font = "12px sans-serif";
       context.fillText("数据加载中…", 20, 30);
       return;
     }
+    this.clampChartViewport();
+    const end = chart.klines.length - chart.rightOffset;
+    const start = Math.max(0, end - chart.visibleCount);
+    const visible = chart.klines.slice(start, end);
     const lightTheme = document.documentElement.dataset.theme === "light";
-    const padding = { left: 10, right: 70, top: 10, bottom: 46 };
-    const volumeHeight = 46;
-    const priceHeight = height - padding.top - padding.bottom - volumeHeight;
-    const high = Math.max(...klines.map((item) => item.high));
-    const low = Math.min(...klines.map((item) => item.low));
+    const colors = lightTheme ? {
+      grid: "#dfe5df", text: "#66736d", up: "#159f70", down: "#d5535c", ma20: "#a27b00", ma50: "#7657a8",
+      boll: "#0e9fb5", volumeUp: "rgba(21,159,112,.42)", volumeDown: "rgba(213,83,92,.38)", cross: "#8e9c96",
+    } : {
+      grid: "#203330", text: "#809795", up: "#2ebd85", down: "#f6465d", ma20: "#d2af32", ma50: "#9a79ce",
+      boll: "#2ec7d3", volumeUp: "rgba(46,189,133,.38)", volumeDown: "rgba(246,70,93,.32)", cross: "#7d9490",
+    };
+    const padding = { left: 14, right: 72, top: 18, bottom: 30 };
+    const volumeHeight = width < 700 ? 64 : 86;
+    const volumeGap = 16;
+    const plotRight = width - padding.right;
+    const plotWidth = plotRight - padding.left;
+    const volumeBottom = height - padding.bottom;
+    const volumeTop = volumeBottom - volumeHeight;
+    const priceBottom = volumeTop - volumeGap;
+    const rawHigh = Math.max(...visible.map((item) => item.high));
+    const rawLow = Math.min(...visible.map((item) => item.low));
+    const rawRange = rawHigh - rawLow || Math.max(Math.abs(rawHigh) * 0.01, 1);
+    const high = rawHigh + rawRange * 0.08;
+    const low = rawLow - rawRange * 0.08;
     const range = high - low || 1;
-    const x = (index) => padding.left + (index + 0.5) * (width - padding.left - padding.right) / klines.length;
-    const y = (value) => padding.top + (high - value) / range * priceHeight;
+    const candleStep = plotWidth / Math.max(1, visible.length);
+    const x = (localIndex) => padding.left + (localIndex + 0.5) * candleStep;
+    const y = (value) => padding.top + (high - value) / range * (priceBottom - padding.top);
+    const maxVolume = Math.max(...visible.map((item) => item.volume), 1);
+    const volumeY = (value) => volumeBottom - Math.max(0, Number(value) || 0) / maxVolume * volumeHeight;
+    const geometry = { width, height, padding, plotRight, plotWidth, priceBottom, volumeTop, volumeBottom, candleStep, start, end, visible, x, y, high, low, range };
+    this.chartGeometry = geometry;
+
+    context.font = "10px ui-monospace, SFMono-Regular, Consolas, monospace";
     context.lineWidth = 1;
-    context.strokeStyle = lightTheme ? "#e1e5dd" : "#203330";
-    context.fillStyle = lightTheme ? "#747c71" : "#809795";
-    context.font = "11px sans-serif";
-    for (let index = 0; index <= 4; index += 1) {
-      const value = high - range * index / 4;
+    for (let tick = 0; tick <= 5; tick += 1) {
+      const value = high - range * tick / 5;
       const yValue = y(value);
+      context.strokeStyle = colors.grid;
       context.beginPath();
       context.moveTo(padding.left, yValue);
-      context.lineTo(width - padding.right, yValue);
+      context.lineTo(plotRight, yValue);
       context.stroke();
-      context.fillText(this.formatPrice(value), width - padding.right + 6, yValue + 4);
+      context.fillStyle = colors.text;
+      context.textAlign = "left";
+      context.fillText(this.formatPrice(value), plotRight + 7, yValue + 3);
     }
-    const movingAverage = (period, color) => {
+    context.strokeStyle = colors.grid;
+    context.beginPath();
+    context.moveTo(padding.left, volumeTop - volumeGap / 2);
+    context.lineTo(plotRight, volumeTop - volumeGap / 2);
+    context.stroke();
+
+    const timeTickCount = width < 700 ? 4 : 7;
+    for (let tick = 0; tick < timeTickCount; tick += 1) {
+      const localIndex = Math.min(visible.length - 1, Math.round(tick * (visible.length - 1) / Math.max(1, timeTickCount - 1)));
+      const xValue = x(localIndex);
+      context.strokeStyle = colors.grid;
+      context.globalAlpha = 0.38;
+      context.beginPath();
+      context.moveTo(xValue, padding.top);
+      context.lineTo(xValue, volumeBottom);
+      context.stroke();
+      context.globalAlpha = 1;
+      context.fillStyle = colors.text;
+      context.textAlign = tick === 0 ? "left" : tick === timeTickCount - 1 ? "right" : "center";
+      context.fillText(this.chartTimeLabel(visible[localIndex].open_time), xValue, height - 10);
+    }
+
+    const candleWidth = Math.max(2, Math.min(13, candleStep * 0.64));
+    visible.forEach((item, localIndex) => {
+      const rising = item.close >= item.open;
+      context.fillStyle = rising ? colors.volumeUp : colors.volumeDown;
+      context.fillRect(x(localIndex) - candleWidth / 2, volumeY(item.volume), candleWidth, Math.max(1, volumeBottom - volumeY(item.volume)));
+    });
+
+    const plotLine = (values, color, valueY = y, lineWidth = 1.35, dash = []) => {
+      context.save();
       context.strokeStyle = color;
+      context.lineWidth = lineWidth;
+      context.setLineDash(dash);
       context.beginPath();
       let started = false;
-      for (let index = period - 1; index < klines.length; index += 1) {
-        let total = 0;
-        for (let offset = index - period + 1; offset <= index; offset += 1) total += klines[offset].close;
-        const yValue = y(total / period);
-        if (started) context.lineTo(x(index), yValue);
-        else context.moveTo(x(index), yValue);
+      for (let globalIndex = start; globalIndex < end; globalIndex += 1) {
+        const value = values[globalIndex];
+        if (!Number.isFinite(value)) {
+          started = false;
+          continue;
+        }
+        const localIndex = globalIndex - start;
+        if (started) context.lineTo(x(localIndex), valueY(value));
+        else context.moveTo(x(localIndex), valueY(value));
         started = true;
       }
       context.stroke();
+      context.restore();
     };
-    movingAverage(20, lightTheme ? "#9a7a14" : "#c7aa42");
-    movingAverage(50, lightTheme ? "#7255aa" : "#9a79ce");
-    const candleWidth = Math.max(2, (width - padding.left - padding.right) / klines.length * 0.6);
-    const maxVolume = Math.max(...klines.map((item) => item.volume)) || 1;
-    klines.forEach((item, index) => {
+
+    if (chart.overlays.has("volma")) plotLine(chart.series.volma20, "#f0a000", volumeY, 1.4);
+    if (chart.overlays.has("boll")) {
+      const upperPoints = [];
+      const lowerPoints = [];
+      for (let globalIndex = start; globalIndex < end; globalIndex += 1) {
+        const upper = chart.series.boll.upper[globalIndex];
+        const lowerBand = chart.series.boll.lower[globalIndex];
+        if (Number.isFinite(upper) && Number.isFinite(lowerBand)) {
+          upperPoints.push([x(globalIndex - start), y(upper)]);
+          lowerPoints.push([x(globalIndex - start), y(lowerBand)]);
+        }
+      }
+      if (upperPoints.length > 1) {
+        context.save();
+        context.fillStyle = colors.boll;
+        context.globalAlpha = 0.055;
+        context.beginPath();
+        upperPoints.forEach(([pointX, pointY], index) => index ? context.lineTo(pointX, pointY) : context.moveTo(pointX, pointY));
+        lowerPoints.reverse().forEach(([pointX, pointY]) => context.lineTo(pointX, pointY));
+        context.closePath();
+        context.fill();
+        context.restore();
+      }
+      plotLine(chart.series.boll.upper, colors.boll, y, 1.1, [4, 3]);
+      plotLine(chart.series.boll.lower, colors.boll, y, 1.1, [4, 3]);
+    }
+
+    visible.forEach((item, localIndex) => {
       const rising = item.close >= item.open;
-      context.strokeStyle = rising ? "#2ebd85" : "#f6465d";
-      context.fillStyle = context.strokeStyle;
+      const color = rising ? colors.up : colors.down;
+      context.strokeStyle = color;
+      context.fillStyle = color;
+      context.lineWidth = 1;
       context.beginPath();
-      context.moveTo(x(index), y(item.high));
-      context.lineTo(x(index), y(item.low));
+      context.moveTo(x(localIndex), y(item.high));
+      context.lineTo(x(localIndex), y(item.low));
       context.stroke();
       const top = y(Math.max(item.open, item.close));
       const bottom = y(Math.min(item.open, item.close));
-      context.fillRect(x(index) - candleWidth / 2, top, candleWidth, Math.max(1, bottom - top));
-      context.globalAlpha = 0.5;
-      const volume = item.volume / maxVolume * volumeHeight;
-      context.fillRect(x(index) - candleWidth / 2, height - padding.bottom + volumeHeight - volume - 8, candleWidth, volume);
-      context.globalAlpha = 1;
+      context.fillRect(x(localIndex) - candleWidth / 2, top, candleWidth, Math.max(1.3, bottom - top));
     });
+    if (chart.overlays.has("ma20")) plotLine(chart.series.ma20, colors.ma20, y, 1.55);
+    if (chart.overlays.has("ma50")) plotLine(chart.series.ma50, colors.ma50, y, 1.55);
+    if (chart.overlays.has("ma60")) plotLine(chart.series.ma60, lightTheme ? "#b84b8d" : "#e378b4", y, 1.35, [6, 3]);
+
+    const visibleSignals = chart.overlays.has("signals")
+      ? chart.signals.filter((signal) => signal.index >= start && signal.index < end)
+      : [];
+    visibleSignals.forEach((signal) => {
+      const item = chart.klines[signal.index];
+      const localIndex = signal.index - start;
+      const markerX = x(localIndex);
+      const markerY = signal.side === "buy"
+        ? Math.min(priceBottom - 15, y(item.low) + 13)
+        : Math.max(padding.top + 15, y(item.high) - 13);
+      const color = signal.side === "buy" ? colors.up : colors.down;
+      context.fillStyle = color;
+      context.strokeStyle = lightTheme ? "#ffffff" : "#0d181b";
+      context.lineWidth = 1;
+      context.beginPath();
+      if (signal.side === "buy") {
+        context.moveTo(markerX, markerY - 6);
+        context.lineTo(markerX - 5, markerY + 4);
+        context.lineTo(markerX + 5, markerY + 4);
+      } else {
+        context.moveTo(markerX, markerY + 6);
+        context.lineTo(markerX - 5, markerY - 4);
+        context.lineTo(markerX + 5, markerY - 4);
+      }
+      context.closePath();
+      context.fill();
+      context.stroke();
+      context.font = "bold 9px sans-serif";
+      context.textAlign = "center";
+      context.fillStyle = color;
+      context.fillText(signal.side === "buy" ? "买" : "卖", markerX, markerY + (signal.side === "buy" ? 15 : -9));
+    });
+
+    if (chart.hoverIndex != null && chart.hoverIndex >= start && chart.hoverIndex < end) {
+      const localIndex = chart.hoverIndex - start;
+      const crossX = x(localIndex);
+      const crossY = Math.max(padding.top, Math.min(priceBottom, chart.hoverY || y(chart.klines[chart.hoverIndex].close)));
+      context.save();
+      context.strokeStyle = colors.cross;
+      context.setLineDash([4, 4]);
+      context.beginPath();
+      context.moveTo(crossX, padding.top);
+      context.lineTo(crossX, volumeBottom);
+      context.moveTo(padding.left, crossY);
+      context.lineTo(plotRight, crossY);
+      context.stroke();
+      context.restore();
+      const hoverPrice = high - (crossY - padding.top) / Math.max(1, priceBottom - padding.top) * range;
+      context.fillStyle = lightTheme ? "#52615b" : "#294642";
+      context.fillRect(plotRight + 2, crossY - 9, padding.right - 4, 18);
+      context.fillStyle = "#f4fbf8";
+      context.textAlign = "center";
+      context.font = "10px ui-monospace, monospace";
+      context.fillText(this.formatPrice(hoverPrice), plotRight + padding.right / 2, crossY + 3);
+    }
+
+    const rangeSignalCount = chart.signals.filter((signal) => signal.index >= start && signal.index < end).length;
+    this.q("#chart-range").textContent = `${this.chartTimeLabel(visible[0].open_time)} — ${this.chartTimeLabel(visible[visible.length - 1].open_time)} · ${visible.length}/${chart.klines.length} 根 · ${rangeSignalCount} 个历史信号`;
+    this.updateChartTooltip(geometry);
   }
 }
 

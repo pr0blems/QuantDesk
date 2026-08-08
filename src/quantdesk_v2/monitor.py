@@ -22,8 +22,7 @@ def _bind_params(sql: str, params: tuple[Any, ...]):
     if len(parts) - 1 != len(params):
         raise MonitorUnavailable("invalid monitor query parameters")
     statement = "".join(
-        part + (f":p{index}" if index < len(params) else "")
-        for index, part in enumerate(parts)
+        part + (f":p{index}" if index < len(params) else "") for index, part in enumerate(parts)
     )
     return text(statement), {f"p{index}": value for index, value in enumerate(params)}
 
@@ -50,6 +49,18 @@ def _json_object(value: Any) -> dict[str, Any]:
             return {}
         return decoded if isinstance(decoded, dict) else {}
     return {}
+
+
+def _json_array(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        return decoded if isinstance(decoded, list) else []
+    return []
 
 
 def _optional_finite_number(value: Any) -> float | None:
@@ -123,9 +134,7 @@ def build_underlying_quote(
     if 0 < market_time_ms < 100_000_000_000:
         market_time_ms *= 1_000
     alignment_delta_ms = (
-        abs(contract_time_ms - market_time_ms)
-        if contract_time_ms and market_time_ms
-        else None
+        abs(contract_time_ms - market_time_ms) if contract_time_ms and market_time_ms else None
     )
     market_state = _underlying_market_state(market_status) if available else "unavailable"
     if not available or not contract_time_ms:
@@ -148,20 +157,14 @@ def build_underlying_quote(
         and status in {"ok", "stale"}
     )
     basis_bps = (
-        round((contract_price / underlying_price - 1) * 10_000, 2)
-        if basis_comparable
-        else None
+        round((contract_price / underlying_price - 1) * 10_000, 2) if basis_comparable else None
     )
     alert_eligible = status == "ok" and alignment_status == "aligned"
     spread_alert = (
         "strong"
-        if alert_eligible
-        and basis_bps is not None
-        and abs(basis_bps) >= _SPREAD_STRONG_BPS
+        if alert_eligible and basis_bps is not None and abs(basis_bps) >= _SPREAD_STRONG_BPS
         else "watch"
-        if alert_eligible
-        and basis_bps is not None
-        and abs(basis_bps) >= _SPREAD_WATCH_BPS
+        if alert_eligible and basis_bps is not None and abs(basis_bps) >= _SPREAD_WATCH_BPS
         else "normal"
         if alert_eligible and basis_bps is not None
         else "disabled"
@@ -210,9 +213,7 @@ def build_collected_underlying_quote(
         contract_time_ms *= 1_000
     market_time_ms = int(row.get("market_time_ms") or 0)
     alignment_delta_ms = (
-        abs(contract_time_ms - market_time_ms)
-        if contract_time_ms and market_time_ms
-        else None
+        abs(contract_time_ms - market_time_ms) if contract_time_ms and market_time_ms else None
     )
     market_state = str(row.get("market_state") or "unknown")
     if not has_market_data or not contract_time_ms:
@@ -226,9 +227,7 @@ def build_collected_underlying_quote(
     else:
         alignment_status = "lagging"
 
-    underlying_price = (
-        _optional_finite_number(row.get("price")) if has_market_data else None
-    )
+    underlying_price = _optional_finite_number(row.get("price")) if has_market_data else None
     currency = str(row.get("currency") or "") if has_market_data else ""
     basis_comparable = (
         contract_price is not None
@@ -239,20 +238,14 @@ def build_collected_underlying_quote(
         and status in {"ok", "stale"}
     )
     basis_bps = (
-        round((contract_price / underlying_price - 1) * 10_000, 2)
-        if basis_comparable
-        else None
+        round((contract_price / underlying_price - 1) * 10_000, 2) if basis_comparable else None
     )
     alert_eligible = status == "ok" and alignment_status == "aligned"
     spread_alert = (
         "strong"
-        if alert_eligible
-        and basis_bps is not None
-        and abs(basis_bps) >= _SPREAD_STRONG_BPS
+        if alert_eligible and basis_bps is not None and abs(basis_bps) >= _SPREAD_STRONG_BPS
         else "watch"
-        if alert_eligible
-        and basis_bps is not None
-        and abs(basis_bps) >= _SPREAD_WATCH_BPS
+        if alert_eligible and basis_bps is not None and abs(basis_bps) >= _SPREAD_WATCH_BPS
         else "normal"
         if alert_eligible and basis_bps is not None
         else "disabled"
@@ -270,9 +263,7 @@ def build_collected_underlying_quote(
         "price": underlying_price,
         "previous_close": _optional_finite_number(row.get("previous_close")),
         "change_pct": _optional_finite_number(row.get("change_pct")),
-        "regular_market_price": _optional_finite_number(
-            row.get("regular_market_price")
-        ),
+        "regular_market_price": _optional_finite_number(row.get("regular_market_price")),
         "day_open": _optional_finite_number(row.get("day_open")),
         "day_high": _optional_finite_number(row.get("day_high")),
         "day_low": _optional_finite_number(row.get("day_low")),
@@ -304,11 +295,7 @@ def _fresh_microstructure_metrics(
     except (TypeError, ValueError):
         return {}
     age_seconds = now_seconds - snapshot_at
-    if not (
-        -_MAX_MARKET_CLOCK_SKEW_SECONDS
-        <= age_seconds
-        <= _MARKET_MICROSTRUCTURE_STALE_SECONDS
-    ):
+    if not (-_MAX_MARKET_CLOCK_SKEW_SECONDS <= age_seconds <= _MARKET_MICROSTRUCTURE_STALE_SECONDS):
         return {}
     numbers = {
         key: _optional_finite_number(row.get(key))
@@ -458,9 +445,7 @@ class MonitorRepository:
         battles: dict[str, dict[str, dict[str, Any]]] = {}
         now_ms = int(time.time() * 1_000)
         for row in battle_rows:
-            horizon = horizon_names.get(
-                int(row["horizon_seconds"]), str(row["horizon_seconds"])
-            )
+            horizon = horizon_names.get(int(row["horizon_seconds"]), str(row["horizon_seconds"]))
             state = str(row["prediction_state"])
             if int(row.get("valid_until_ms") or 0) < now_ms:
                 state = "data_insufficient"
@@ -496,8 +481,7 @@ class MonitorRepository:
             """
         )
         opportunities = {
-            row["symbol"]: _opportunity_out(row, compact=True)
-            for row in opportunity_rows
+            row["symbol"]: _opportunity_out(row, compact=True) for row in opportunity_rows
         }
 
         trending_rows = self._query("SELECT v FROM system_state WHERE k='st_trending'")
@@ -718,17 +702,12 @@ class MonitorRepository:
         lifecycle = lifecycle_rows[0] if lifecycle_rows else {}
         outcomes = outcome_rows[0] if outcome_rows else {}
         total_symbols = len(self.symbols)
-        fresh = len(
-            self.symbol_set
-            & {str(row.get("symbol") or "") for row in fresh_depth_rows}
-        )
+        fresh = len(self.symbol_set & {str(row.get("symbol") or "") for row in fresh_depth_rows})
         return {
             "market_data": {
                 "symbols": total_symbols,
                 "fresh_microstructure": fresh,
-                "coverage_pct": round(fresh / total_symbols * 100, 2)
-                if total_symbols
-                else 0,
+                "coverage_pct": round(fresh / total_symbols * 100, 2) if total_symbols else 0,
                 "avg_spread_bps": None,
                 "quality_events_24h": 0,
             },
@@ -883,11 +862,15 @@ class MonitorRepository:
                       p.short_probability,p.neutral_probability,p.confidence_score,
                       p.confidence_label,p.gross_edge_bps,p.entry_price,p.spread_bps,
                       p.target_bps,p.stop_bps,p.model_key,p.model_version,
+                      a.algorithm_config_json,p.components_json,
+                      f.feature_schema_version,
                       p.predicted_at_ms,p.valid_until_ms,
                       o.status,o.actual_result,o.exit_price,o.raw_return_bps,
                       o.directional_return_bps,o.max_favorable_bps,o.max_adverse_bps,
                       o.hit_result,o.cost_bps,o.due_at_ms,o.completed_at_ms
                FROM battle_predictions p
+               JOIN prediction_feature_snapshots f ON f.id=p.feature_snapshot_id
+               LEFT JOIN prediction_algorithm_snapshots a ON a.prediction_id=p.id
                JOIN prediction_outcomes o ON o.prediction_id=p.id
                WHERE o.status='completed' AND p.result IN ('long','short')
                  AND (? IS NULL OR p.result=?)
@@ -921,6 +904,16 @@ class MonitorRepository:
         items: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
+            algorithm_config = _json_object(item.pop("algorithm_config_json", None))
+            components = _json_object(item.pop("components_json", None))
+            config_version = algorithm_config.get(
+                "config_version", components.get("algorithm_config_version", 0)
+            )
+            try:
+                item["algorithm_config_version"] = int(config_version or 0)
+            except (TypeError, ValueError):
+                item["algorithm_config_version"] = 0
+            item["algorithm_snapshot_available"] = bool(algorithm_config)
             for field in numeric_fields:
                 item[field] = None if item.get(field) is None else _finite_number(item[field])
             direction = str(item.get("prediction_result") or "neutral")
@@ -945,9 +938,7 @@ class MonitorRepository:
                 "long_count": int(totals.get("long_count") or 0),
                 "short_count": int(totals.get("short_count") or 0),
                 "hit_rate": (
-                    None
-                    if totals.get("hit_rate") is None
-                    else _finite_number(totals["hit_rate"])
+                    None if totals.get("hit_rate") is None else _finite_number(totals["hit_rate"])
                 ),
                 "avg_return_bps": (
                     None
@@ -956,6 +947,89 @@ class MonitorRepository:
                 ),
             },
         }
+
+    def prediction_algorithm_snapshot(self, public_id: str) -> dict[str, Any] | None:
+        """Return the immutable inputs and algorithm config used by one prediction."""
+        rows = self._query(
+            """SELECT p.public_id,p.symbol,p.horizon_seconds,p.prediction_state,
+                      p.result AS prediction_result,p.battle_score,p.model_key,p.model_version,
+                      p.predicted_at_ms,p.reason_codes_json,p.components_json,
+                      a.algorithm_config_json,f.feature_schema_version,f.features_json,
+                      f.quality_score
+               FROM battle_predictions p
+               JOIN prediction_feature_snapshots f ON f.id=p.feature_snapshot_id
+               LEFT JOIN prediction_algorithm_snapshots a ON a.prediction_id=p.id
+               WHERE p.public_id=? LIMIT 1""",
+            (public_id,),
+        )
+        if not rows:
+            return None
+        item = dict(rows[0])
+        algorithm_config = _json_object(item.pop("algorithm_config_json", None))
+        components = _json_object(item.pop("components_json", None))
+        config_version = algorithm_config.get(
+            "config_version", components.get("algorithm_config_version", 0)
+        )
+        try:
+            item["algorithm_config_version"] = int(config_version or 0)
+        except (TypeError, ValueError):
+            item["algorithm_config_version"] = 0
+        item["algorithm_snapshot_available"] = bool(algorithm_config)
+        item["algorithm_config"] = algorithm_config or None
+        item["components"] = components
+        item["features"] = _json_object(item.pop("features_json", None))
+        item["reason_codes"] = _json_array(item.pop("reason_codes_json", None))
+        item["battle_score"] = _finite_number(item.get("battle_score"))
+        item["quality_score"] = _finite_number(item.get("quality_score"))
+        return item
+
+    def prediction_algorithm_history(self) -> list[dict[str, Any]]:
+        """Return settled immutable snapshots used by algorithm optimizers."""
+
+        from . import battle
+
+        return self._query(
+            """SELECT recent.* FROM (
+                   SELECT p.id AS prediction_row_id,p.symbol,p.horizon_seconds,
+                          p.predicted_at_ms,p.result AS prediction_result,
+                          p.battle_score,p.long_probability,p.short_probability,
+                          p.neutral_probability,p.confidence_score,p.confidence_label,
+                          p.gross_edge_bps,p.spread_bps,p.target_bps,p.stop_bps,
+                          a.algorithm_config_json,f.features_json,
+                          o.raw_return_bps,o.directional_return_bps,
+                          o.max_favorable_bps,o.max_adverse_bps,o.hit_result,
+                          o.cost_bps,o.completed_at_ms,
+                          CAST(UNIX_TIMESTAMP(o.updated_at)*1000 AS SIGNED)
+                              AS outcome_updated_at_ms
+                   FROM battle_predictions p
+                   JOIN prediction_feature_snapshots f ON f.id=p.feature_snapshot_id
+                   JOIN prediction_algorithm_snapshots a ON a.prediction_id=p.id
+                   JOIN prediction_outcomes o ON o.prediction_id=p.id
+                   WHERE p.model_key=? AND p.model_version=?
+                     AND f.feature_schema_version=?
+                     AND p.prediction_state='heuristic'
+                     AND o.status='completed' AND o.raw_return_bps IS NOT NULL
+                   ORDER BY p.predicted_at_ms DESC,p.id DESC
+                   LIMIT 50000
+               ) recent
+               ORDER BY recent.predicted_at_ms ASC,recent.prediction_row_id ASC""",
+            (battle.MODEL_KEY, battle.MODEL_VERSION, battle.FEATURE_SCHEMA_VERSION),
+        )
+
+    def prediction_algorithm_optimization(
+        self,
+        current_config: dict[str, Any],
+        current_config_version: int,
+    ) -> dict[str, Any]:
+        """Build the legacy local recommendation for diagnostic compatibility."""
+
+        from .prediction_optimizer import optimize_prediction_algorithm
+
+        return optimize_prediction_algorithm(
+            self.prediction_algorithm_history(),
+            current_config,
+            current_config_version=current_config_version,
+        )
 
     def alerts(self, user_id: int, limit: int) -> list[dict[str, Any]]:
         rows = self._query(
@@ -997,10 +1071,32 @@ class MonitorRepository:
         return list(reversed(rows))
 
     def strategy_indicators(self, symbol: str, timeframe: str) -> dict[str, Any]:
+        from .prediction_feature_indicators import evaluate_prediction_feature_indicators
         from .strategy_indicators import evaluate_strategy_indicators
 
-        candles = self.klines(symbol, timeframe, 120)
-        return evaluate_strategy_indicators(candles, timeframe)
+        normalized = self._validate_symbol(symbol)
+        candles = self.klines(normalized, timeframe, 120)
+        result = evaluate_strategy_indicators(candles, timeframe)
+        snapshot: dict[str, Any] | None = None
+        try:
+            rows = self._query(
+                """SELECT as_of_ms,feature_schema_version,features_json,quality_score
+                   FROM prediction_feature_snapshots
+                   WHERE symbol=? ORDER BY as_of_ms DESC,id DESC LIMIT 1""",
+                (normalized,),
+            )
+            if rows:
+                snapshot = {
+                    **rows[0],
+                    "features": _json_object(rows[0].get("features_json")),
+                }
+        except MonitorUnavailable:
+            # The K-line indicators remain usable during a rolling battle migration.
+            snapshot = None
+        prediction_features = evaluate_prediction_feature_indicators(snapshot, timeframe)
+        result["prediction_features"] = prediction_features
+        result["total_count"] = result["count"] + prediction_features["count"]
+        return result
 
     def score_detail(self, symbol: str) -> dict[str, Any]:
         normalized = self._validate_symbol(symbol)

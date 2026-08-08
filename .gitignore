@@ -18,6 +18,7 @@ __pycache__/
 
 # Test and coverage output
 .codex-test-temp/
+.pytest_tmp*/
 .coverage
 .coverage.*
 coverage.xml

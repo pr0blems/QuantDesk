@@ -84,6 +84,8 @@ from .schemas import (
     OpportunityPreferenceUpdate,
     PaperAccountCreateRequest,
     PaperAccountStatusUpdate,
+    PaperAccountStrategyUpdate,
+    PredictionAlgorithmOptimizationRequest,
     PredictionAlgorithmUpdate,
     RefreshRequest,
     RegisterRequest,
@@ -140,7 +142,9 @@ def _release_backtest_slot(user_id: int) -> None:
 def _backtest(request: Request) -> BacktestRepository:
     settings = request.app.state.settings
     try:
-        return BacktestRepository(request.app.state.database_engine, settings.monitor_symbols_config)
+        return BacktestRepository(
+            request.app.state.database_engine, settings.monitor_symbols_config
+        )
     except BacktestUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
 
@@ -1245,6 +1249,9 @@ def _prediction_algorithm_out(
         "model_key": battle.MODEL_KEY,
         "model_version": battle.MODEL_VERSION,
         "feature_schema_version": battle.FEATURE_SCHEMA_VERSION,
+        "feature_count": len(battle.ALGORITHM_FEATURES),
+        "market_feature_count": len(battle.MARKET_ALGORITHM_FEATURES),
+        "kline_strategy_count": len(battle.KLINE_STRATEGY_FEATURES),
         "config": battle.normalize_algorithm_config(stored),
         "defaults": battle.default_algorithm_config(),
         "config_version": int(setting.version if setting is not None else 0),
@@ -1262,6 +1269,524 @@ def monitor_prediction_algorithm(
     return _prediction_algorithm_out(db.get(AdminSetting, battle.ALGORITHM_SETTING_KEY), user)
 
 
+def _audit_prediction_ai_rejection(
+    db: Session,
+    request: Request,
+    user_id: int,
+    current_version: int,
+    model_name: str,
+    exc: Exception,
+) -> None:
+    """Persist a redacted failed-attempt trace without changing the algorithm."""
+
+    trace = getattr(exc, "trace", None)
+    if not isinstance(trace, dict):
+        return
+    metadata = {
+        "status": "rejected",
+        "failure_category": trace.get("failure_category"),
+        "provider": "deepseek",
+        "model": model_name,
+        "source_version": current_version,
+        "saved_version": None,
+        "sample_count": trace.get("sample_count"),
+        "history_start_ms": trace.get("history_start_ms"),
+        "history_end_ms": trace.get("history_end_ms"),
+        "optimized_horizons": [],
+        "optimizer_key": trace.get("optimizer_key"),
+        "response_model": trace.get("response_model"),
+        "system_fingerprint": trace.get("system_fingerprint"),
+        "summary": trace.get("summary"),
+        "reasoning_steps": trace.get("reasoning_steps", []),
+        "raw_model_output": trace.get("raw_model_output"),
+        "model_attempts": trace.get("model_attempts", []),
+        "normalization": trace.get("normalization"),
+        "horizons": trace.get("horizons", []),
+        "submitted_prompt": trace.get("submitted_prompt"),
+        "usage": trace.get("usage", {}),
+    }
+    try:
+        db.rollback()
+        _audit(
+            db,
+            request,
+            "monitor.prediction_algorithm.ai_optimize_rejected",
+            user_id,
+            "admin_setting",
+            battle.ALGORITHM_SETTING_KEY,
+            metadata,
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+
+
+@router.post("/monitor/prediction-algorithm/optimize")
+def optimize_monitor_prediction_algorithm(
+    payload: PredictionAlgorithmOptimizationRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="administrator access required")
+    _require_expected_user(request, user)
+    user_id = user.id
+    setting = db.get(AdminSetting, battle.ALGORITHM_SETTING_KEY)
+    current_version = int(setting.version if setting is not None else 0)
+    if payload.expected_config_version != current_version:
+        raise HTTPException(
+            status_code=409,
+            detail="prediction algorithm changed; reload it before optimizing",
+        )
+    current_config = battle.normalize_algorithm_config(
+        setting.value_json if setting is not None else None
+    )
+    deepseek_model = db.scalar(
+        select(AiModelConfig)
+        .where(
+            AiModelConfig.user_id == user_id,
+            AiModelConfig.provider_code == "deepseek",
+            AiModelConfig.is_enabled.is_(True),
+        )
+        .order_by(
+            AiModelConfig.is_default.desc(),
+            AiModelConfig.updated_at.desc(),
+            AiModelConfig.id.desc(),
+        )
+        .limit(1)
+    )
+    if deepseek_model is None:
+        raise HTTPException(
+            status_code=409,
+            detail="请先在系统设置中新增并启用 DeepSeek 模型配置",
+        )
+    try:
+        api_key = CredentialCipher(
+            request.app.state.settings.credential_master_key.get_secret_value()
+        ).decrypt(deepseek_model.api_key_encrypted)
+    except SecurityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="DeepSeek 模型密钥无法解密，请重新配置 API Key",
+        ) from None
+
+    model_name = deepseek_model.model_name
+    history_rows = _monitor(request).prediction_algorithm_history()
+    timeout_seconds = request.app.state.settings.deepseek_optimizer_timeout_seconds
+    max_tokens = request.app.state.settings.deepseek_optimizer_max_tokens
+    # Do not hold a SQL transaction or connection while waiting for the model.
+    db.rollback()
+    try:
+        from .prediction_ai_optimizer import optimize_prediction_algorithm_with_deepseek
+        from .prediction_optimizer import PredictionOptimizationUnavailable
+
+        result = optimize_prediction_algorithm_with_deepseek(
+            history_rows,
+            current_config,
+            current_config_version=current_version,
+            api_key=api_key,
+            model_name=model_name,
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_tokens,
+        )
+    except PredictionOptimizationUnavailable as exc:
+        _audit_prediction_ai_rejection(
+            db, request, user_id, current_version, model_name, exc
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except StrategyAiError as exc:
+        _audit_prediction_ai_rejection(
+            db, request, user_id, current_version, model_name, exc
+        )
+        status_by_category = {
+            "not_configured": 503,
+            "timeout": 504,
+            "upstream": 502,
+            "invalid_output": 502,
+        }
+        message_by_category = {
+            "not_configured": "DeepSeek 模型配置无效或无权访问该模型",
+            "timeout": "DeepSeek 调优请求超时，当前算法未修改",
+            "upstream": "DeepSeek 服务暂时不可用，当前算法未修改",
+            "invalid_output": "DeepSeek 返回的权重不符合安全约束，当前算法未修改",
+        }
+        raise HTTPException(
+            status_code=status_by_category[exc.category],
+            detail=message_by_category[exc.category],
+        ) from None
+
+    # Recheck the version under a row lock after inference. A concurrent edit
+    # invalidates this recommendation instead of silently overwriting it.
+    setting = db.scalar(
+        select(AdminSetting)
+        .where(AdminSetting.key == battle.ALGORITHM_SETTING_KEY)
+        .with_for_update()
+    )
+    latest_version = int(setting.version if setting is not None else 0)
+    if latest_version != current_version:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="prediction algorithm changed while DeepSeek was optimizing; retry",
+        )
+    value = result["recommended_config"]
+    if setting is None:
+        setting = AdminSetting(
+            key=battle.ALGORITHM_SETTING_KEY,
+            value_json=value,
+            version=1,
+            updated_by=user_id,
+        )
+        db.add(setting)
+    else:
+        setting.value_json = value
+        setting.version += 1
+        setting.updated_by = user_id
+        setting.updated_at = utcnow()
+    try:
+        db.flush()
+        _audit(
+            db,
+            request,
+            "monitor.prediction_algorithm.ai_optimize",
+            user_id,
+            "admin_setting",
+            battle.ALGORITHM_SETTING_KEY,
+            {
+                "status": "saved",
+                "provider": "deepseek",
+                "model": model_name,
+                "source_version": current_version,
+                "saved_version": setting.version,
+                "sample_count": result["sample_count"],
+                "history_start_ms": result["history_start_ms"],
+                "history_end_ms": result["history_end_ms"],
+                "optimized_horizons": [
+                    report["horizon"]
+                    for report in result["horizons"]
+                    if report["status"] == "optimized"
+                ],
+                "optimizer_key": result["optimizer_key"],
+                "response_model": result["response_model"],
+                "system_fingerprint": result["system_fingerprint"],
+                "summary": result["summary"],
+                "reasoning_steps": result["reasoning_steps"],
+                "raw_model_output": result["raw_model_output"],
+                "model_attempts": result["model_attempts"],
+                "normalization": result["normalization"],
+                "submitted_prompt": result["submitted_prompt"],
+                "usage": result["usage"],
+            },
+        )
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="prediction algorithm changed while DeepSeek was optimizing; retry",
+        ) from None
+
+    battle.invalidate_algorithm_config_cache()
+    result["saved"] = True
+    result["saved_config_version"] = int(setting.version)
+    result["algorithm"] = _prediction_algorithm_out(setting, user)
+    return result
+
+
+def _prediction_ai_trace_database_analysis(
+    request: Request,
+    metadata: Mapping[str, Any],
+    *,
+    audit_created_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Rebuild rich version statistics for legacy traces that predate them."""
+
+    source_version = metadata.get("source_version")
+    try:
+        source_version = int(source_version)
+    except (TypeError, ValueError):
+        return {"available": False, "reason": "source_config_version_missing"}
+
+    submitted_prompt = metadata.get("submitted_prompt")
+    submitted_user = (
+        submitted_prompt.get("user") if isinstance(submitted_prompt, Mapping) else None
+    )
+    try:
+        submitted_payload = json.loads(submitted_user) if isinstance(submitted_user, str) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        submitted_payload = {}
+    submitted_horizons = (
+        submitted_payload.get("training_statistics", {})
+        .get("history", {})
+        .get("horizons", {})
+        if isinstance(submitted_payload, Mapping)
+        else {}
+    )
+    if isinstance(submitted_horizons, Mapping) and submitted_horizons and all(
+        isinstance(item, Mapping) and isinstance(item.get("training_history_analysis"), Mapping)
+        for item in submitted_horizons.values()
+    ):
+        return {"available": False, "reason": "submitted_prompt_already_contains_analysis"}
+
+    cutoff_ms = metadata.get("history_end_ms")
+    try:
+        cutoff_ms = int(cutoff_ms) if cutoff_ms is not None else None
+    except (TypeError, ValueError):
+        cutoff_ms = None
+    try:
+        rows = _monitor(request).prediction_algorithm_history()
+    except MonitorUnavailable:
+        return {"available": False, "reason": "database_history_temporarily_unavailable"}
+    matching_rows: list[dict[str, Any]] = []
+    source_config: dict[str, Any] | None = None
+    audit_created_at_ms = (
+        int(audit_created_at.replace(tzinfo=UTC).timestamp() * 1_000)
+        if audit_created_at is not None
+        else None
+    )
+    for row in rows:
+        raw_config = row.get("algorithm_config_json")
+        try:
+            config = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(config, dict):
+            continue
+        try:
+            row_version = int(config.get("config_version"))
+        except (TypeError, ValueError):
+            continue
+        if row_version != source_version:
+            continue
+        try:
+            predicted_at_ms = int(row.get("predicted_at_ms") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cutoff_ms is not None and predicted_at_ms > cutoff_ms:
+            continue
+        try:
+            outcome_updated_at_ms = int(row.get("outcome_updated_at_ms") or 0)
+        except (TypeError, ValueError):
+            outcome_updated_at_ms = 0
+        if (
+            audit_created_at_ms is not None
+            and outcome_updated_at_ms > audit_created_at_ms
+        ):
+            continue
+        source_config = source_config or config
+        matching_rows.append(row)
+    if source_config is None or not matching_rows:
+        return {"available": False, "reason": "version_history_not_found"}
+
+    try:
+        original_sample_count = int(metadata.get("sample_count") or 0)
+    except (TypeError, ValueError):
+        original_sample_count = 0
+    if 0 < original_sample_count < len(matching_rows):
+        matching_rows = sorted(
+            matching_rows,
+            key=lambda row: (
+                int(row.get("outcome_updated_at_ms") or 0),
+                int(row.get("predicted_at_ms") or 0),
+            ),
+        )[:original_sample_count]
+
+    try:
+        from .prediction_ai_optimizer import build_prediction_ai_dataset
+        from .prediction_optimizer import PredictionOptimizationUnavailable
+
+        dataset = build_prediction_ai_dataset(
+            matching_rows,
+            source_config,
+            current_config_version=source_version,
+        )
+    except PredictionOptimizationUnavailable:
+        return {
+            "available": False,
+            "reason": "insufficient_version_history",
+            "sample_count": len(matching_rows),
+        }
+    return {
+        "available": True,
+        "provenance": "database_recomputed_for_legacy_trace",
+        "source_config_version": source_version,
+        "history_cutoff_ms": cutoff_ms,
+        "history": dataset.model_context["history"],
+    }
+
+
+_PREDICTION_AI_AUDIT_ACTIONS = (
+    "monitor.prediction_algorithm.ai_optimize",
+    "monitor.prediction_algorithm.ai_optimize_rejected",
+)
+
+
+def _prediction_ai_trace_out(
+    request: Request,
+    audit: AuditLog,
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    database_history_analysis = _prediction_ai_trace_database_analysis(
+        request,
+        metadata,
+        audit_created_at=audit.created_at,
+    )
+    return {
+        "audit_id": audit.id,
+        "status": metadata.get("status", "saved"),
+        "failure_category": metadata.get("failure_category"),
+        "optimizer_key": metadata.get("optimizer_key"),
+        "provider_code": metadata.get("provider"),
+        "model_name": metadata.get("model"),
+        "response_model": metadata.get("response_model"),
+        "system_fingerprint": metadata.get("system_fingerprint"),
+        "source_config_version": metadata.get("source_version"),
+        "saved_config_version": metadata.get("saved_version"),
+        "sample_count": metadata.get("sample_count"),
+        "history_start_ms": metadata.get("history_start_ms"),
+        "history_end_ms": metadata.get("history_end_ms"),
+        "optimized_horizons": metadata.get("optimized_horizons", []),
+        "summary": metadata.get("summary"),
+        "reasoning_steps": metadata.get("reasoning_steps", []),
+        "raw_model_output": metadata.get("raw_model_output"),
+        "model_attempts": metadata.get("model_attempts", []),
+        "normalization": metadata.get("normalization"),
+        "horizons": metadata.get("horizons", []),
+        "submitted_prompt": metadata.get("submitted_prompt"),
+        "database_history_analysis": database_history_analysis,
+        "usage": metadata.get("usage", {}),
+        "created_at": audit.created_at,
+    }
+
+
+@router.get("/monitor/prediction-algorithm/ai-history")
+def monitor_prediction_algorithm_ai_history(
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """List saved and rejected DeepSeek optimization audit records."""
+
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="administrator access required")
+
+    filters = (
+        AuditLog.action.in_(_PREDICTION_AI_AUDIT_ACTIONS),
+        AuditLog.resource_type == "admin_setting",
+        AuditLog.resource_id == battle.ALGORITHM_SETTING_KEY,
+    )
+    total = int(
+        db.scalar(select(func.count()).select_from(AuditLog).where(*filters)) or 0
+    )
+    audits = db.scalars(
+        select(AuditLog)
+        .where(*filters)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .limit(limit)
+    ).all()
+    items: list[dict[str, Any]] = []
+    for audit in audits:
+        metadata = audit.metadata_json
+        if not isinstance(metadata, dict):
+            continue
+        usage = metadata.get("usage")
+        usage = usage if isinstance(usage, Mapping) else {}
+        optimized_horizons = metadata.get("optimized_horizons")
+        items.append(
+            {
+                "audit_id": audit.id,
+                "status": metadata.get("status", "saved"),
+                "failure_category": metadata.get("failure_category"),
+                "source_config_version": metadata.get("source_version"),
+                "saved_config_version": metadata.get("saved_version"),
+                "model_name": metadata.get("model"),
+                "response_model": metadata.get("response_model"),
+                "sample_count": metadata.get("sample_count"),
+                "optimized_horizons": (
+                    optimized_horizons if isinstance(optimized_horizons, list) else []
+                ),
+                "summary": metadata.get("summary"),
+                "total_tokens": usage.get("total_tokens"),
+                "created_at": audit.created_at,
+            }
+        )
+    return {"items": items, "total": total, "limit": limit}
+
+
+@router.get("/monitor/prediction-algorithm/ai-history/{audit_id}")
+def monitor_prediction_algorithm_ai_history_detail(
+    audit_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return one historical DeepSeek trace with its version-level analysis."""
+
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="administrator access required")
+
+    audit = db.scalar(
+        select(AuditLog).where(
+            AuditLog.id == audit_id,
+            AuditLog.action.in_(_PREDICTION_AI_AUDIT_ACTIONS),
+            AuditLog.resource_type == "admin_setting",
+            AuditLog.resource_id == battle.ALGORITHM_SETTING_KEY,
+        )
+    )
+    metadata = audit.metadata_json if audit is not None else None
+    if audit is None or not isinstance(metadata, dict):
+        raise HTTPException(status_code=404, detail="AI analysis history record not found")
+    return _prediction_ai_trace_out(request, audit, metadata)
+
+
+@router.get("/monitor/prediction-algorithm/ai-trace")
+def monitor_prediction_algorithm_ai_trace(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return the auditable prompt and rationale for the current AI-saved version."""
+
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="administrator access required")
+
+    setting = db.get(AdminSetting, battle.ALGORITHM_SETTING_KEY)
+    current_version = int(setting.version if setting is not None else 0)
+    audits = db.scalars(
+        select(AuditLog)
+        .where(
+            AuditLog.action.in_(_PREDICTION_AI_AUDIT_ACTIONS),
+            AuditLog.resource_type == "admin_setting",
+            AuditLog.resource_id == battle.ALGORITHM_SETTING_KEY,
+        )
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .limit(20)
+    ).all()
+    audit = None
+    metadata = None
+    for candidate in audits:
+        candidate_metadata = candidate.metadata_json
+        if not isinstance(candidate_metadata, dict):
+            continue
+        is_saved_current = candidate_metadata.get("saved_version") == current_version
+        is_rejected_current = (
+            candidate_metadata.get("status") == "rejected"
+            and candidate_metadata.get("source_version") == current_version
+        )
+        if is_saved_current or is_rejected_current:
+            audit = candidate
+            metadata = candidate_metadata
+            break
+    if audit is None or metadata is None:
+        raise HTTPException(
+            status_code=404,
+            detail="current prediction algorithm version has no DeepSeek trace",
+        )
+    return _prediction_ai_trace_out(request, audit, metadata)
+
+
 @router.put("/monitor/prediction-algorithm")
 def update_monitor_prediction_algorithm(
     payload: PredictionAlgorithmUpdate,
@@ -1272,8 +1797,23 @@ def update_monitor_prediction_algorithm(
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="administrator access required")
     _require_expected_user(request, user)
+    expected_version = request.headers.get("X-QuantDesk-Algorithm-Version", "").strip()
     value = payload.model_dump(by_alias=True)
     setting = db.get(AdminSetting, battle.ALGORITHM_SETTING_KEY)
+    current_version = int(setting.version if setting is not None else 0)
+    if expected_version:
+        try:
+            parsed_expected_version = int(expected_version)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="expected algorithm version is invalid",
+            ) from None
+        if parsed_expected_version != current_version:
+            raise HTTPException(
+                status_code=409,
+                detail="prediction algorithm changed; reload it before saving",
+            )
     if setting is None:
         setting = AdminSetting(
             key=battle.ALGORITHM_SETTING_KEY,
@@ -1324,11 +1864,15 @@ def monitor_prediction_history(
         raise HTTPException(status_code=422, detail="start_ms and end_ms must be provided together")
     if start_ms is not None and end_ms is not None:
         if period is not None:
-            raise HTTPException(status_code=422, detail="period cannot be combined with a time range")
+            raise HTTPException(
+                status_code=422, detail="period cannot be combined with a time range"
+            )
         if start_ms >= end_ms:
             raise HTTPException(status_code=422, detail="prediction history time range is invalid")
         if end_ms - start_ms > 7 * 24 * 60 * 60 * 1_000:
-            raise HTTPException(status_code=422, detail="prediction history time range exceeds 7 days")
+            raise HTTPException(
+                status_code=422, detail="prediction history time range exceeds 7 days"
+            )
         predicted_after_ms = start_ms
         predicted_before_ms = end_ms
     else:
@@ -1348,6 +1892,18 @@ def monitor_prediction_history(
         predicted_before_ms=predicted_before_ms,
         timezone_offset_minutes=timezone_offset_minutes,
     )
+
+
+@router.get("/monitor/prediction-history/{prediction_id}/algorithm")
+def monitor_prediction_algorithm_snapshot(
+    prediction_id: uuid.UUID,
+    request: Request,
+    _: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    snapshot = _monitor(request).prediction_algorithm_snapshot(str(prediction_id))
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="prediction history record not found")
+    return snapshot
 
 
 def _matching_strategies(db: Session, user_id: int) -> dict[str, list[dict[str, Any]]]:
@@ -1428,8 +1984,10 @@ def update_monitor_opportunity_preference(
         notify_enabled = False
     else:
         new_state = "watching" if payload.action == "watch" else "ignored"
-        should_alert = new_state == "watching" and payload.notify_enabled and (
-            state is None or state.state != "watching" or not state.notify_enabled
+        should_alert = (
+            new_state == "watching"
+            and payload.notify_enabled
+            and (state is None or state.state != "watching" or not state.notify_enabled)
         )
         if state is None:
             state = UserOpportunityState(
@@ -1799,15 +2357,17 @@ def create_paper_account(
         "take_profit_pct": risk.get("take_profit_pct", 5),
         "max_holding_bars": risk.get("max_holding_bars", 12),
         "signal_mode": (
-            "strategy_event_v2"
-            if strategy.strategy_kind == "full_strategy"
-            else "legacy_score_v1"
+            "strategy_event_v2" if strategy.strategy_kind == "full_strategy" else "legacy_score_v1"
         ),
     }
     for key in ("leverage", "max_positions", "position_size_pct", "margin_cap"):
         value = getattr(payload, key)
         if value is not None:
             config[key] = value
+    # The paper leverage field is a maximum request, not a promise that every
+    # entry will use it.  Persist the same visible value as the risk ceiling so
+    # the shared sizing policy does not apply its unrelated 10x live default.
+    config["risk_max_leverage"] = min(int(config["leverage"]), 20)
     account = PaperAccount(
         user_id=user.id,
         strategy_id=strategy.id,
@@ -1906,6 +2466,90 @@ def update_paper_account_status(
     return _paper_account_out(account)
 
 
+@router.put("/paper/accounts/{account_id}/strategy")
+def update_paper_account_strategy(
+    account_id: str,
+    payload: PaperAccountStrategyUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Atomically replace the paper strategy snapshot and future-entry limits."""
+
+    _require_expected_user(request, user)
+    account = _paper_account_record(db, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    strategy = get_user_strategy(db, user.id, payload.strategy_id)
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="active strategy not found")
+    revision = db.scalar(
+        select(StrategyRevision).where(
+            StrategyRevision.user_strategy_id == strategy.id,
+            StrategyRevision.user_id == user.id,
+            StrategyRevision.version == strategy.version,
+        )
+    )
+    if revision is None:
+        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+
+    risk = dict(strategy.risk_defaults_json or {})
+    config = dict(account.config_json or {})
+    config.update(
+        {
+            "leverage": payload.leverage,
+            "risk_max_leverage": payload.leverage,
+            "max_positions": payload.max_positions,
+            "position_size_pct": payload.position_size_pct,
+            "margin_cap": payload.margin_cap,
+            "fee_bps": risk.get("fee_bps", config.get("fee_bps", 5)),
+            "slippage_bps": risk.get("slippage_bps", config.get("slippage_bps", 3)),
+            "stop_loss_pct": risk.get("stop_loss_pct", config.get("stop_loss_pct", 3)),
+            "take_profit_pct": risk.get("take_profit_pct", config.get("take_profit_pct", 5)),
+            "max_holding_bars": risk.get("max_holding_bars", config.get("max_holding_bars", 12)),
+            "signal_mode": (
+                "strategy_event_v2"
+                if strategy.strategy_kind == "full_strategy"
+                else "legacy_score_v1"
+            ),
+        }
+    )
+    account.strategy_id = strategy.id
+    account.config_json = config
+    account.strategy_snapshot_json = _execution_strategy_snapshot(strategy)
+
+    deployment = db.scalar(
+        select(StrategyDeployment).where(
+            StrategyDeployment.user_id == user.id,
+            StrategyDeployment.mode == "paper",
+            StrategyDeployment.target_account_id == account.id,
+        )
+    )
+    if deployment is None:
+        raise HTTPException(status_code=409, detail="paper deployment is unavailable")
+    deployment.strategy_id = strategy.id
+    deployment.strategy_revision_id = revision.id
+    deployment.risk_override_json = {
+        "leverage": payload.leverage,
+        "risk_max_leverage": payload.leverage,
+        "max_positions": payload.max_positions,
+        "position_size_pct": payload.position_size_pct,
+        "margin_cap": payload.margin_cap,
+    }
+    deployment.updated_at = utcnow()
+    _audit(
+        db,
+        request,
+        "paper.account.strategy.update",
+        user.id,
+        "paper_account",
+        account.public_id,
+    )
+    db.commit()
+    db.refresh(account)
+    return _paper_account_out(account)
+
+
 @router.get("/paper")
 def paper_account(
     request: Request,
@@ -1917,9 +2561,7 @@ def paper_account(
     account = _paper_account_record(db, user.id, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="paper account not found")
-    return _paper_response(
-        _monitor(request).paper(user.id, account.id, timezone_offset_minutes)
-    )
+    return _paper_response(_monitor(request).paper(user.id, account.id, timezone_offset_minutes))
 
 
 @router.get("/dashboard/performance", response_model=DashboardPerformanceOut)
@@ -2017,11 +2659,7 @@ def create_live_account(
     if int(existing_count or 0) >= 10:
         raise HTTPException(status_code=409, detail="live account limit reached")
     strategy = get_user_strategy(db, user.id, payload.strategy_id)
-    if (
-        strategy is None
-        or strategy.status != "active"
-        or strategy.lifecycle_status != "published"
-    ):
+    if strategy is None or strategy.status != "active" or strategy.lifecycle_status != "published":
         raise HTTPException(status_code=404, detail="published active strategy not found")
     revision = db.scalar(
         select(StrategyRevision).where(
@@ -2146,9 +2784,7 @@ def arm_live_account(
                 status_code=409,
                 detail="实盘启用失败：当前风险模型不支持 Binance 统一账户，请使用标准 USD-M 合约账户。",
             )
-        position_mode = request.app.state.binance_trading_client.position_mode(
-            api_key, api_secret
-        )
+        position_mode = request.app.state.binance_trading_client.position_mode(api_key, api_secret)
         eligible_symbols: list[str] = []
         for symbol in symbols:
             try:
@@ -2164,7 +2800,9 @@ def arm_live_account(
                 detail="实盘启用失败：当前 TradFi 品种池没有可交易的 Binance USD-M 合约。",
             )
     except SecurityError:
-        raise HTTPException(status_code=409, detail="Binance credentials cannot be decrypted") from None
+        raise HTTPException(
+            status_code=409, detail="Binance credentials cannot be decrypted"
+        ) from None
     except BinanceAccountClientError as exc:
         reason = {
             "authentication": "API 密钥认证失败或没有合约交易权限",
@@ -2176,9 +2814,7 @@ def arm_live_account(
             "invalid_response": "Binance 返回了无法识别的数据",
             "rejected": "Binance 拒绝了预检请求",
         }.get(exc.category, exc.category)
-        raise HTTPException(
-            status_code=409, detail=f"实盘启用失败：{reason}。"
-        ) from None
+        raise HTTPException(status_code=409, detail=f"实盘启用失败：{reason}。") from None
     account = _lock_and_revalidate_live_arm(
         db,
         user_id=user.id,
@@ -2319,11 +2955,7 @@ def update_live_account_strategy(
             detail="resolve managed orders before adjusting the live strategy",
         )
     strategy = get_user_strategy(db, user.id, payload.strategy_id)
-    if (
-        strategy is None
-        or strategy.status != "active"
-        or strategy.lifecycle_status != "published"
-    ):
+    if strategy is None or strategy.status != "active" or strategy.lifecycle_status != "published":
         raise HTTPException(status_code=404, detail="published active strategy not found")
     revision = db.scalar(
         select(StrategyRevision).where(
@@ -2349,9 +2981,7 @@ def update_live_account_strategy(
             **risk_config,
             "stop_loss_pct": max(0.1, min(float(risk.get("stop_loss_pct", 3)), 20)),
             "take_profit_pct": max(0.1, min(float(risk.get("take_profit_pct", 5)), 50)),
-            "max_holding_bars": max(
-                0, min(int(risk.get("max_holding_bars", 12)), 1_000)
-            ),
+            "max_holding_bars": max(0, min(int(risk.get("max_holding_bars", 12)), 1_000)),
         }
     )
     for stale_key in (
@@ -2485,10 +3115,15 @@ def live_trading_dashboard(
                 position["managed_by_strategy"] = False
             result.append(position)
         return result
+
     if not user.binance_credentials_configured:
         return {
             "live_account": account_out,
-            "binance": {"configured": False, "connected": False, "error_category": "not_configured"},
+            "binance": {
+                "configured": False,
+                "connected": False,
+                "error_category": "not_configured",
+            },
             "positions": [],
             "open_orders": [],
             "order_intents": intent_items,
@@ -2633,9 +3268,7 @@ def create_backtest(
             if strategy.get("strategy_kind") == "full_strategy":
                 spec = strategy.get("spec")
                 if not isinstance(spec, dict):
-                    raise HTTPException(
-                        status_code=409, detail="full strategy spec is unavailable"
-                    )
+                    raise HTTPException(status_code=409, detail="full strategy spec is unavailable")
                 raw_result = repository.run_full_strategy(config, spec)
             else:
                 raw_result = repository.run(config)

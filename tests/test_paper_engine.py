@@ -834,6 +834,13 @@ def test_paper_max_positions_is_hard_capped_at_twenty() -> None:
     assert paper._config(account)["max_positions"] == 20
 
 
+def test_paper_visible_leverage_is_the_policy_ceiling_for_legacy_accounts() -> None:
+    account = _account()
+    account["config_json"]["risk_max_leverage"] = 10
+
+    assert paper._paper_risk_policy(account).max_leverage == 20
+
+
 def test_legacy_signal_requires_a_closed_recent_four_hour_bar() -> None:
     account = _account()
     policy = paper._paper_risk_policy(account)

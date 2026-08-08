@@ -409,7 +409,7 @@ def _validate_openai_settings(api_key: str, model: str, timeout_seconds: float) 
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
         or not math.isfinite(float(timeout_seconds))
-        or not 1 <= float(timeout_seconds) <= 60
+        or not 1 <= float(timeout_seconds) <= 300
     ):
         raise StrategyAiError("not_configured")
 
