@@ -32,7 +32,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   outline: 1px solid var(--brand);
   outline-offset: 2px;
 }
-.eyebrow { color: var(--brand); font-size: 9px; font-weight: 700; letter-spacing: .18em; }
+.eyebrow { color: var(--brand); font-size: 14.4px; font-weight: 700; letter-spacing: .18em; }
 
 /* Authentication */
 .auth-boot { background: var(--bg); }
@@ -63,21 +63,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   right: 44px;
   top: 43px;
   color: #70766e;
-  font: 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  font: 16px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
   letter-spacing: .12em;
 }
 .login-visual::after { display: none; }
-.brand-mark { font-size: 14px; letter-spacing: .12em; }
-.login-copy h1 { max-width: 760px; margin: 20px 0 24px; font-size: clamp(46px, 6vw, 82px); font-weight: 500; line-height: 1.02; }
-.login-copy p { max-width: 590px; color: #939a90; font-size: 15px; line-height: 1.8; }
-.trust-row { color: #8e958b; font-size: 11px; }
+.brand-mark { font-size: 22.4px; letter-spacing: .12em; }
+.login-copy h1 { max-width: 760px; margin: 20px 0 24px; font-size: clamp(73.6px, 9.6vw, 131.2px); font-weight: 500; line-height: 1.02; }
+.login-copy p { max-width: 590px; color: #939a90; font-size: 24px; line-height: 1.8; }
+.trust-row { color: #8e958b; font-size: 17.6px; }
 .trust-row i { width: 5px; height: 5px; background: var(--brand); box-shadow: none; }
 .login-panel { background: #121411; border-left-color: var(--line); }
-.auth-heading h2 { font-size: 26px; font-weight: 500; }
+.auth-heading h2 { font-size: 41.6px; font-weight: 500; }
 .tabs { border-color: var(--line); border-radius: 2px; background: #0b0d0b; }
 .tabs button { border-radius: 1px !important; }
 .tabs button.active { background: var(--panel-2); box-shadow: none; }
-form label { color: #aeb4aa; font-size: 11px; font-weight: 500; }
+form label { color: #aeb4aa; font-size: 17.6px; font-weight: 500; }
 form input, form select, form textarea {
   border-color: #343932;
   color: var(--text);
@@ -120,9 +120,9 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
   border: 0;
   border-right: 1px solid var(--line);
 }
-.sidebar-brand > span { width: 30px; height: 30px; font-size: 12px; }
-.sidebar-brand strong { font-size: 12px; font-weight: 700; letter-spacing: .1em; }
-.sidebar-brand small { color: #6f756c; font-size: 8px; letter-spacing: .13em; }
+.sidebar-brand > span { width: 30px; height: 30px; font-size: 19.2px; }
+.sidebar-brand strong { font-size: 19.2px; font-weight: 700; letter-spacing: .1em; }
+.sidebar-brand small { color: #6f756c; font-size: 12.8px; letter-spacing: .13em; }
 .side-nav {
   min-width: 0;
   display: flex;
@@ -146,7 +146,7 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
   border-radius: 0;
   border-bottom: 2px solid transparent;
   color: #878e84;
-  font-size: 11px;
+  font-size: 17.6px;
 }
 .nav-item > span { display: none; }
 .nav-item > i {
@@ -155,7 +155,7 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
   border: 1px solid #343932;
   border-radius: 2px;
   color: #70766d;
-  font-size: 7px;
+  font-size: 11.2px;
 }
 .nav-item:hover { color: var(--text); background: rgba(255, 255, 255, .025); }
 .nav-item.active { color: var(--text); border-bottom-color: var(--brand); background: var(--terminal-soft); }
@@ -167,9 +167,9 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
   border: 0;
   border-left: 1px solid var(--line);
 }
-.avatar { width: 30px; height: 30px; border: 1px solid #3a3f37; border-radius: 50%; color: var(--brand); background: #181b17; font-size: 10px; }
-.sidebar-account strong { font-size: 11px; font-weight: 500; }
-.sidebar-account small { color: #6c7369; font-size: 8px; }
+.avatar { width: 30px; height: 30px; border: 1px solid #3a3f37; border-radius: 50%; color: var(--brand); background: #181b17; font-size: 16px; }
+.sidebar-account strong { font-size: 17.6px; font-weight: 500; }
+.sidebar-account small { color: #6c7369; font-size: 12.8px; }
 .sidebar-account button { color: #858c82; }
 .theme-toggle {
   min-height: 30px;
@@ -182,8 +182,8 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
   background: #151814 !important;
 }
 .theme-toggle:hover { border-color: var(--brand) !important; color: var(--text) !important; }
-.theme-toggle span { font-size: 12px; }
-.theme-toggle b { font-size: 9px; font-weight: 500; }
+.theme-toggle span { font-size: 19.2px; }
+.theme-toggle b { font-size: 14.4px; font-weight: 500; }
 .login-theme-toggle {
   position: fixed;
   right: 20px;
@@ -197,15 +197,15 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
 
 /* Page headers and reusable surfaces */
 .page-heading { align-items: flex-end; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
-.page-heading h1 { margin: 6px 0 4px; font-size: clamp(25px, 2.4vw, 34px); font-weight: 500; letter-spacing: -.035em; }
-.page-heading p { color: #7e857b; font-size: 11px; }
+.page-heading h1 { margin: 6px 0 4px; font-size: clamp(40px, 3.84vw, 54.4px); font-weight: 500; letter-spacing: -.035em; }
+.page-heading p { color: #7e857b; font-size: 17.6px; }
 .live-lock {
   padding: 6px 9px;
   border-color: #4a4231;
   border-radius: 2px;
   color: var(--warning);
   background: rgba(215, 181, 109, .055);
-  font-size: 9px;
+  font-size: 14.4px;
 }
 .live-lock i, .status-dot { width: 5px; height: 5px; }
 .summary-grid, .orders-summary { gap: 1px; border: 1px solid var(--line); background: var(--line); }
@@ -217,9 +217,9 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
 }
 .summary-grid .metric-card, .orders-summary .metric-card { border: 0; }
 .metric-card { min-height: 118px; padding: 17px 18px; }
-.metric-card span { color: #868d83; font-size: 10px; }
-.metric-card strong { font-size: 21px; font-weight: 500; }
-.metric-card small { color: #666d64; font-size: 9px; }
+.metric-card span { color: #868d83; font-size: 16px; }
+.metric-card strong { font-size: 33.6px; font-weight: 500; }
+.metric-card small { color: #666d64; font-size: 14.4px; }
 .account-state, .performance-source, .orders-count-badge, .settings-security-badge {
   border-radius: 2px;
   font-weight: 600;
@@ -232,7 +232,7 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
 }
 .account-card-action { border-color: #4b465f; border-radius: 2px; color: var(--brand); background: var(--terminal-soft); }
 .performance-heading { margin-top: 26px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
-.performance-heading h2 { font-size: 21px; font-weight: 500; }
+.performance-heading h2 { font-size: 33.6px; font-weight: 500; }
 .performance-heading p { color: #71786f; }
 .performance-heading-actions button, .calendar-controls button { border-color: var(--line); border-radius: 2px; color: #a0a79d; background: #10120f; }
 .performance-columns { gap: 1px; border: 1px solid var(--line); background: var(--line); }
@@ -250,7 +250,7 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
 }
 .performance-metric::after, .performance-metric.primary-performance::before, .performance-metric.live-primary::before { display: none; }
 .performance-metric.primary-performance, .performance-metric.live-primary { border-color: #4b465f; background: #181a1a; }
-.performance-metric > strong { color: #e7eae4; font-size: 21px; font-weight: 500; }
+.performance-metric > strong { color: #e7eae4; font-size: 33.6px; font-weight: 500; }
 .performance-metric > strong.profit, .month-summary > strong.profit { color: #71d7a8; }
 .returns-calendar-card { border-color: var(--line); border-radius: 2px; background: #121411; box-shadow: none; }
 .calendar-heading, .calendar-footer { border-color: var(--line); }
@@ -292,7 +292,7 @@ form input:focus, form select:focus, form textarea:focus { border-color: var(--b
 .strategy-center-shell { --strategy-surface: #121411; --strategy-surface-strong: #171a16; --strategy-line: #2b2f29; gap: 14px; }
 .strategy-center-head { min-height: 82px; }
 .strategy-kicker, .strategy-editor-head > div > span, .strategy-ai-panel > header > div > span { color: var(--brand); }
-.strategy-title-line h1 { font-size: clamp(26px, 2.6vw, 35px); font-weight: 500; }
+.strategy-title-line h1 { font-size: clamp(41.6px, 4.16vw, 56px); font-weight: 500; }
 .strategy-title-mark, .strategy-db-badge, .strategy-section-tabs, .strategy-overview article, .strategy-library-card, .strategy-card, .strategy-create-button, .strategy-refresh-button {
   border-radius: 2px !important;
 }

@@ -193,7 +193,7 @@ def test_full_strategy_signal_reads_declared_timeframes(
     monkeypatch.setattr(
         paper,
         "_record_full_strategy_decision",
-        lambda account, symbol, spec, decision: recorded.append(
+        lambda account, symbol, spec, decision, snapshot=None: recorded.append(
             (symbol, decision.decision)
         )
         or True,
@@ -261,6 +261,99 @@ def test_legacy_signal_reads_its_frozen_timeframe(
     assert atr is None
     assert signal_time == 2 * 3_600
     assert "周期：1h" in basis
+
+
+@pytest.mark.parametrize(
+    ("directions", "expected_direction", "expected_matched"),
+    [
+        ((1, 1), 1, 2),
+        ((-1, -1), -1, 2),
+        ((1, 0), 0, 1),
+        ((1, -1), 0, 1),
+    ],
+)
+def test_combined_paper_strategies_require_all_same_direction(
+    monkeypatch: pytest.MonkeyPatch,
+    directions: tuple[int, int],
+    expected_direction: int,
+    expected_matched: int,
+) -> None:
+    account = _account()
+    snapshots = [
+        {
+            "public_id": f"00000000-0000-0000-0000-0000000000{index}",
+            "name": f"策略 {index}",
+            "engine_key": "multi_factor",
+            "timeframe": "1h",
+        }
+        for index in (21, 22)
+    ]
+    account["strategy_snapshot_json"] = {
+        **snapshots[0],
+        "combination_mode": "all",
+        "strategy_snapshots": snapshots,
+    }
+
+    def strategy_signal(account, symbol, snapshot=None):
+        del account, symbol
+        index = snapshots.index(snapshot)
+        return (
+            directions[index],
+            2.0 + index,
+            [f"策略：{snapshot['name']}"],
+            1_700_000_000 + index * 60,
+            {"score": index + 1},
+        )
+
+    monkeypatch.setattr(paper, "_strategy_signal", strategy_signal)
+
+    direction, atr, basis, signal_time, evidence = paper._paper_strategy_signal(
+        account, "TESTUSDT"
+    )
+
+    assert direction == expected_direction
+    assert atr == pytest.approx(2.0)
+    assert signal_time == 1_700_000_060
+    assert evidence["combination_mode"] == "all"
+    assert evidence["required_count"] == 2
+    assert evidence["matched_count"] == expected_matched
+    assert [item["direction"] for item in evidence["strategy_signals"]] == list(
+        directions
+    )
+    assert evidence["combination_key"].count("|") == 1
+    assert basis[0] == f"组合条件：{expected_matched}/2 策略同向满足（全部满足才开仓）"
+
+
+def test_combined_strategy_freshness_requires_every_component() -> None:
+    account = _account()
+    snapshots = [
+        {
+            "public_id": f"00000000-0000-0000-0000-0000000000{index}",
+            "name": f"策略 {index}",
+            "engine_key": "multi_factor",
+            "timeframe": "1h",
+        }
+        for index in (31, 32)
+    ]
+    account["strategy_snapshot_json"] = {
+        **snapshots[0],
+        "combination_mode": "all",
+        "strategy_snapshots": snapshots,
+    }
+    now = 1_700_010_000
+    recent_bar = now - 90 * 60
+    policy = paper._paper_risk_policy(account)
+    evidence = {
+        "strategy_signals": [
+            {"direction": 1, "signal_time": recent_bar, "evidence": {}},
+            {"direction": 1, "signal_time": recent_bar, "evidence": {}},
+        ]
+    }
+
+    assert paper._signal_is_fresh(account, recent_bar, evidence, now, policy)
+
+    evidence["strategy_signals"][1]["signal_time"] = now - 8 * 60 * 60
+    assert not paper._signal_is_fresh(account, recent_bar, evidence, now, policy)
 
 
 def test_legacy_paper_score_mode_restores_persistent_threshold_signal(
@@ -834,6 +927,13 @@ def test_paper_max_positions_is_hard_capped_at_twenty() -> None:
     assert paper._config(account)["max_positions"] == 20
 
 
+def test_paper_leverage_is_hard_capped_at_twenty() -> None:
+    account = _account()
+    account["config_json"]["leverage"] = 50
+
+    assert paper._config(account)["leverage"] == 20
+
+
 def test_paper_visible_leverage_is_the_policy_ceiling_for_legacy_accounts() -> None:
     account = _account()
     account["config_json"]["risk_max_leverage"] = 10
@@ -894,7 +994,7 @@ def test_full_strategy_signal_honors_its_valid_until() -> None:
     assert not paper._signal_is_fresh(account, now - 60, {}, now, policy)
 
 
-def test_full_strategy_risk_proposal_can_only_tighten_account_policy() -> None:
+def test_full_strategy_risk_proposal_keeps_fixed_paper_leverage() -> None:
     account = _account()
     account["strategy_snapshot_json"]["strategy_kind"] = "full_strategy"
     base = paper._paper_risk_policy(account)
@@ -925,7 +1025,7 @@ def test_full_strategy_risk_proposal_can_only_tighten_account_policy() -> None:
     assert looser.max_leverage == base.max_leverage
     assert tighter.risk_per_trade_pct == paper.Decimal("0.2")
     assert tighter.max_margin_per_trade_pct == paper.Decimal("1")
-    assert tighter.max_leverage == 3
+    assert tighter.max_leverage == base.max_leverage
 
 
 def test_full_strategy_uses_its_fixed_stop_and_target_distances() -> None:
@@ -1042,7 +1142,7 @@ def test_correlated_group_cap_is_applied_to_paper_entries(
     paper._tick_account(account, prices, now)
 
 
-def test_atr_risk_sizing_reduces_leverage_and_fixed_margin_exposure(
+def test_atr_risk_sizing_keeps_configured_leverage_and_limits_risk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     account = _account()
@@ -1061,10 +1161,10 @@ def test_atr_risk_sizing_reduces_leverage_and_fixed_margin_exposure(
     assert opened is True
     params = next(params for sql, params in writes if "INSERT INTO paper_positions" in sql)
     quantity, margin, leverage, stop = params[4], params[6], params[7], params[8]
-    assert leverage == 5
+    assert leverage == 20
     assert stop == pytest.approx(85)
     assert quantity * (100 - stop) == pytest.approx(50)
-    assert margin == pytest.approx(66.6666667)
+    assert margin == pytest.approx(16.6666667)
     assert margin < 10_000 * 0.10
 
 

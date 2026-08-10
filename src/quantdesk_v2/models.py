@@ -55,6 +55,13 @@ class News(Base):
     __tablename__ = "news"
     __table_args__ = (
         Index("ix_news_ts", "ts"),
+        Index("ix_news_ai_pending_ts", "ai_analyzed_at", "ts"),
+        Index(
+            "ix_news_ai_claim_pending",
+            "ai_claim_batch_id",
+            "ai_analyzed_at",
+            "ts",
+        ),
         Index("uq_news_source_link_hash", "source_link_hash", unique=True),
         {
             "comment": "系统共享的新闻、翻译、情绪和摘要数据",
@@ -80,6 +87,9 @@ class News(Base):
     related_us_stocks: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON, comment="AI 识别的关联美股、相关度与影响方向"
     )
+    related_industries: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, comment="AI 识别的关联行业、相关度与影响方向"
+    )
     ai_sentiment: Mapped[str | None] = mapped_column(
         String(32), comment="AI 语义研判情绪"
     )
@@ -100,6 +110,18 @@ class News(Base):
     ai_batch_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("news_ai_batches.id", ondelete="SET NULL"), comment="AI 分析批次"
     )
+    ai_claim_batch_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey(
+            "news_ai_batches.id",
+            ondelete="SET NULL",
+            name="fk_news_ai_claim_batch_id_news_ai_batches",
+        ),
+        comment="当前原子领取该新闻的 AI 分析批次",
+    )
+    ai_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="AI 分析领取时间（UTC）"
+    )
     ai_analyzed_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="AI 分析完成时间（UTC）"
     )
@@ -117,7 +139,10 @@ class NewsAiBatch(Base):
             "status IN ('pending', 'running', 'completed', 'partial', 'failed')",
             name="valid_status",
         ),
-        CheckConstraint("requested_count IN (300, 500)", name="valid_requested_count"),
+        CheckConstraint(
+            "requested_count IN (10, 300, 500)",
+            name="valid_requested_count_v2",
+        ),
         CheckConstraint(
             "selected_count >= 0 AND processed_count >= 0 AND failed_count >= 0",
             name="nonnegative_counts",
@@ -357,6 +382,388 @@ class AiModelConfig(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="ai_model_configs")
+
+
+class AiMonitorConfig(Base):
+    __tablename__ = "ai_monitor_configs"
+    __table_args__ = (
+        CheckConstraint(
+            "news_interval_minutes BETWEEN 5 AND 1440",
+            name="valid_news_interval",
+        ),
+        CheckConstraint(
+            "opportunity_interval_minutes BETWEEN 5 AND 1440",
+            name="valid_opportunity_interval",
+        ),
+        CheckConstraint(
+            "news_lookback_hours BETWEEN 1 AND 168",
+            name="valid_news_lookback",
+        ),
+        CheckConstraint("timeframe IN ('15m', '1h', '4h')", name="valid_timeframe"),
+        CheckConstraint(
+            "minimum_news_confidence BETWEEN 0 AND 1",
+            name="valid_news_confidence",
+        ),
+        CheckConstraint(
+            "minimum_news_mentions BETWEEN 1 AND 20",
+            name="valid_news_mentions",
+        ),
+        Index("ix_ai_monitor_configs_enabled", "enabled", "updated_at"),
+        {
+            "comment": "用户隔离的 AI 新闻与技术指标机会扫描配置",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        comment="所属用户 ID",
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, comment="是否启用后台周期分析"
+    )
+    news_interval_minutes: Mapped[int] = mapped_column(
+        Integer, default=15, nullable=False, comment="AI 分析最新 10 条新新闻的间隔分钟数"
+    )
+    opportunity_interval_minutes: Mapped[int] = mapped_column(
+        Integer, default=15, nullable=False, comment="新闻与指标组合扫描间隔分钟数"
+    )
+    news_lookback_hours: Mapped[int] = mapped_column(
+        Integer, default=24, nullable=False, comment="机会扫描采用的新闻回看小时数"
+    )
+    timeframe: Mapped[str] = mapped_column(
+        String(8), default="1h", nullable=False, comment="技术指标扫描周期"
+    )
+    indicator_keys_json: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, comment="全部需要满足的技术指标稳定键"
+    )
+    monitor_symbols_json: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, comment="机会扫描品种白名单；空数组表示全部可用品种"
+    )
+    minimum_news_confidence: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), default=Decimal("0.6000"), nullable=False, comment="新闻最低置信度"
+    )
+    minimum_news_mentions: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False, comment="候选美股至少关联新闻数"
+    )
+    last_news_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="最近一次新闻分析启动时间（UTC）"
+    )
+    last_opportunity_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="最近一次机会扫描启动时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="配置创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="配置最后更新时间（UTC）",
+    )
+
+
+class AiMonitorRun(Base):
+    __tablename__ = "ai_monitor_runs"
+    __table_args__ = (
+        CheckConstraint("run_type IN ('news', 'opportunity')", name="valid_run_type"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'partial', 'failed', 'skipped')",
+            name="valid_status",
+        ),
+        UniqueConstraint("public_id", name="uq_ai_monitor_runs_public_id"),
+        UniqueConstraint(
+            "id",
+            "user_id",
+            name="uq_ai_monitor_runs_id_user_id",
+        ),
+        UniqueConstraint(
+            "active_user_id",
+            "run_type",
+            name="uq_ai_monitor_runs_active_user_type",
+        ),
+        Index("ix_ai_monitor_runs_user_created", "user_id", "created_at"),
+        Index("ix_ai_monitor_runs_user_status", "user_id", "status", "updated_at"),
+        {
+            "comment": "AI 监控新闻分析与机会发现的用户级执行记录",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="执行记录主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="执行记录公开 UUID"
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属用户 ID",
+    )
+    run_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="news 新闻分析或 opportunity 机会扫描"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, comment="执行状态"
+    )
+    active_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        Computed(
+            "CASE WHEN status IN ('pending', 'running') THEN user_id ELSE NULL END",
+            persisted=True,
+        ),
+        comment="活动任务唯一性生成列；非活动任务为空",
+    )
+    news_batch_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("news_ai_batches.id", ondelete="SET NULL"),
+        comment="关联的新闻 AI 批次 UUID",
+    )
+    input_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="本轮输入新闻或候选数"
+    )
+    matched_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="本轮成功分析或发现数量"
+    )
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="执行摘要和脱敏统计"
+    )
+    error_message: Mapped[str | None] = mapped_column(
+        Text, comment="面向用户的脱敏错误摘要"
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="开始时间（UTC）"
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="完成时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="最后更新时间（UTC）",
+    )
+
+
+class AiMonitorOpportunity(Base):
+    __tablename__ = "ai_monitor_opportunities"
+    __table_args__ = (
+        CheckConstraint("direction IN ('long', 'short')", name="valid_direction"),
+        CheckConstraint(
+            "status IN ('candidate', 'discovered', 'expired', 'dismissed')",
+            name="valid_status",
+        ),
+        UniqueConstraint("public_id", name="uq_ai_monitor_opportunities_public_id"),
+        UniqueConstraint("dedup_key", name="uq_ai_monitor_opportunities_dedup_key"),
+        UniqueConstraint(
+            "id",
+            "user_id",
+            name="uq_ai_monitor_opportunities_id_user_id",
+        ),
+        ForeignKeyConstraint(
+            ["analysis_run_id", "user_id"],
+            ["ai_monitor_runs.id", "ai_monitor_runs.user_id"],
+            name="fk_ai_monitor_opportunities_run_user",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_ai_monitor_opportunities_user_status_score",
+            "user_id",
+            "status",
+            "combined_score",
+        ),
+        Index("ix_ai_monitor_opportunities_user_created", "user_id", "created_at"),
+        {
+            "comment": "由 AI 新闻与用户配置指标共同确认的美股机会",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="AI 机会主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="AI 机会公开 UUID"
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属用户 ID",
+    )
+    analysis_run_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        comment="产生该机会的执行记录",
+    )
+    symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="标准美股代码，例如 AAPL"
+    )
+    contract_symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="对应的 Binance TradFi 合约代码"
+    )
+    direction: Mapped[str] = mapped_column(
+        String(12), nullable=False, comment="机会方向"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="discovered", nullable=False, comment="机会状态"
+    )
+    timeframe: Mapped[str] = mapped_column(
+        String(8), nullable=False, comment="技术指标确认周期"
+    )
+    news_score: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), nullable=False, comment="新闻侧置信评分（0 到 100）"
+    )
+    indicator_score: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), nullable=False, comment="技术指标满足评分（0 到 100）"
+    )
+    combined_score: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), nullable=False, comment="新闻与指标组合评分（0 到 100）"
+    )
+    matched_indicator_keys_json: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, comment="本轮全部满足的指标键"
+    )
+    news_ids_json: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, comment="本轮采用的新闻稳定 ID"
+    )
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="新闻、技术指标与行情证据"
+    )
+    dedup_key: Mapped[str] = mapped_column(
+        String(191), nullable=False, comment="相同新闻与行情输入的幂等去重键"
+    )
+    discovered_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="发现时间（UTC）"
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="机会失效时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="最后更新时间（UTC）",
+    )
+
+
+class AiMonitorPrediction(Base):
+    __tablename__ = "ai_monitor_predictions"
+    __table_args__ = (
+        CheckConstraint("direction IN ('long', 'short')", name="valid_direction"),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'unavailable')",
+            name="valid_status",
+        ),
+        CheckConstraint(
+            "result IS NULL OR result IN ('win', 'loss', 'flat')",
+            name="valid_result",
+        ),
+        UniqueConstraint("public_id", name="uq_ai_monitor_predictions_public_id"),
+        UniqueConstraint("opportunity_id", name="uq_ai_monitor_predictions_opportunity_id"),
+        ForeignKeyConstraint(
+            ["opportunity_id", "user_id"],
+            ["ai_monitor_opportunities.id", "ai_monitor_opportunities.user_id"],
+            name="fk_ai_monitor_predictions_opportunity_user",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_ai_monitor_predictions_user_status_due",
+            "user_id",
+            "status",
+            "due_at",
+        ),
+        Index("ix_ai_monitor_predictions_user_predicted", "user_id", "predicted_at"),
+        {
+            "comment": "AI 监控机会生成的虚拟预测及到期结果，不产生任何交易订单",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="AI 预测主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="AI 预测公开 UUID"
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属用户 ID",
+    )
+    opportunity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        comment="触发该预测的 AI 机会",
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="标准美股代码")
+    contract_symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="行情对应的 TradFi 合约代码"
+    )
+    direction: Mapped[str] = mapped_column(
+        String(12), nullable=False, comment="预测方向；当前机会扫描为 long"
+    )
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False, comment="预测观察周期")
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, comment="预测结算状态"
+    )
+    result: Mapped[str | None] = mapped_column(
+        String(16), comment="到期结果：win、loss 或 flat"
+    )
+    confidence_score: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), nullable=False, comment="生成预测时的组合置信评分"
+    )
+    entry_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(30, 12), comment="生成预测时的参考入场价"
+    )
+    exit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(30, 12), comment="预测到期时的参考价格"
+    )
+    raw_return_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="到期价格相对入场价的原始涨跌基点"
+    )
+    directional_return_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="按预测方向计算的收益基点"
+    )
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="预测生成时的新闻、指标与行情快照"
+    )
+    predicted_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="预测生成时间（UTC）"
+    )
+    due_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="预测到期结算时间（UTC）"
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="预测实际结算时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="最后更新时间（UTC）",
+    )
 
 
 class UserSession(Base):
@@ -1667,3 +2074,75 @@ class SecurityFundamentalAnalysis(Base):
     confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     evidence_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class SecurityFinancialSnapshot(Base):
+    __tablename__ = "security_financial_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "security_id",
+            "snapshot_date",
+            name="uq_security_financial_snapshot_date",
+        ),
+        {
+            "comment": "美股基本面财务、现金流、负债与估值快照",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    security_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("securities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    snapshot_date: Mapped[Any] = mapped_column(Date, nullable=False)
+    fiscal_period_end: Mapped[Any | None] = mapped_column(Date)
+    period_type: Mapped[str] = mapped_column(String(16), default="TTM", nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), default="USD", nullable=False)
+    data_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    coverage_pct: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
+
+    revenue_ttm: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    revenue_growth_yoy_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    gross_profit_ttm: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    gross_margin_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    operating_income_ttm: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    operating_margin_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    net_income_ttm: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    net_margin_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    ebitda_ttm: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+
+    operating_cash_flow_ttm: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    capital_expenditure_ttm: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    free_cash_flow_ttm: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    cash_and_equivalents: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    total_debt: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    total_assets: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    total_liabilities: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    stockholders_equity: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+
+    current_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    debt_to_equity: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    return_on_equity_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    market_cap: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    enterprise_value: Mapped[Decimal | None] = mapped_column(Numeric(30, 4))
+    pe_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    price_to_sales_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    price_to_book_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    ev_to_ebitda: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    filing_form: Mapped[str | None] = mapped_column(String(32))
+    filing_accession: Mapped[str | None] = mapped_column(String(32))
+    applicable_metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    raw_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )

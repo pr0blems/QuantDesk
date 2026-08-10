@@ -12,11 +12,12 @@ from .finnhub import FinnhubClient
 from .models import CompanyProfile, Security, SecuritySymbolMapping, utcnow
 
 SYMBOL_ALIASES = {"BRKB": "BRK.B"}
+FINNHUB_SYMBOL_ALIASES = {"BBX": "BB"}
 ETF_SYMBOLS = {
-    "BITO", "EWJ", "EWT", "EWY", "EWZ", "IWM", "KORU", "QQQ", "SMH", "SOXL",
+    "BITO", "BOT", "EWJ", "EWT", "EWY", "EWZ", "IWM", "KORU", "QQQ", "SMH", "SOXL",
     "SOXS", "SPY", "SQQQ", "TBT", "TMF", "TQQQ", "TZA", "URNM", "UVXY", "XBI", "XLE",
 }
-NON_STANDARD_SYMBOLS = {"BOT", "BSP", "DRAM", "FWDI", "INTW", "KSTR", "MUU", "MVLL", "QNTX", "SHAZ", "SKHY", "SNXX", "SPCX", "STXX"}
+NON_STANDARD_SYMBOLS = {"DRAM", "FWDI", "INTW", "KSTR", "MUU", "MVLL", "QNTX", "SHAZ", "SKHY", "SNXX", "SPCX", "STXX"}
 
 
 def normalize_contract_symbol(source_symbol: str) -> str:
@@ -42,14 +43,14 @@ def import_tradfi_equities(db: Session, config_path: Path) -> dict[str, int]:
         verification = "REVIEW_REQUIRED" if security_type == "UNKNOWN" else "AUTO_VERIFIED"
         security = db.scalar(select(Security).where(Security.exchange == "US", Security.symbol == symbol))
         if security is None:
-            security = Security(symbol=symbol, exchange="US", finnhub_symbol=symbol, security_type=security_type, verification_status=verification)
+            security = Security(symbol=symbol, exchange="US", finnhub_symbol=FINNHUB_SYMBOL_ALIASES.get(symbol, symbol), security_type=security_type, verification_status=verification)
             db.add(security)
             db.flush()
             created += 1
         else:
             security.security_type = security_type
             security.verification_status = verification
-            security.finnhub_symbol = symbol
+            security.finnhub_symbol = FINNHUB_SYMBOL_ALIASES.get(symbol, symbol)
             updated += 1
         mapping = db.scalar(select(SecuritySymbolMapping).where(SecuritySymbolMapping.source == "binance_tradfi", SecuritySymbolMapping.source_symbol == source_symbol))
         if mapping is None:

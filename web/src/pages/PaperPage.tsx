@@ -70,7 +70,7 @@ export function PaperPage() {
     try {
       const created = await paperApi.create({
         name: stringValue(form.get("name"), "").trim(),
-        strategy_id: stringValue(form.get("strategy_id"), ""),
+        strategy_ids: form.getAll("strategy_ids").map((value) => stringValue(value)).filter(Boolean),
         initial_balance: Number(form.get("initial_balance")),
         leverage: Number(form.get("leverage")),
         max_positions: Number(form.get("max_positions")),
@@ -119,7 +119,7 @@ export function PaperPage() {
     setError("");
     try {
       await paperApi.updateStrategy(selectedId, {
-        strategy_id: stringValue(form.get("strategy_id"), ""),
+        strategy_ids: form.getAll("strategy_ids").map((value) => stringValue(value)).filter(Boolean),
         leverage: Number(form.get("leverage")),
         max_positions: Number(form.get("max_positions")),
         position_size_pct: Number(form.get("position_size_pct")),
@@ -155,9 +155,12 @@ export function PaperPage() {
   const paperAccount = dashboard ? asObject(dashboard.paper_account) : {};
   const selectedConfig = selected ? asObject(selected.config) : {};
   const activeStrategies = strategies?.items.filter((item) => item.status === "active") ?? [];
-  const selectedStrategyId = selected ? stringValue(selected.strategy_id, "") : "";
-  const selectedStrategyAvailable = activeStrategies.some(
-    (item) => item.public_id === selectedStrategyId,
+  const selectedStrategyIds = selected
+    ? asList(selected.strategy_ids).map((value) => stringValue(value)).filter(Boolean)
+    : [];
+  if (selectedStrategyIds.length === 0 && selected) selectedStrategyIds.push(stringValue(selected.strategy_id));
+  const unavailableStrategyIds = selectedStrategyIds.filter(
+    (strategyId) => !activeStrategies.some((item) => item.public_id === strategyId),
   );
   const selectedStrategyName = selected
     ? stringValue(selected.strategy_name ?? selected.engine_key, "当前策略")
@@ -182,13 +185,13 @@ export function PaperPage() {
         <Panel eyebrow="NEW ACCOUNT" title="创建模拟盘">
           <form className="form-grid" onSubmit={(event) => void createAccount(event)}>
             <label><span>名称</span><input name="name" required maxLength={100} placeholder="趋势策略模拟盘" /></label>
-            <label><span>绑定策略</span><select name="strategy_id" required>{activeStrategies.map((item) => <option key={item.public_id} value={item.public_id}>{item.name} · {item.category}</option>)}</select></label>
+            <label><span>绑定策略（多选）</span><select name="strategy_ids" multiple size={Math.min(6, Math.max(3, activeStrategies.length))} required defaultValue={activeStrategies[0] ? [activeStrategies[0].public_id] : []}>{activeStrategies.map((item) => <option key={item.public_id} value={item.public_id}>{item.name} · {item.category}</option>)}</select></label>
             <label><span>初始资金</span><input name="initial_balance" type="number" min="1" max="1000000000" defaultValue="10000" /></label>
-            <label><span>最大杠杆</span><input name="leverage" type="number" min="1" max="20" defaultValue="20" /></label>
+            <label><span>固定杠杆</span><input name="leverage" type="number" min="1" max="20" defaultValue="20" /></label>
             <label><span>最大持仓数</span><input name="max_positions" type="number" min="1" max="20" defaultValue="15" /></label>
             <label><span>单笔仓位 %</span><input name="position_size_pct" type="number" min="0.01" max="100" step="0.01" defaultValue="10" /></label>
             <label><span>保证金上限</span><input name="margin_cap" type="number" min="0.01" max="0.95" step="0.01" defaultValue="0.8" /></label>
-            <Notice>最大杠杆是账户上限；每次新开仓仍会按照止损距离与强平安全缓冲自动降低实际杠杆。</Notice>
+            <Notice>可选择 1 到 10 个策略；只有全部策略给出同一方向信号时才会开仓。新仓固定使用账户设定的杠杆。</Notice>
             <FormActions><button className="button button--primary" type="submit" disabled={working}>创建并运行</button><button className="button button--secondary" type="button" onClick={() => setShowCreate(false)}>取消</button></FormActions>
           </form>
         </Panel>
@@ -208,7 +211,7 @@ export function PaperPage() {
           <div className="control-toolbar">
             <form className="inline-form" onSubmit={(event) => void rename(event)}><input name="name" defaultValue={stringValue(selected.name, "")} aria-label="模拟盘新名称" /><button type="submit" disabled={working}>修改名称</button></form>
             <div className="inline-actions">
-              <button type="button" disabled={working} onClick={() => setShowStrategyEditor((value) => !value)}>{showStrategyEditor ? "收起调整" : "调整策略"}</button>
+              <button type="button" disabled={working} onClick={() => setShowStrategyEditor((value) => !value)}>{showStrategyEditor ? "收起调整" : "调整参数"}</button>
               <button type="button" disabled={working} onClick={() => void updateAccount({ status: stringValue(selected.status) === "paused" ? "active" : "paused" }, stringValue(selected.status) === "paused" ? "模拟盘已恢复运行" : "模拟盘已暂停")}>{stringValue(selected.status) === "paused" ? "继续运行" : "暂停运行"}</button>
               <button type="button" disabled={working || !canReset} onClick={() => void reset()}>重置账户</button>
               <button className="danger-action" type="button" disabled={working || positions.length > 0} onClick={() => { if (window.confirm(`归档模拟盘“${stringValue(selected.name)}”？`)) void updateAccount({ status: "archived" }, "模拟盘已归档"); }}>归档</button>
@@ -218,21 +221,21 @@ export function PaperPage() {
       ) : null}
 
       {selected && showStrategyEditor ? (
-        <Panel eyebrow="STRATEGY SNAPSHOT" title="调整模拟盘策略">
+        <Panel eyebrow="STRATEGY SNAPSHOT" title="调整模拟盘参数">
           <form className="stack-form panel-form" onSubmit={(event) => void saveStrategy(event)}>
             <div className="form-grid">
-              <label><span>绑定策略</span><select name="strategy_id" defaultValue={selectedStrategyId} required>
-                {selectedStrategyId && !selectedStrategyAvailable ? (
-                  <option value={selectedStrategyId}>{selectedStrategyName} · 当前绑定（已归档或不可用）</option>
-                ) : null}
+              <label><span>绑定策略（多选）</span><select name="strategy_ids" multiple size={Math.min(6, Math.max(3, activeStrategies.length + unavailableStrategyIds.length))} defaultValue={selectedStrategyIds} required>
+                {unavailableStrategyIds.map((strategyId) => (
+                  <option key={strategyId} value={strategyId} disabled>{selectedStrategyName} · 当前绑定（已归档或不可用）</option>
+                ))}
                 {activeStrategies.map((item) => <option key={item.public_id} value={item.public_id}>{item.name} · v{item.version}</option>)}
               </select></label>
-              <label><span>最大杠杆</span><input name="leverage" type="number" min="1" max="20" defaultValue={numberValue(selectedConfig.leverage, 20)} required /></label>
+              <label><span>固定杠杆</span><input name="leverage" type="number" min="1" max="20" defaultValue={numberValue(selectedConfig.leverage, 20)} required /></label>
               <label><span>最大持仓数</span><input name="max_positions" type="number" min="1" max="20" defaultValue={numberValue(selectedConfig.max_positions, 15)} required /></label>
               <label><span>单笔仓位 %</span><input name="position_size_pct" type="number" min="0.01" max="100" step="0.01" defaultValue={numberValue(selectedConfig.position_size_pct, 10)} required /></label>
               <label><span>保证金上限</span><input name="margin_cap" type="number" min="0.01" max="0.95" step="0.01" defaultValue={numberValue(selectedConfig.margin_cap, 0.8)} required /></label>
             </div>
-            <Notice>修改会原子更新账户策略快照，只影响后续信号与新仓；现有持仓继续保留开仓时的实际杠杆和止盈止损。20x 是最大上限，止损距离较大时仍会安全降杠杆。</Notice>
+            <Notice>组合采用 AND 条件：所选策略必须全部给出同一方向信号才会开仓。修改只影响后续信号与新仓；现有持仓保留原杠杆和止盈止损。</Notice>
             <FormActions><button className="button button--primary" type="submit" disabled={working}>保存策略调整</button><button className="button button--secondary" type="button" onClick={() => setShowStrategyEditor(false)}>取消</button></FormActions>
           </form>
         </Panel>
@@ -248,7 +251,7 @@ export function PaperPage() {
             <MetricCard label="已实现盈亏" value={formatMoney(numberValue(stats.realized))} note={`${numberValue(stats.trades)} 笔 · 胜率 ${numberValue(stats.win_rate).toFixed(1)}%`} />
             <MetricCard label="最大回撤" value={`${numberValue(stats.max_drawdown).toFixed(2)}%`} note={`盈亏比 ${stringValue(stats.profit_factor)}`} tone={numberValue(stats.max_drawdown) > 10 ? "danger" : "warning"} />
             <MetricCard label="运行策略" value={stringValue(paperAccount.strategy_name ?? paperAccount.engine_key)} note={stringValue(paperAccount.status)} />
-            <MetricCard label="最大杠杆" value={`${numberValue(account.leverage)}x`} note="新仓按止损距离动态下调" tone="info" />
+            <MetricCard label="固定杠杆" value={`${numberValue(account.leverage)}x`} note="后续新仓严格使用" tone="info" />
           </section>
           <Panel eyebrow="OPEN POSITIONS" title="当前持仓" actions={<StatusPill>{positions.length} 个</StatusPill>}>
             <DataTable rows={positions} columns={[

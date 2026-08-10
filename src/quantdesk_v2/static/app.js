@@ -75,6 +75,7 @@ let binanceOrdersRequestVersion = 0;
 const panelNames = {
   overview: "工作台",
   monitor: "合约监控",
+  "ai-monitor": "发现机会",
   paper: "模拟盘",
   live: "实盘交易",
   settings: "系统设置",
@@ -89,6 +90,7 @@ const LOGIN_PATH = "/login";
 const DEFAULT_PANEL = "monitor";
 const panelPaths = Object.freeze({
   monitor: "/monitor",
+  "ai-monitor": "/ai-monitor",
   paper: "/paper",
   live: "/live",
   overview: "/overview",
@@ -328,13 +330,17 @@ function openPanel(name, { historyMode = "push" } = {}) {
   });
   $("#mobile-title").textContent = panelNames[selected];
   $(".workspace-content").classList.toggle("monitor-mode", ["monitor", "paper", "live", "backtest"].includes(selected));
+  $(".workspace-content").classList.toggle("ai-monitor-mode", selected === "ai-monitor");
   const monitor = $("#contract-monitor");
+  const aiMonitor = $("#ai-monitor-dashboard");
   const paper = $("#paper-dashboard");
   const live = $("#live-dashboard");
   const strategies = $("#strategy-center");
   const backtest = $("#backtest-workbench");
   if (monitor && selected === "monitor" && typeof monitor.start === "function") monitor.start();
   if (monitor && selected !== "monitor" && typeof monitor.pause === "function") monitor.pause();
+  if (aiMonitor && selected === "ai-monitor" && typeof aiMonitor.start === "function") aiMonitor.start();
+  if (aiMonitor && selected !== "ai-monitor" && typeof aiMonitor.pause === "function") aiMonitor.pause();
   if (paper && selected === "paper" && typeof paper.start === "function") paper.start();
   if (paper && selected !== "paper" && typeof paper.pause === "function") paper.pause();
   if (live && selected === "live" && typeof live.start === "function") live.start();

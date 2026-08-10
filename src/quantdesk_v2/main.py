@@ -28,6 +28,7 @@ from .strategy_routes import router as strategy_router
 FRONTEND_ROUTES = (
     "/login",
     "/monitor",
+    "/ai-monitor",
     "/paper",
     "/live",
     "/overview",
@@ -133,11 +134,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # The production ASGI app owns the market collectors and the
             # multi-account paper executor. Explicitly constructed apps are
             # used by tests/tools and must not start perpetual worker threads.
-            from . import battle, live_engine, market_engine, market_store, underlying_quotes
+            from . import (
+                ai_monitor,
+                battle,
+                live_engine,
+                market_engine,
+                market_store,
+                underlying_quotes,
+            )
 
             market_store.configure_engine(database_engine)
             initialize_admin_runtime(database_engine)
             market_engine.start()
+            ai_monitor.start(
+                database_engine,
+                runtime_settings.credential_master_key.get_secret_value(),
+                runtime_settings.monitor_symbols_config,
+            )
             battle.start()
             underlying_quotes.start()
             live_engine.configure(
@@ -227,8 +240,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def index() -> FileResponse:
             return FileResponse(runtime_settings.static_dir / "index.html")
 
-        def admin_index() -> FileResponse:
-            return FileResponse(runtime_settings.static_dir / "admin.html")
+        def admin_index() -> RedirectResponse:
+            target = "/next/admin/#overview"
+            if runtime_settings.app_env.lower() != "production":
+                target = "http://127.0.0.1:5173/next/admin/#overview"
+            return RedirectResponse(url=target, status_code=308)
 
         app.add_api_route(
             "/",

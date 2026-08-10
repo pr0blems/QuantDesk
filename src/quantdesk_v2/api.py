@@ -36,6 +36,7 @@ from .binance_performance import (
 from .binance_rate_limit import REST_RATE_LIMITER
 from .database import get_db
 from .dependencies import get_current_user
+from .interfaces.api.ai_monitor import router as ai_monitor_router
 from .interfaces.api.backtest_presenters import backtest_run_detail as _run_detail
 from .interfaces.api.backtests_read import router as backtests_read_router
 from .interfaces.api.finnhub import router as finnhub_router
@@ -1238,6 +1239,7 @@ def delete_ai_model_config(
 
 
 router.include_router(monitor_public_router)
+router.include_router(ai_monitor_router)
 
 
 def _prediction_algorithm_out(
@@ -2111,14 +2113,40 @@ def _paper_account_record(
     return db.scalar(statement.limit(1))
 
 
+def _paper_strategy_snapshots(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    selected = snapshot if isinstance(snapshot, dict) else {}
+    bundled = selected.get("strategy_snapshots")
+    if isinstance(bundled, list):
+        normalized = [item for item in bundled if isinstance(item, dict)]
+        if normalized:
+            return normalized
+    return [selected] if selected else []
+
+
 def _paper_account_out(account: PaperAccount) -> dict[str, Any]:
     snapshot = account.strategy_snapshot_json or {}
+    snapshots = _paper_strategy_snapshots(snapshot)
+    strategy_ids = [str(item["public_id"]) for item in snapshots if item.get("public_id")]
+    strategy_names = [str(item["name"]) for item in snapshots if item.get("name")]
     return {
         "id": account.public_id,
         "name": account.name,
         "status": account.status,
         "strategy_id": snapshot.get("public_id"),
-        "strategy_name": snapshot.get("name"),
+        "strategy_name": " + ".join(strategy_names) or snapshot.get("name"),
+        "strategy_ids": strategy_ids,
+        "strategy_names": strategy_names,
+        "strategies": [
+            {
+                "id": item.get("public_id"),
+                "name": item.get("name"),
+                "engine_key": item.get("engine_key"),
+                "strategy_kind": item.get("strategy_kind"),
+                "version": item.get("version"),
+            }
+            for item in snapshots
+        ],
+        "combination_mode": "all",
         "engine_key": snapshot.get("engine_key"),
         "initial_balance": float(account.initial_balance),
         "balance": float(account.balance),
@@ -2157,6 +2185,52 @@ def _execution_strategy_snapshot(strategy: UserStrategy) -> dict[str, Any]:
                 detail="strategy execution timeframe is invalid",
             ) from exc
     return snapshot
+
+
+def _execution_strategy_bundle(strategies: list[UserStrategy]) -> dict[str, Any]:
+    snapshots = [_execution_strategy_snapshot(strategy) for strategy in strategies]
+    if not snapshots:
+        raise HTTPException(status_code=422, detail="at least one paper strategy is required")
+    return {
+        **snapshots[0],
+        "combination_mode": "all",
+        "strategy_snapshots": snapshots,
+    }
+
+
+def _active_paper_strategies(
+    db: Session, user_id: int, strategy_ids: list[str]
+) -> list[UserStrategy]:
+    selected: list[UserStrategy] = []
+    for strategy_id in strategy_ids:
+        strategy = get_user_strategy(db, user_id, strategy_id)
+        if strategy is None or strategy.status != "active":
+            raise HTTPException(status_code=404, detail="active strategy not found")
+        selected.append(strategy)
+    return selected
+
+
+def _strategy_revision_for_deployment(
+    db: Session, user_id: int, strategy: UserStrategy
+) -> StrategyRevision:
+    revision = db.scalar(
+        select(StrategyRevision).where(
+            StrategyRevision.user_strategy_id == strategy.id,
+            StrategyRevision.user_id == user_id,
+            StrategyRevision.version == strategy.version,
+        )
+    )
+    if revision is None:
+        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+    return revision
+
+
+def _paper_deployment_name(
+    account_name: str, strategy_name: str, strategy_count: int
+) -> str:
+    if strategy_count == 1:
+        return account_name
+    return f"{account_name} · {strategy_name}"[:100]
 
 
 def _paper_response(data: dict) -> dict:
@@ -2342,10 +2416,13 @@ def create_paper_account(
     )
     if int(existing_count or 0) >= 20:
         raise HTTPException(status_code=409, detail="paper account limit reached")
-    strategy = get_user_strategy(db, user.id, payload.strategy_id)
-    if strategy is None or strategy.status != "active":
-        raise HTTPException(status_code=404, detail="active strategy not found")
-    risk = dict(strategy.risk_defaults_json or {})
+    strategies = _active_paper_strategies(db, user.id, payload.strategy_ids or [])
+    primary_strategy = strategies[0]
+    revisions = [
+        _strategy_revision_for_deployment(db, user.id, strategy)
+        for strategy in strategies
+    ]
+    risk = dict(primary_strategy.risk_defaults_json or {})
     config: dict[str, Any] = {
         "leverage": risk.get("leverage", 20),
         "max_positions": risk.get("max_positions", 15),
@@ -2357,25 +2434,27 @@ def create_paper_account(
         "take_profit_pct": risk.get("take_profit_pct", 5),
         "max_holding_bars": risk.get("max_holding_bars", 12),
         "signal_mode": (
-            "strategy_event_v2" if strategy.strategy_kind == "full_strategy" else "legacy_score_v1"
+            "strategy_event_v2"
+            if len(strategies) > 1 or primary_strategy.strategy_kind == "full_strategy"
+            else "legacy_score_v1"
         ),
+        "strategy_combination_mode": "all",
     }
     for key in ("leverage", "max_positions", "position_size_pct", "margin_cap"):
         value = getattr(payload, key)
         if value is not None:
             config[key] = value
-    # The paper leverage field is a maximum request, not a promise that every
-    # entry will use it.  Persist the same visible value as the risk ceiling so
-    # the shared sizing policy does not apply its unrelated 10x live default.
+    # Paper leverage is an exact future-entry setting. Persist the same value as
+    # the sizing ceiling so risk controls may reduce quantity, but not leverage.
     config["risk_max_leverage"] = min(int(config["leverage"]), 20)
     account = PaperAccount(
         user_id=user.id,
-        strategy_id=strategy.id,
+        strategy_id=primary_strategy.id,
         name=payload.name,
         initial_balance=Decimal(str(payload.initial_balance)),
         balance=Decimal(str(payload.initial_balance)),
         config_json=config,
-        strategy_snapshot_json=_execution_strategy_snapshot(strategy),
+        strategy_snapshot_json=_execution_strategy_bundle(strategies),
     )
     db.add(account)
     try:
@@ -2383,30 +2462,21 @@ def create_paper_account(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="paper account name already exists") from exc
-    revision = db.scalar(
-        select(StrategyRevision).where(
-            StrategyRevision.user_strategy_id == strategy.id,
-            StrategyRevision.user_id == user.id,
-            StrategyRevision.version == strategy.version,
+    for strategy, revision in zip(strategies, revisions, strict=True):
+        db.add(
+            StrategyDeployment(
+                public_id=str(uuid.uuid4()),
+                user_id=user.id,
+                strategy_id=strategy.id,
+                strategy_revision_id=revision.id,
+                mode="paper",
+                target_account_id=account.id,
+                name=_paper_deployment_name(account.name, strategy.name, len(strategies)),
+                status="running",
+                runtime_state_json={"combination_mode": "all"},
+                started_at=utcnow(),
+            )
         )
-    )
-    if revision is None:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
-    db.add(
-        StrategyDeployment(
-            public_id=str(uuid.uuid4()),
-            user_id=user.id,
-            strategy_id=strategy.id,
-            strategy_revision_id=revision.id,
-            mode="paper",
-            target_account_id=account.id,
-            name=account.name,
-            status="running",
-            runtime_state_json={},
-            started_at=utcnow(),
-        )
-    )
     _audit(db, request, "paper.account.create", user.id, "paper_account", account.public_id)
     db.commit()
     db.refresh(account)
@@ -2438,22 +2508,48 @@ def update_paper_account_status(
         account.status = payload.status
     if payload.name is not None:
         account.name = payload.name
-    deployment = db.scalar(
+    deployments = db.scalars(
         select(StrategyDeployment).where(
             StrategyDeployment.user_id == user.id,
             StrategyDeployment.mode == "paper",
             StrategyDeployment.target_account_id == account.id,
         )
-    )
-    if deployment is not None:
+    ).all()
+    strategy_names = {
+        strategy.id: strategy.name
+        for strategy in db.scalars(
+            select(UserStrategy).where(
+                UserStrategy.user_id == user.id,
+                UserStrategy.id.in_([item.strategy_id for item in deployments] or [-1]),
+            )
+        ).all()
+    }
+    selected_public_ids = {
+        str(item["public_id"])
+        for item in _paper_strategy_snapshots(account.strategy_snapshot_json)
+        if item.get("public_id")
+    }
+    selected_strategy_ids = {
+        strategy.id
+        for strategy in db.scalars(
+            select(UserStrategy).where(
+                UserStrategy.user_id == user.id,
+                UserStrategy.public_id.in_(selected_public_ids or {""}),
+            )
+        ).all()
+    }
+    for deployment in deployments:
         if payload.status is not None:
-            deployment.status = {
-                "active": "running",
-                "paused": "paused",
-                "archived": "stopped",
-            }[payload.status]
+            if payload.status == "archived" or deployment.strategy_id not in selected_strategy_ids:
+                deployment.status = "stopped"
+            else:
+                deployment.status = "running" if payload.status == "active" else "paused"
         if payload.name is not None:
-            deployment.name = payload.name
+            deployment.name = _paper_deployment_name(
+                payload.name,
+                strategy_names.get(deployment.strategy_id, "策略"),
+                len(deployments),
+            )
         deployment.updated_at = utcnow()
     action = "paper.account.rename" if payload.name is not None else "paper.account.status"
     _audit(db, request, action, user.id, "paper_account", account.public_id)
@@ -2480,20 +2576,13 @@ def update_paper_account_strategy(
     account = _paper_account_record(db, user.id, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="paper account not found")
-    strategy = get_user_strategy(db, user.id, payload.strategy_id)
-    if strategy is None or strategy.status != "active":
-        raise HTTPException(status_code=404, detail="active strategy not found")
-    revision = db.scalar(
-        select(StrategyRevision).where(
-            StrategyRevision.user_strategy_id == strategy.id,
-            StrategyRevision.user_id == user.id,
-            StrategyRevision.version == strategy.version,
-        )
-    )
-    if revision is None:
-        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
-
-    risk = dict(strategy.risk_defaults_json or {})
+    strategies = _active_paper_strategies(db, user.id, payload.strategy_ids or [])
+    primary_strategy = strategies[0]
+    revisions = [
+        _strategy_revision_for_deployment(db, user.id, strategy)
+        for strategy in strategies
+    ]
+    risk = dict(primary_strategy.risk_defaults_json or {})
     config = dict(account.config_json or {})
     config.update(
         {
@@ -2509,34 +2598,67 @@ def update_paper_account_strategy(
             "max_holding_bars": risk.get("max_holding_bars", config.get("max_holding_bars", 12)),
             "signal_mode": (
                 "strategy_event_v2"
-                if strategy.strategy_kind == "full_strategy"
+                if len(strategies) > 1 or primary_strategy.strategy_kind == "full_strategy"
                 else "legacy_score_v1"
             ),
+            "strategy_combination_mode": "all",
         }
     )
-    account.strategy_id = strategy.id
+    account.strategy_id = primary_strategy.id
     account.config_json = config
-    account.strategy_snapshot_json = _execution_strategy_snapshot(strategy)
+    account.strategy_snapshot_json = _execution_strategy_bundle(strategies)
 
-    deployment = db.scalar(
+    deployments = db.scalars(
         select(StrategyDeployment).where(
             StrategyDeployment.user_id == user.id,
             StrategyDeployment.mode == "paper",
             StrategyDeployment.target_account_id == account.id,
         )
-    )
-    if deployment is None:
-        raise HTTPException(status_code=409, detail="paper deployment is unavailable")
-    deployment.strategy_id = strategy.id
-    deployment.strategy_revision_id = revision.id
-    deployment.risk_override_json = {
+    ).all()
+    deployments_by_strategy: dict[int, list[StrategyDeployment]] = {}
+    for deployment in deployments:
+        deployments_by_strategy.setdefault(deployment.strategy_id, []).append(deployment)
+    risk_override = {
         "leverage": payload.leverage,
         "risk_max_leverage": payload.leverage,
         "max_positions": payload.max_positions,
         "position_size_pct": payload.position_size_pct,
         "margin_cap": payload.margin_cap,
     }
-    deployment.updated_at = utcnow()
+    selected_deployments: set[int] = set()
+    deployment_status = "paused" if account.status == "paused" else "running"
+    for strategy, revision in zip(strategies, revisions, strict=True):
+        matching = deployments_by_strategy.get(strategy.id) or []
+        deployment = matching.pop(0) if matching else None
+        if deployment is None:
+            deployment = StrategyDeployment(
+                public_id=str(uuid.uuid4()),
+                user_id=user.id,
+                strategy_id=strategy.id,
+                strategy_revision_id=revision.id,
+                mode="paper",
+                target_account_id=account.id,
+                name=_paper_deployment_name(account.name, strategy.name, len(strategies)),
+                status=deployment_status,
+                runtime_state_json={"combination_mode": "all"},
+                started_at=utcnow(),
+            )
+            db.add(deployment)
+        else:
+            deployment.strategy_revision_id = revision.id
+            deployment.name = _paper_deployment_name(
+                account.name, strategy.name, len(strategies)
+            )
+            deployment.status = deployment_status
+            deployment.runtime_state_json = {"combination_mode": "all"}
+        deployment.risk_override_json = risk_override
+        deployment.last_error_code = None
+        deployment.updated_at = utcnow()
+        selected_deployments.add(id(deployment))
+    for deployment in deployments:
+        if id(deployment) not in selected_deployments:
+            deployment.status = "stopped"
+            deployment.updated_at = utcnow()
     _audit(
         db,
         request,

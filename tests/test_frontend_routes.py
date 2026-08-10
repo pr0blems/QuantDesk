@@ -106,6 +106,14 @@ def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     assert paper_asset.status_code == 200
     assert 'id="paper-delete"' in paper_asset.text
     assert 'id="paper-rename"' in paper_asset.text
+    assert 'id="paper-adjust"' in paper_asset.text
+    assert 'id="paper-adjust-modal"' in paper_asset.text
+    assert 'id="paper-adjust-form"' in paper_asset.text
+    assert 'id="paper-create-strategies"' in paper_asset.text
+    assert 'id="paper-adjust-strategies"' in paper_asset.text
+    assert "strategy_ids: strategyIds" in paper_asset.text
+    assert "全部同向满足才开仓" in paper_asset.text
+    assert 'max="20" step="1" value="20"' in paper_asset.text
     assert "syncCountKnown && Number(syncedTradfiSymbols) === 0" in paper_asset.text
     assert "Number(data.account?.synced_tradfi_symbols || 0) === 0" not in paper_asset.text
     assert 'href="/live" data-panel-target="live"' in client.get("/").text

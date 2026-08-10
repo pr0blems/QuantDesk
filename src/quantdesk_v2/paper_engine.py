@@ -38,7 +38,6 @@ from .live_risk import (
     account_loss_limits,
     atr_risk_position_size,
     closed_bar_signal_freshness,
-    leverage_for_stop_distance,
     market_data_freshness,
     policy_from_config,
     signal_freshness,
@@ -99,6 +98,22 @@ def _json_object(value: Any, default: dict[str, Any] | None = None) -> dict[str,
     return dict(default or {})
 
 
+def _strategy_snapshots(account: dict[str, Any]) -> list[dict[str, Any]]:
+    snapshot = account.get("strategy_snapshot_json")
+    selected = snapshot if isinstance(snapshot, dict) else {}
+    bundled = selected.get("strategy_snapshots")
+    if isinstance(bundled, list):
+        normalized = [item for item in bundled if isinstance(item, dict)]
+        if normalized:
+            return normalized
+    return [selected] if selected else []
+
+
+def _strategy_display_name(account: dict[str, Any]) -> str:
+    names = [str(item["name"]) for item in _strategy_snapshots(account) if item.get("name")]
+    return " + ".join(names) or "未命名策略"
+
+
 def _account(user_id: int, account_id: int) -> dict[str, Any]:
     rows = store.query(
         "SELECT * FROM paper_accounts WHERE id=? AND user_id=? AND status<>'archived'",
@@ -141,7 +156,7 @@ def _config(account: dict[str, Any]) -> dict[str, float | int]:
     if not math.isfinite(funding_rate_8h_bps):
         funding_rate_8h_bps = DEFAULT_FUNDING_RATE_8H_BPS
     return {
-        "leverage": max(1, min(int(raw.get("leverage", DEFAULT_LEVERAGE)), 50)),
+        "leverage": max(1, min(int(raw.get("leverage", DEFAULT_LEVERAGE)), 20)),
         "max_positions": max(
             1, min(int(raw.get("max_positions", DEFAULT_MAX_POSITIONS)), 20)
         ),
@@ -221,10 +236,10 @@ def _equity(
 def _paper_risk_policy(
     account: dict[str, Any], signal_evidence: dict[str, Any] | None = None
 ) -> Any:
-    """Return the live risk policy, optionally tightened by a full strategy.
+    """Return the paper risk policy, optionally tightened by a full strategy.
 
     Strategy-authored risk proposals are advisory ceilings. They may reduce an
-    account limit, but can never increase the user's effective risk envelope.
+    account risk limit, but the user-selected paper leverage remains fixed.
     """
 
     raw = account.get("config_json")
@@ -232,8 +247,8 @@ def _paper_risk_policy(
     policy_config = dict(config)
     # Paper exposes only ``leverage``.  A shared-risk migration persisted the
     # unrelated 10x live default as ``risk_max_leverage`` and silently overrode
-    # configured 20x paper accounts.  The visible paper setting is authoritative;
-    # stop-distance safety may still lower individual entries.
+    # configured 20x paper accounts.  The visible paper setting is authoritative
+    # and every new paper position must use that exact leverage.
     policy_config["risk_max_leverage"] = max(
         1, min(int(config.get("leverage", DEFAULT_LEVERAGE)), 20)
     )
@@ -250,14 +265,34 @@ def _paper_risk_policy(
         )
         policy = replace(policy, round_trip_cost_bps=max(configured_cost, Decimal(0)))
 
-    snapshot = account.get("strategy_snapshot_json") or {}
-    if snapshot.get("strategy_kind") != "full_strategy" or signal_evidence is None:
+    snapshots = _strategy_snapshots(account)
+    full_strategy_indexes = [
+        index
+        for index, snapshot in enumerate(snapshots)
+        if snapshot.get("strategy_kind") == "full_strategy"
+    ]
+    if not full_strategy_indexes or signal_evidence is None:
         return policy
     evidence = signal_evidence if isinstance(signal_evidence, dict) else {}
-    proposal = evidence.get("risk_proposal")
-    if not isinstance(proposal, dict):
-        raise ValueError("full strategy risk proposal is unavailable")
-    return tighten_policy_with_strategy(policy, proposal)
+    components = evidence.get("strategy_signals")
+    component_list = components if isinstance(components, list) else []
+    tightened = policy
+    for index in full_strategy_indexes:
+        component_evidence = evidence
+        if len(snapshots) > 1:
+            try:
+                component = component_list[index]
+            except IndexError as exc:
+                raise ValueError("full strategy risk proposal is unavailable") from exc
+            if not isinstance(component, dict):
+                raise ValueError("full strategy risk proposal is unavailable")
+            candidate = component.get("evidence")
+            component_evidence = candidate if isinstance(candidate, dict) else {}
+        proposal = component_evidence.get("risk_proposal")
+        if not isinstance(proposal, dict):
+            raise ValueError("full strategy risk proposal is unavailable")
+        tightened = tighten_policy_with_strategy(tightened, proposal)
+    return replace(tightened, max_leverage=policy.max_leverage)
 
 
 def _paper_signal_mode(account: dict[str, Any]) -> str:
@@ -268,7 +303,10 @@ def _paper_signal_mode(account: dict[str, Any]) -> str:
     or account-creation API explicitly persists that compatibility mode.
     """
 
-    snapshot = account.get("strategy_snapshot_json") or {}
+    snapshots = _strategy_snapshots(account)
+    if len(snapshots) > 1:
+        return STRATEGY_EVENT_SIGNAL_MODE
+    snapshot = snapshots[0] if snapshots else {}
     if snapshot.get("strategy_kind") == "full_strategy":
         return STRATEGY_EVENT_SIGNAL_MODE
     raw = account.get("config_json") or {}
@@ -356,14 +394,14 @@ def _epoch_seconds(value: Any) -> float | None:
     return parsed
 
 
-def _signal_is_fresh(
-    account: dict[str, Any],
-    signal_time: int,
-    signal_evidence: dict[str, Any] | None,
+def _snapshot_signal_is_fresh(
+    snapshot: dict[str, Any],
+    config: dict[str, Any] | None,
+    signal_time: Any,
+    evidence: dict[str, Any],
     now: int,
     policy: Any,
 ) -> bool:
-    snapshot = account.get("strategy_snapshot_json") or {}
     try:
         if snapshot.get("strategy_kind") == "full_strategy":
             decision = signal_freshness(
@@ -373,14 +411,11 @@ def _signal_is_fresh(
             )
             if not decision.fresh:
                 return False
-            evidence = signal_evidence if isinstance(signal_evidence, dict) else {}
             valid_until = _epoch_seconds(evidence.get("valid_until"))
             return valid_until is not None and now <= valid_until
         timeframe = resolve_legacy_strategy_timeframe(
             snapshot,
-            account.get("config_json")
-            if isinstance(account.get("config_json"), dict)
-            else None,
+            config,
         )
         timeframe_seconds = strategy_timeframe_seconds(timeframe)
         closed = closed_bar_signal_freshness(
@@ -400,6 +435,45 @@ def _signal_is_fresh(
         return closed.fresh and maximum_age.fresh
     except (TypeError, ValueError):
         return False
+
+
+def _signal_is_fresh(
+    account: dict[str, Any],
+    signal_time: int,
+    signal_evidence: dict[str, Any] | None,
+    now: int,
+    policy: Any,
+) -> bool:
+    snapshots = _strategy_snapshots(account)
+    if not snapshots:
+        return False
+    config = (
+        account.get("config_json")
+        if isinstance(account.get("config_json"), dict)
+        else None
+    )
+    evidence = signal_evidence if isinstance(signal_evidence, dict) else {}
+    components = evidence.get("strategy_signals")
+    if len(snapshots) > 1:
+        if not isinstance(components, list) or len(components) != len(snapshots):
+            return False
+        for snapshot, component in zip(snapshots, components, strict=True):
+            if not isinstance(component, dict) or component.get("direction") not in {-1, 1}:
+                return False
+            component_evidence = component.get("evidence")
+            if not _snapshot_signal_is_fresh(
+                snapshot,
+                config,
+                component.get("signal_time"),
+                component_evidence if isinstance(component_evidence, dict) else {},
+                now,
+                policy,
+            ):
+                return False
+        return True
+    return _snapshot_signal_is_fresh(
+        snapshots[0], config, signal_time, evidence, now, policy
+    )
 
 
 def _paper_signal_is_fresh(
@@ -815,17 +889,17 @@ def _engine_signal_evidence(
 
 
 def _strategy_signal(
-    account: dict[str, Any], symbol: str
+    account: dict[str, Any], symbol: str, snapshot: dict[str, Any] | None = None
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
-    snapshot = account["strategy_snapshot_json"]
-    if snapshot.get("strategy_kind") == "full_strategy":
-        return _full_strategy_signal(account, snapshot, symbol)
+    selected = snapshot or (_strategy_snapshots(account)[0] if _strategy_snapshots(account) else {})
+    if selected.get("strategy_kind") == "full_strategy":
+        return _full_strategy_signal(account, selected, symbol)
 
-    engine_key = str(snapshot.get("engine_key") or "multi_factor")
-    parameters = _json_object(snapshot.get("parameters"))
+    engine_key = str(selected.get("engine_key") or "multi_factor")
+    parameters = _json_object(selected.get("parameters"))
     try:
         timeframe = resolve_legacy_strategy_timeframe(
-            snapshot,
+            selected,
             account.get("config_json")
             if isinstance(account.get("config_json"), dict)
             else None,
@@ -848,7 +922,7 @@ def _strategy_signal(
             [float(row["close"]) for row in rows],
         )
     basis = [
-        f"策略：{snapshot.get('name') or engine_key}",
+        f"策略：{selected.get('name') or engine_key}",
         f"引擎：{engine_key}",
         f"周期：{timeframe}",
     ]
@@ -871,7 +945,86 @@ def _paper_strategy_signal(
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
     if _paper_signal_mode(account) == LEGACY_PAPER_SIGNAL_MODE:
         return _legacy_score_signal(account, symbol, price)
-    return _strategy_signal(account, symbol)
+    snapshots = _strategy_snapshots(account)
+    if len(snapshots) <= 1:
+        return _strategy_signal(account, symbol, snapshots[0] if snapshots else None)
+    return _combined_strategy_signal(account, snapshots, symbol)
+
+
+def _signal_consumption_value(
+    signal_time: int, signal_evidence: dict[str, Any] | None
+) -> int | str:
+    evidence = signal_evidence if isinstance(signal_evidence, dict) else {}
+    combination_key = evidence.get("combination_key")
+    return str(combination_key) if combination_key else signal_time
+
+
+def _combined_strategy_signal(
+    account: dict[str, Any],
+    snapshots: list[dict[str, Any]],
+    symbol: str,
+) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
+    """Require every selected strategy to emit the same non-zero direction."""
+
+    results = [
+        _strategy_signal(account, symbol, snapshot)
+        for snapshot in snapshots
+    ]
+    directions = [int(result[0]) for result in results]
+    signal_times = [result[3] for result in results]
+    all_same_direction = (
+        bool(directions)
+        and directions[0] in {-1, 1}
+        and all(direction == directions[0] for direction in directions)
+        and all(signal_time is not None for signal_time in signal_times)
+    )
+    direction = directions[0] if all_same_direction else 0
+    matched_count = (
+        len(directions)
+        if all_same_direction
+        else max(directions.count(1), directions.count(-1))
+    )
+    components: list[dict[str, Any]] = []
+    combined_basis = [
+        f"组合条件：{matched_count}/{len(snapshots)} 策略同向满足（全部满足才开仓）"
+    ]
+    for snapshot, result in zip(snapshots, results, strict=True):
+        component_direction, component_atr, basis, signal_time, evidence = result
+        combined_basis.extend(basis)
+        components.append(
+            {
+                "strategy_id": snapshot.get("public_id"),
+                "strategy_name": snapshot.get("name"),
+                "strategy_kind": snapshot.get("strategy_kind"),
+                "engine_key": snapshot.get("engine_key"),
+                "direction": int(component_direction),
+                "atr": component_atr,
+                "signal_time": signal_time,
+                "evidence": evidence,
+            }
+        )
+    primary_evidence = results[0][4] if results and isinstance(results[0][4], dict) else {}
+    aggregate_time = max(
+        (int(value) for value in signal_times if value is not None),
+        default=None,
+    )
+    combination_key = "|".join(
+        f"{snapshot.get('public_id') or index}:{signal_time}:{component_direction}"
+        for index, (snapshot, signal_time, component_direction) in enumerate(
+            zip(snapshots, signal_times, directions, strict=True)
+        )
+    )
+    evidence = {
+        "combination_mode": "all",
+        "required_count": len(snapshots),
+        "matched_count": matched_count,
+        "combination_key": combination_key,
+        "strategy_signals": components,
+        "risk_proposal": primary_evidence.get("risk_proposal"),
+        "score": primary_evidence.get("score"),
+    }
+    atr = next((result[1] for result in results if result[1] is not None), None)
+    return direction, atr, combined_basis, aggregate_time, evidence
 
 
 def _full_strategy_signal(
@@ -914,7 +1067,9 @@ def _full_strategy_signal(
         basis.append(f"依据：{' / '.join(decision.reason_codes)}")
     if decision.confidence is not None:
         basis.append(f"置信度：{decision.confidence:.2%}")
-    if direction and not _record_full_strategy_decision(account, symbol, spec, decision):
+    if direction and not _record_full_strategy_decision(
+        account, symbol, spec, decision, snapshot
+    ):
         return 0, atr, [*basis, "信号未执行：缺少可审计的策略部署记录"], decision.signal_time, {}
     evidence = {
         "decision": decision.decision,
@@ -932,16 +1087,28 @@ def _record_full_strategy_decision(
     symbol: str,
     spec: dict[str, Any],
     decision: Any,
+    snapshot: dict[str, Any] | None = None,
 ) -> bool:
     deployment_mode = str(account.get("deployment_mode") or "paper")
     if deployment_mode not in {"paper", "live"}:
         return False
-    deployments = store.query(
-        """SELECT id,strategy_revision_id FROM strategy_deployments
-           WHERE user_id=? AND mode=? AND target_account_id=? AND status='running'
-           ORDER BY id DESC LIMIT 1""",
-        (account["user_id"], deployment_mode, account["id"]),
-    )
+    strategy_public_id = (snapshot or {}).get("public_id")
+    if strategy_public_id:
+        deployments = store.query(
+            """SELECT d.id,d.strategy_revision_id FROM strategy_deployments d
+               JOIN user_strategies s ON s.id=d.strategy_id AND s.user_id=d.user_id
+               WHERE d.user_id=? AND d.mode=? AND d.target_account_id=?
+                 AND d.status='running' AND s.public_id=?
+               ORDER BY d.id DESC LIMIT 1""",
+            (account["user_id"], deployment_mode, account["id"], strategy_public_id),
+        )
+    else:
+        deployments = store.query(
+            """SELECT id,strategy_revision_id FROM strategy_deployments
+               WHERE user_id=? AND mode=? AND target_account_id=? AND status='running'
+               ORDER BY id DESC LIMIT 1""",
+            (account["user_id"], deployment_mode, account["id"]),
+        )
     if not deployments or decision.signal_time is None:
         return False
     deployment = deployments[0]
@@ -1029,7 +1196,8 @@ def build_entry_basis_snapshot(
 ) -> tuple[dict[str, Any], int | None]:
     """Build one immutable, self-contained entry audit snapshot."""
 
-    strategy = dict(account.get("strategy_snapshot_json") or {})
+    strategies = _strategy_snapshots(account)
+    strategy = dict(strategies[0]) if strategies else {}
     signal_evidence = dict(evidence or {})
     strategy_signal_id = None
     strategy_revision_id = account.get("strategy_revision_id")
@@ -1076,7 +1244,7 @@ def build_entry_basis_snapshot(
 
     score = signal_evidence.get("score")
     snapshot = {
-        "schema_version": 1,
+        "schema_version": 2,
         "availability": "captured",
         "mode": mode,
         "captured_at": int(time.time()),
@@ -1093,6 +1261,20 @@ def build_entry_basis_snapshot(
             "spec_hash": strategy.get("spec_hash"),
             "parameters": strategy.get("parameters"),
         },
+        "strategies": [
+            {
+                "public_id": item.get("public_id"),
+                "name": item.get("name"),
+                "kind": item.get("strategy_kind"),
+                "engine_key": item.get("engine_key"),
+                "version": item.get("version"),
+                "spec_schema_version": item.get("spec_schema_version"),
+                "spec_hash": item.get("spec_hash"),
+                "parameters": item.get("parameters"),
+            }
+            for item in strategies
+        ],
+        "combination_mode": "all",
         "signal": {
             "strategy_signal_id": strategy_signal_id,
             "deployment_id": deployment_id,
@@ -1259,12 +1441,7 @@ def _open_position(
     if stop is None or target is None:
         return False
     stop_distance = abs(Decimal(str(execution)) - Decimal(str(stop)))
-    leverage = leverage_for_stop_distance(
-        entry_price=execution,
-        stop_distance=stop_distance,
-        requested_leverage=int(config["leverage"]),
-        policy=policy,
-    )
+    leverage = int(config["leverage"])
     entry_fee_rate = float(config["fee_bps"]) / 10_000
     available_for_margin = available / (1 + leverage * entry_fee_rate)
     sizing = atr_risk_position_size(
@@ -1369,7 +1546,7 @@ def _open_position(
         {
             "paper_account_id": account["public_id"],
             "paper_account_name": account["name"],
-            "strategy_name": account["strategy_snapshot_json"].get("name"),
+            "strategy_name": _strategy_display_name(account),
             "entry_basis": entry_basis,
             "price": execution,
             "quantity": quantity,
@@ -1439,7 +1616,7 @@ def _close_position(
         {
             "paper_account_id": account["public_id"],
             "paper_account_name": account["name"],
-            "strategy_name": account["strategy_snapshot_json"].get("name"),
+            "strategy_name": _strategy_display_name(account),
             "price": execution,
             "pnl": pnl - fee,
             "reason": reason,
@@ -1562,9 +1739,11 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 continue
             signal_mode = _paper_signal_mode(account)
             state_key = f"paper:{account['id']}:signal:{symbol}"
+            consumption_value = _signal_consumption_value(signal_time, signal_evidence)
             if (
                 signal_mode == STRATEGY_EVENT_SIGNAL_MODE
-                and store.user_state_get(account["user_id"], state_key) == signal_time
+                and store.user_state_get(account["user_id"], state_key)
+                == consumption_value
             ):
                 continue
             if _open_position(
@@ -1580,7 +1759,9 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 signal_evidence,
             ):
                 if signal_mode == STRATEGY_EVENT_SIGNAL_MODE:
-                    store.user_state_set(account["user_id"], state_key, signal_time)
+                    store.user_state_set(
+                        account["user_id"], state_key, consumption_value
+                    )
                 positions = _positions(account)
                 occupied_symbols = {
                     str(position["symbol"]).upper() for position in positions
@@ -1768,7 +1949,10 @@ def api_data(
         peak = max(peak, float(value))
         if peak:
             drawdown = max(drawdown, (peak - float(value)) / peak * 100)
-    strategy = account["strategy_snapshot_json"]
+    strategies = _strategy_snapshots(account)
+    strategy = strategies[0] if strategies else {}
+    strategy_ids = [str(item["public_id"]) for item in strategies if item.get("public_id")]
+    strategy_names = [str(item["name"]) for item in strategies if item.get("name")]
     signal_mode = _paper_signal_mode(account)
     entry_count = closed_trade_count + sum(
         1 + max(int(position.get("adds") or 0), 0) for position in positions
@@ -1785,7 +1969,20 @@ def api_data(
             "name": account["name"],
             "status": account["status"],
             "strategy_id": strategy.get("public_id"),
-            "strategy_name": strategy.get("name"),
+            "strategy_name": " + ".join(strategy_names) or strategy.get("name"),
+            "strategy_ids": strategy_ids,
+            "strategy_names": strategy_names,
+            "strategies": [
+                {
+                    "id": item.get("public_id"),
+                    "name": item.get("name"),
+                    "engine_key": item.get("engine_key"),
+                    "strategy_kind": item.get("strategy_kind"),
+                    "version": item.get("version"),
+                }
+                for item in strategies
+            ],
+            "combination_mode": "all",
             "engine_key": strategy.get("engine_key"),
             "signal_mode": signal_mode,
         },
@@ -1823,7 +2020,11 @@ def api_data(
             "tiers": (
                 "老版兼容：4h 评分达到 ±60，并通过 MA150 趋势过滤"
                 if signal_mode == LEGACY_PAPER_SIGNAL_MODE
-                else f"绑定策略：{strategy.get('name') or strategy.get('engine_key')}"
+                else (
+                    f"组合策略（全部满足才开仓）：{' + '.join(strategy_names)}"
+                    if len(strategies) > 1
+                    else f"绑定策略：{strategy.get('name') or strategy.get('engine_key')}"
+                )
             ),
             "exits": "1.5×ATR 止损 / 2.5×ATR 止盈 / 策略反转 / 最大持仓周期 / 强平",
             "costs": (

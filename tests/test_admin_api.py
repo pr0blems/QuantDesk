@@ -257,55 +257,15 @@ def test_admin_authorization_rules_and_news_source_management(
 def test_admin_frontend_assets_and_route(mysql_test_engine: Engine) -> None:
     client, _ = build_admin_client(mysql_test_engine)
     with client:
-        page = client.get("/admin")
-        login_page = client.get("/admin/login")
+        page = client.get("/admin", follow_redirects=False)
+        login_page = client.get("/admin/login", follow_redirects=False)
         user_page = client.get("/monitor")
-        script = client.get("/assets/admin.js")
-        stylesheet = client.get("/assets/admin.css")
 
-    assert page.status_code == 200
-    assert login_page.text == page.text
-    assert 'id="admin-login"' in page.text
-    assert 'id="admin-shell"' in page.text
-    assert 'data-view="collectors"' in page.text
-    assert '<button class="nav-item" data-view-target="stock-library"><span>03</span>美股资料库</button>' in page.text
-    assert 'data-view="stock-library"' in page.text
-    assert 'id="stock-library-import"' in page.text
-    assert 'id="stock-library-table"' in page.text
-    assert 'data-view="audit"' in page.text
-    assert '<button class="nav-item" data-view-target="sources"><span>06</span>舆情来源</button>' in page.text
-    assert '<button class="nav-item" data-view-target="news"><span>07</span>采集新闻</button>' in page.text
-    assert 'data-view="news"' in page.text
-    assert 'id="news-section-title">采集新闻列表' in page.text
-    assert '<tbody id="news-list"></tbody>' in page.text
-    assert '<select name="source">' in page.text
-    assert '<option value="bull">看多</option>' in page.text
-    assert 'data-news-ai-count="300"' in page.text
-    assert 'data-news-ai-count="500"' in page.text
-    assert "关联美股" in page.text
-    assert "<contract-monitor" not in page.text
-    assert 'data-panel-target="admin"' not in user_page.text
-    sources_start = page.text.index('<section class="view hidden" data-view="sources">')
-    news_start = page.text.index('<section class="view hidden" data-view="news"')
-    assert sources_start < news_start
-    assert 'id="news-list"' not in page.text[sources_start:news_start]
-    assert "/assets/admin.js" not in user_page.text
-    assert script.status_code == 200
-    assert '"stock-library": ["US EQUITIES / 03", "美股资料库"]' in script.text
-    assert 'news: ["INTELLIGENCE / 07", "采集新闻"]' in script.text
-    assert "news: loadNews" in script.text
-    assert 'if (activeView !== "news") return;' in script.text
-    assert 'api("/stock-library/import"' in script.text
-    assert 'fetch("/api/v2/auth/refresh"' in script.text
-    assert "if (!user.is_admin)" in script.text
-    assert 'const VIEWS = {' in script.text
-    assert 'api(`/news?${formQuery(newsFilter)}`)' in script.text
-    assert 'api("/news-ai-batches?limit=5")' in script.text
-    assert "sentimentView(item.ai_sentiment || item.sentiment)" in script.text
-    assert 'method: "POST"' in script.text
-    assert stylesheet.status_code == 200
-    assert ".admin-shell" in stylesheet.text
-    assert ".login-screen" in stylesheet.text
+    assert page.status_code == 308
+    assert page.headers["location"] == "http://127.0.0.1:5173/next/admin/#overview"
+    assert login_page.status_code == 308
+    assert login_page.headers["location"] == "http://127.0.0.1:5173/next/admin/#overview"
+    assert user_page.status_code == 200
 
 
 def test_deepseek_algorithm_optimization_saves_a_new_version(

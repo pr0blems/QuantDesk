@@ -10,7 +10,7 @@ from quantdesk_v2 import api
 from quantdesk_v2.config import Settings
 from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
-from quantdesk_v2.models import AuditLog
+from quantdesk_v2.models import AuditLog, StrategyDeployment
 
 
 class FakePaperRepository:
@@ -150,20 +150,24 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
         assert client.get("/api/v2/paper").status_code == 401
         assert client.get("/api/v2/dashboard/performance").status_code == 401
         alice_headers = _register_and_login(client, "paper-alice")
-        strategy_id = client.get(
+        strategy_items = client.get(
             "/api/v2/strategies", headers=alice_headers
-        ).json()["items"][0]["id"]
+        ).json()["items"]
+        strategy_ids = [item["id"] for item in strategy_items[:2]]
+        assert len(strategy_ids) == 2
         created = client.post(
             "/api/v2/paper/accounts",
             headers=alice_headers,
             json={
                 "name": "Alice paper",
-                "strategy_id": strategy_id,
+                "strategy_ids": strategy_ids,
                 "initial_balance": 10_000,
             },
         )
         assert created.status_code == 201
-        assert created.json()["config"]["signal_mode"] == "legacy_score_v1"
+        assert created.json()["config"]["signal_mode"] == "strategy_event_v2"
+        assert created.json()["strategy_ids"] == strategy_ids
+        assert created.json()["combination_mode"] == "all"
         assert created.json()["config"]["risk_max_leverage"] == 20
         public_account_id = created.json()["id"]
 
@@ -215,7 +219,7 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
             f"/api/v2/paper/accounts/{public_account_id}/strategy",
             headers=alice_headers,
             json={
-                "strategy_id": strategy_id,
+                "strategy_ids": list(reversed(strategy_ids)),
                 "leverage": 20,
                 "max_positions": 20,
                 "position_size_pct": 8,
@@ -223,7 +227,8 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
             },
         )
         assert adjusted.status_code == 200
-        assert adjusted.json()["strategy_id"] == strategy_id
+        assert adjusted.json()["strategy_ids"] == list(reversed(strategy_ids))
+        assert adjusted.json()["strategy_id"] == strategy_ids[1]
         assert adjusted.json()["config"]["leverage"] == 20
         assert adjusted.json()["config"]["risk_max_leverage"] == 20
         assert adjusted.json()["config"]["max_positions"] == 20
@@ -238,6 +243,13 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
         assert client.get("/api/v2/paper/accounts", headers=alice_headers).json() == []
 
         with test_session() as db:
+            deployments = (
+                db.query(StrategyDeployment)
+                .filter(StrategyDeployment.user_id == alice_user_id)
+                .all()
+            )
+            assert len(deployments) == 2
+            assert {deployment.status for deployment in deployments} == {"stopped"}
             audit = db.query(AuditLog).filter(AuditLog.action == "paper.account.reset").one()
             assert audit.resource_type == "paper_account"
             assert audit.resource_id == public_account_id

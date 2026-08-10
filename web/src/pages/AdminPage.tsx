@@ -8,6 +8,13 @@ import { formatDate } from "../utils/format";
 
 type AdminTab = "alerts" | "collectors" | "data" | "maintenance" | "news" | "overview" | "users";
 
+const adminTabs = new Set<AdminTab>(["alerts", "collectors", "data", "maintenance", "news", "overview", "users"]);
+
+function tabFromHash(): AdminTab {
+  const [, candidate = "overview"] = window.location.hash.replace(/^#\/?/, "").split("/");
+  return adminTabs.has(candidate as AdminTab) ? candidate as AdminTab : "overview";
+}
+
 function rows(payload: ApiObject | null, ...keys: string[]) {
   if (!payload) return [];
   const found = firstList(payload, ...keys);
@@ -15,11 +22,12 @@ function rows(payload: ApiObject | null, ...keys: string[]) {
 }
 
 export function AdminPage() {
-  const [tab, setTab] = useState<AdminTab>("overview");
+  const [tab, setTab] = useState<AdminTab>(tabFromHash);
   const [payload, setPayload] = useState<ApiObject | null>(null);
   const [secondary, setSecondary] = useState<ApiObject | null>(null);
   const [tertiary, setTertiary] = useState<ApiObject | null>(null);
   const [cleanupPreview, setCleanupPreview] = useState<ApiObject | null>(null);
+  const [editingSource, setEditingSource] = useState<ApiObject | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
@@ -59,6 +67,16 @@ export function AdminPage() {
   }, []);
 
   useEffect(() => { void loadTab(tab); }, [loadTab, tab]);
+  useEffect(() => {
+    const syncTab = () => setTab(tabFromHash());
+    window.addEventListener("hashchange", syncTab);
+    return () => window.removeEventListener("hashchange", syncTab);
+  }, []);
+
+  function selectTab(next: AdminTab): void {
+    if (next === tab) return;
+    window.location.hash = `#/admin/${next}`;
+  }
 
   async function action(run: () => Promise<unknown>, success: string): Promise<void> {
     setWorking(true);
@@ -88,11 +106,11 @@ export function AdminPage() {
     await action(() => adminApi.updateAlertRules(input), "提醒规则已保存");
   }
 
-  async function createSource(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function saveSource(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    await action(() => adminApi.createNewsSource({
-      name: stringValue(form.get("name"), "").trim(),
+    const name = stringValue(form.get("name"), "").trim();
+    const values = {
       url: stringValue(form.get("url"), "").trim(),
       lang: stringValue(form.get("lang"), "en"),
       feed_type: stringValue(form.get("feed_type"), "rss"),
@@ -100,7 +118,13 @@ export function AdminPage() {
       hourly_limit: Number(form.get("hourly_limit")),
       enabled: form.get("enabled") === "on",
       slow: form.get("slow") === "on",
-    }), "新闻源已创建");
+    };
+    if (editingSource) {
+      await action(() => adminApi.updateNewsSource(stringValue(editingSource.name), values), "新闻源已更新");
+    } else {
+      await action(() => adminApi.createNewsSource({ name, ...values }), "新闻源已创建");
+    }
+    setEditingSource(null);
     event.currentTarget.reset();
   }
 
@@ -142,7 +166,7 @@ export function AdminPage() {
   return (
     <>
       <PageHeader eyebrow="ADMINISTRATION" title="管理后台" description="管理采集器、提醒规则、新闻源、用户权限、数据目录、审计和存储维护。" actions={<button className="button button--secondary" type="button" onClick={() => void loadTab(tab)} disabled={loading || working}>刷新当前模块</button>} />
-      <Tabs value={tab} onChange={setTab} label="管理模块" items={[
+      <Tabs value={tab} onChange={selectTab} label="管理模块" items={[
         { value: "overview", label: "运行总览" }, { value: "collectors", label: "采集器" }, { value: "alerts", label: "提醒规则" }, { value: "news", label: "新闻与 AI" }, { value: "users", label: "用户权限" }, { value: "data", label: "数据目录" }, { value: "maintenance", label: "存储维护" },
       ]} />
       {loading ? <LoadingPanel label="正在读取管理数据…" /> : null}
@@ -167,10 +191,13 @@ export function AdminPage() {
         <Panel eyebrow="COLLECTORS" title="数据采集器">
           <DataTable rows={rows(payload, "items", "collectors")} columns={[
             { key: "name", label: "采集器" },
-            { key: "status", label: "状态", render: (row) => <StatusPill tone={stringValue(row.status) === "running" ? "success" : "warning"}>{stringValue(row.status)}</StatusPill> },
-            { key: "last_run_at", label: "最近运行", render: (row) => formatDate(stringValue(row.last_run_at ?? row.updated_at, "")) },
+            { key: "health", label: "健康", render: (row) => <StatusPill tone={stringValue(row.health) === "ok" ? "success" : "warning"}>{stringValue(row.health, "未知")}</StatusPill> },
+            { key: "paused", label: "运行状态", render: (row) => booleanValue(row.paused) ? "管理员已暂停" : "自动运行" },
+            { key: "heartbeat_at", label: "最近心跳", render: (row) => formatDate(stringValue(row.heartbeat_at, "")) },
+            { key: "cycles", label: "周期" },
+            { key: "items", label: "处理量" },
             { key: "last_error", label: "最近错误" },
-            { key: "actions", label: "操作", render: (row) => { const name = stringValue(row.name, ""); return <div className="inline-actions"><button type="button" onClick={() => void action(() => adminApi.collectorAction(name, "start"), `${name} 已启动`)}>启动</button><button type="button" onClick={() => void action(() => adminApi.collectorAction(name, "stop"), `${name} 已停止`)}>停止</button><button type="button" onClick={() => void action(() => adminApi.collectorAction(name, "run"), `${name} 已触发`)}>立即运行</button></div>; } },
+            { key: "actions", label: "操作", render: (row) => { const name = stringValue(row.name, ""); const paused = booleanValue(row.paused); const next = paused ? "resume" : "pause"; return <button type="button" onClick={() => void action(() => adminApi.collectorAction(name, next), `${name} 已${paused ? "恢复" : "暂停"}`)}>{paused ? "恢复" : "暂停"}</button>; } },
           ]} empty="暂无采集器" />
         </Panel>
       ) : null}
@@ -198,15 +225,15 @@ export function AdminPage() {
             <Panel eyebrow="SOURCES" title="新闻源">
               <DataTable rows={sourceRows} columns={[
                 { key: "name", label: "名称" }, { key: "feed_type", label: "类型" }, { key: "lang", label: "语言" }, { key: "enabled", label: "状态", render: (row) => <StatusPill tone={booleanValue(row.enabled) ? "success" : "neutral"}>{booleanValue(row.enabled) ? "启用" : "停用"}</StatusPill> },
-                { key: "actions", label: "操作", render: (row) => { const name = stringValue(row.name, ""); return <div className="inline-actions"><button type="button" onClick={() => void action(() => adminApi.testNewsSource(name), `${name} 测试成功`)}>测试</button><button type="button" onClick={() => void action(() => adminApi.updateNewsSource(name, { enabled: !booleanValue(row.enabled) }), `${name} 状态已更新`)}>{booleanValue(row.enabled) ? "停用" : "启用"}</button><button className="danger-action" type="button" onClick={() => { if (window.confirm(`确定删除新闻源“${name}”？`)) void action(() => adminApi.deleteNewsSource(name), `${name} 已删除`); }}>删除</button></div>; } },
+                { key: "actions", label: "操作", render: (row) => { const name = stringValue(row.name, ""); return <div className="inline-actions"><button type="button" onClick={() => setEditingSource(row)}>编辑</button><button type="button" onClick={() => void action(() => adminApi.testNewsSource(name), `${name} 测试成功`)}>测试</button><button type="button" onClick={() => void action(() => adminApi.updateNewsSource(name, { enabled: !booleanValue(row.enabled) }), `${name} 状态已更新`)}>{booleanValue(row.enabled) ? "停用" : "启用"}</button><button className="danger-action" type="button" onClick={() => { if (window.confirm(`确定删除新闻源“${name}”？`)) void action(() => adminApi.deleteNewsSource(name), `${name} 已删除`); }}>删除</button></div>; } },
               ]} empty="暂无新闻源" />
             </Panel>
-            <Panel eyebrow="NEW SOURCE" title="新增新闻源">
-              <form className="stack-form" onSubmit={(event) => void createSource(event)}>
-                <label><span>名称</span><input name="name" required maxLength={80} /></label><label><span>URL</span><input name="url" type="url" required /></label>
-                <div className="form-grid"><label><span>类型</span><select name="feed_type"><option value="rss">RSS</option><option value="taoz_flash">淘金快讯</option></select></label><label><span>语言</span><input name="lang" defaultValue="en" /></label><label><span>权重</span><input name="weight" type="number" min="1" max="1000" defaultValue="100" /></label><label><span>每小时上限</span><input name="hourly_limit" type="number" min="1" max="10000" defaultValue="600" /></label></div>
-                <label className="check-field"><input name="enabled" type="checkbox" defaultChecked /><span>立即启用</span></label><label className="check-field"><input name="slow" type="checkbox" /><span>慢速来源</span></label>
-                <FormActions><button className="button button--primary" type="submit" disabled={working}>新增来源</button></FormActions>
+            <Panel eyebrow={editingSource ? "EDIT SOURCE" : "NEW SOURCE"} title={editingSource ? "编辑新闻源" : "新增新闻源"}>
+              <form key={stringValue(editingSource?.name, "new")} className="stack-form" onSubmit={(event) => void saveSource(event)}>
+                <label><span>名称</span><input name="name" required maxLength={80} defaultValue={stringValue(editingSource?.name)} disabled={Boolean(editingSource)} /></label><label><span>URL</span><input name="url" type="url" required defaultValue={stringValue(editingSource?.url)} /></label>
+                <div className="form-grid"><label><span>类型</span><select name="feed_type" defaultValue={stringValue(editingSource?.feed_type, "rss")}><option value="rss">RSS</option><option value="taoz_flash">淘金快讯</option></select></label><label><span>语言</span><input name="lang" defaultValue={stringValue(editingSource?.lang, "en")} /></label><label><span>权重</span><input name="weight" type="number" min="1" max="1000" defaultValue={numberValue(editingSource?.weight, 100)} /></label><label><span>每小时上限</span><input name="hourly_limit" type="number" min="1" max="10000" defaultValue={numberValue(editingSource?.hourly_limit, 600)} /></label></div>
+                <label className="check-field"><input name="enabled" type="checkbox" defaultChecked={editingSource ? booleanValue(editingSource.enabled) : true} /><span>立即启用</span></label><label className="check-field"><input name="slow" type="checkbox" defaultChecked={booleanValue(editingSource?.slow)} /><span>慢速来源</span></label>
+                <FormActions><button className="button button--primary" type="submit" disabled={working}>{editingSource ? "保存修改" : "新增来源"}</button>{editingSource ? <button className="button button--secondary" type="button" onClick={() => setEditingSource(null)}>取消编辑</button> : null}</FormActions>
               </form>
             </Panel>
           </section>

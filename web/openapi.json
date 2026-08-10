@@ -513,6 +513,114 @@
         "title": "AiModelConfigUpdate",
         "type": "object"
       },
+      "AiMonitorConfigUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "indicator_keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Indicator Keys",
+            "type": "array"
+          },
+          "minimum_news_confidence": {
+            "default": 0.6,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Minimum News Confidence",
+            "type": "number"
+          },
+          "minimum_news_mentions": {
+            "default": 1,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Minimum News Mentions",
+            "type": "integer"
+          },
+          "monitor_symbols": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 250,
+            "title": "Monitor Symbols",
+            "type": "array"
+          },
+          "news_interval_minutes": {
+            "default": 15,
+            "maximum": 1440.0,
+            "minimum": 5.0,
+            "title": "News Interval Minutes",
+            "type": "integer"
+          },
+          "news_lookback_hours": {
+            "default": 24,
+            "maximum": 168.0,
+            "minimum": 1.0,
+            "title": "News Lookback Hours",
+            "type": "integer"
+          },
+          "opportunity_interval_minutes": {
+            "default": 15,
+            "maximum": 1440.0,
+            "minimum": 5.0,
+            "title": "Opportunity Interval Minutes",
+            "type": "integer"
+          },
+          "timeframe": {
+            "default": "1h",
+            "enum": [
+              "15m",
+              "1h",
+              "4h"
+            ],
+            "title": "Timeframe",
+            "type": "string"
+          }
+        },
+        "title": "AiMonitorConfigUpdate",
+        "type": "object"
+      },
+      "AiMonitorNewsAnalyzeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "news_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "News Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "news_id"
+        ],
+        "title": "AiMonitorNewsAnalyzeRequest",
+        "type": "object"
+      },
+      "AiMonitorRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "run_type": {
+            "enum": [
+              "news",
+              "opportunity"
+            ],
+            "title": "Run Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_type"
+        ],
+        "title": "AiMonitorRunRequest",
+        "type": "object"
+      },
       "AiProviderOut": {
         "properties": {
           "base_url": {
@@ -2548,15 +2656,37 @@
             "title": "Position Size Pct"
           },
           "strategy_id": {
-            "maxLength": 36,
-            "minLength": 36,
-            "title": "Strategy Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy Id"
+          },
+          "strategy_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy Ids"
           }
         },
         "required": [
-          "name",
-          "strategy_id"
+          "name"
         ],
         "title": "PaperAccountCreateRequest",
         "type": "object"
@@ -2625,14 +2755,36 @@
             "type": "number"
           },
           "strategy_id": {
-            "maxLength": 36,
-            "minLength": 36,
-            "title": "Strategy Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy Id"
+          },
+          "strategy_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy Ids"
           }
         },
         "required": [
-          "strategy_id",
           "leverage",
           "max_positions",
           "position_size_pct",
@@ -5260,6 +5412,608 @@
         "tags": [
           "admin"
         ]
+      }
+    },
+    "/api/v2/ai-monitor/config": {
+      "get": {
+        "operationId": "get_config_api_v2_ai_monitor_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Config Api V2 Ai Monitor Config Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Config"
+      },
+      "put": {
+        "operationId": "update_config_api_v2_ai_monitor_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Config Api V2 Ai Monitor Config Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Config"
+      }
+    },
+    "/api/v2/ai-monitor/indicators": {
+      "get": {
+        "operationId": "indicators_api_v2_ai_monitor_indicators_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "timeframe",
+            "required": false,
+            "schema": {
+              "default": "1h",
+              "pattern": "^(15m|1h|4h)$",
+              "title": "Timeframe",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Indicators Api V2 Ai Monitor Indicators Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Indicators"
+      }
+    },
+    "/api/v2/ai-monitor/news": {
+      "get": {
+        "operationId": "news_api_v2_ai_monitor_news_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 300,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response News Api V2 Ai Monitor News Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "News"
+      }
+    },
+    "/api/v2/ai-monitor/news/analyze": {
+      "post": {
+        "description": "Analyze one explicitly selected news record with the user's default AI model.",
+        "operationId": "analyze_single_news_api_v2_ai_monitor_news_analyze_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorNewsAnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Analyze Single News Api V2 Ai Monitor News Analyze Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Analyze Single News"
+      }
+    },
+    "/api/v2/ai-monitor/opportunities": {
+      "get": {
+        "operationId": "opportunities_api_v2_ai_monitor_opportunities_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 300,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_expired",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Expired",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opportunities Api V2 Ai Monitor Opportunities Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Opportunities"
+      }
+    },
+    "/api/v2/ai-monitor/opportunities/{opportunity_id}/fundamentals": {
+      "get": {
+        "operationId": "opportunity_fundamentals_api_v2_ai_monitor_opportunities__opportunity_id__fundamentals_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "opportunity_id",
+            "required": true,
+            "schema": {
+              "title": "Opportunity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opportunity Fundamentals Api V2 Ai Monitor Opportunities  Opportunity Id  Fundamentals Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Opportunity Fundamentals"
+      }
+    },
+    "/api/v2/ai-monitor/opportunities/{opportunity_id}/news": {
+      "get": {
+        "operationId": "opportunity_news_api_v2_ai_monitor_opportunities__opportunity_id__news_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "opportunity_id",
+            "required": true,
+            "schema": {
+              "title": "Opportunity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opportunity News Api V2 Ai Monitor Opportunities  Opportunity Id  News Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Opportunity News"
+      }
+    },
+    "/api/v2/ai-monitor/opportunity-analytics": {
+      "get": {
+        "operationId": "opportunity_analytics_api_v2_ai_monitor_opportunity_analytics_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 300,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opportunity Analytics Api V2 Ai Monitor Opportunity Analytics Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Opportunity Analytics"
+      }
+    },
+    "/api/v2/ai-monitor/overview": {
+      "get": {
+        "operationId": "overview_api_v2_ai_monitor_overview_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Overview Api V2 Ai Monitor Overview Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Overview"
+      }
+    },
+    "/api/v2/ai-monitor/prediction-records": {
+      "get": {
+        "operationId": "prediction_records_api_v2_ai_monitor_prediction_records_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 300,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Prediction Records Api V2 Ai Monitor Prediction Records Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Prediction Records"
+      }
+    },
+    "/api/v2/ai-monitor/runs": {
+      "get": {
+        "operationId": "runs_api_v2_ai_monitor_runs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 60,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Runs Api V2 Ai Monitor Runs Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Runs"
+      },
+      "post": {
+        "operationId": "create_run_api_v2_ai_monitor_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Run Api V2 Ai Monitor Runs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Run"
+      }
+    },
+    "/api/v2/ai-monitor/symbols": {
+      "get": {
+        "operationId": "monitor_symbols_api_v2_ai_monitor_symbols_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Monitor Symbols Api V2 Ai Monitor Symbols Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Monitor Symbols"
       }
     },
     "/api/v2/auth/login": {

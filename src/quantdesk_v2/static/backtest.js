@@ -36,7 +36,7 @@ class BacktestWorkbench extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/backtest.css?v=20260804-5">
+      <link rel="stylesheet" href="/assets/backtest.css?v=20260809-font1_6x-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -742,7 +742,7 @@ class BacktestWorkbench extends HTMLElement {
     const padding = { left: 14, right: 62, top: 15, bottom: 25 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
-    context.font = "10px Inter, sans-serif";
+    context.font = "16px Inter, sans-serif";
     if (points.length < 2) {
       context.fillStyle = "#64778d";
       context.fillText("权益样本不足，暂无可绘制曲线", 18, 30);

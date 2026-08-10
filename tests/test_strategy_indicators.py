@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from quantdesk_v2.strategy_indicators import (
     STRATEGY_INDICATOR_COUNT,
+    evaluate_directional_strategy_indicators,
     evaluate_strategy_indicators,
 )
 
@@ -65,3 +66,26 @@ def test_strategy_indicator_scan_uses_price_volume_and_cross_conditions() -> Non
     assert by_name["MA金叉"]["triggered"] is True
     assert by_name["MACD金叉放量"]["triggered"] is True
     assert all(item["metrics"] for item in result["items"])
+
+
+def test_directional_strategy_scan_exposes_inverse_bearish_conditions() -> None:
+    candles = [_candle(index, 100.0) for index in range(79)]
+    candles.append(
+        {
+            "open_time": 79 * 3_600_000,
+            "open": 80.0,
+            "high": 81.0,
+            "low": 69.0,
+            "close": 70.0,
+            "volume": 200.0,
+        }
+    )
+
+    result = evaluate_directional_strategy_indicators(candles, "1h")
+    by_key = {item["key"]: item for item in result["items"]}
+
+    assert result["bearish_triggered_count"] > 0
+    assert by_key["strong_gap_open"]["triggered"] is False
+    assert by_key["strong_gap_open"]["bearish_triggered"] is True
+    assert by_key["strong_gap_open"]["bearish_name"] == "强势低开"
+    assert by_key["strong_gap_open"]["direction"] == "bearish"

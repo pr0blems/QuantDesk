@@ -37,7 +37,7 @@ class PaperDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/paper.css?v=20260804-5">
+      <link rel="stylesheet" href="/assets/paper.css?v=20260809-paper-combo-1">
       <main class="paper-dashboard">
         <nav class="account-switcher" aria-label="模拟盘切换">
           <div id="paper-account-tabs" class="account-tabs" role="tablist" aria-label="我的模拟盘">
@@ -65,6 +65,7 @@ class PaperDashboard extends HTMLElement {
             <button id="paper-refresh" class="action-button" type="button">刷新</button>
             <button id="paper-toggle-status" class="action-button status-button" type="button" disabled>暂停运行</button>
             <button id="paper-rename" class="action-button manage-button" type="button" disabled>修改名称</button>
+            <button id="paper-adjust" class="action-button manage-button" type="button" disabled>调整参数</button>
             <button id="paper-reset" class="action-button reset-button" type="button" disabled title="重置当前模拟盘，不影响其他模拟盘">重置账户</button>
             <button id="paper-delete" class="action-button delete-button" type="button" disabled title="删除当前模拟盘">删除</button>
           </div>
@@ -125,16 +126,16 @@ class PaperDashboard extends HTMLElement {
               <div>
                 <span class="modal-kicker">NEW PAPER ACCOUNT</span>
                 <h2 id="paper-create-title">新增模拟盘</h2>
-                <p>绑定一个策略，资金、持仓、成交和权益将独立运行。</p>
+                <p>可绑定多个策略；全部策略同向满足时才会开仓。</p>
               </div>
               <button class="modal-close" type="button" data-modal-close aria-label="关闭">×</button>
             </header>
             <form id="paper-create-form" class="create-form">
-              <label class="form-field form-field-wide">
-                <span>绑定策略</span>
-                <select id="paper-create-strategy" required></select>
-                <small id="paper-create-strategy-note">每个模拟盘保存创建时的策略快照。</small>
-              </label>
+              <div class="form-field form-field-wide">
+                <span>绑定策略（多选）</span>
+                <div id="paper-create-strategies" class="strategy-picker" role="group" aria-label="选择模拟盘策略"></div>
+                <small id="paper-create-strategy-note">至少选择 1 个，最多 10 个；全部策略同向满足才开仓。</small>
+              </div>
               <label class="form-field form-field-wide">
                 <span>模拟盘名称</span>
                 <input id="paper-create-name" type="text" maxlength="100" autocomplete="off" placeholder="例如：趋势突破测试" required>
@@ -145,12 +146,55 @@ class PaperDashboard extends HTMLElement {
               </label>
               <label class="form-field">
                 <span>杠杆倍数</span>
-                <input id="paper-create-leverage" type="number" min="1" max="50" step="1" value="20" required>
+                <input id="paper-create-leverage" type="number" min="1" max="20" step="1" value="20" required>
               </label>
               <p id="paper-create-error" class="form-error hidden" role="alert"></p>
               <footer class="modal-actions">
                 <button class="action-button" type="button" data-modal-close>取消</button>
                 <button id="paper-create-submit" class="create-account-button" type="submit">创建并运行</button>
+              </footer>
+            </form>
+          </section>
+        </div>
+
+        <div id="paper-adjust-modal" class="paper-modal hidden" aria-hidden="true">
+          <button class="modal-backdrop" type="button" data-adjust-modal-close aria-label="关闭调整参数窗口"></button>
+          <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="paper-adjust-title">
+            <header class="modal-head">
+              <div>
+                <span class="modal-kicker">PAPER PARAMETERS</span>
+                <h2 id="paper-adjust-title">调整模拟盘参数</h2>
+                <p>多选绑定策略；全部策略同向满足时才会开仓。</p>
+              </div>
+              <button class="modal-close" type="button" data-adjust-modal-close aria-label="关闭">×</button>
+            </header>
+            <form id="paper-adjust-form" class="create-form">
+              <div class="form-field form-field-wide">
+                <span>绑定策略（多选）</span>
+                <div id="paper-adjust-strategies" class="strategy-picker" role="group" aria-label="调整模拟盘策略"></div>
+                <small id="paper-adjust-strategy-note">至少选择 1 个，最多 10 个；全部策略同向满足才开仓。</small>
+              </div>
+              <label class="form-field">
+                <span>固定杠杆倍数</span>
+                <input id="paper-adjust-leverage" type="number" min="1" max="20" step="1" required>
+              </label>
+              <label class="form-field">
+                <span>最大持仓数</span>
+                <input id="paper-adjust-max-positions" type="number" min="1" max="20" step="1" required>
+              </label>
+              <label class="form-field">
+                <span>单笔仓位（%）</span>
+                <input id="paper-adjust-position-size" type="number" min="0.01" max="100" step="0.01" required>
+              </label>
+              <label class="form-field">
+                <span>保证金上限</span>
+                <input id="paper-adjust-margin-cap" type="number" min="0.01" max="0.95" step="0.01" required>
+              </label>
+              <p class="form-note">组合采用 AND 条件：所选策略必须全部给出同一方向信号才会开仓。调整只影响后续信号和新仓。</p>
+              <p id="paper-adjust-error" class="form-error hidden" role="alert"></p>
+              <footer class="modal-actions">
+                <button class="action-button" type="button" data-adjust-modal-close>取消</button>
+                <button id="paper-adjust-submit" class="create-account-button" type="submit">保存参数</button>
               </footer>
             </form>
           </section>
@@ -171,6 +215,7 @@ class PaperDashboard extends HTMLElement {
     this.q("#paper-refresh").addEventListener("click", () => this.load());
     this.q("#paper-reset").addEventListener("click", () => this.resetAccount());
     this.q("#paper-rename").addEventListener("click", () => this.renameAccount());
+    this.q("#paper-adjust").addEventListener("click", () => this.openAdjustDialog());
     this.q("#paper-delete").addEventListener("click", () => this.deleteAccount());
     this.q("#paper-toggle-status").addEventListener("click", () => this.toggleAccountStatus());
     this.q("#paper-create").addEventListener("click", () => this.openCreateDialog());
@@ -180,14 +225,19 @@ class PaperDashboard extends HTMLElement {
     });
     this.q("#paper-account-tabs").addEventListener("keydown", (event) => this.handleTabKeydown(event));
     this.q("#paper-create-form").addEventListener("submit", (event) => this.createAccount(event));
-    this.q("#paper-create-strategy").addEventListener("change", () => this.applyStrategyDefaults());
+    this.q("#paper-create-strategies").addEventListener("change", () => this.applyStrategyDefaults());
+    this.q("#paper-adjust-form").addEventListener("submit", (event) => this.adjustAccount(event));
+    this.q("#paper-adjust-strategies").addEventListener("change", () => this.updateAdjustStrategyNote());
     this.shadowRoot.querySelectorAll("[data-modal-close]").forEach((button) => {
       button.addEventListener("click", () => this.closeCreateDialog());
     });
+    this.shadowRoot.querySelectorAll("[data-adjust-modal-close]").forEach((button) => {
+      button.addEventListener("click", () => this.closeAdjustDialog());
+    });
     this.shadowRoot.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !this.q("#paper-create-modal").classList.contains("hidden")) {
-        this.closeCreateDialog();
-      }
+      if (event.key !== "Escape") return;
+      if (!this.q("#paper-adjust-modal").classList.contains("hidden")) this.closeAdjustDialog();
+      else if (!this.q("#paper-create-modal").classList.contains("hidden")) this.closeCreateDialog();
     });
   }
 
@@ -227,6 +277,7 @@ class PaperDashboard extends HTMLElement {
         this.q("#paper-toggle-status").disabled = true;
         this.q("#paper-reset").disabled = true;
         this.q("#paper-rename").disabled = true;
+        this.q("#paper-adjust").disabled = true;
         this.q("#paper-delete").disabled = true;
         return;
       }
@@ -344,22 +395,16 @@ class PaperDashboard extends HTMLElement {
       const createButton = this.q("#paper-create");
       createButton.disabled = true;
       this.q("#paper-create .create-label").textContent = "读取策略…";
-      if (!this.strategyCatalog.length) {
-        const catalog = await window.quantdeskApi("/api/v2/strategies");
-        this.strategyCatalog = (catalog.items || []).filter((item) => item.status === "active");
-      }
+      await this.loadStrategyCatalog();
       if (!this.strategyCatalog.length) throw new Error("请先在策略中心创建或启用策略");
-      const strategySelect = this.q("#paper-create-strategy");
-      strategySelect.innerHTML = this.strategyCatalog.map((strategy) => (
-        `<option value="${this.escape(strategy.id)}">${this.escape(strategy.name)} · ${this.escape(strategy.category || strategy.engine_key || "策略")}</option>`
-      )).join("");
+      this.renderStrategyPicker("#paper-create-strategies", [this.strategyCatalog[0].id]);
       this.q("#paper-create-balance").value = "10000";
       this.applyStrategyDefaults();
       this.showCreateError("");
       const modal = this.q("#paper-create-modal");
       modal.classList.remove("hidden");
       modal.setAttribute("aria-hidden", "false");
-      window.requestAnimationFrame(() => strategySelect.focus());
+      window.requestAnimationFrame(() => this.q("#paper-create-strategies input")?.focus());
     } catch (error) {
       this.showBanner(`无法新增模拟盘：${error.message}`, "error");
     } finally {
@@ -381,15 +426,19 @@ class PaperDashboard extends HTMLElement {
     event.preventDefault();
     const submit = this.q("#paper-create-submit");
     const name = this.q("#paper-create-name").value.trim();
-    const strategyId = this.q("#paper-create-strategy").value;
+    const strategyIds = this.selectedStrategyIds("#paper-create-strategies");
     const initialBalance = Number(this.q("#paper-create-balance").value);
     const leverage = Number(this.q("#paper-create-leverage").value);
+    if (!strategyIds.length || strategyIds.length > 10) {
+      this.showCreateError("请选择 1 到 10 个策略；全部策略同向满足时才会开仓。");
+      return;
+    }
     if (!Number.isFinite(initialBalance) || initialBalance <= 0 || initialBalance > 1_000_000_000) {
       this.showCreateError("初始资金必须大于 0，且不能超过 1,000,000,000 USDT。");
       return;
     }
-    if (!Number.isInteger(leverage) || leverage < 1 || leverage > 50) {
-      this.showCreateError("杠杆倍数必须是 1 到 50 之间的整数。");
+    if (!Number.isInteger(leverage) || leverage < 1 || leverage > 20) {
+      this.showCreateError("杠杆倍数必须是 1 到 20 之间的整数。");
       return;
     }
     submit.disabled = true;
@@ -398,12 +447,12 @@ class PaperDashboard extends HTMLElement {
     try {
       const created = await this.api("/accounts", {
         method: "POST",
-        body: JSON.stringify({ name, strategy_id: strategyId, initial_balance: initialBalance, leverage }),
+        body: JSON.stringify({ name, strategy_ids: strategyIds, initial_balance: initialBalance, leverage }),
       });
       this.closeCreateDialog();
       await this.loadAccounts(created.id);
       await this.load();
-      this.showBanner("模拟盘已创建，每个账户将独立运行绑定策略。", "success");
+      this.showBanner(`模拟盘已创建；${strategyIds.length} 个策略必须全部同向满足才会开仓。`, "success");
     } catch (error) {
       this.showCreateError(`创建失败：${error.message}`);
     } finally {
@@ -419,12 +468,149 @@ class PaperDashboard extends HTMLElement {
   }
 
   applyStrategyDefaults() {
-    const strategyId = this.q("#paper-create-strategy").value;
-    const strategy = this.strategyCatalog.find((item) => item.id === strategyId);
+    const strategyIds = this.selectedStrategyIds("#paper-create-strategies");
+    const strategy = this.strategyCatalog.find((item) => item.id === strategyIds[0]);
     if (!strategy) return;
     this.q("#paper-create-name").value = `${strategy.name} 模拟盘`;
-    this.q("#paper-create-leverage").value = String(strategy.risk_defaults?.leverage || 20);
-    this.q("#paper-create-strategy-note").textContent = `${strategy.description || "创建后使用独立策略快照运行。"}`;
+    this.q("#paper-create-leverage").value = String(Math.min(20, Number(strategy.risk_defaults?.leverage) || 20));
+    const names = this.strategyCatalog.filter((item) => strategyIds.includes(item.id)).map((item) => item.name);
+    this.q("#paper-create-strategy-note").textContent = `已选 ${names.length} 个：${names.join(" + ")}。全部同向满足才开仓。`;
+  }
+
+  async loadStrategyCatalog() {
+    if (this.strategyCatalog.length) return;
+    const catalog = await window.quantdeskApi("/api/v2/strategies");
+    this.strategyCatalog = (catalog.items || []).filter((item) => item.status === "active");
+  }
+
+  renderStrategyPicker(selector, selectedIds = []) {
+    const selected = new Set(selectedIds);
+    this.q(selector).innerHTML = this.strategyCatalog.map((strategy) => `
+      <label class="strategy-option">
+        <input type="checkbox" value="${this.escape(strategy.id)}"${selected.has(strategy.id) ? " checked" : ""}>
+        <span>
+          <strong>${this.escape(strategy.name)}</strong>
+          <small>${this.escape(strategy.category || strategy.engine_key || "策略")} · v${this.escape(strategy.version || "1")}</small>
+        </span>
+      </label>`).join("");
+  }
+
+  selectedStrategyIds(selector) {
+    return [...this.q(selector).querySelectorAll('input[type="checkbox"]:checked')]
+      .map((input) => input.value)
+      .filter(Boolean);
+  }
+
+  async openAdjustDialog() {
+    const account = this.accounts.find((item) => item.id === this.selectedAccountId);
+    if (!account) return;
+    const button = this.q("#paper-adjust");
+    button.disabled = true;
+    button.textContent = "读取参数…";
+    try {
+      await this.loadStrategyCatalog();
+      if (!this.strategyCatalog.length) throw new Error("请先在策略中心创建或启用策略");
+      const currentStrategyIds = Array.isArray(account.strategy_ids) && account.strategy_ids.length
+        ? account.strategy_ids
+        : [account.strategy_id].filter(Boolean);
+      this.renderStrategyPicker("#paper-adjust-strategies", currentStrategyIds);
+      const config = account.config || {};
+      this.q("#paper-adjust-leverage").value = String(config.leverage ?? 20);
+      this.q("#paper-adjust-max-positions").value = String(config.max_positions ?? 15);
+      this.q("#paper-adjust-position-size").value = String(config.position_size_pct ?? 10);
+      this.q("#paper-adjust-margin-cap").value = String(config.margin_cap ?? 0.8);
+      this.updateAdjustStrategyNote();
+      this.showAdjustError("");
+      const modal = this.q("#paper-adjust-modal");
+      modal.classList.remove("hidden");
+      modal.setAttribute("aria-hidden", "false");
+      window.requestAnimationFrame(() => (
+        this.q('#paper-adjust-strategies input:checked') || this.q("#paper-adjust-strategies input")
+      )?.focus());
+    } catch (error) {
+      this.showBanner(`无法调整参数：${error.message}`, "error");
+    } finally {
+      button.textContent = "调整参数";
+      button.disabled = !this.selectedAccountId;
+    }
+  }
+
+  closeAdjustDialog() {
+    const modal = this.q("#paper-adjust-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    this.showAdjustError("");
+    this.q("#paper-adjust").focus();
+  }
+
+  updateAdjustStrategyNote() {
+    const strategyIds = this.selectedStrategyIds("#paper-adjust-strategies");
+    const names = this.strategyCatalog
+      .filter((item) => strategyIds.includes(item.id))
+      .map((item) => item.name);
+    this.q("#paper-adjust-strategy-note").textContent = names.length
+      ? `已选 ${names.length} 个：${names.join(" + ")}。全部同向满足才开仓。`
+      : "请至少选择 1 个策略；全部策略同向满足才开仓。";
+  }
+
+  async adjustAccount(event) {
+    event.preventDefault();
+    const submit = this.q("#paper-adjust-submit");
+    const strategyIds = this.selectedStrategyIds("#paper-adjust-strategies");
+    const leverage = Number(this.q("#paper-adjust-leverage").value);
+    const maxPositions = Number(this.q("#paper-adjust-max-positions").value);
+    const positionSizePct = Number(this.q("#paper-adjust-position-size").value);
+    const marginCap = Number(this.q("#paper-adjust-margin-cap").value);
+    if (!strategyIds.length || strategyIds.length > 10) {
+      this.showAdjustError("请选择 1 到 10 个正在运行的策略。");
+      return;
+    }
+    if (!Number.isInteger(leverage) || leverage < 1 || leverage > 20) {
+      this.showAdjustError("固定杠杆必须是 1 到 20 之间的整数。");
+      return;
+    }
+    if (!Number.isInteger(maxPositions) || maxPositions < 1 || maxPositions > 20) {
+      this.showAdjustError("最大持仓数必须是 1 到 20 之间的整数。");
+      return;
+    }
+    if (!Number.isFinite(positionSizePct) || positionSizePct <= 0 || positionSizePct > 100) {
+      this.showAdjustError("单笔仓位必须大于 0%，且不能超过 100%。");
+      return;
+    }
+    if (!Number.isFinite(marginCap) || marginCap <= 0 || marginCap > 0.95) {
+      this.showAdjustError("保证金上限必须大于 0，且不能超过 0.95。");
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = "保存中…";
+    this.showAdjustError("");
+    try {
+      const updated = await this.api(`/accounts/${encodeURIComponent(this.selectedAccountId)}/strategy`, {
+        method: "PUT",
+        body: JSON.stringify({
+          strategy_ids: strategyIds,
+          leverage,
+          max_positions: maxPositions,
+          position_size_pct: positionSizePct,
+          margin_cap: marginCap,
+        }),
+      });
+      await this.loadAccounts(updated.id);
+      await this.load();
+      this.closeAdjustDialog();
+      this.showBanner(`参数已保存；${strategyIds.length} 个策略必须全部同向满足，新仓才会使用 ${leverage}x 杠杆。`, "success");
+    } catch (error) {
+      this.showAdjustError(`保存失败：${error.message}`);
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "保存参数";
+    }
+  }
+
+  showAdjustError(message) {
+    const target = this.q("#paper-adjust-error");
+    target.textContent = message;
+    target.classList.toggle("hidden", !message);
   }
 
   readRememberedAccount() {
@@ -573,6 +759,7 @@ class PaperDashboard extends HTMLElement {
     resetButton.title = "只重置当前用户选中的模拟盘";
     this.q("#paper-delete").disabled = false;
     this.q("#paper-rename").disabled = false;
+    this.q("#paper-adjust").disabled = false;
     const statusButton = this.q("#paper-toggle-status");
     statusButton.disabled = false;
     statusButton.textContent = accountMeta.status === "paused" ? "继续运行" : "暂停运行";
@@ -605,7 +792,7 @@ class PaperDashboard extends HTMLElement {
   renderPositions(positions) {
     this.q("#paper-pos-count").textContent = `${positions.length} 个`;
     if (!positions.length) {
-      this.q("#paper-positions").innerHTML = '<div class="empty-state"><strong>暂无持仓</strong><span>等待 4h 信号评分达到策略阈值后自动开仓</span></div>';
+      this.q("#paper-positions").innerHTML = '<div class="empty-state"><strong>暂无持仓</strong><span>等待所选策略全部给出同一方向信号后自动开仓</span></div>';
       return;
     }
     const rows = positions.map((position) => {
@@ -684,7 +871,7 @@ class PaperDashboard extends HTMLElement {
 
     if (!curve.length) {
       context.fillStyle = "#718096";
-      context.font = "13px system-ui, sans-serif";
+      context.font = "20.8px system-ui, sans-serif";
       context.fillText("权益数据积累中（每分钟记录一次）…", padding.left + 6, padding.top + 20);
       return;
     }
@@ -699,7 +886,7 @@ class PaperDashboard extends HTMLElement {
     const x = (index) => padding.left + index * plotWidth / Math.max(curve.length - 1, 1);
     const y = (value) => padding.top + (chartHigh - value) / chartRange * plotHeight;
 
-    context.font = "11px system-ui, sans-serif";
+    context.font = "17.6px system-ui, sans-serif";
     context.lineWidth = 1;
     for (let index = 0; index <= 4; index += 1) {
       const value = chartHigh - chartRange * index / 4;
@@ -721,7 +908,7 @@ class PaperDashboard extends HTMLElement {
     context.stroke();
     context.setLineDash([]);
     context.fillStyle = "#f0b90b";
-    context.font = "600 11px system-ui, sans-serif";
+    context.font = "600 17.6px system-ui, sans-serif";
     context.fillText(`本金 ${this.number(start, 0)}`, padding.left + 6, Math.max(13, y(start) - 7));
 
     const lastValue = curve[curve.length - 1][1];
@@ -751,7 +938,7 @@ class PaperDashboard extends HTMLElement {
     context.stroke();
 
     context.fillStyle = "#718096";
-    context.font = "11px system-ui, sans-serif";
+    context.font = "17.6px system-ui, sans-serif";
     const labels = [0, Math.floor((curve.length - 1) / 2), curve.length - 1];
     labels.forEach((index, labelIndex) => {
       const label = this.shortTime(curve[index][0]);

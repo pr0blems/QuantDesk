@@ -201,6 +201,39 @@ def test_sha256_migration_does_not_duplicate_an_existing_source_link(monkeypatch
     assert writes == []
 
 
+def test_newly_inserted_news_immediately_notifies_ai_worker(monkeypatch) -> None:
+    source = {
+        "name": "CoinDesk",
+        "url": "https://www.coindesk.com/feed",
+        "lang": "zh",
+    }
+    monkeypatch.setattr(news, "settings", {"news_sources": [source]})
+    monkeypatch.setattr(
+        news,
+        "fetch_rss",
+        lambda url, **kwargs: [("Headline", "https://example.com/immediate", "")],
+    )
+    monkeypatch.setattr(news, "_fail_streak", {})
+    monkeypatch.setattr(news, "_skip_until", {})
+    monkeypatch.setattr(
+        news.store,
+        "query",
+        lambda sql, params=(): [] if "SELECT" in sql else [],
+    )
+    monkeypatch.setattr(news.store, "execute", lambda *args: 1)
+    notified: list[list[str]] = []
+    monkeypatch.setattr(
+        news,
+        "_notify_news_ingested",
+        lambda news_ids: notified.append(news_ids),
+    )
+
+    assert news.news_once() == 1
+    assert notified == [
+        [news._news_id("CoinDesk", "https://example.com/immediate")]
+    ]
+
+
 def test_news_model_exposes_generated_unique_dedup_hash() -> None:
     column = News.__table__.c.source_link_hash
     assert isinstance(column.computed, Computed)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
@@ -20,6 +20,7 @@ from .dependencies import require_admin, require_admin_write
 from .models import (
     AdminSetting,
     AiModelConfig,
+    AiMonitorRun,
     AuditLog,
     CollectorStatus,
     CompanyProfile,
@@ -208,13 +209,30 @@ def initialize_admin_runtime(engine: Engine) -> None:
     """Seed file-defined news sources before production workers start."""
 
     with Session(engine) as db:
+        now = utcnow()
+        stale_cutoff = now - timedelta(minutes=10)
         db.execute(
             update(NewsAiBatch)
-            .where(NewsAiBatch.status.in_(("pending", "running")))
+            .where(
+                NewsAiBatch.status.in_(("pending", "running")),
+                NewsAiBatch.updated_at < stale_cutoff,
+            )
             .values(
                 status="failed",
                 error_message="服务重启导致任务中断，请重新发起分析",
-                completed_at=utcnow(),
+                completed_at=now,
+            )
+        )
+        db.execute(
+            update(AiMonitorRun)
+            .where(
+                AiMonitorRun.status.in_(("pending", "running")),
+                AiMonitorRun.updated_at < stale_cutoff,
+            )
+            .values(
+                status="failed",
+                error_message="服务重启或任务超时，请重新发起",
+                completed_at=now,
             )
         )
         _sync_news_sources(db)

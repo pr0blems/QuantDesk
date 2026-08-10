@@ -1070,13 +1070,34 @@ class MonitorRepository:
         )
         return list(reversed(rows))
 
+    def kline_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> list[dict[str, Any]]:
+        """Return ascending candles inside a bounded historical window."""
+
+        normalized = self._validate_symbol(symbol)
+        if timeframe not in {"15m", "1h", "4h"}:
+            raise MonitorUnavailable("unsupported monitor timeframe")
+        return self._query(
+            """
+            SELECT open_time, open, high, low, close, volume FROM klines
+            WHERE symbol=? AND tf=? AND open_time>=? AND open_time<=?
+            ORDER BY open_time ASC
+            """,
+            (normalized, timeframe, int(start_ms), int(end_ms)),
+        )
+
     def strategy_indicators(self, symbol: str, timeframe: str) -> dict[str, Any]:
         from .prediction_feature_indicators import evaluate_prediction_feature_indicators
-        from .strategy_indicators import evaluate_strategy_indicators
+        from .strategy_indicators import evaluate_directional_strategy_indicators
 
         normalized = self._validate_symbol(symbol)
         candles = self.klines(normalized, timeframe, 120)
-        result = evaluate_strategy_indicators(candles, timeframe)
+        result = evaluate_directional_strategy_indicators(candles, timeframe)
         snapshot: dict[str, Any] | None = None
         try:
             rows = self._query(

@@ -36,8 +36,8 @@ class LiveDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/paper.css?v=20260804-3">
-      <link rel="stylesheet" href="/assets/live.css?v=20260804-3">
+      <link rel="stylesheet" href="/assets/paper.css?v=20260809-font1_6x-1">
+      <link rel="stylesheet" href="/assets/live.css?v=20260809-font1_6x-1">
       <main class="paper-dashboard live-dashboard">
         <nav class="account-switcher" aria-label="实盘策略切换">
           <div id="live-tabs" class="account-tabs" role="tablist"><span class="tabs-loading">正在读取实盘策略…</span></div>
@@ -353,12 +353,12 @@ class LiveDashboard extends HTMLElement {
     const canvas = this.q("#live-chart"); const width = Math.floor(canvas.clientWidth); const height = Math.floor(canvas.clientHeight); if (!width || !height) return;
     const ratio = Math.min(devicePixelRatio || 1, 2); canvas.width = width * ratio; canvas.height = height * ratio; const ctx = canvas.getContext("2d"); ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, width, height);
     const curve = (rawCurve || []).map((point) => [Number(point[0]), Number(point[1])]).filter((point) => Number.isFinite(point[0]) && Number.isFinite(point[1])); const start = Number(rawStart || curve[0]?.[1] || 0); const pad = { left: 16, right: width < 560 ? 52 : 70, top: 24, bottom: 34 };
-    if (!curve.length) { ctx.fillStyle = "#718096"; ctx.font = "13px system-ui"; ctx.fillText("权益数据积累中…", 22, 44); return; }
+    if (!curve.length) { ctx.fillStyle = "#718096"; ctx.font = "20.8px system-ui"; ctx.fillText("权益数据积累中…", 22, 44); return; }
     const values = curve.map((point) => point[1]).concat(start); const high = Math.max(...values); const low = Math.min(...values); const range = high - low || Math.max(Math.abs(high) * .01, 1); const hi = high + range * .08; const lo = low - range * .08; const total = hi - lo || 1; const plotW = width - pad.left - pad.right; const plotH = height - pad.top - pad.bottom; const x = (i) => pad.left + i * plotW / Math.max(curve.length - 1, 1); const y = (v) => pad.top + (hi - v) / total * plotH;
-    ctx.font = "11px system-ui"; ctx.lineWidth = 1; for (let i = 0; i <= 4; i += 1) { const value = hi - total * i / 4; const yy = y(value); ctx.strokeStyle = "#202936"; ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(width - pad.right, yy); ctx.stroke(); ctx.fillStyle = "#718096"; ctx.fillText(this.number(value, range < 5 ? 2 : 0), width - pad.right + 8, yy + 4); }
-    ctx.strokeStyle = "#f0b90b"; ctx.setLineDash([6, 6]); ctx.beginPath(); ctx.moveTo(pad.left, y(start)); ctx.lineTo(width - pad.right, y(start)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = "#f0b90b"; ctx.font = "600 11px system-ui"; ctx.fillText(`起点 ${this.number(start, 0)}`, pad.left + 6, Math.max(13, y(start) - 7));
+    ctx.font = "17.6px system-ui"; ctx.lineWidth = 1; for (let i = 0; i <= 4; i += 1) { const value = hi - total * i / 4; const yy = y(value); ctx.strokeStyle = "#202936"; ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(width - pad.right, yy); ctx.stroke(); ctx.fillStyle = "#718096"; ctx.fillText(this.number(value, range < 5 ? 2 : 0), width - pad.right + 8, yy + 4); }
+    ctx.strokeStyle = "#f0b90b"; ctx.setLineDash([6, 6]); ctx.beginPath(); ctx.moveTo(pad.left, y(start)); ctx.lineTo(width - pad.right, y(start)); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = "#f0b90b"; ctx.font = "600 17.6px system-ui"; ctx.fillText(`起点 ${this.number(start, 0)}`, pad.left + 6, Math.max(13, y(start) - 7));
     const last = curve.at(-1)[1]; const color = last >= start ? "#2bd7a3" : "#f6465d"; const gradient = ctx.createLinearGradient(0, pad.top, 0, height - pad.bottom); gradient.addColorStop(0, last >= start ? "rgba(43,215,163,.28)" : "rgba(246,70,93,.26)"); gradient.addColorStop(1, "rgba(43,215,163,.01)"); ctx.beginPath(); curve.forEach((p, i) => i ? ctx.lineTo(x(i), y(p[1])) : ctx.moveTo(x(i), y(p[1]))); ctx.lineTo(x(curve.length - 1), height - pad.bottom); ctx.lineTo(x(0), height - pad.bottom); ctx.closePath(); ctx.fillStyle = gradient; ctx.fill(); ctx.beginPath(); curve.forEach((p, i) => i ? ctx.lineTo(x(i), y(p[1])) : ctx.moveTo(x(i), y(p[1]))); ctx.strokeStyle = color; ctx.lineWidth = 2.2; ctx.lineJoin = "round"; ctx.stroke();
-    ctx.fillStyle = "#718096"; ctx.font = "11px system-ui"; [...new Set([0, Math.floor((curve.length - 1) / 2), curve.length - 1])].forEach((i, n, indexes) => { const label = this.shortTime(curve[i][0]); const measured = ctx.measureText(label).width; let xx = x(i) - measured / 2; if (!n) xx = pad.left; if (n === indexes.length - 1) xx = width - pad.right - measured; ctx.fillText(label, xx, height - 9); });
+    ctx.fillStyle = "#718096"; ctx.font = "17.6px system-ui"; [...new Set([0, Math.floor((curve.length - 1) / 2), curve.length - 1])].forEach((i, n, indexes) => { const label = this.shortTime(curve[i][0]); const measured = ctx.measureText(label).width; let xx = x(i) - measured / 2; if (!n) xx = pad.left; if (n === indexes.length - 1) xx = width - pad.right - measured; ctx.fillText(label, xx, height - 9); });
   }
 
   async loadCatalog() {

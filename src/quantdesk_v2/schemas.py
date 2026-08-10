@@ -292,7 +292,9 @@ class AiProviderOut(BaseModel):
 
 def _normalize_ai_display_name(value: str) -> str:
     normalized = value.strip()
-    if not normalized or any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+    if not normalized or any(
+        ord(character) < 32 or ord(character) == 127 for character in normalized
+    ):
         raise ValueError("display_name must not be blank or contain control characters")
     return normalized
 
@@ -618,6 +620,60 @@ class OpportunityPreferenceUpdate(BaseModel):
     notify_enabled: bool = True
 
 
+class AiMonitorConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    news_interval_minutes: int = Field(default=15, ge=5, le=1440)
+    opportunity_interval_minutes: int = Field(default=15, ge=5, le=1440)
+    news_lookback_hours: int = Field(default=24, ge=1, le=168)
+    timeframe: Literal["15m", "1h", "4h"] = "1h"
+    indicator_keys: list[str] = Field(
+        default_factory=lambda: ["moving_average_bull"], min_length=1, max_length=20
+    )
+    monitor_symbols: list[str] = Field(default_factory=list, max_length=250)
+    minimum_news_confidence: float = Field(default=0.6, ge=0, le=1)
+    minimum_news_mentions: int = Field(default=1, ge=1, le=20)
+
+    @field_validator("indicator_keys")
+    @classmethod
+    def normalize_indicator_keys(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_key in value:
+            key = raw_key.strip().lower()
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key):
+                raise ValueError("indicator key is invalid")
+            if key not in normalized:
+                normalized.append(key)
+        if not normalized:
+            raise ValueError("at least one indicator is required")
+        return normalized
+
+    @field_validator("monitor_symbols")
+    @classmethod
+    def normalize_monitor_symbols(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_symbol in value:
+            symbol = raw_symbol.strip().upper()
+            if not re.fullmatch(r"[A-Z0-9][A-Z0-9._:/-]{1,31}", symbol):
+                raise ValueError("monitor symbol is invalid")
+            if symbol not in normalized:
+                normalized.append(symbol)
+        return normalized
+
+
+class AiMonitorRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_type: Literal["news", "opportunity"]
+
+
+class AiMonitorNewsAnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    news_id: str = Field(min_length=1, max_length=255)
+
+
 class PredictionAlgorithmWeights(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -702,9 +758,7 @@ class PredictionAlgorithmUpdate(BaseModel):
     @model_validator(mode="after")
     def enabled_features_need_positive_weight(self) -> Self:
         enabled = self.enabled_features
-        enabled_names = [
-            name for name in type(enabled).model_fields if getattr(enabled, name)
-        ]
+        enabled_names = [name for name in type(enabled).model_fields if getattr(enabled, name)]
         if not enabled_names:
             raise ValueError("at least one prediction feature must be enabled")
         for horizon in ("five_minutes", "fifteen_minutes", "one_hour"):
@@ -724,12 +778,27 @@ class PaperAccountCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     name: str = Field(min_length=1, max_length=100)
-    strategy_id: str = Field(min_length=36, max_length=36)
+    strategy_ids: list[str] | None = Field(default=None, min_length=1, max_length=10)
+    strategy_id: str | None = Field(default=None, min_length=36, max_length=36)
     initial_balance: float = Field(default=10_000, gt=0, le=1_000_000_000)
     leverage: int | None = Field(default=None, ge=1, le=20)
     max_positions: int | None = Field(default=None, ge=1, le=20)
     position_size_pct: float | None = Field(default=None, gt=0, le=100)
     margin_cap: float | None = Field(default=None, gt=0, le=0.95)
+
+    @model_validator(mode="after")
+    def normalize_strategy_selection(self) -> Self:
+        selected = self.strategy_ids or ([self.strategy_id] if self.strategy_id else [])
+        if not selected:
+            raise ValueError("at least one paper strategy is required")
+        if any(len(value) != 36 for value in selected):
+            raise ValueError("paper strategy ids must be 36 characters")
+        if len(set(selected)) != len(selected):
+            raise ValueError("paper strategy ids must be unique")
+        if self.strategy_ids is not None and self.strategy_id is not None:
+            raise ValueError("provide strategy_ids or strategy_id, not both")
+        self.strategy_ids = selected
+        return self
 
 
 class PaperAccountStatusUpdate(BaseModel):
@@ -748,11 +817,26 @@ class PaperAccountStatusUpdate(BaseModel):
 class PaperAccountStrategyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    strategy_id: str = Field(min_length=36, max_length=36)
+    strategy_ids: list[str] | None = Field(default=None, min_length=1, max_length=10)
+    strategy_id: str | None = Field(default=None, min_length=36, max_length=36)
     leverage: int = Field(ge=1, le=20)
     max_positions: int = Field(ge=1, le=20)
     position_size_pct: float = Field(gt=0, le=100)
     margin_cap: float = Field(gt=0, le=0.95)
+
+    @model_validator(mode="after")
+    def normalize_strategy_selection(self) -> Self:
+        selected = self.strategy_ids or ([self.strategy_id] if self.strategy_id else [])
+        if not selected:
+            raise ValueError("at least one paper strategy is required")
+        if any(len(value) != 36 for value in selected):
+            raise ValueError("paper strategy ids must be 36 characters")
+        if len(set(selected)) != len(selected):
+            raise ValueError("paper strategy ids must be unique")
+        if self.strategy_ids is not None and self.strategy_id is not None:
+            raise ValueError("provide strategy_ids or strategy_id, not both")
+        self.strategy_ids = selected
+        return self
 
 
 class LiveAccountCreateRequest(BaseModel):

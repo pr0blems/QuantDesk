@@ -9,6 +9,21 @@ from . import indicators
 
 STRATEGY_INDICATOR_COUNT = 12
 
+BEARISH_STRATEGY_NAMES: dict[str, str] = {
+    "bollinger_breakout": "布林跌破",
+    "moving_average_pullback_bounce": "均线反弹受阻",
+    "trend_breakout": "趋势跌破",
+    "price_volume_rise": "量价齐跌",
+    "new_low_reversal": "新高反转",
+    "low_volume_pullback": "缩量反弹",
+    "strong_gap_open": "强势低开",
+    "moving_average_bull": "均线空头",
+    "ma_golden_cross": "MA死叉",
+    "macd_golden_cross_volume": "MACD死叉放量",
+    "oversold_bounce": "超买回落",
+    "oversold_reversal": "超买反转",
+}
+
 
 def _number(value: Any) -> float:
     return float(value)
@@ -516,6 +531,74 @@ def evaluate_strategy_indicators(
     if len(items) != STRATEGY_INDICATOR_COUNT:  # pragma: no cover - invariant
         raise RuntimeError("strategy indicator count mismatch")
     return _result(timeframe, items, count, clean[-1]["open_time"])
+
+
+def evaluate_directional_strategy_indicators(
+    candles: Sequence[Mapping[str, Any]], timeframe: str
+) -> dict[str, Any]:
+    """Evaluate each strategy family for both long and short opportunities.
+
+    Short conditions are evaluated on the reciprocal OHLC series. A price decline,
+    lower-band break, bearish moving-average alignment, death cross, or overbought
+    reversal therefore maps to the existing and tested bullish family condition
+    without weakening its thresholds.
+    """
+
+    bullish = evaluate_strategy_indicators(candles, timeframe)
+    bearish = evaluate_strategy_indicators(_reciprocal_candles(candles), timeframe)
+    bearish_by_key = {item["key"]: item for item in bearish["items"]}
+    for item in bullish["items"]:
+        opposite = bearish_by_key[item["key"]]
+        item["bullish_triggered"] = item["triggered"]
+        item["bearish_triggered"] = opposite["triggered"]
+        item["bearish_name"] = BEARISH_STRATEGY_NAMES[item["key"]]
+        item["bearish_status"] = opposite["status"]
+        item["bearish_summary"] = (
+            f"{BEARISH_STRATEGY_NAMES[item['key']]}反向条件"
+            f"{'已满足' if opposite['triggered'] is True else '尚未满足' if opposite['triggered'] is False else '数据不足'}。"
+        )
+        item["direction"] = (
+            "both"
+            if item["triggered"] is True and opposite["triggered"] is True
+            else "bullish"
+            if item["triggered"] is True
+            else "bearish"
+            if opposite["triggered"] is True
+            else None
+        )
+    bullish["bullish_triggered_count"] = sum(
+        item["bullish_triggered"] is True for item in bullish["items"]
+    )
+    bullish["bearish_triggered_count"] = sum(
+        item["bearish_triggered"] is True for item in bullish["items"]
+    )
+    return bullish
+
+
+def _reciprocal_candles(
+    candles: Sequence[Mapping[str, Any]],
+) -> list[dict[str, float | int]]:
+    """Mirror positive OHLC prices so bullish tests become bearish tests."""
+
+    result: list[dict[str, float | int]] = []
+    for candle in candles:
+        open_price = _number(candle["open"])
+        high_price = _number(candle["high"])
+        low_price = _number(candle["low"])
+        close_price = _number(candle["close"])
+        if min(open_price, high_price, low_price, close_price) <= 0:
+            return []
+        result.append(
+            {
+                "open_time": int(candle.get("open_time") or 0),
+                "open": 1 / open_price,
+                "high": 1 / low_price,
+                "low": 1 / high_price,
+                "close": 1 / close_price,
+                "volume": _number(candle["volume"]),
+            }
+        )
+    return result
 
 
 def _result(

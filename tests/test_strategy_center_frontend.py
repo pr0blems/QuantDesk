@@ -66,12 +66,12 @@ def test_strategy_custom_element_initializes_after_construction() -> None:
 def test_paper_strategy_editor_preserves_an_unavailable_current_strategy() -> None:
     page = (ROOT / "web/src/pages/PaperPage.tsx").read_text(encoding="utf-8")
 
-    assert 'const selectedStrategyId = selected ? stringValue(selected.strategy_id, "") : "";' in page
-    assert "const selectedStrategyAvailable = activeStrategies.some(" in page
-    assert 'defaultValue={selectedStrategyId}' in page
-    assert "selectedStrategyId && !selectedStrategyAvailable" in page
-    assert "<option value={selectedStrategyId}>" in page
+    assert "const selectedStrategyIds = selected" in page
+    assert "const unavailableStrategyIds = selectedStrategyIds.filter(" in page
+    assert "defaultValue={selectedStrategyIds}" in page
+    assert "unavailableStrategyIds.map" in page
+    assert "<option key={strategyId} value={strategyId} disabled>" in page
     assert "当前绑定（已归档或不可用）" in page
-    assert page.index("selectedStrategyId && !selectedStrategyAvailable") < page.index(
-        "activeStrategies.map", page.index("defaultValue={selectedStrategyId}")
+    assert page.index("unavailableStrategyIds.map") < page.index(
+        "activeStrategies.map", page.index("defaultValue={selectedStrategyIds}")
     )

@@ -27,7 +27,9 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
         'data-chart-overlay="ma60"',
         'data-chart-overlay="boll"',
         'data-chart-overlay="signals"',
+        'data-chart-overlay="projection"',
         'data-chart-action="reset"',
+        'id="chart-projection-note"',
         'id="battle-detail"',
         'id="opportunity-detail"',
         'id="score-summary"',
@@ -48,7 +50,7 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
     assert 'bearish: "偏空"' in script
     assert "handleChartPointerMove(event)" in script
     assert "handleChartWheel(event)" in script
-    assert "buildChartSignals(klines, series)" in script
+    assert "buildChartSignals(realKlines, realSeries)" in script
     assert 'item.direction === "long" ? "buy"' not in script
     assert "opportunities.forEach" not in script
     assert 'add(index, "buy", "MA金叉"' in script
@@ -64,6 +66,16 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
     assert "美股映射 USDT 合约" in script
     assert "市盈率" not in script
     assert "市净率" not in script
+    assert 'async openResearch(symbol, timeframe = "1h", predictionContext = null)' in script
+    assert "buildPredictionProjection(klines, context)" in script
+    assert "renderPredictionProjection(projection)" in script
+    assert "evaluatePredictionProjection(klines, candles, anchorPrice, context)" in script
+    assert "pathAccuracy * 0.7 + directionAccuracy * 0.3" in script
+    assert "推演准确率" in script
+    assert "终点价格偏差" in script
+    assert "targetReturnPct" in script
+    assert "非真实行情" in script
+    assert 'this.api("/overview")' in script
 
 
 def test_monitor_research_modal_is_responsive_and_supports_light_theme() -> None:
@@ -78,9 +90,15 @@ def test_monitor_research_modal_is_responsive_and_supports_light_theme() -> None
     assert ".chart-tooltip { width: 206px" in stylesheet
     assert ".chart-overlay-toolbar" in stylesheet
     assert ".chart-signal-note" in stylesheet
+    assert ".legend-line.projection" in stylesheet
+    assert ".chart-projection-note" in stylesheet
+    assert ".tooltip-projection" in stylesheet
+    assert ".chart-projection-note .projection-accuracy" in stylesheet
     assert "touch-action: none" in stylesheet
     assert "@media (max-width: 620px)" in stylesheet
     assert ':host-context(html[data-theme="light"]) .research-modal' in stylesheet
+    assert ':host([research-only]) .monitor' in stylesheet
+    assert ':host([research-only]) #modal' in stylesheet
 
 
 def test_prediction_algorithm_includes_all_twelve_kline_strategy_weights() -> None:

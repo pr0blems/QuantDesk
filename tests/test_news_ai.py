@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -54,6 +56,9 @@ def analysis_output() -> dict[str, Any]:
                 "related_us_stocks": [
                     {"symbol": "NVDA", "relevance": 0.98, "direction": "bull"}
                 ],
+                "related_industries": [
+                    {"name": "半导体", "relevance": 0.96, "direction": "bull"}
+                ],
                 "sentiment": "bull",
                 "confidence": 0.92,
                 "impact_strength": "high",
@@ -64,6 +69,9 @@ def analysis_output() -> dict[str, Any]:
             {
                 "id": "news-2",
                 "related_us_stocks": [],
+                "related_industries": [
+                    {"name": "金融", "relevance": 0.72, "direction": "neutral"}
+                ],
                 "sentiment": "neutral",
                 "confidence": 0.74,
                 "impact_strength": "medium",
@@ -98,6 +106,9 @@ def test_analyze_news_chunk_returns_validated_us_stock_decisions(monkeypatch) ->
         {"symbol": "NVDA", "relevance": 0.98, "direction": "bull"}
     ]
     assert result[0]["sentiment"] == "bull"
+    assert result[0]["related_industries"] == [
+        {"name": "半导体", "relevance": 0.96, "direction": "bull"}
+    ]
     assert result[1]["sentiment"] == "neutral"
     assert captured["endpoint"].host == "api.deepseek.com"
     assert captured["request"]["response_format"] == {"type": "json_object"}
@@ -156,7 +167,7 @@ def test_batch_summary_is_structured_and_bounded(monkeypatch) -> None:
     assert result == summary
 
 
-@pytest.mark.parametrize("count", [0, 6])
+@pytest.mark.parametrize("count", [0, 3])
 def test_chunk_size_is_bounded(count: int) -> None:
     items = [sample_items()[0] | {"id": f"news-{index}"} for index in range(count)]
 
@@ -218,7 +229,33 @@ def test_recovery_depth_is_bounded(monkeypatch) -> None:
     assert results == []
     assert failed == 5
     assert error is not None and error.category == "timeout"
-    assert calls == [5, 2, 3]
+    assert calls == [5]
+
+
+def test_chunk_wall_clock_timeout_releases_the_batch(monkeypatch) -> None:
+    release = threading.Event()
+
+    def slow_analysis(*_args, **_kwargs):
+        release.wait(0.5)
+        return [], 1, None
+
+    monkeypatch.setattr(news_ai, "_analyze_with_recovery", slow_analysis)
+    monkeypatch.setattr(news_ai, "CHUNK_WALL_TIMEOUT_SECONDS", 0.01)
+    started = time.monotonic()
+
+    results, failed, error = news_ai._analyze_chunk_bounded(
+        [sample_items()[0]],
+        provider_code="deepseek",
+        api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+        model_name="deepseek-v4-flash",
+        deadline=time.monotonic() + 1,
+    )
+    release.set()
+
+    assert time.monotonic() - started < 0.2
+    assert results == []
+    assert failed == 1
+    assert error is not None and error.category == "timeout"
 
 
 def test_analysis_parser_accepts_common_model_aliases() -> None:
@@ -231,6 +268,7 @@ def test_analysis_parser_accepts_common_model_aliases() -> None:
                 "impact": "moderate",
                 "timeframe": "short-term",
                 "type": "technology",
+                "sectors": [{"sector": "人工智能芯片", "score": "0.93"}],
                 "explanation": "AI 需求提升芯片业务预期",
             }
         }
@@ -244,3 +282,6 @@ def test_analysis_parser_accepts_common_model_aliases() -> None:
     ]
     assert result[0]["impact_strength"] == "medium"
     assert result[0]["category"] == "company"
+    assert result[0]["related_industries"] == [
+        {"name": "人工智能芯片", "relevance": 0.93, "direction": "bull"}
+    ]

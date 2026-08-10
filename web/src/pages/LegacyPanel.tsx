@@ -5,7 +5,7 @@ type LegacyElement = HTMLElement & {
   start?: () => void;
 };
 
-export function LegacyPanel({ active, tag }: { active: boolean; tag: "backtest-workbench" | "contract-monitor" | "live-dashboard" | "paper-dashboard" | "strategy-center" }) {
+export function LegacyPanel({ active, tag }: { active: boolean; tag: "ai-monitor-dashboard" | "backtest-workbench" | "contract-monitor" | "live-dashboard" | "paper-dashboard" | "strategy-center" }) {
   const activeRef = useRef(active);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const elementRef = useRef<LegacyElement | null>(null);

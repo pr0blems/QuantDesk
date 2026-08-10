@@ -12,11 +12,13 @@ class ContractMonitor extends HTMLElement {
       watchlist: new Set(),
       lastAlertId: 0,
       spreadAlertStates: new Map(),
-      modal: { symbol: null, tf: "1h", opportunity: null, indicators: [], selectedIndicator: null },
+      modal: { symbol: null, tf: "1h", opportunity: null, indicators: [], selectedIndicator: null, predictionContext: null },
       chart: {
         klines: [],
+        realCount: 0,
         signals: [],
         series: null,
+        projection: null,
         visibleCount: 90,
         rightOffset: 0,
         hoverIndex: null,
@@ -24,7 +26,7 @@ class ContractMonitor extends HTMLElement {
         dragging: false,
         dragStartX: 0,
         dragStartOffset: 0,
-        overlays: new Set(["ma20", "ma50", "ma60", "boll", "volma", "signals"]),
+        overlays: new Set(["ma20", "ma50", "ma60", "boll", "volma", "signals", "projection"]),
       },
       history: {
         page: 1,
@@ -65,7 +67,7 @@ class ContractMonitor extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260808-15">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260810-forecast-2">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -203,10 +205,12 @@ class ContractMonitor extends HTMLElement {
               <button class="on" type="button" data-chart-overlay="boll" aria-pressed="true"><i class="legend-line boll"></i>BOLL</button>
               <button class="on" type="button" data-chart-overlay="volma" aria-pressed="true"><i class="legend-line volma"></i>VOL MA20</button>
               <button class="on" type="button" data-chart-overlay="signals" aria-pressed="true"><i class="legend-signal buy">买</i><i class="legend-signal sell">卖</i>历史买卖点</button>
+              <button class="on" type="button" data-chart-overlay="projection" aria-pressed="true"><i class="legend-line projection"></i>预测模拟</button>
               <button class="chart-reset" type="button" data-chart-action="reset">复位到最新</button>
               <small id="chart-range">--</small>
             </div>
             <div class="chart-signal-note"><b>时间口径：</b>图中买点是历史 MA 金叉/布林上破，卖点是历史 MA 死叉/布林下破；下方 12 项策略指标只判断最新一根 K 线。</div>
+            <div id="chart-projection-note" class="chart-projection-note hidden" aria-live="polite"></div>
             <div id="modal-ohlc" class="research-ohlc"><span>正在加载当前周期行情…</span></div>
             <div id="chart-stage" class="chart-stage">
               <canvas id="chart" class="chart" width="1280" height="500" tabindex="0" aria-label="可拖拽缩放的 K 线、叠加指标、成交量和买卖点图"></canvas>
@@ -1429,7 +1433,7 @@ class ContractMonitor extends HTMLElement {
     } catch (_) {}
   }
 
-  async openModal(symbol) {
+  revealModal(symbol) {
     this.state.modal.symbol = symbol;
     const modal = this.q("#modal");
     modal.classList.remove("hidden");
@@ -1437,7 +1441,58 @@ class ContractMonitor extends HTMLElement {
     this.q(".research-modal").scrollTop = 0;
     this.qa("[data-modal-section]").forEach((button, index) => button.classList.toggle("on", index === 0));
     this.q("#modal-close").focus({ preventScroll: true });
+  }
+
+  async openModal(symbol) {
+    this.state.modal.predictionContext = null;
+    this.revealModal(symbol);
     await this.refreshModal();
+  }
+
+  async openResearch(symbol, timeframe = "1h", predictionContext = null) {
+    const normalizedSymbol = String(symbol || "").trim().toUpperCase();
+    if (!normalizedSymbol) return;
+    this.state.modal.tf = ["15m", "1h", "4h"].includes(timeframe) ? timeframe : "1h";
+    this.state.modal.predictionContext = this.normalizePredictionContext(predictionContext);
+    this.revealModal(normalizedSymbol);
+    this.q("#modal-symbol").textContent = normalizedSymbol;
+    this.q("#modal-price").textContent = "--";
+    this.q("#modal-pct").textContent = "--";
+    this.q("#modal-ohlc").innerHTML = "<span>正在读取合约行情与 K 线…</span>";
+    try {
+      const [overview, watchlist] = await Promise.all([
+        this.api("/overview"),
+        this.api("/watchlist").catch(() => []),
+      ]);
+      this.state.overview = Array.isArray(overview.items) ? overview.items : [];
+      this.state.watchlist = new Set(Array.isArray(watchlist) ? watchlist : []);
+      this.state.overview.forEach((item) => { item.watch = this.state.watchlist.has(item.symbol); });
+    } catch (_) {
+      this.state.overview = [];
+    }
+    await this.refreshModal();
+  }
+
+  normalizePredictionContext(context) {
+    if (!context || typeof context !== "object") return null;
+    const clampScore = (value) => Math.max(0, Math.min(100, Number(value) || 0));
+    const entryPrice = Number(context.entry_price);
+    return {
+      id: String(context.id || ""),
+      direction: context.direction === "short" ? "short" : "long",
+      combinedScore: clampScore(context.combined_score),
+      newsScore: clampScore(context.news_score),
+      indicatorScore: clampScore(context.indicator_score),
+      signalTime: context.signal_time || null,
+      expiresAt: context.expires_at || null,
+      entryPrice: Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : null,
+      technicalConfirmed: context.technical_confirmed === true,
+      historical: context.historical === true,
+      outcomeResult: ["win", "loss", "flat"].includes(context.outcome_result) ? context.outcome_result : "unavailable",
+      exitPrice: Number(context.exit_price) > 0 ? Number(context.exit_price) : null,
+      directionalReturnBps: Number.isFinite(Number(context.directional_return_bps)) ? Number(context.directional_return_bps) : null,
+      settledPriceAt: context.settled_price_at || null,
+    };
   }
 
   maybeNotifySpreadAlert(item) {
@@ -2516,7 +2571,7 @@ class ContractMonitor extends HTMLElement {
   }
 
   setChartData(rawKlines) {
-    const klines = (Array.isArray(rawKlines) ? rawKlines : []).map((item) => ({
+    const realKlines = (Array.isArray(rawKlines) ? rawKlines : []).map((item) => ({
       ...item,
       open_time: Number(item.open_time || item.ts || item.time || 0),
       open: Number(item.open),
@@ -2525,26 +2580,194 @@ class ContractMonitor extends HTMLElement {
       close: Number(item.close),
       volume: Number(item.volume) || 0,
     })).filter((item) => item.open_time > 0 && [item.open, item.high, item.low, item.close].every(Number.isFinite));
-    const closes = klines.map((item) => item.close);
-    const volumes = klines.map((item) => item.volume);
+    const closes = realKlines.map((item) => item.close);
+    const volumes = realKlines.map((item) => item.volume);
     const ma20 = this.chartMovingAverage(closes, 20);
     const ma50 = this.chartMovingAverage(closes, 50);
-    const series = {
+    const realSeries = {
       ma20,
       ma50,
       ma60: this.chartMovingAverage(closes, 60),
       volma20: this.chartMovingAverage(volumes, 20),
       boll: this.chartBollinger(closes, 20, 2),
     };
+    const projection = this.buildPredictionProjection(realKlines, this.state.modal.predictionContext);
+    const futureCandles = projection && !projection.historical
+      ? projection.candles.map((item) => ({ ...item, simulated: true }))
+      : [];
+    const klines = [...realKlines, ...futureCandles];
+    const extension = Array(futureCandles.length).fill(null);
+    const series = {
+      ma20: [...realSeries.ma20, ...extension],
+      ma50: [...realSeries.ma50, ...extension],
+      ma60: [...realSeries.ma60, ...extension],
+      volma20: [...realSeries.volma20, ...extension],
+      boll: {
+        middle: [...realSeries.boll.middle, ...extension],
+        upper: [...realSeries.boll.upper, ...extension],
+        lower: [...realSeries.boll.lower, ...extension],
+      },
+    };
     this.state.chart.klines = klines;
+    this.state.chart.realCount = realKlines.length;
     this.state.chart.series = series;
-    this.state.chart.signals = this.buildChartSignals(klines, series);
+    this.state.chart.signals = this.buildChartSignals(realKlines, realSeries);
+    this.state.chart.projection = projection;
     this.state.chart.visibleCount = Math.min(90, klines.length || 90);
     this.state.chart.rightOffset = 0;
     this.state.chart.hoverIndex = null;
     this.state.chart.hoverY = null;
     this.q("#chart-tooltip").classList.add("hidden");
+    this.renderPredictionProjection(projection);
     this.drawChart();
+  }
+
+  buildPredictionProjection(klines, context) {
+    if (!context || !klines.length) return null;
+    const timeframeMs = { "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000 }[this.state.modal.tf] || 3_600_000;
+    const signalTime = this.normalizeChartTime(new Date(context.signalTime).getTime());
+    const expiresAt = this.normalizeChartTime(new Date(context.expiresAt).getTime());
+    const validityMs = expiresAt > signalTime ? expiresAt - signalTime : timeframeMs * 2;
+    const horizonBars = Math.max(1, Math.min(12, Math.ceil(validityMs / timeframeMs)));
+    const historical = context.historical === true;
+    const anchorIndex = historical ? this.nearestChartIndex(klines, signalTime) : klines.length - 1;
+    if (anchorIndex < 0) return null;
+    const anchor = klines[anchorIndex];
+    const anchorPrice = context.entryPrice && Math.abs(context.entryPrice / anchor.close - 1) < 0.2
+      ? context.entryPrice
+      : anchor.close;
+    const sampleStart = Math.max(1, anchorIndex - 30);
+    const returns = [];
+    for (let index = sampleStart; index <= anchorIndex; index += 1) {
+      const previous = Number(klines[index - 1]?.close);
+      const current = Number(klines[index]?.close);
+      if (previous > 0 && current > 0) returns.push(current / previous - 1);
+    }
+    const volatility = Math.max(0.001, Math.min(0.05, returns.length
+      ? Math.sqrt(returns.reduce((total, value) => total + value ** 2, 0) / returns.length)
+      : 0.005));
+    const confidence = context.combinedScore / 100;
+    const newsEdge = Math.max(0, (context.newsScore - 50) / 50);
+    const indicatorEdge = context.indicatorScore / 100;
+    let magnitude = volatility * Math.sqrt(horizonBars) * (0.55 + confidence * 0.75)
+      + newsEdge * 0.003 + indicatorEdge * 0.004;
+    magnitude = Math.max(0.002, Math.min(0.06, magnitude));
+    if (!context.technicalConfirmed) magnitude *= 0.78;
+    const targetReturn = (context.direction === "short" ? -1 : 1) * magnitude;
+    const uncertainty = Math.max(
+      volatility * Math.sqrt(horizonBars) * 1.25,
+      magnitude * (1 - confidence) * 1.1 + volatility * 0.7,
+    );
+    const averageVolume = klines.slice(Math.max(0, anchorIndex - 20), anchorIndex + 1)
+      .reduce((total, item) => total + (Number(item.volume) || 0), 0) / Math.max(1, Math.min(21, anchorIndex + 1));
+    const phase = (context.newsScore + context.indicatorScore) / 100 * Math.PI;
+    const candles = [];
+    let previousClose = anchorPrice;
+    for (let step = 1; step <= horizonBars; step += 1) {
+      const progress = step / horizonBars;
+      const eased = progress * progress * (3 - 2 * progress);
+      const wave = Math.sin(progress * Math.PI * 2 + phase) * volatility * 0.22 * (1 - progress * 0.35);
+      const close = anchorPrice * (1 + targetReturn * eased + wave);
+      const open = previousClose;
+      const wick = anchorPrice * volatility * (0.42 + 0.12 * Math.cos(step + phase));
+      const openTime = this.normalizeChartTime(anchor.open_time) + timeframeMs * step;
+      const index = historical ? this.nearestChartIndex(klines, openTime) : anchorIndex + step;
+      if (index >= 0) {
+        candles.push({
+          index,
+          open_time: openTime,
+          open,
+          high: Math.max(open, close) + Math.abs(wick),
+          low: Math.min(open, close) - Math.abs(wick),
+          close,
+          volume: averageVolume * (0.52 + confidence * 0.24 + progress * 0.12),
+          upper: anchorPrice * (1 + targetReturn * eased + uncertainty * Math.sqrt(progress)),
+          lower: anchorPrice * (1 + targetReturn * eased - uncertainty * Math.sqrt(progress)),
+          simulated: true,
+          projectionStep: step,
+        });
+      }
+      previousClose = close;
+    }
+    if (!candles.length) return null;
+    const last = candles[candles.length - 1];
+    const replay = historical
+      ? this.evaluatePredictionProjection(klines, candles, anchorPrice, context)
+      : null;
+    return {
+      historical,
+      direction: context.direction,
+      confidence,
+      combinedScore: context.combinedScore,
+      newsScore: context.newsScore,
+      indicatorScore: context.indicatorScore,
+      technicalConfirmed: context.technicalConfirmed,
+      anchorIndex,
+      anchorPrice,
+      targetPrice: last.close,
+      targetReturnPct: targetReturn * 100,
+      rangeLow: last.lower,
+      rangeHigh: last.upper,
+      horizonBars,
+      expiresAt: context.expiresAt,
+      candles,
+      replay,
+    };
+  }
+
+  evaluatePredictionProjection(klines, candles, anchorPrice, context) {
+    const samples = candles.map((prediction) => {
+      const actual = klines[prediction.index];
+      if (!actual || !Number.isFinite(Number(actual.close)) || Number(actual.close) <= 0) return null;
+      const actualClose = Number(actual.close);
+      const halfBand = Math.max(Math.abs(Number(prediction.upper) - Number(prediction.lower)) / 2, anchorPrice * 0.002);
+      const priceError = Math.abs(Number(prediction.close) - actualClose);
+      const pathFit = Math.max(0, 1 - priceError / halfBand);
+      const directionOf = (value) => Math.abs(value / anchorPrice - 1) < 0.0002 ? 0 : Math.sign(value - anchorPrice);
+      return {
+        pathFit,
+        directionMatched: directionOf(Number(prediction.close)) === directionOf(actualClose),
+        priceErrorPct: priceError / actualClose * 100,
+        actualClose,
+      };
+    }).filter(Boolean);
+    if (!samples.length) return null;
+    const pathAccuracy = samples.reduce((total, item) => total + item.pathFit, 0) / samples.length * 100;
+    const directionAccuracy = samples.filter((item) => item.directionMatched).length / samples.length * 100;
+    const accuracy = pathAccuracy * 0.7 + directionAccuracy * 0.3;
+    const endpoint = samples[samples.length - 1];
+    return {
+      accuracy: Math.round(accuracy * 10) / 10,
+      pathAccuracy: Math.round(pathAccuracy * 10) / 10,
+      directionAccuracy: Math.round(directionAccuracy * 10) / 10,
+      endpointErrorPct: Math.round(endpoint.priceErrorPct * 100) / 100,
+      actualEndPrice: endpoint.actualClose,
+      sampleCount: samples.length,
+      outcomeResult: context.outcomeResult,
+      directionalReturnBps: context.directionalReturnBps,
+    };
+  }
+
+  renderPredictionProjection(projection) {
+    const note = this.q("#chart-projection-note");
+    if (!projection) {
+      note.classList.add("hidden");
+      note.innerHTML = "";
+      return;
+    }
+    const direction = projection.direction === "short" ? "做空" : "做多";
+    const directionClass = projection.direction === "short" ? "down" : "up";
+    const mode = projection.historical ? "历史信号情景复盘" : "当前信号未来模拟";
+    const replay = projection.replay;
+    const resultLabel = ({ win: "命中", loss: "未命中", flat: "持平", unavailable: "行情不足" })[replay?.outcomeResult] || "行情不足";
+    const replayMetrics = replay
+      ? `<span class="projection-accuracy">推演准确率 <b>${replay.accuracy.toFixed(1)}%</b></span><span>路径贴合 <b>${replay.pathAccuracy.toFixed(1)}%</b></span><span>方向一致 <b>${replay.directionAccuracy.toFixed(1)}%</b></span><span>结算结果 <b class="replay-${this.escape(replay.outcomeResult)}">${resultLabel}</b></span>`
+      : "";
+    const replayCaption = replay
+      ? `复盘 ${replay.sampleCount} 根真实 K 线 · 准确率 = 70% 路径贴合 + 30% 逐根方向一致 · 终点价格偏差 ${replay.endpointErrorPct.toFixed(2)}%`
+      : `${projection.horizonBars} 根 ${this.escape(this.state.modal.tf)} 模拟 K 线 · ${projection.technicalConfirmed ? "技术已确认" : "新闻候选，技术未完全确认"}`;
+    note.innerHTML = `<strong>◆ ${mode}</strong><span>预测方向 <b class="${directionClass}">${direction}</b></span><span>组合评分 <b>${projection.combinedScore.toFixed(1)}</b></span><span>目标变化 <b class="${directionClass}">${this.formatPercent(projection.targetReturnPct)}</b></span><span>模拟目标 <b>${this.formatPrice(projection.targetPrice)}</b></span>${replayMetrics}<span>情景区间 <b>${this.formatPrice(projection.rangeLow)} — ${this.formatPrice(projection.rangeHigh)}</b></span><small>${replayCaption} · 紫色区域均为模型情景，不是真实行情</small>`;
+    note.classList.remove("hidden");
   }
 
   chartMovingAverage(values, period) {
@@ -2717,7 +2940,7 @@ class ContractMonitor extends HTMLElement {
     this.state.chart.hoverY = null;
     this.q("#chart-tooltip").classList.add("hidden");
     const klines = this.state.chart.klines;
-    if (klines.length) this.renderChartOhlc(klines.length - 1);
+    if (klines.length) this.renderChartOhlc(Math.max(0, (this.state.chart.realCount || klines.length) - 1));
     this.drawChart();
   }
 
@@ -2781,13 +3004,14 @@ class ContractMonitor extends HTMLElement {
     const barChange = Number(previous.close) ? (current.close / previous.close - 1) * 100 : null;
     const timeframeLabel = { "15m": "15 分", "1h": "1 小时", "4h": "4 小时" }[this.state.modal.tf] || this.state.modal.tf;
     this.q("#modal-ohlc").innerHTML = `
-      <strong>${this.escape(timeframeLabel)} · ${this.chartTimeLabel(current.open_time, true)}</strong>
+      <strong>${current.simulated ? "AI 模拟" : this.escape(timeframeLabel)} · ${this.chartTimeLabel(current.open_time, true)}</strong>
       <span>开 <b>${this.formatPrice(current.open)}</b></span>
       <span>高 <b>${this.formatPrice(current.high)}</b></span>
       <span>低 <b>${this.formatPrice(current.low)}</b></span>
       <span>收 <b>${this.formatPrice(current.close)}</b></span>
       <span class="${barChange > 0 ? "up" : barChange < 0 ? "down" : "flat"}">${barChange == null ? "--" : this.formatPercent(barChange)}</span>
-      <span>量 <b>${this.formatCompact(current.volume)}</b></span>`;
+      <span>${current.simulated ? "模拟量" : "量"} <b>${this.formatCompact(current.volume)}</b></span>
+      ${current.simulated ? '<span class="projection-warning">非真实行情</span>' : ""}`;
   }
 
   updateChartTooltip(geometry) {
@@ -2802,11 +3026,13 @@ class ContractMonitor extends HTMLElement {
     const previous = index > 0 ? this.state.chart.klines[index - 1] : candle;
     const change = previous.close ? (candle.close / previous.close - 1) * 100 : 0;
     const signals = this.state.chart.signals.filter((signal) => signal.index === index);
+    const projectionCandle = this.state.chart.projection?.candles.find((item) => item.index === index);
     const signalRows = signals.map((signal) => `<div class="tooltip-signal ${signal.side}"><b>${signal.side === "buy" ? "买" : "卖"}</b><span><em>历史触发</em>${this.escape(signal.names.join(" / "))}</span></div>`).join("");
     tooltip.innerHTML = `
-      <strong>${this.chartTimeLabel(candle.open_time, true)}</strong>
+      <strong>${candle.simulated ? "AI 模拟 · " : ""}${this.chartTimeLabel(candle.open_time, true)}</strong>
       <div class="tooltip-ohlc"><span>开 ${this.formatPrice(candle.open)}</span><span>高 ${this.formatPrice(candle.high)}</span><span>低 ${this.formatPrice(candle.low)}</span><span>收 ${this.formatPrice(candle.close)}</span></div>
-      <div class="tooltip-change ${change > 0 ? "up" : change < 0 ? "down" : "flat"}">${this.formatPercent(change)} <span>成交量 ${this.formatCompact(candle.volume)}</span></div>
+      <div class="tooltip-change ${change > 0 ? "up" : change < 0 ? "down" : "flat"}">${this.formatPercent(change)} <span>${candle.simulated ? "模拟量" : "成交量"} ${this.formatCompact(candle.volume)}</span></div>
+      ${projectionCandle ? `<div class="tooltip-projection"><b>预测路径</b><span>模拟收盘 ${this.formatPrice(projectionCandle.close)}</span><small>${this.formatPrice(projectionCandle.lower)} — ${this.formatPrice(projectionCandle.upper)}${this.state.chart.projection?.historical ? ` · 与真实收盘偏差 ${(Math.abs(projectionCandle.close / candle.close - 1) * 100).toFixed(2)}%` : ""} · 非真实行情</small></div>` : ""}
       ${signalRows}`;
     const localIndex = index - geometry.start;
     const candleX = geometry.x(localIndex);
@@ -2835,7 +3061,7 @@ class ContractMonitor extends HTMLElement {
     const chart = this.state.chart;
     if (!chart.klines.length || !chart.series) {
       context.fillStyle = "#77808f";
-      context.font = "12px sans-serif";
+      context.font = "19.2px sans-serif";
       context.fillText("数据加载中…", 20, 30);
       return;
     }
@@ -2846,10 +3072,10 @@ class ContractMonitor extends HTMLElement {
     const lightTheme = document.documentElement.dataset.theme === "light";
     const colors = lightTheme ? {
       grid: "#dfe5df", text: "#66736d", up: "#159f70", down: "#d5535c", ma20: "#a27b00", ma50: "#7657a8",
-      boll: "#0e9fb5", volumeUp: "rgba(21,159,112,.42)", volumeDown: "rgba(213,83,92,.38)", cross: "#8e9c96",
+      boll: "#0e9fb5", projection: "#7657b8", projectionFill: "rgba(118,87,184,.13)", volumeUp: "rgba(21,159,112,.42)", volumeDown: "rgba(213,83,92,.38)", cross: "#8e9c96",
     } : {
       grid: "#203330", text: "#809795", up: "#2ebd85", down: "#f6465d", ma20: "#d2af32", ma50: "#9a79ce",
-      boll: "#2ec7d3", volumeUp: "rgba(46,189,133,.38)", volumeDown: "rgba(246,70,93,.32)", cross: "#7d9490",
+      boll: "#2ec7d3", projection: "#b19cff", projectionFill: "rgba(177,156,255,.12)", volumeUp: "rgba(46,189,133,.38)", volumeDown: "rgba(246,70,93,.32)", cross: "#7d9490",
     };
     const padding = { left: 14, right: 72, top: 18, bottom: 30 };
     const volumeHeight = width < 700 ? 64 : 86;
@@ -2859,8 +3085,13 @@ class ContractMonitor extends HTMLElement {
     const volumeBottom = height - padding.bottom;
     const volumeTop = volumeBottom - volumeHeight;
     const priceBottom = volumeTop - volumeGap;
-    const rawHigh = Math.max(...visible.map((item) => item.high));
-    const rawLow = Math.min(...visible.map((item) => item.low));
+    const visibleProjection = chart.overlays.has("projection")
+      ? (chart.projection?.candles || []).filter((item) => item.index >= start && item.index < end)
+      : [];
+    const projectionHighs = visibleProjection.flatMap((item) => [item.high, item.upper]);
+    const projectionLows = visibleProjection.flatMap((item) => [item.low, item.lower]);
+    const rawHigh = Math.max(...visible.map((item) => item.high), ...projectionHighs);
+    const rawLow = Math.min(...visible.map((item) => item.low), ...projectionLows);
     const rawRange = rawHigh - rawLow || Math.max(Math.abs(rawHigh) * 0.01, 1);
     const high = rawHigh + rawRange * 0.08;
     const low = rawLow - rawRange * 0.08;
@@ -2873,7 +3104,7 @@ class ContractMonitor extends HTMLElement {
     const geometry = { width, height, padding, plotRight, plotWidth, priceBottom, volumeTop, volumeBottom, candleStep, start, end, visible, x, y, high, low, range };
     this.chartGeometry = geometry;
 
-    context.font = "10px ui-monospace, SFMono-Regular, Consolas, monospace";
+    context.font = "16px ui-monospace, SFMono-Regular, Consolas, monospace";
     context.lineWidth = 1;
     for (let tick = 0; tick <= 5; tick += 1) {
       const value = high - range * tick / 5;
@@ -2911,6 +3142,11 @@ class ContractMonitor extends HTMLElement {
 
     const candleWidth = Math.max(2, Math.min(13, candleStep * 0.64));
     visible.forEach((item, localIndex) => {
+      if (item.simulated) {
+        context.fillStyle = colors.projectionFill;
+        context.fillRect(x(localIndex) - candleWidth / 2, volumeY(item.volume), candleWidth, Math.max(1, volumeBottom - volumeY(item.volume)));
+        return;
+      }
       const rising = item.close >= item.open;
       context.fillStyle = rising ? colors.volumeUp : colors.volumeDown;
       context.fillRect(x(localIndex) - candleWidth / 2, volumeY(item.volume), candleWidth, Math.max(1, volumeBottom - volumeY(item.volume)));
@@ -2966,6 +3202,7 @@ class ContractMonitor extends HTMLElement {
     }
 
     visible.forEach((item, localIndex) => {
+      if (item.simulated) return;
       const rising = item.close >= item.open;
       const color = rising ? colors.up : colors.down;
       context.strokeStyle = color;
@@ -2982,6 +3219,92 @@ class ContractMonitor extends HTMLElement {
     if (chart.overlays.has("ma20")) plotLine(chart.series.ma20, colors.ma20, y, 1.55);
     if (chart.overlays.has("ma50")) plotLine(chart.series.ma50, colors.ma50, y, 1.55);
     if (chart.overlays.has("ma60")) plotLine(chart.series.ma60, lightTheme ? "#b84b8d" : "#e378b4", y, 1.35, [6, 3]);
+
+    if (visibleProjection.length) {
+      const projection = chart.projection;
+      const points = visibleProjection.map((item) => ({
+        ...item,
+        pointX: x(item.index - start),
+        closeY: y(item.close),
+        upperY: y(item.upper),
+        lowerY: y(item.lower),
+      }));
+      const firstIndex = Math.max(start, Math.min(...points.map((item) => item.index)));
+      const lastIndex = Math.min(end - 1, Math.max(...points.map((item) => item.index)));
+      context.save();
+      context.fillStyle = colors.projectionFill;
+      context.fillRect(
+        Math.max(padding.left, x(firstIndex - start) - candleStep * 0.58),
+        padding.top,
+        Math.max(candleStep, x(lastIndex - start) - x(firstIndex - start) + candleStep * 1.16),
+        priceBottom - padding.top,
+      );
+      context.beginPath();
+      points.forEach((item, index) => index ? context.lineTo(item.pointX, item.upperY) : context.moveTo(item.pointX, item.upperY));
+      [...points].reverse().forEach((item) => context.lineTo(item.pointX, item.lowerY));
+      context.closePath();
+      context.fillStyle = colors.projectionFill;
+      context.globalAlpha = 1;
+      context.fill();
+
+      const anchorVisible = projection.anchorIndex >= start && projection.anchorIndex < end;
+      const pathStartX = anchorVisible ? x(projection.anchorIndex - start) : points[0].pointX;
+      const pathStartY = anchorVisible ? y(projection.anchorPrice) : points[0].closeY;
+      context.strokeStyle = colors.projection;
+      context.lineWidth = 2;
+      context.setLineDash([7, 4]);
+      context.beginPath();
+      context.moveTo(pathStartX, pathStartY);
+      points.forEach((item) => context.lineTo(item.pointX, item.closeY));
+      context.stroke();
+
+      const projectionCandleWidth = Math.max(3, Math.min(12, candleStep * 0.56));
+      points.forEach((item) => {
+        context.strokeStyle = colors.projection;
+        context.fillStyle = colors.projectionFill;
+        context.lineWidth = 1.3;
+        context.setLineDash([3, 2]);
+        context.beginPath();
+        context.moveTo(item.pointX, y(item.high));
+        context.lineTo(item.pointX, y(item.low));
+        context.stroke();
+        const top = y(Math.max(item.open, item.close));
+        const bottom = y(Math.min(item.open, item.close));
+        context.fillRect(item.pointX - projectionCandleWidth / 2, top, projectionCandleWidth, Math.max(2, bottom - top));
+        context.strokeRect(item.pointX - projectionCandleWidth / 2, top, projectionCandleWidth, Math.max(2, bottom - top));
+      });
+      const endpoint = points[points.length - 1];
+      context.setLineDash([]);
+      context.fillStyle = colors.projection;
+      context.beginPath();
+      context.arc(endpoint.pointX, endpoint.closeY, 4, 0, Math.PI * 2);
+      context.fill();
+      context.font = "bold 13px sans-serif";
+      context.textAlign = endpoint.pointX > plotRight - 150 ? "right" : "left";
+      context.fillText(
+        projection.replay
+          ? `推演准确率 ${projection.replay.accuracy.toFixed(1)}%`
+          : `模拟 ${projection.targetReturnPct >= 0 ? "+" : ""}${projection.targetReturnPct.toFixed(2)}%`,
+        endpoint.pointX + (endpoint.pointX > plotRight - 150 ? -7 : 7),
+        Math.max(padding.top + 14, endpoint.closeY - 9),
+      );
+      if (anchorVisible) {
+        const separatorX = x(projection.anchorIndex - start) + candleStep * 0.5;
+        context.strokeStyle = colors.projection;
+        context.globalAlpha = 0.72;
+        context.setLineDash([4, 4]);
+        context.beginPath();
+        context.moveTo(separatorX, padding.top);
+        context.lineTo(separatorX, priceBottom);
+        context.stroke();
+        context.globalAlpha = 1;
+        context.setLineDash([]);
+        context.fillStyle = colors.projection;
+        context.textAlign = "left";
+        context.fillText(projection.historical ? "历史预测模拟" : "未来预测模拟", Math.min(plotRight - 100, separatorX + 6), padding.top + 14);
+      }
+      context.restore();
+    }
 
     const visibleSignals = chart.overlays.has("signals")
       ? chart.signals.filter((signal) => signal.index >= start && signal.index < end)
@@ -3010,7 +3333,7 @@ class ContractMonitor extends HTMLElement {
       context.closePath();
       context.fill();
       context.stroke();
-      context.font = "bold 9px sans-serif";
+      context.font = "bold 14.4px sans-serif";
       context.textAlign = "center";
       context.fillStyle = color;
       context.fillText(signal.side === "buy" ? "买" : "卖", markerX, markerY + (signal.side === "buy" ? 15 : -9));
@@ -3035,12 +3358,13 @@ class ContractMonitor extends HTMLElement {
       context.fillRect(plotRight + 2, crossY - 9, padding.right - 4, 18);
       context.fillStyle = "#f4fbf8";
       context.textAlign = "center";
-      context.font = "10px ui-monospace, monospace";
+      context.font = "16px ui-monospace, monospace";
       context.fillText(this.formatPrice(hoverPrice), plotRight + padding.right / 2, crossY + 3);
     }
 
     const rangeSignalCount = chart.signals.filter((signal) => signal.index >= start && signal.index < end).length;
-    this.q("#chart-range").textContent = `${this.chartTimeLabel(visible[0].open_time)} — ${this.chartTimeLabel(visible[visible.length - 1].open_time)} · ${visible.length}/${chart.klines.length} 根 · ${rangeSignalCount} 个历史信号`;
+    const projectionText = visibleProjection.length ? ` · ${visibleProjection.length} 根预测模拟` : "";
+    this.q("#chart-range").textContent = `${this.chartTimeLabel(visible[0].open_time)} — ${this.chartTimeLabel(visible[visible.length - 1].open_time)} · ${visible.length}/${chart.klines.length} 根 · ${rangeSignalCount} 个历史信号${projectionText}`;
     this.updateChartTooltip(geometry);
   }
 }
