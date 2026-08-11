@@ -5,26 +5,37 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy.dialects import mysql
 
 from quantdesk_v2 import news_ai
 from quantdesk_v2.ai_monitor import (
     NEWS_BATCH_SIZE,
     RUN_STALE_SECONDS,
+    _news_model_call_audit_index,
     _take_ingested_news,
     aggregate_news_candidates,
+    edge_calibration_summary,
     enqueue_news_analysis,
     filter_monitored_candidates,
     historical_settlement_price,
     indicator_catalog,
     indicator_conflicts,
     indicator_templates,
+    market_flow_snapshot,
     match_configured_indicators,
+    opportunity_score_weights,
+    prediction_cost_breakdown,
+    prediction_estimated_cost_bps,
+    prediction_net_outcome,
     prediction_outcome,
+    prediction_path_metrics,
     settle_due_predictions,
     settleable_historical_outcomes,
+    signal_readiness_snapshot,
     strongest_candidate_per_symbol,
     summarize_historical_opportunities,
+    weighted_opportunity_score,
 )
 from quantdesk_v2.interfaces.api.ai_monitor import _utc_out
 from quantdesk_v2.models import (
@@ -33,8 +44,14 @@ from quantdesk_v2.models import (
     AiMonitorRun,
     News,
     NewsAiBatch,
+    NewsAiModelCall,
+    NewsAiModelCallItem,
 )
-from quantdesk_v2.schemas import AiMonitorConfigUpdate, AiMonitorNewsAnalyzeRequest
+from quantdesk_v2.schemas import (
+    AiMonitorConfigUpdate,
+    AiMonitorCostConfigUpdate,
+    AiMonitorNewsAnalyzeRequest,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -289,6 +306,7 @@ def test_configured_indicators_use_all_selected_policy() -> None:
 
     assert matched is True
     assert all(item["matched"] for item in evidence)
+    assert all(item["strength"] == 100 for item in evidence)
     assert rejected is False
     assert [item["matched"] for item in rejected_evidence] == [True, False]
 
@@ -380,6 +398,64 @@ def test_ai_monitor_prediction_outcome_is_direction_aware() -> None:
     assert short_result["result"] == "loss"
 
 
+def test_ai_monitor_prediction_cost_and_path_metrics_are_direction_aware() -> None:
+    predicted_at = datetime(2026, 8, 11, 8, 0)
+    due_at = predicted_at + timedelta(hours=1)
+    cost = prediction_estimated_cost_bps(predicted_at, due_at)
+    net = prediction_net_outcome(20.0, cost)
+    candles = [
+        {
+            "open_time": int(predicted_at.replace(tzinfo=UTC).timestamp() * 1_000),
+            "open": 100,
+            "high": 103,
+            "low": 98,
+            "close": 101,
+        }
+    ]
+
+    assert cost == 16.125
+    assert net == {
+        "estimated_cost_bps": 16.125,
+        "net_directional_return_bps": 3.875,
+        "net_result": "win",
+    }
+    assert prediction_path_metrics(
+        candles,
+        100,
+        "long",
+        int(predicted_at.replace(tzinfo=UTC).timestamp() * 1_000),
+        int(due_at.replace(tzinfo=UTC).timestamp() * 1_000),
+    ) == {"max_favorable_bps": 300.0, "max_adverse_bps": -200.0}
+    assert prediction_path_metrics(
+        candles,
+        100,
+        "short",
+        int(predicted_at.replace(tzinfo=UTC).timestamp() * 1_000),
+        int(due_at.replace(tzinfo=UTC).timestamp() * 1_000),
+    ) == {"max_favorable_bps": 200.0, "max_adverse_bps": -300.0}
+
+
+def test_ai_monitor_prediction_cost_components_are_optional_and_configurable() -> None:
+    predicted_at = datetime(2026, 8, 11, 8, 0)
+    due_at = predicted_at + timedelta(hours=4)
+    config = {
+        "prediction_fee_enabled": False,
+        "prediction_fee_bps_per_side": 9,
+        "prediction_slippage_enabled": True,
+        "prediction_slippage_bps_per_side": 2.5,
+        "prediction_funding_enabled": True,
+        "prediction_funding_bps_per_8h": 4,
+    }
+
+    breakdown = prediction_cost_breakdown(predicted_at, due_at, config)
+
+    assert breakdown["fee_cost_bps"] == 0
+    assert breakdown["slippage_cost_bps"] == 5
+    assert breakdown["funding_cost_bps"] == 2
+    assert breakdown["total_cost_bps"] == 7
+    assert prediction_estimated_cost_bps(predicted_at, due_at, config) == 7
+
+
 def test_historical_opportunity_analytics_uses_expiry_price_and_summarizes_hits() -> None:
     expiry = 1_800_000_000_000
     settlement = historical_settlement_price(
@@ -401,10 +477,10 @@ def test_historical_opportunity_analytics_uses_expiry_price_and_summarizes_hits(
 
     summary = summarize_historical_opportunities(
         [
-            {"result": "win", "directional_return_bps": 100, "technical_confirmed": True},
-            {"result": "loss", "directional_return_bps": -50, "technical_confirmed": False},
-            {"result": "flat", "directional_return_bps": 0, "technical_confirmed": False},
-            {"result": "unavailable", "directional_return_bps": None, "technical_confirmed": False},
+            {"result": "win", "direction": "long", "directional_return_bps": 100, "technical_confirmed": True},
+            {"result": "loss", "direction": "short", "directional_return_bps": -50, "technical_confirmed": False},
+            {"result": "flat", "direction": "long", "directional_return_bps": 0, "technical_confirmed": False},
+            {"result": "unavailable", "direction": "short", "directional_return_bps": None, "technical_confirmed": False},
         ]
     )
 
@@ -414,6 +490,8 @@ def test_historical_opportunity_analytics_uses_expiry_price_and_summarizes_hits(
     assert summary["hit_rate"] == 50.0
     assert summary["coverage_rate"] == 75.0
     assert summary["average_directional_return_bps"] == 16.6667
+    assert summary["long_count"] == 2
+    assert summary["short_count"] == 2
 
 
 def test_historical_statistics_exclude_insufficient_expiry_market_data() -> None:
@@ -429,6 +507,7 @@ def test_historical_statistics_exclude_insufficient_expiry_market_data() -> None
 
 def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> None:
     due_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1)
+    old_due_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=7)
     due_ms = int(due_at.replace(tzinfo=UTC).timestamp() * 1_000)
     settled = SimpleNamespace(
         id=1,
@@ -456,10 +535,36 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
         directional_return_bps=None,
         completed_at=None,
     )
+    retry = SimpleNamespace(
+        id=3,
+        contract_symbol="TSLAUSDT",
+        due_at=due_at,
+        entry_price=Decimal("100"),
+        direction="short",
+        status="unavailable",
+        result=None,
+        exit_price=None,
+        raw_return_bps=None,
+        directional_return_bps=None,
+        completed_at=due_at,
+    )
+    expired_missing = SimpleNamespace(
+        id=4,
+        contract_symbol="GOOGLUSDT",
+        due_at=old_due_at,
+        entry_price=Decimal("100"),
+        direction="long",
+        status="pending",
+        result=None,
+        exit_price=None,
+        raw_return_bps=None,
+        directional_return_bps=None,
+        completed_at=None,
+    )
 
     class Scalars:
         def all(self):
-            return [settled, missing]
+            return [settled, missing, retry, expired_missing]
 
     class Database:
         flushed = False
@@ -475,7 +580,7 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
 
         def kline_range(self, symbol, timeframe, start_ms, end_ms):
             self.calls.append((symbol, timeframe, start_ms, end_ms))
-            if symbol == "AAPLUSDT":
+            if symbol in {"AAPLUSDT", "TSLAUSDT"}:
                 return [{"open_time": due_ms, "open": 102, "close": 102}]
             return []
 
@@ -487,27 +592,306 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
 
     result = settle_due_predictions(database, repository)
 
-    assert result == {"completed": 1, "unavailable": 1}
+    assert result == {"completed": 2, "recovered": 1, "deferred": 1, "unavailable": 1}
     assert settled.status == "completed"
     assert settled.exit_price == Decimal("102.0")
     assert settled.result == "win"
-    assert missing.status == "unavailable"
+    assert settled.net_result == "win"
+    assert settled.net_directional_return_bps == Decimal("183.96875")
+    assert settled.max_favorable_bps == Decimal("200.0")
+    assert settled.max_adverse_bps == Decimal("0.0")
+    assert settled.settlement_version == "path_cost_v2"
+    assert missing.status == "pending"
     assert missing.exit_price is None
+    assert retry.status == "completed"
+    assert retry.exit_price == Decimal("102.0")
+    assert retry.result == "loss"
+    assert expired_missing.status == "unavailable"
     assert database.flushed is True
-    assert {call[0] for call in repository.calls} == {"AAPLUSDT", "MSFTUSDT"}
+    assert {call[0] for call in repository.calls} == {
+        "AAPLUSDT",
+        "MSFTUSDT",
+        "TSLAUSDT",
+        "GOOGLUSDT",
+    }
 
 
 def test_ai_monitor_config_normalizes_symbol_allowlist() -> None:
     config = AiMonitorConfigUpdate(monitor_symbols=[" nvdausdt ", "AAPLUSDT", "NVDAUSDT"])
 
     assert config.monitor_symbols == ["NVDAUSDT", "AAPLUSDT"]
+    assert config.minimum_indicator_score == 65
+    assert config.minimum_combined_score == 70
+    assert config.minimum_calibration_samples == 1000
+    assert config.news_score_weight == 45
+    assert config.technical_score_weight == 35
+    assert config.market_flow_score_weight == 20
+
+    costs = AiMonitorCostConfigUpdate(
+        prediction_fee_enabled=False,
+        prediction_fee_bps_per_side=4.5,
+        prediction_slippage_enabled=True,
+        prediction_slippage_bps_per_side=2,
+        prediction_funding_enabled=False,
+        prediction_funding_bps_per_8h=0.8,
+    )
+    assert costs.prediction_fee_enabled is False
+    assert costs.prediction_slippage_bps_per_side == 2
+
+
+def test_ai_monitor_score_weights_are_validated_and_applied() -> None:
+    config = AiMonitorConfigUpdate(
+        news_score_weight=20,
+        technical_score_weight=30,
+        market_flow_score_weight=50,
+    )
+
+    assert opportunity_score_weights(config.model_dump()) == {
+        "news": 0.2,
+        "technical": 0.3,
+        "market_flow": 0.5,
+    }
+    assert weighted_opportunity_score(80, 60, 40, config.model_dump()) == 54
+
+    with pytest.raises(ValueError, match="权重合计必须为 100%"):
+        AiMonitorConfigUpdate(
+            news_score_weight=50,
+            technical_score_weight=40,
+            market_flow_score_weight=20,
+        )
+    rounded = AiMonitorConfigUpdate(
+        news_score_weight=45.004,
+        technical_score_weight=34.996,
+        market_flow_score_weight=20,
+    )
+    assert (
+        rounded.news_score_weight,
+        rounded.technical_score_weight,
+        rounded.market_flow_score_weight,
+    ) == (45.0, 35.0, 20.0)
+    with pytest.raises(ValueError, match="权重合计必须为 100%"):
+        AiMonitorConfigUpdate(
+            news_score_weight=33.334,
+            technical_score_weight=33.333,
+            market_flow_score_weight=33.333,
+        )
+
+
+def test_model_call_audit_index_keeps_only_current_tenant_batch_links() -> None:
+    class Database:
+        def __init__(self) -> None:
+            self.statement = None
+
+        def execute(self, statement):
+            self.statement = statement
+            return SimpleNamespace(
+                all=lambda: [
+                    ("news-1", 11, "batch-current"),
+                    ("news-1", 12, "batch-old"),
+                ]
+            )
+
+    database = Database()
+    result = _news_model_call_audit_index(
+        database,
+        7,
+        [SimpleNamespace(id="news-1", ai_batch_id="batch-current")],
+    )
+    sql = str(database.statement.compile(dialect=mysql.dialect()))
+
+    assert result == {"news-1": {"batch_id": "batch-current", "call_ids": [11]}}
+    assert "news_ai_batches.started_by" in sql
+    assert "news_ai_model_calls.batch_id IN" in sql
+    assert "news_ai_model_call_items.news_id IN" in sql
+
+
+def test_live_readiness_requires_samples_quality_and_cost_stress_edge() -> None:
+    calibration = edge_calibration_summary([40.0] * 30, 30)
+    readiness = signal_readiness_snapshot(
+        matched=True,
+        indicator_score=82,
+        combined_score=78,
+        estimated_cost_bps=16,
+        market_quality={"passed": True},
+        calibration=calibration,
+        minimum_indicator_score=65,
+        minimum_combined_score=70,
+        safety_margin_bps=10,
+        market_flow={
+            "directional_data_available": True,
+            "fresh": True,
+            "data_quality": 0.8,
+        },
+        market_flow_weight=0.2,
+        minimum_market_flow_quality=0.5,
+    )
+
+    assert calibration["lower_bound_bps"] == 40.0
+    assert readiness["status"] == "shadow_ready"
+    assert all(readiness["checks"].values())
+    blocked = signal_readiness_snapshot(
+        matched=True,
+        indicator_score=82,
+        combined_score=78,
+        estimated_cost_bps=16,
+        market_quality={"passed": False},
+        calibration=edge_calibration_summary([40.0] * 29, 30),
+        minimum_indicator_score=65,
+        minimum_combined_score=70,
+        safety_margin_bps=10,
+        market_flow={
+            "directional_data_available": True,
+            "fresh": True,
+            "data_quality": 0.8,
+        },
+        market_flow_weight=0.2,
+        minimum_market_flow_quality=0.5,
+    )
+    assert blocked["status"] == "research_only"
+    assert "历史校准样本不足" in blocked["failed_reasons"]
+
+    missing_flow = signal_readiness_snapshot(
+        matched=True,
+        indicator_score=82,
+        combined_score=78,
+        estimated_cost_bps=16,
+        market_quality={"passed": True},
+        calibration=calibration,
+        minimum_indicator_score=65,
+        minimum_combined_score=70,
+        safety_margin_bps=10,
+        market_flow={
+            "directional_data_available": False,
+            "fresh": False,
+            "data_quality": 0,
+        },
+        market_flow_weight=0.2,
+        minimum_market_flow_quality=0.5,
+    )
+    assert missing_flow["status"] == "research_only"
+    assert missing_flow["checks"]["market_flow_available"] is False
+    assert missing_flow["checks"]["market_flow_freshness"] is False
+    assert missing_flow["checks"]["market_flow_quality"] is False
+
+    flow_disabled = signal_readiness_snapshot(
+        matched=True,
+        indicator_score=82,
+        combined_score=78,
+        estimated_cost_bps=16,
+        market_quality={"passed": True},
+        calibration=calibration,
+        minimum_indicator_score=65,
+        minimum_combined_score=70,
+        safety_margin_bps=10,
+        market_flow={},
+        market_flow_weight=0,
+        minimum_market_flow_quality=0.5,
+    )
+    assert flow_disabled["status"] == "shadow_ready"
+    assert flow_disabled["market_flow_quality"]["required"] is False
+
+
+def test_strategy_readiness_uses_the_latest_bounded_prediction_window() -> None:
+    source = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    readiness = source[
+        source.index("def strategy_readiness_report(") : source.index(
+            "def historical_opportunity_analytics("
+        )
+    ]
+
+    assert "AiMonitorPrediction.predicted_at.desc()" in readiness
+    assert ".limit(5000)" in readiness
+    assert "predictions.reverse()" in readiness
+
+
+def test_market_flow_snapshot_combines_real_inputs_and_blocks_opposite_direction() -> None:
+    now = datetime(2026, 8, 11, 8, 0, tzinfo=UTC)
+    now_seconds = int(now.timestamp())
+    inputs = {
+        "depth": {
+            "TESTUSDT": {
+                "ts": now_seconds,
+                "bid_depth_notional": 1_400_000,
+                "ask_depth_notional": 600_000,
+                "bid_depth_notional_5": 300_000,
+                "ask_depth_notional_5": 100_000,
+                "book_imbalance": 0.4,
+                "book_imbalance_5": 0.5,
+                "bid_level_count": 100,
+                "ask_level_count": 96,
+                "spread_bps": 2.5,
+                "bid_depth_change_5s_pct": 12,
+                "ask_depth_change_5s_pct": -4,
+                "bid_depth_change_30s_pct": 20,
+                "ask_depth_change_30s_pct": 3,
+                "imbalance_change_5s": 0.08,
+            }
+        },
+        "positioning": {
+            "TESTUSDT": {
+                "snapshot_at_ms": now_seconds * 1000,
+                "taker_buy_sell_ratio": 4,
+                "taker_buy_volume": 800,
+                "taker_sell_volume": 200,
+            }
+        },
+        "ticker": {
+            "TESTUSDT": {"quote_volume": 50_000_000, "pct_24h": 1.2, "ts": now_seconds}
+        },
+        "underlying": {"TESTUSDT": {"volume": 1_000_000}},
+        "profile": {
+            "TEST": {
+                "shares_outstanding": 100,
+                "market_cap": 10_000,
+                "source": "finnhub",
+            }
+        },
+    }
+
+    bullish = market_flow_snapshot(
+        inputs,
+        symbol="TEST",
+        contract_symbol="TESTUSDT",
+        direction="long",
+        now=now,
+    )
+    bearish = market_flow_snapshot(
+        inputs,
+        symbol="TEST",
+        contract_symbol="TESTUSDT",
+        direction="short",
+        now=now,
+    )
+
+    assert bullish["turnover_rate_pct"] == 1
+    assert bullish["main_force_ratio"] > 0.75
+    assert bullish["confirms_direction"] is True
+    assert bullish["hard_conflict"] is False
+    assert bullish["directional_data_available"] is True
+    assert bullish["fresh"] is True
+    assert bullish["data_quality"] >= 0.5
+    assert bullish["bid_level_count"] == 100
+    assert bullish["sources"]["order_count"] == "visible_price_levels_proxy"
+    assert bearish["hard_conflict"] is True
 
 
 def test_ai_monitor_prediction_table_is_separate_from_trading_orders() -> None:
     table = AiMonitorPrediction.__table__
 
     assert table.name == "ai_monitor_predictions"
-    assert {"opportunity_id", "entry_price", "exit_price", "result", "due_at"} <= {
+    assert {
+        "opportunity_id",
+        "entry_price",
+        "exit_price",
+        "result",
+        "due_at",
+        "signal_news_score",
+        "signal_indicator_score",
+        "estimated_cost_bps",
+        "net_directional_return_bps",
+        "max_favorable_bps",
+        "max_adverse_bps",
+    } <= {
         column.name for column in table.columns
     }
     assert {foreign_key.target_fullname for foreign_key in table.foreign_keys} == {
@@ -562,6 +946,25 @@ def test_ai_monitor_concurrency_guards_are_database_backed() -> None:
     assert '"fk_ai_monitor_predictions_opportunity_user"' in migration
 
 
+def test_news_ai_model_call_audit_schema_follows_concurrency_revision() -> None:
+    migration = (ROOT / "migrations/versions/0044_news_ai_model_call_audit.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert NewsAiModelCall.__tablename__ == "news_ai_model_calls"
+    assert NewsAiModelCallItem.__tablename__ == "news_ai_model_call_items"
+    assert NewsAiModelCall.__table__.c.request_json.nullable is False
+    assert NewsAiModelCall.__table__.c.response_text.nullable is True
+    assert NewsAiModelCallItem.__table__.c.news_id.primary_key is True
+    assert AiMonitorOpportunity.__table__.c.news_ai_batch_ids_json.nullable is True
+    assert AiMonitorOpportunity.__table__.c.news_ai_model_call_ids_json.nullable is True
+    assert 'down_revision: str | None = "0043_ai_monitor_claims"' in migration
+    assert 'mysql.LONGTEXT()' in migration
+    assert '"news_ai_model_call_items"' in migration
+    assert '"news_ai_batch_ids_json"' in migration
+    assert '"news_ai_model_call_ids_json"' in migration
+
+
 def test_ai_monitor_prediction_migration_follows_workspace_revision() -> None:
     migration = (ROOT / "migrations/versions/0038_ai_monitor_predictions.py").read_text(
         encoding="utf-8"
@@ -570,6 +973,99 @@ def test_ai_monitor_prediction_migration_follows_workspace_revision() -> None:
     assert 'down_revision: str | None = "0037_ai_monitor_workspace"' in migration
     assert '"ai_monitor_predictions"' in migration
     assert '"monitor_symbols_json"' in migration
+
+
+def test_ai_monitor_execution_metrics_migration_follows_model_call_audit() -> None:
+    migration = (
+        ROOT / "migrations/versions/0045_ai_prediction_execution_metrics.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'down_revision: str | None = "0044_news_ai_call_audit"' in migration
+    for column in (
+        "signal_news_score",
+        "signal_indicator_score",
+        "estimated_cost_bps",
+        "net_directional_return_bps",
+        "max_favorable_bps",
+        "max_adverse_bps",
+        "settlement_version",
+    ):
+        assert f'"{column}"' in migration
+
+
+def test_ai_monitor_live_readiness_migration_follows_execution_metrics() -> None:
+    migration = (ROOT / "migrations/versions/0046_ai_live_readiness_gates.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'down_revision: str | None = "0045_ai_prediction_metrics"' in migration
+    for column in (
+        "minimum_indicator_score",
+        "minimum_combined_score",
+        "maximum_market_age_seconds",
+        "minimum_feature_quality",
+        "minimum_calibration_samples",
+        "live_safety_margin_bps",
+        "readiness_status",
+        "expected_edge_lower_bound_bps",
+    ):
+        assert f'"{column}"' in migration
+
+
+def test_ai_monitor_cost_config_migration_follows_live_readiness() -> None:
+    migration = (ROOT / "migrations/versions/0047_ai_prediction_cost_config.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'down_revision: str | None = "0046_ai_live_readiness"' in migration
+    for column in (
+        "prediction_fee_enabled",
+        "prediction_fee_bps_per_side",
+        "prediction_slippage_enabled",
+        "prediction_slippage_bps_per_side",
+        "prediction_funding_enabled",
+        "prediction_funding_bps_per_8h",
+    ):
+        assert f'"{column}"' in migration
+
+
+def test_market_flow_migration_follows_prediction_cost_config() -> None:
+    migration = (ROOT / "migrations/versions/0048_market_flow_metrics.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'down_revision: str | None = "0047_ai_prediction_costs"' in migration
+    for column in (
+        "bid_depth_notional_5",
+        "ask_depth_notional_5",
+        "bid_level_count",
+        "ask_level_count",
+        "spread_bps",
+        "bid_depth_change_5s_pct",
+        "ask_depth_change_30s_pct",
+        "imbalance_change_5s",
+    ):
+        assert f'"{column}"' in migration
+    assert '"bid_notional_5_nonnegative"' in migration
+    assert '"ck_market_microstructure_bid_notional_5_nonnegative"' not in migration
+
+
+def test_ai_monitor_score_weight_migration_follows_market_flow_metrics() -> None:
+    migration = (ROOT / "migrations/versions/0049_ai_monitor_score_weights.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'down_revision: str | None = "0048_market_flow_metrics"' in migration
+    for column in (
+        "minimum_market_flow_quality",
+        "news_score_weight",
+        "technical_score_weight",
+        "market_flow_score_weight",
+    ):
+        assert f'"{column}"' in migration
+    assert '"news_score_weight + technical_score_weight + market_flow_score_weight = 100"' in migration
+    assert '"valid_news_score_weight"' in migration
+    assert '"ck_ai_monitor_configs_news_score_weight"' not in migration
 
 
 def test_news_ai_industry_migration_follows_prediction_revision() -> None:
@@ -611,7 +1107,7 @@ def test_news_candidates_are_visible_before_prediction_confirmation() -> None:
     )
 
     assert "candidate" in str(opportunity_status.sqltext)
-    assert 'status="discovered" if matched else "candidate"' in monitor
+    assert 'status="discovered" if signal_confirmed else "candidate"' in monitor
     assert 'AiMonitorOpportunity.status.in_(("candidate", "discovered"))' in api
     assert 'down_revision: str | None = "0039_news_ai_industries"' in migration
     assert "status IN ('candidate', 'discovered', 'expired', 'dismissed')" in migration
@@ -626,6 +1122,25 @@ def test_opportunity_related_news_endpoint_is_tenant_scoped() -> None:
     assert "opportunity.news_ids_json" in endpoint
     assert "News.id.in_(news_ids)" in endpoint
     assert 'raise HTTPException(status_code=404, detail="opportunity not found")' in endpoint
+
+
+def test_opportunity_model_call_endpoint_is_tenant_scoped_and_returns_raw_audit() -> None:
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
+        encoding="utf-8"
+    )
+    endpoint = api[api.index('@router.get("/opportunities/{opportunity_id}/model-calls")') :]
+
+    assert "AiMonitorOpportunity.user_id == user.id" in endpoint
+    assert "NewsAiBatch.started_by == user.id" in endpoint
+    assert "opportunity.news_ai_batch_ids_json" in endpoint
+    assert "opportunity.news_ai_model_call_ids_json" in endpoint
+    assert "NewsAiModelCall.batch_id.in_(batch_ids)" in endpoint
+    assert "NewsAiModelCall.id.in_(call_ids)" in endpoint
+    assert "NewsAiModelCallItem.news_id.in_(news_ids)" not in endpoint
+    assert '"request_json": dict(call.request_json or {})' in endpoint
+    assert '"response_text": call.response_text' in endpoint
+    assert '"response_envelope": call.response_envelope' in endpoint
+    assert "系统不会用后续重跑结果替代" in endpoint
 
 
 def test_opportunity_fundamentals_endpoint_reads_existing_research_tables() -> None:
@@ -657,7 +1172,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260810-26"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260811-8"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -667,7 +1182,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260810-26"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260811-8"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -695,6 +1210,10 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     for label in ("新闻列表", "分析记录", "指标配置", "发现机会", "预测统计分析"):
         assert label in component
     assert component.index('id="run-opportunity"') < component.index('id="open-config"')
+    assert component.index('id="run-opportunity"') < component.index(
+        'id="open-weight-config"'
+    )
+    assert component.index('id="open-weight-config"') < component.index('id="open-config"')
     assert component.index('id="open-config"') < component.index('id="ai-refresh"')
     assert (
         'this.q("#open-config").addEventListener("click", () => this.openConfig("indicators"));'
@@ -702,6 +1221,25 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     )
     assert 'id="open-news-config"' in component
     assert 'this.openConfig("news")' in component
+    assert 'id="open-weight-config"' in component
+    assert 'this.openConfig("weights")' in component
+    for field in (
+        "config-news-weight",
+        "config-technical-weight",
+        "config-market-flow-weight",
+        "config-market-flow-quality",
+        "weight-total-state",
+    ):
+        assert f'id="{field}"' in component
+    assert (
+        'Number(config.minimum_market_flow_quality ?? 0.5) * 100' in component
+    )
+    assert (
+        'minimum_market_flow_quality: Number(this.q("#config-market-flow-quality").value) / 100'
+        in component
+    )
+    assert "scoreWeightSummary" in component
+    assert ".weight-preview" in stylesheet
     assert 'data-analyze-news="${this.escape(item.id)}"' in component
     assert 'this.api("/news/analyze"' in component
     assert "await this.waitForRun(run.id)" in component
@@ -718,13 +1256,16 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "当前机会" in component
     assert "历史机会" in component
     assert 'id="include-expired"' not in component
-    assert 'tab === "history" ? !active : active' in component
+    assert 'const historyItems = items.filter((item) => !isActive(item));' in component
     assert "this.parseDate(item.expires_at).getTime() > now" in component
     assert "`${raw}Z`" in component
     assert "if (!unique.has(instrument)) unique.set(instrument, item)" in component
     assert 'id="current-direction-counts"' in component
+    assert 'id="history-direction-counts"' in component
     assert "opportunityDirectionCounts" in component
-    assert "做多 ${counts.long} 个，做空 ${counts.short} 个" in component
+    assert "historyOpportunityDirectionCounts" in component
+    assert 'this.api("/opportunities?limit=300&include_expired=true")' in component
+    assert "做多 ${counts.long} 次，做空 ${counts.short} 次" in component
     assert ".opportunity-tabs .direction-counts .long" in stylesheet
     assert ".opportunity-tabs .direction-counts .short" in stylesheet
     assert "已剔除行情不足" in component
@@ -744,14 +1285,34 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "AI 新闻研判" in component
     assert "技术指标验证" in component
     assert "仅作虚拟预测研究，不会触发实盘交易" in component
+    assert 'id="open-news-logic"' in component
+    assert "新闻分析逻辑" in component
+    assert "openNewsAnalysisLogic(trigger)" in component
+    assert "renderNewsAnalysisLogic()" in component
+    assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/model-calls`)' in component
+    assert "System 提示词" in component
+    assert "User 提示词 / 新闻输入" in component
+    assert "模型返回原始文本" in component
+    assert "服务商完整响应包" in component
+    assert "API Key 从未写入记录" in component
     assert 'data-conclusion-view="news"' in component
     assert 'data-conclusion-view="analysis"' in component
     assert 'data-conclusion-view="fundamentals"' in component
+    assert 'data-conclusion-view="market"' in component
     assert component.index('data-conclusion-view="fundamentals"') < component.index(
         'data-conclusion-view="news"'
     )
+    assert component.index('data-conclusion-view="news"') < component.index(
+        'data-conclusion-view="market"'
+    )
+    assert component.index('data-conclusion-view="market"') < component.index(
+        'data-conclusion-view="analysis"'
+    )
     assert "基本面信息" in component
     assert "相关新闻列表" in component
+    assert "资金盘口指标" in component
+    assert "主力量比" in component
+    assert "5秒挂单增速" in component
     assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/news`)' in component
     assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/fundamentals`)' in component
     assert "renderAiRelatedNewsList(items, opportunity" in component
@@ -768,6 +1329,11 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".ai-fundamental-panel" in stylesheet
     assert ".ai-conclusion-trigger" in stylesheet
     assert ".ai-conclusion-dialog" in stylesheet
+    assert ".ai-market-flow-grid" in stylesheet
+    assert ".news-logic-trigger" in stylesheet
+    assert ".news-logic-dialog" in stylesheet
+    assert ".news-model-call-tabs" in stylesheet
+    assert ".news-model-raw-block" in stylesheet
     assert "combined_score: opportunity.combined_score" in component
     assert "technical_confirmed: evidence.confirmed === true" in component
     assert "outcome_result: opportunity.outcome?.result" in component
@@ -777,12 +1343,53 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".opportunity-metrics.with-result" in stylesheet
     assert ".history-result.win" in stylesheet
     assert 'this.api("/opportunity-analytics?limit=300")' in component
+    assert 'id="prediction-filter-form"' in component
+    assert 'id="prediction-news-score-min"' in component
+    assert 'id="prediction-indicator-score-min"' in component
+    assert 'id="prediction-direction"' in component
+    assert 'id="prediction-cost-form"' in component
+    assert 'id="prediction-fee-enabled"' in component
+    assert 'id="prediction-slippage-enabled"' in component
+    assert 'id="prediction-funding-enabled"' in component
+    assert 'this.api("/cost-config"' in component
+    assert 'news_score_min: String(filters.newsScoreMin)' in component
+    assert 'indicator_score_min: String(filters.indicatorScoreMin)' in component
+    assert 'direction: filters.direction' in component
+    assert "筛选样本" in component
+    assert "多 / 空方向" in component
     assert 'this.api("/prediction-records?limit=200")' not in component
-    for label in ("历史机会", "有效样本", "命中次数", "命中概率", "平均方向收益"):
+    for label in ("历史机会", "筛选样本", "命中次数", "命中概率", "平均净收益"):
         assert label in component
-    assert "仅作虚拟统计" in (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    for label in ("毛收益 / 净收益", "MFE / MAE", "成本后结果", "成本计算"):
+        assert label in component
+    for label in (
+        "最低技术强度",
+        "最低组合评分",
+        "最大实时行情延迟",
+        "历史校准样本门槛",
+        "成本安全边际",
+        "实盘准备门槛",
+        "影子候选",
+    ):
+        assert label in component
+    assert 'id="strategy-readiness"' in component
+    assert 'readiness.status === "shadow_ready"' in component
+    assert ".strategy-readiness" in stylesheet
+    assert "不会执行任何交易" in (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    analytics_source = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    assert "select(AiMonitorPrediction, AiMonitorOpportunity)" in analytics_source
+    assert "AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id" in analytics_source
+    assert 'AiMonitorPrediction.status == "completed"' in analytics_source
+    assert "直接统计已经完成结算的虚拟预测" in analytics_source
     assert '@router.get("/opportunity-analytics")' in (
         ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py"
     ).read_text(encoding="utf-8")
+    api_source = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
+        encoding="utf-8"
+    )
+    for parameter in ("news_score_min", "indicator_score_min", "direction"):
+        assert parameter in api_source
     assert ".analytics-summary" in stylesheet
+    assert ".analytics-filters" in stylesheet
+    assert ".analytics-cost-config" in stylesheet
     assert ".ai-module-nav" in stylesheet

@@ -52,9 +52,19 @@ class DepthMetrics:
     symbol: str
     bid_depth_notional: float
     ask_depth_notional: float
+    bid_depth_notional_5: float
+    ask_depth_notional_5: float
     book_imbalance: float
     book_imbalance_5: float
     depth_levels: int
+    bid_level_count: int
+    ask_level_count: int
+    spread_bps: float
+    bid_depth_change_5s_pct: float | None
+    ask_depth_change_5s_pct: float | None
+    bid_depth_change_30s_pct: float | None
+    ask_depth_change_30s_pct: float | None
+    imbalance_change_5s: float | None
     ts: int
 
     def as_dict(self) -> dict[str, Any]:
@@ -197,6 +207,7 @@ class DepthOrderBook:
         self._asks: dict[Decimal, Decimal] = {}
         self._last_update_id: int | None = None
         self._timestamp = 0
+        self._metric_history: deque[tuple[int, Decimal, Decimal, float]] = deque(maxlen=64)
         self._synced = False
         self._awaiting_bridge = False
         self._lock = threading.RLock()
@@ -229,6 +240,7 @@ class DepthOrderBook:
             self._pending.clear()
             self._last_update_id = None
             self._timestamp = 0
+            self._metric_history.clear()
             self._synced = False
             self._awaiting_bridge = False
 
@@ -263,7 +275,7 @@ class DepthOrderBook:
                 if self._is_crossed_unlocked():
                     self._mark_unsynced_unlocked(())
                     return None
-                return self._metrics_unlocked() if publish else None
+                return self._metrics_unlocked(record=True) if publish else None
             if event.final_update_id <= self._last_update_id:
                 return None
             if event.previous_final_update_id != self._last_update_id:
@@ -277,7 +289,7 @@ class DepthOrderBook:
             # but sorting up to 1,000 Decimal levels for every 500 ms message
             # is unnecessary when storage already coalesces writes.  The
             # collector publishes one calculated snapshot per heartbeat.
-            return self._metrics_unlocked() if publish else None
+            return self._metrics_unlocked(record=True) if publish else None
 
     def load_snapshot(self, payload: Any) -> DepthMetrics | None:
         """Atomically install a REST snapshot and replay buffered diff events."""
@@ -331,11 +343,11 @@ class DepthOrderBook:
             if self._is_crossed_unlocked():
                 self._mark_unsynced_unlocked(())
                 return None
-            return self._metrics_unlocked()
+            return self._metrics_unlocked(record=True)
 
     def metrics(self) -> DepthMetrics | None:
         with self._lock:
-            return self._metrics_unlocked() if self._synced else None
+            return self._metrics_unlocked(record=False) if self._synced else None
 
     def heartbeat(self, timestamp: int | None = None) -> DepthMetrics | None:
         """Refresh freshness while a live stream still owns this synchronized book."""
@@ -349,7 +361,7 @@ class DepthOrderBook:
             if not self._synced:
                 return None
             self._timestamp = max(self._timestamp, now)
-            return self._metrics_unlocked()
+            return self._metrics_unlocked(record=True)
 
     def _mark_unsynced_unlocked(self, events: Sequence[_DepthEvent]) -> None:
         self._bids.clear()
@@ -358,6 +370,7 @@ class DepthOrderBook:
         self._pending.extend(events[-self._pending.maxlen :])
         self._last_update_id = None
         self._timestamp = 0
+        self._metric_history.clear()
         self._synced = False
         self._awaiting_bridge = False
 
@@ -387,22 +400,77 @@ class DepthOrderBook:
     def _is_crossed_unlocked(self) -> bool:
         return not self._bids or not self._asks or max(self._bids) >= min(self._asks)
 
-    def _metrics_unlocked(self) -> DepthMetrics:
+    def _metrics_unlocked(self, *, record: bool) -> DepthMetrics:
         bids = sorted(self._bids.items(), reverse=True)[:TOP_LEVELS]
         asks = sorted(self._asks.items())[:TOP_LEVELS]
         bid_notional = sum((price * quantity for price, quantity in bids), Decimal(0))
         ask_notional = sum((price * quantity for price, quantity in asks), Decimal(0))
         bid_near = sum((price * quantity for price, quantity in bids[:5]), Decimal(0))
         ask_near = sum((price * quantity for price, quantity in asks[:5]), Decimal(0))
+        imbalance = _imbalance(bid_notional, ask_notional)
+        if record and self._timestamp > 0:
+            sample = (self._timestamp, bid_notional, ask_notional, imbalance)
+            if self._metric_history and self._metric_history[-1][0] == self._timestamp:
+                self._metric_history[-1] = sample
+            else:
+                self._metric_history.append(sample)
+        change_5s = self._depth_changes_unlocked(bid_notional, ask_notional, imbalance, 5)
+        change_30s = self._depth_changes_unlocked(bid_notional, ask_notional, imbalance, 30)
+        best_bid = bids[0][0]
+        best_ask = asks[0][0]
+        mid_price = (best_bid + best_ask) / Decimal(2)
+        spread_bps = float((best_ask - best_bid) / mid_price * Decimal(10_000))
         return DepthMetrics(
             symbol=self.symbol,
             bid_depth_notional=float(bid_notional),
             ask_depth_notional=float(ask_notional),
-            book_imbalance=_imbalance(bid_notional, ask_notional),
+            bid_depth_notional_5=float(bid_near),
+            ask_depth_notional_5=float(ask_near),
+            book_imbalance=imbalance,
             book_imbalance_5=_imbalance(bid_near, ask_near),
             depth_levels=min(len(bids), len(asks), TOP_LEVELS),
+            bid_level_count=min(len(bids), TOP_LEVELS),
+            ask_level_count=min(len(asks), TOP_LEVELS),
+            spread_bps=max(0.0, spread_bps),
+            bid_depth_change_5s_pct=change_5s[0],
+            ask_depth_change_5s_pct=change_5s[1],
+            bid_depth_change_30s_pct=change_30s[0],
+            ask_depth_change_30s_pct=change_30s[1],
+            imbalance_change_5s=change_5s[2],
             ts=self._timestamp,
         )
+
+    def _depth_changes_unlocked(
+        self,
+        bid_notional: Decimal,
+        ask_notional: Decimal,
+        imbalance: float,
+        window_seconds: int,
+    ) -> tuple[float | None, float | None, float | None]:
+        cutoff = self._timestamp - window_seconds
+        prior = next(
+            (sample for sample in reversed(self._metric_history) if sample[0] <= cutoff),
+            None,
+        )
+        if prior is None:
+            return None, None, None
+        prior_bid = prior[1]
+        prior_ask = prior[2]
+        bid_change = (
+            float((bid_notional - prior_bid) / prior_bid * Decimal(100))
+            if prior_bid > 0
+            else None
+        )
+        ask_change = (
+            float((ask_notional - prior_ask) / prior_ask * Decimal(100))
+            if prior_ask > 0
+            else None
+        )
+        if bid_change is not None:
+            bid_change = max(-1_000_000.0, min(1_000_000.0, bid_change))
+        if ask_change is not None:
+            ask_change = max(-1_000_000.0, min(1_000_000.0, ask_change))
+        return bid_change, ask_change, max(-2.0, min(2.0, imbalance - prior[3]))
 
 
 def _imbalance(bid_notional: Decimal, ask_notional: Decimal) -> float:

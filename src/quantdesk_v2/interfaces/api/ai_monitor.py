@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
@@ -24,6 +24,7 @@ from ...models import (
     CompanyProfile,
     News,
     NewsAiBatch,
+    NewsAiModelCall,
     Security,
     SecurityFinancialSnapshot,
     SecurityFundamentalAnalysis,
@@ -33,6 +34,7 @@ from ...models import (
 from ...monitor import MonitorRepository
 from ...schemas import (
     AiMonitorConfigUpdate,
+    AiMonitorCostConfigUpdate,
     AiMonitorNewsAnalyzeRequest,
     AiMonitorRunRequest,
 )
@@ -175,6 +177,38 @@ def _prediction_out(item: AiMonitorPrediction) -> dict[str, Any]:
         "raw_return_bps": (float(item.raw_return_bps) if item.raw_return_bps is not None else None),
         "directional_return_bps": (
             float(item.directional_return_bps) if item.directional_return_bps is not None else None
+        ),
+        "signal_news_score": (
+            float(item.signal_news_score) if item.signal_news_score is not None else None
+        ),
+        "signal_indicator_score": (
+            float(item.signal_indicator_score) if item.signal_indicator_score is not None else None
+        ),
+        "estimated_cost_bps": float(item.estimated_cost_bps),
+        "net_directional_return_bps": (
+            float(item.net_directional_return_bps)
+            if item.net_directional_return_bps is not None
+            else None
+        ),
+        "net_result": item.net_result,
+        "max_favorable_bps": (
+            float(item.max_favorable_bps) if item.max_favorable_bps is not None else None
+        ),
+        "max_adverse_bps": (
+            float(item.max_adverse_bps) if item.max_adverse_bps is not None else None
+        ),
+        "settlement_version": item.settlement_version,
+        "readiness_status": item.readiness_status,
+        "calibration_sample_count": int(item.calibration_sample_count),
+        "expected_gross_edge_bps": (
+            float(item.expected_gross_edge_bps)
+            if item.expected_gross_edge_bps is not None
+            else None
+        ),
+        "expected_edge_lower_bound_bps": (
+            float(item.expected_edge_lower_bound_bps)
+            if item.expected_edge_lower_bound_bps is not None
+            else None
         ),
         "evidence": dict(item.evidence_json or {}),
         "predicted_at": _utc_out(item.predicted_at),
@@ -359,6 +393,18 @@ def update_config(
     config.monitor_symbols_json = list(payload.monitor_symbols)
     config.minimum_news_confidence = Decimal(str(payload.minimum_news_confidence))
     config.minimum_news_mentions = payload.minimum_news_mentions
+    config.minimum_indicator_score = Decimal(str(payload.minimum_indicator_score))
+    config.minimum_combined_score = Decimal(str(payload.minimum_combined_score))
+    config.maximum_market_age_seconds = payload.maximum_market_age_seconds
+    config.minimum_feature_quality = Decimal(str(payload.minimum_feature_quality))
+    config.minimum_market_flow_quality = Decimal(
+        str(payload.minimum_market_flow_quality)
+    )
+    config.minimum_calibration_samples = payload.minimum_calibration_samples
+    config.live_safety_margin_bps = Decimal(str(payload.live_safety_margin_bps))
+    config.news_score_weight = Decimal(str(payload.news_score_weight))
+    config.technical_score_weight = Decimal(str(payload.technical_score_weight))
+    config.market_flow_score_weight = Decimal(str(payload.market_flow_score_weight))
     _audit(
         db,
         request,
@@ -373,7 +419,63 @@ def update_config(
             "monitor_symbol_count": len(payload.monitor_symbols),
             "monitor_scope": "selected" if payload.monitor_symbols else "all",
             "match_policy": "all",
+            "minimum_indicator_score": payload.minimum_indicator_score,
+            "minimum_combined_score": payload.minimum_combined_score,
+            "maximum_market_age_seconds": payload.maximum_market_age_seconds,
+            "minimum_feature_quality": payload.minimum_feature_quality,
+            "minimum_market_flow_quality": payload.minimum_market_flow_quality,
+            "minimum_calibration_samples": payload.minimum_calibration_samples,
+            "live_safety_margin_bps": payload.live_safety_margin_bps,
+            "score_weights": {
+                "news": payload.news_score_weight,
+                "technical": payload.technical_score_weight,
+                "market_flow": payload.market_flow_score_weight,
+            },
         },
+    )
+    db.commit()
+    db.refresh(config)
+    return _config_out(config)
+
+
+@router.put("/cost-config")
+def update_cost_config(
+    payload: AiMonitorCostConfigUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Persist cost assumptions used by virtual prediction statistics and gates."""
+
+    _require_expected_user(request, user)
+    config = db.get(AiMonitorConfig, user.id)
+    if config is None:
+        defaults = ai_monitor.default_config_data()
+        config = AiMonitorConfig(
+            user_id=user.id,
+            indicator_keys_json=list(defaults["indicator_keys"]),
+            monitor_symbols_json=list(defaults["monitor_symbols"]),
+        )
+        db.add(config)
+    config.prediction_fee_enabled = payload.prediction_fee_enabled
+    config.prediction_fee_bps_per_side = Decimal(
+        str(payload.prediction_fee_bps_per_side)
+    )
+    config.prediction_slippage_enabled = payload.prediction_slippage_enabled
+    config.prediction_slippage_bps_per_side = Decimal(
+        str(payload.prediction_slippage_bps_per_side)
+    )
+    config.prediction_funding_enabled = payload.prediction_funding_enabled
+    config.prediction_funding_bps_per_8h = Decimal(
+        str(payload.prediction_funding_bps_per_8h)
+    )
+    _audit(
+        db,
+        request,
+        user.id,
+        "ai_monitor.cost_config.update",
+        str(user.id),
+        payload.model_dump(),
     )
     db.commit()
     db.refresh(config)
@@ -506,6 +608,98 @@ def opportunity_news(
         .order_by(News.ts.desc(), News.id.desc())
     ).all()
     return {"items": [_news_out(item) for item in items], "total": len(items)}
+
+
+@router.get("/opportunities/{opportunity_id}/model-calls")
+def opportunity_model_calls(
+    opportunity_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Return exact persisted prompts and raw provider responses for an opportunity's news."""
+
+    opportunity = db.scalar(
+        select(AiMonitorOpportunity).where(
+            AiMonitorOpportunity.public_id == opportunity_id,
+            AiMonitorOpportunity.user_id == user.id,
+        )
+    )
+    if opportunity is None:
+        raise HTTPException(status_code=404, detail="opportunity not found")
+    news_ids = [str(item) for item in (opportunity.news_ids_json or []) if str(item)]
+    if not news_ids:
+        return {
+            "items": [],
+            "total": 0,
+            "retention_started": False,
+            "note": "该机会没有关联新闻，无法定位模型调用记录。",
+        }
+    batch_ids = sorted(
+        {
+            str(item).strip()
+            for item in (opportunity.news_ai_batch_ids_json or [])
+            if str(item).strip()
+        }
+    )
+    call_ids: list[int] = []
+    for item in opportunity.news_ai_model_call_ids_json or []:
+        try:
+            call_id = int(item)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if call_id > 0:
+            call_ids.append(call_id)
+    call_ids = sorted(set(call_ids))
+    if not batch_ids or not call_ids:
+        return {
+            "items": [],
+            "total": 0,
+            "retention_started": opportunity.news_ai_model_call_ids_json is not None,
+            "note": (
+                "该机会生成时没有可向当前账户披露的模型调用记录；"
+                "历史机会或由其他账户完成的共享新闻分析不会回填原始调用。"
+            ),
+        }
+    calls = db.scalars(
+        select(NewsAiModelCall)
+        .join(NewsAiBatch, NewsAiBatch.id == NewsAiModelCall.batch_id)
+        .where(
+            NewsAiBatch.started_by == user.id,
+            NewsAiModelCall.batch_id.in_(batch_ids),
+            NewsAiModelCall.id.in_(call_ids),
+        )
+        .order_by(NewsAiModelCall.started_at.desc(), NewsAiModelCall.id.desc())
+        .limit(50)
+    ).all()
+    items = [
+        {
+            "id": call.id,
+            "batch_id": call.batch_id,
+            "call_type": call.call_type,
+            "attempt_depth": int(call.attempt_depth),
+            "provider_code": call.provider_code,
+            "model_name": call.model_name,
+            "news_ids": list(call.news_ids_json or []),
+            "request_json": dict(call.request_json or {}),
+            "response_text": call.response_text,
+            "response_envelope": call.response_envelope,
+            "status": call.status,
+            "error_category": call.error_category,
+            "started_at": _utc_out(call.started_at),
+            "completed_at": _utc_out(call.completed_at),
+        }
+        for call in calls
+    ]
+    return {
+        "items": items,
+        "total": len(items),
+        "retention_started": True,
+        "note": (
+            "完整请求提示词与模型原始响应来自机会首次生成时冻结的数据库审计记录。"
+            if items
+            else "冻结的审计记录已不可用或不属于当前账户，系统不会用后续重跑结果替代。"
+        ),
+    }
 
 
 @router.get("/opportunities/{opportunity_id}/fundamentals")
@@ -772,7 +966,10 @@ def opportunity_analytics(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
-    limit: int = Query(default=300, ge=1, le=500),
+    limit: int = Query(default=500, ge=1, le=500),
+    news_score_min: float = Query(default=0, ge=0, le=100),
+    indicator_score_min: float = Query(default=0, ge=0, le=100),
+    direction: Literal["all", "long", "short"] = Query(default="all"),
 ) -> dict[str, Any]:
     repository = MonitorRepository(
         request.app.state.database_engine,
@@ -783,6 +980,9 @@ def opportunity_analytics(
         repository,
         user.id,
         limit=limit,
+        news_score_min=news_score_min,
+        indicator_score_min=indicator_score_min,
+        direction=direction,
     )
 
 

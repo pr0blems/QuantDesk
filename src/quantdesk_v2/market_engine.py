@@ -294,9 +294,24 @@ def queue_depth_metric(metric: object) -> bool:
         symbol = str(payload["symbol"]).strip().upper()
         bid_notional = float(payload["bid_depth_notional"])
         ask_notional = float(payload["ask_depth_notional"])
+        bid_notional_5 = float(payload.get("bid_depth_notional_5", 0))
+        ask_notional_5 = float(payload.get("ask_depth_notional_5", 0))
         imbalance = float(payload["book_imbalance"])
         imbalance_5 = float(payload["book_imbalance_5"])
         depth_levels = int(payload["depth_levels"])
+        bid_level_count = int(payload.get("bid_level_count", depth_levels))
+        ask_level_count = int(payload.get("ask_level_count", depth_levels))
+        optional_values = {
+            key: (float(payload[key]) if payload.get(key) is not None else None)
+            for key in (
+                "spread_bps",
+                "bid_depth_change_5s_pct",
+                "ask_depth_change_5s_pct",
+                "bid_depth_change_30s_pct",
+                "ask_depth_change_30s_pct",
+                "imbalance_change_5s",
+            )
+        }
         timestamp = int(payload["ts"])
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
@@ -307,13 +322,30 @@ def queue_depth_metric(metric: object) -> bool:
         or (_depth_symbols and symbol not in _depth_symbols)
         or not all(
             math.isfinite(value)
-            for value in (bid_notional, ask_notional, imbalance, imbalance_5)
+            for value in (
+                bid_notional,
+                ask_notional,
+                bid_notional_5,
+                ask_notional_5,
+                imbalance,
+                imbalance_5,
+                *(value for value in optional_values.values() if value is not None),
+            )
         )
         or bid_notional < 0
         or ask_notional < 0
+        or bid_notional_5 < 0
+        or ask_notional_5 < 0
         or not -1 <= imbalance <= 1
         or not -1 <= imbalance_5 <= 1
         or not 0 <= depth_levels <= 100
+        or not 0 <= bid_level_count <= 100
+        or not 0 <= ask_level_count <= 100
+        or (optional_values["spread_bps"] is not None and optional_values["spread_bps"] < 0)
+        or (
+            optional_values["imbalance_change_5s"] is not None
+            and not -2 <= optional_values["imbalance_change_5s"] <= 2
+        )
         or timestamp <= 0
     ):
         return False
@@ -321,9 +353,19 @@ def queue_depth_metric(metric: object) -> bool:
         symbol,
         bid_notional,
         ask_notional,
+        bid_notional_5,
+        ask_notional_5,
         imbalance,
         imbalance_5,
         depth_levels,
+        bid_level_count,
+        ask_level_count,
+        optional_values["spread_bps"],
+        optional_values["bid_depth_change_5s_pct"],
+        optional_values["ask_depth_change_5s_pct"],
+        optional_values["bid_depth_change_30s_pct"],
+        optional_values["ask_depth_change_30s_pct"],
+        optional_values["imbalance_change_5s"],
         timestamp,
     )
     with _depth_metrics_lock:
@@ -344,14 +386,28 @@ def _flush_depth_metrics() -> int:
     try:
         store.realtime_executemany(
             "INSERT INTO market_microstructure("
-            "symbol,bid_depth_notional,ask_depth_notional,book_imbalance,"
-            "book_imbalance_5,depth_levels,ts) VALUES(?,?,?,?,?,?,?) "
+            "symbol,bid_depth_notional,ask_depth_notional,bid_depth_notional_5,"
+            "ask_depth_notional_5,book_imbalance,book_imbalance_5,depth_levels,"
+            "bid_level_count,ask_level_count,spread_bps,bid_depth_change_5s_pct,"
+            "ask_depth_change_5s_pct,bid_depth_change_30s_pct,"
+            "ask_depth_change_30s_pct,imbalance_change_5s,ts) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON DUPLICATE KEY UPDATE "
             "bid_depth_notional=VALUES(bid_depth_notional),"
             "ask_depth_notional=VALUES(ask_depth_notional),"
+            "bid_depth_notional_5=VALUES(bid_depth_notional_5),"
+            "ask_depth_notional_5=VALUES(ask_depth_notional_5),"
             "book_imbalance=VALUES(book_imbalance),"
             "book_imbalance_5=VALUES(book_imbalance_5),"
-            "depth_levels=VALUES(depth_levels),ts=VALUES(ts)",
+            "depth_levels=VALUES(depth_levels),"
+            "bid_level_count=VALUES(bid_level_count),"
+            "ask_level_count=VALUES(ask_level_count),"
+            "spread_bps=VALUES(spread_bps),"
+            "bid_depth_change_5s_pct=VALUES(bid_depth_change_5s_pct),"
+            "ask_depth_change_5s_pct=VALUES(ask_depth_change_5s_pct),"
+            "bid_depth_change_30s_pct=VALUES(bid_depth_change_30s_pct),"
+            "ask_depth_change_30s_pct=VALUES(ask_depth_change_30s_pct),"
+            "imbalance_change_5s=VALUES(imbalance_change_5s),ts=VALUES(ts)",
             rows,
         )
     except Exception:

@@ -23,6 +23,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -44,6 +45,7 @@ class Base(DeclarativeBase):
 
 
 BIGINT_PK = BigInteger()
+MODEL_RAW_TEXT = Text().with_variant(mysql.LONGTEXT(), "mysql")
 
 NEWS_DEDUP_EXPRESSION = (
     "CASE WHEN link IS NULL THEN NULL "
@@ -206,6 +208,94 @@ class NewsAiBatch(Base):
         onupdate=utcnow,
         nullable=False,
         comment="最后更新时间（UTC）",
+    )
+
+
+class NewsAiModelCall(Base):
+    __tablename__ = "news_ai_model_calls"
+    __table_args__ = (
+        CheckConstraint("call_type IN ('analysis', 'summary')", name="valid_call_type"),
+        CheckConstraint("status IN ('completed', 'failed')", name="valid_status"),
+        Index("ix_news_ai_model_calls_batch", "batch_id", "created_at"),
+        {
+            "comment": "新闻 AI 模型调用的提示词、请求参数与原始响应审计记录",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="模型调用记录主键"
+    )
+    batch_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("news_ai_batches.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属新闻 AI 批次",
+    )
+    call_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="analysis", comment="调用类型"
+    )
+    attempt_depth: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="结构恢复拆分重试深度"
+    )
+    provider_code: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="AI 服务商代码"
+    )
+    model_name: Mapped[str] = mapped_column(
+        String(128), nullable=False, comment="模型标识"
+    )
+    news_ids_json: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, comment="该次调用包含的新闻稳定 ID"
+    )
+    request_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="实际发送给模型的请求体，不包含认证密钥"
+    )
+    response_text: Mapped[str | None] = mapped_column(
+        MODEL_RAW_TEXT, comment="模型 message content 原始文本"
+    )
+    response_envelope: Mapped[str | None] = mapped_column(
+        MODEL_RAW_TEXT, comment="AI 服务商返回的完整 HTTP 响应正文"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="调用完成或失败状态"
+    )
+    error_category: Mapped[str | None] = mapped_column(
+        String(32), comment="稳定且脱敏的错误类别"
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="调用开始时间（UTC）"
+    )
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="调用结束时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="审计记录创建时间（UTC）"
+    )
+
+
+class NewsAiModelCallItem(Base):
+    __tablename__ = "news_ai_model_call_items"
+    __table_args__ = (
+        Index("ix_news_ai_model_call_items_news", "news_id", "call_id"),
+        {
+            "comment": "模型调用与新闻记录的可查询关联",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    call_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("news_ai_model_calls.id", ondelete="CASCADE"),
+        primary_key=True,
+        comment="模型调用记录主键",
+    )
+    news_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("news.id", ondelete="CASCADE"),
+        primary_key=True,
+        comment="新闻稳定 ID",
     )
 
 
@@ -408,6 +498,62 @@ class AiMonitorConfig(Base):
             "minimum_news_mentions BETWEEN 1 AND 20",
             name="valid_news_mentions",
         ),
+        CheckConstraint(
+            "minimum_indicator_score BETWEEN 0 AND 100",
+            name="valid_minimum_indicator_score",
+        ),
+        CheckConstraint(
+            "minimum_combined_score BETWEEN 0 AND 100",
+            name="valid_minimum_combined_score",
+        ),
+        CheckConstraint(
+            "maximum_market_age_seconds BETWEEN 5 AND 3600",
+            name="valid_maximum_market_age",
+        ),
+        CheckConstraint(
+            "minimum_feature_quality BETWEEN 0 AND 1",
+            name="valid_minimum_feature_quality",
+        ),
+        CheckConstraint(
+            "minimum_market_flow_quality BETWEEN 0 AND 1",
+            name="valid_minimum_market_flow_quality",
+        ),
+        CheckConstraint(
+            "minimum_calibration_samples BETWEEN 30 AND 5000",
+            name="valid_minimum_calibration_samples",
+        ),
+        CheckConstraint(
+            "live_safety_margin_bps BETWEEN 0 AND 500",
+            name="valid_live_safety_margin",
+        ),
+        CheckConstraint(
+            "news_score_weight BETWEEN 0 AND 100",
+            name="valid_news_score_weight",
+        ),
+        CheckConstraint(
+            "technical_score_weight BETWEEN 0 AND 100",
+            name="valid_technical_score_weight",
+        ),
+        CheckConstraint(
+            "market_flow_score_weight BETWEEN 0 AND 100",
+            name="valid_market_flow_score_weight",
+        ),
+        CheckConstraint(
+            "news_score_weight + technical_score_weight + market_flow_score_weight = 100",
+            name="valid_score_weight_total",
+        ),
+        CheckConstraint(
+            "prediction_fee_bps_per_side BETWEEN 0 AND 500",
+            name="valid_prediction_fee_bps",
+        ),
+        CheckConstraint(
+            "prediction_slippage_bps_per_side BETWEEN 0 AND 500",
+            name="valid_prediction_slippage_bps",
+        ),
+        CheckConstraint(
+            "prediction_funding_bps_per_8h BETWEEN 0 AND 500",
+            name="valid_prediction_funding_bps",
+        ),
         Index("ix_ai_monitor_configs_enabled", "enabled", "updated_at"),
         {
             "comment": "用户隔离的 AI 新闻与技术指标机会扫描配置",
@@ -448,6 +594,54 @@ class AiMonitorConfig(Base):
     )
     minimum_news_mentions: Mapped[int] = mapped_column(
         Integer, default=1, nullable=False, comment="候选美股至少关联新闻数"
+    )
+    minimum_indicator_score: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("65.00"), nullable=False, comment="影子准入最低技术强度"
+    )
+    minimum_combined_score: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("70.00"), nullable=False, comment="影子准入最低组合评分"
+    )
+    maximum_market_age_seconds: Mapped[int] = mapped_column(
+        Integer, default=120, nullable=False, comment="影子准入允许的最大行情延迟秒数"
+    )
+    minimum_feature_quality: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), default=Decimal("0.7000"), nullable=False, comment="预测因子最低数据质量"
+    )
+    minimum_market_flow_quality: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), default=Decimal("0.5000"), nullable=False, comment="资金盘口最低数据质量"
+    )
+    minimum_calibration_samples: Mapped[int] = mapped_column(
+        Integer, default=1000, nullable=False, comment="历史净优势校准的最低已结算样本数"
+    )
+    live_safety_margin_bps: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), default=Decimal("10.0000"), nullable=False, comment="成本之外要求的安全边际基点"
+    )
+    news_score_weight: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("45.00"), nullable=False, comment="新闻评分组合权重百分比"
+    )
+    technical_score_weight: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("35.00"), nullable=False, comment="技术指标组合权重百分比"
+    )
+    market_flow_score_weight: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("20.00"), nullable=False, comment="资金盘口组合权重百分比"
+    )
+    prediction_fee_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, comment="预测统计是否扣除手续费"
+    )
+    prediction_fee_bps_per_side: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), default=Decimal("5.0000"), nullable=False, comment="预测统计单边手续费基点"
+    )
+    prediction_slippage_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, comment="预测统计是否扣除滑点"
+    )
+    prediction_slippage_bps_per_side: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), default=Decimal("3.0000"), nullable=False, comment="预测统计单边滑点基点"
+    )
+    prediction_funding_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, comment="预测统计是否扣除持有期资金成本"
+    )
+    prediction_funding_bps_per_8h: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), default=Decimal("1.0000"), nullable=False, comment="预测统计每八小时资金成本基点"
     )
     last_news_run_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="最近一次新闻分析启动时间（UTC）"
@@ -638,6 +832,12 @@ class AiMonitorOpportunity(Base):
     news_ids_json: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, comment="本轮采用的新闻稳定 ID"
     )
+    news_ai_batch_ids_json: Mapped[list[str] | None] = mapped_column(
+        JSON, comment="机会首次生成时冻结的本租户新闻 AI 批次 ID"
+    )
+    news_ai_model_call_ids_json: Mapped[list[int] | None] = mapped_column(
+        JSON, comment="机会首次生成时冻结的本租户模型调用审计 ID"
+    )
     evidence_json: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, comment="新闻、技术指标与行情证据"
     )
@@ -673,6 +873,14 @@ class AiMonitorPrediction(Base):
         CheckConstraint(
             "result IS NULL OR result IN ('win', 'loss', 'flat')",
             name="valid_result",
+        ),
+        CheckConstraint(
+            "net_result IS NULL OR net_result IN ('win', 'loss', 'flat')",
+            name="valid_net_result",
+        ),
+        CheckConstraint(
+            "readiness_status IN ('research_only', 'shadow_ready')",
+            name="valid_readiness_status",
         ),
         UniqueConstraint("public_id", name="uq_ai_monitor_predictions_public_id"),
         UniqueConstraint("opportunity_id", name="uq_ai_monitor_predictions_opportunity_id"),
@@ -718,7 +926,7 @@ class AiMonitorPrediction(Base):
         String(32), nullable=False, comment="行情对应的 TradFi 合约代码"
     )
     direction: Mapped[str] = mapped_column(
-        String(12), nullable=False, comment="预测方向；当前机会扫描为 long"
+        String(12), nullable=False, comment="预测方向：long 或 short"
     )
     timeframe: Mapped[str] = mapped_column(String(8), nullable=False, comment="预测观察周期")
     status: Mapped[str] = mapped_column(
@@ -741,6 +949,48 @@ class AiMonitorPrediction(Base):
     )
     directional_return_bps: Mapped[Decimal | None] = mapped_column(
         Numeric(20, 8), comment="按预测方向计算的收益基点"
+    )
+    signal_news_score: Mapped[Decimal | None] = mapped_column(
+        Numeric(8, 4), comment="生成预测时不可变的新闻评分"
+    )
+    signal_indicator_score: Mapped[Decimal | None] = mapped_column(
+        Numeric(8, 4), comment="生成预测时不可变的技术指标评分"
+    )
+    estimated_cost_bps: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4),
+        default=Decimal("16.0000"),
+        nullable=False,
+        comment="预测持有期估算总成本基点",
+    )
+    net_directional_return_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="扣除估算成本后的方向收益基点"
+    )
+    net_result: Mapped[str | None] = mapped_column(
+        String(16), comment="成本后结果：win、loss 或 flat"
+    )
+    max_favorable_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="预测持有期最大有利波动基点（MFE）"
+    )
+    max_adverse_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="预测持有期最大不利波动基点（MAE）"
+    )
+    settlement_version: Mapped[str] = mapped_column(
+        String(32),
+        default="gross_v1",
+        nullable=False,
+        comment="预测结算与成本模型版本",
+    )
+    readiness_status: Mapped[str] = mapped_column(
+        String(32), default="research_only", nullable=False, comment="研究信号或已达到影子运行准入"
+    )
+    calibration_sample_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="生成信号时同方向历史校准样本数"
+    )
+    expected_gross_edge_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="生成信号时历史样本估计的平均毛优势基点"
+    )
+    expected_edge_lower_bound_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="生成信号时毛优势 95% 置信区间下限"
     )
     evidence_json: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, comment="预测生成时的新闻、指标与行情快照"

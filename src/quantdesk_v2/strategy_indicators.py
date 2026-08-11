@@ -70,7 +70,78 @@ def _item(
             "insufficient" if triggered is None else "triggered" if triggered else "not_triggered"
         ),
         "summary": summary,
+        "strength": None,
         "metrics": list(metrics),
+    }
+
+
+def _unit_interval(value: float, scale: float = 1.0) -> float:
+    if scale <= 0:
+        return 0.5
+    return max(0.0, min(1.0, 0.5 + value / (2 * scale)))
+
+
+def _strategy_strengths(candles: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    """Build continuous directional context scores for the twelve strategy families."""
+
+    if len(candles) < 2:
+        return {}
+    closes = [_number(candle["close"]) for candle in candles]
+    opens = [_number(candle["open"]) for candle in candles]
+    highs = [_number(candle["high"]) for candle in candles]
+    lows = [_number(candle["low"]) for candle in candles]
+    volumes = [_number(candle["volume"]) for candle in candles]
+    current_close = closes[-1]
+    current_open = opens[-1]
+    previous_close = closes[-2]
+    atr14 = indicators.atr(highs, lows, closes, 14)
+    risk_unit = atr14 if atr14 is not None and atr14 > 0 else max(current_close * 0.01, 1e-9)
+    one_bar_impulse = (current_close - previous_close) / risk_unit
+    three_bar_impulse = (
+        (current_close - closes[-4]) / risk_unit if len(closes) >= 4 else one_bar_impulse
+    )
+    body_impulse = (current_close - current_open) / risk_unit
+    ma20 = indicators.sma(closes, 20)
+    previous_ma20 = indicators.sma(closes[:-1], 20)
+    ma50 = indicators.sma(closes, 50)
+    trend_impulse = (current_close - ma20) / risk_unit if ma20 is not None else 0.0
+    if ma20 is not None and previous_ma20 is not None:
+        trend_impulse += (ma20 - previous_ma20) / risk_unit * 4
+    if ma20 is not None and ma50 is not None:
+        trend_impulse += (ma20 - ma50) / risk_unit * 0.5
+    prior_high = max(highs[-21:-1]) if len(highs) >= 21 else previous_close
+    breakout_impulse = (current_close - prior_high) / risk_unit
+    average_volume = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else None
+    volume_ratio = volumes[-1] / average_volume if average_volume and average_volume > 0 else 1.0
+    volume_strength = max(0.0, min(1.0, (volume_ratio - 0.5) / 1.5))
+    low_volume_quality = max(0.0, min(1.0, (1.2 - volume_ratio) / 0.8))
+    rsi14 = indicators.rsi(closes, 14)
+    reversal_impulse = body_impulse
+    if rsi14 is not None:
+        reversal_impulse += (40.0 - rsi14) / 20.0
+    gap_impulse = (current_open - previous_close) / risk_unit
+    dif, dea, histogram = indicators.macd(closes)
+    macd_impulse = (histogram or 0.0) / risk_unit
+
+    trend = _unit_interval(trend_impulse, 2.0)
+    momentum = _unit_interval((one_bar_impulse + three_bar_impulse) / 2, 2.0)
+    breakout = _unit_interval(breakout_impulse, 1.0)
+    reversal = _unit_interval(reversal_impulse, 2.0)
+    gap = _unit_interval((gap_impulse + body_impulse) / 2, 2.0)
+    macd = _unit_interval(macd_impulse + one_bar_impulse * 0.25, 1.0)
+    return {
+        "bollinger_breakout": (breakout + momentum) / 2,
+        "moving_average_pullback_bounce": (trend + reversal) / 2,
+        "trend_breakout": (breakout + volume_strength) / 2,
+        "price_volume_rise": (momentum + volume_strength) / 2,
+        "new_low_reversal": reversal,
+        "low_volume_pullback": (trend + low_volume_quality + reversal) / 3,
+        "strong_gap_open": gap,
+        "moving_average_bull": trend,
+        "ma_golden_cross": trend,
+        "macd_golden_cross_volume": (macd + volume_strength) / 2,
+        "oversold_bounce": reversal,
+        "oversold_reversal": reversal,
     }
 
 
@@ -528,6 +599,15 @@ def evaluate_strategy_indicators(
             )
         )
 
+    strengths = _strategy_strengths(clean)
+    for item in items:
+        if item["triggered"] is None:
+            continue
+        context = max(0.0, min(1.0, strengths.get(item["key"], 0.5)))
+        item["strength"] = round(
+            70.0 + context * 30.0 if item["triggered"] else context * 50.0,
+            4,
+        )
     if len(items) != STRATEGY_INDICATOR_COUNT:  # pragma: no cover - invariant
         raise RuntimeError("strategy indicator count mismatch")
     return _result(timeframe, items, count, clean[-1]["open_time"])
@@ -551,6 +631,8 @@ def evaluate_directional_strategy_indicators(
         opposite = bearish_by_key[item["key"]]
         item["bullish_triggered"] = item["triggered"]
         item["bearish_triggered"] = opposite["triggered"]
+        item["bullish_strength"] = item.get("strength")
+        item["bearish_strength"] = opposite.get("strength")
         item["bearish_name"] = BEARISH_STRATEGY_NAMES[item["key"]]
         item["bearish_status"] = opposite["status"]
         item["bearish_summary"] = (

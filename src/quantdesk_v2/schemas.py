@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, Self
 
 from pydantic import (
@@ -634,6 +634,16 @@ class AiMonitorConfigUpdate(BaseModel):
     monitor_symbols: list[str] = Field(default_factory=list, max_length=250)
     minimum_news_confidence: float = Field(default=0.6, ge=0, le=1)
     minimum_news_mentions: int = Field(default=1, ge=1, le=20)
+    minimum_indicator_score: float = Field(default=65, ge=0, le=100)
+    minimum_combined_score: float = Field(default=70, ge=0, le=100)
+    maximum_market_age_seconds: int = Field(default=120, ge=5, le=3600)
+    minimum_feature_quality: float = Field(default=0.7, ge=0, le=1)
+    minimum_market_flow_quality: float = Field(default=0.5, ge=0, le=1)
+    minimum_calibration_samples: int = Field(default=1000, ge=30, le=5000)
+    live_safety_margin_bps: float = Field(default=10, ge=0, le=500)
+    news_score_weight: float = Field(default=45, ge=0, le=100)
+    technical_score_weight: float = Field(default=35, ge=0, le=100)
+    market_flow_score_weight: float = Field(default=20, ge=0, le=100)
 
     @field_validator("indicator_keys")
     @classmethod
@@ -660,6 +670,37 @@ class AiMonitorConfigUpdate(BaseModel):
             if symbol not in normalized:
                 normalized.append(symbol)
         return normalized
+
+    @model_validator(mode="after")
+    def validate_score_weight_total(self) -> Self:
+        quantum = Decimal("0.01")
+        quantized = {
+            name: Decimal(str(getattr(self, name))).quantize(
+                quantum,
+                rounding=ROUND_HALF_UP,
+            )
+            for name in (
+                "news_score_weight",
+                "technical_score_weight",
+                "market_flow_score_weight",
+            )
+        }
+        if sum(quantized.values(), Decimal("0.00")) != Decimal("100.00"):
+            raise ValueError("新闻、技术指标与资金盘口权重合计必须为 100%")
+        for name, value in quantized.items():
+            setattr(self, name, float(value))
+        return self
+
+
+class AiMonitorCostConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prediction_fee_enabled: bool = True
+    prediction_fee_bps_per_side: float = Field(default=5, ge=0, le=500)
+    prediction_slippage_enabled: bool = True
+    prediction_slippage_bps_per_side: float = Field(default=3, ge=0, le=500)
+    prediction_funding_enabled: bool = True
+    prediction_funding_bps_per_8h: float = Field(default=1, ge=0, le=500)
 
 
 class AiMonitorRunRequest(BaseModel):

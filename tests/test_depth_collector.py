@@ -102,6 +102,26 @@ def test_depth_book_retains_deeper_snapshot_but_exports_exact_top_100() -> None:
     assert after_delete.ask_depth_notional == pytest.approx(105_150)
 
 
+def test_depth_book_reports_side_counts_spread_and_rolling_growth() -> None:
+    book = DepthOrderBook("BTCUSDT")
+    initial = book.load_snapshot(_snapshot())
+    assert initial is not None
+    event = _event(101, 101, 100, bids=[["100", "2"]])
+    event["E"] = 1_800_000_005_000
+
+    metrics = book.feed(event)
+
+    assert metrics is not None
+    assert metrics.bid_level_count == 2
+    assert metrics.ask_level_count == 2
+    assert metrics.bid_depth_notional_5 == pytest.approx(metrics.bid_depth_notional)
+    assert metrics.ask_depth_notional_5 == pytest.approx(metrics.ask_depth_notional)
+    assert metrics.spread_bps > 0
+    assert metrics.bid_depth_change_5s_pct == pytest.approx((398 - 298) / 298 * 100)
+    assert metrics.ask_depth_change_5s_pct == pytest.approx(0)
+    assert metrics.imbalance_change_5s is not None
+
+
 def test_depth_gap_invalidates_until_fresh_snapshot_bridges_it() -> None:
     book = DepthOrderBook("BTCUSDT")
     assert book.load_snapshot(_snapshot()) is not None
@@ -381,9 +401,19 @@ def test_collector_accepts_combined_stream_and_heartbeat_emits_storage_rows() ->
         "symbol",
         "bid_depth_notional",
         "ask_depth_notional",
+        "bid_depth_notional_5",
+        "ask_depth_notional_5",
         "book_imbalance",
         "book_imbalance_5",
         "depth_levels",
+        "bid_level_count",
+        "ask_level_count",
+        "spread_bps",
+        "bid_depth_change_5s_pct",
+        "ask_depth_change_5s_pct",
+        "bid_depth_change_30s_pct",
+        "ask_depth_change_30s_pct",
+        "imbalance_change_5s",
         "ts",
     }
     assert emitted[0].ts >= int(time.time()) - 1

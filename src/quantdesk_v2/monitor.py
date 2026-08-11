@@ -292,6 +292,8 @@ def _fresh_microstructure_metrics(
     try:
         snapshot_at = int(row.get("ts") or 0)
         depth_levels = int(row.get("depth_levels"))
+        bid_level_count = int(row.get("bid_level_count", depth_levels))
+        ask_level_count = int(row.get("ask_level_count", depth_levels))
     except (TypeError, ValueError):
         return {}
     age_seconds = now_seconds - snapshot_at
@@ -306,6 +308,19 @@ def _fresh_microstructure_metrics(
             "book_imbalance_5",
         )
     }
+    optional_numbers = {
+        key: _optional_finite_number(row.get(key))
+        for key in (
+            "bid_depth_notional_5",
+            "ask_depth_notional_5",
+            "spread_bps",
+            "bid_depth_change_5s_pct",
+            "ask_depth_change_5s_pct",
+            "bid_depth_change_30s_pct",
+            "ask_depth_change_30s_pct",
+            "imbalance_change_5s",
+        )
+    }
     if (
         any(value is None for value in numbers.values())
         or numbers["bid_depth_notional"] < 0
@@ -313,9 +328,21 @@ def _fresh_microstructure_metrics(
         or not -1 <= numbers["book_imbalance"] <= 1
         or not -1 <= numbers["book_imbalance_5"] <= 1
         or not 0 <= depth_levels <= 100
+        or not 0 <= bid_level_count <= 100
+        or not 0 <= ask_level_count <= 100
+        or (
+            optional_numbers["spread_bps"] is not None
+            and optional_numbers["spread_bps"] < 0
+        )
     ):
         return {}
-    return {**numbers, "depth_levels": depth_levels}
+    return {
+        **numbers,
+        **optional_numbers,
+        "depth_levels": depth_levels,
+        "bid_level_count": bid_level_count,
+        "ask_level_count": ask_level_count,
+    }
 
 
 def _opportunity_out(row: dict[str, Any], *, compact: bool = False) -> dict[str, Any]:
@@ -405,7 +432,12 @@ class MonitorRepository:
                 row["symbol"]: row
                 for row in self._query(
                     """SELECT symbol,bid_depth_notional,ask_depth_notional,
-                              book_imbalance,book_imbalance_5,depth_levels,ts
+                              bid_depth_notional_5,ask_depth_notional_5,
+                              book_imbalance,book_imbalance_5,depth_levels,
+                              bid_level_count,ask_level_count,spread_bps,
+                              bid_depth_change_5s_pct,ask_depth_change_5s_pct,
+                              bid_depth_change_30s_pct,ask_depth_change_30s_pct,
+                              imbalance_change_5s,ts
                        FROM market_microstructure"""
                 )
             }
@@ -552,9 +584,19 @@ class MonitorRepository:
                     "quote_volume": _finite_number(ticker.get("quote_volume")),
                     "bid_depth_notional": depth.get("bid_depth_notional"),
                     "ask_depth_notional": depth.get("ask_depth_notional"),
+                    "bid_depth_notional_5": depth.get("bid_depth_notional_5"),
+                    "ask_depth_notional_5": depth.get("ask_depth_notional_5"),
                     "book_imbalance": depth.get("book_imbalance"),
                     "book_imbalance_5": depth.get("book_imbalance_5"),
                     "depth_levels": depth.get("depth_levels"),
+                    "bid_level_count": depth.get("bid_level_count"),
+                    "ask_level_count": depth.get("ask_level_count"),
+                    "spread_bps": depth.get("spread_bps"),
+                    "bid_depth_change_5s_pct": depth.get("bid_depth_change_5s_pct"),
+                    "ask_depth_change_5s_pct": depth.get("ask_depth_change_5s_pct"),
+                    "bid_depth_change_30s_pct": depth.get("bid_depth_change_30s_pct"),
+                    "ask_depth_change_30s_pct": depth.get("ask_depth_change_30s_pct"),
+                    "imbalance_change_5s": depth.get("imbalance_change_5s"),
                     "score": round(numerator / denominator) if denominator else None,
                     "tf_scores": tf_scores,
                     "watch": symbol in selected,

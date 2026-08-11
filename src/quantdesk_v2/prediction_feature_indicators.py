@@ -54,6 +54,22 @@ def _direction_label(status: str) -> str:
     )
 
 
+def _directional_strength(
+    value: float | None,
+    quality_score: float | None,
+    direction_sign: int,
+) -> float | None:
+    """Map a normalized -1..1 engine feature to a quality-adjusted 0..100 score."""
+
+    if value is None:
+        return None
+    normalized = max(-1.0, min(1.0, direction_sign * value))
+    quality = max(0.0, min(1.0, quality_score if quality_score is not None else 0.5))
+    raw_score = 50.0 + normalized * 50.0
+    adjusted = 50.0 + (raw_score - 50.0) * (0.5 + quality * 0.5)
+    return round(max(0.0, min(100.0, adjusted)), 4)
+
+
 def _metric(label: str, value: str) -> dict[str, str]:
     return {"label": label, "value": value}
 
@@ -90,6 +106,16 @@ def _item(
         "direction": None if status == "insufficient" else status,
         "summary": summary,
         "source": source,
+        "available": available,
+        "normalized_value": value,
+        "source_age_ms": source_age_ms,
+        "quality_score": quality_score,
+        "bullish_strength": _directional_strength(value, quality_score, 1)
+        if available
+        else None,
+        "bearish_strength": _directional_strength(value, quality_score, -1)
+        if available
+        else None,
         "metrics": [
             _metric("归一化得分", _score(value)),
             _metric("当前方向", direction),

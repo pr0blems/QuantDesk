@@ -608,7 +608,12 @@ def _market_microstructure(symbol: str, now_ms: int) -> dict[str, Any] | None:
         # while the prediction feature contract measures age in milliseconds.
         rows = store.query(
             """SELECT symbol,bid_depth_notional,ask_depth_notional,
-                      book_imbalance,book_imbalance_5,depth_levels,ts,
+                      bid_depth_notional_5,ask_depth_notional_5,
+                      book_imbalance,book_imbalance_5,depth_levels,
+                      bid_level_count,ask_level_count,spread_bps,
+                      bid_depth_change_5s_pct,ask_depth_change_5s_pct,
+                      bid_depth_change_30s_pct,ask_depth_change_30s_pct,
+                      imbalance_change_5s,ts,
                       ts*1000 AS received_at
                FROM market_microstructure WHERE symbol=?""",
             (symbol,),

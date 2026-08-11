@@ -618,14 +618,12 @@ def test_depth_metrics_are_coalesced_into_one_bulk_upsert(monkeypatch) -> None:
     assert market_engine._flush_depth_metrics() == 1
     assert len(writes) == 1
     assert "ON DUPLICATE KEY UPDATE" in writes[0][0]
-    assert writes[0][1][0][1:] == (
-        1_100.0,
-        900.0,
-        0.1,
-        0.2,
-        100,
-        1_800_000_001,
-    )
+    stored = writes[0][1][0]
+    assert stored[1:3] == (1_100.0, 900.0)
+    assert stored[5:8] == (0.1, 0.2, 100)
+    assert stored[8:10] == (100, 100)
+    assert stored[-1] == 1_800_000_001
+    assert "bid_depth_change_5s_pct" in writes[0][0]
 
 
 def test_depth_metric_validation_fails_closed(monkeypatch) -> None:

@@ -116,6 +116,36 @@ def test_analyze_news_chunk_returns_validated_us_stock_decisions(monkeypatch) ->
     assert captured["authorization"].startswith("Bearer provider-key-")
 
 
+def test_analyze_news_chunk_captures_exact_prompt_and_raw_provider_response(monkeypatch) -> None:
+    raw_body = chat_body(analysis_output())
+    traces: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        news_ai,
+        "_chat_http_transport",
+        lambda *_args: (200, raw_body),
+    )
+
+    news_ai.analyze_news_chunk(
+        sample_items(),
+        provider_code="deepseek",
+        api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+        model_name="deepseek-v4-flash",
+        trace_sink=lambda trace: traces.append(dict(trace)),
+    )
+
+    assert len(traces) == 1
+    trace = traces[0]
+    assert trace["status"] == "completed"
+    assert trace["news_ids"] == ["news-1", "news-2"]
+    assert trace["request_json"]["model"] == "deepseek-v4-flash"
+    assert trace["request_json"]["messages"][0]["role"] == "system"
+    assert "professional US-equity news analyst" in trace["request_json"]["messages"][0]["content"]
+    assert "provider-key" not in json.dumps(trace["request_json"])
+    assert json.loads(trace["response_text"]) == analysis_output()
+    assert trace["response_envelope"] == raw_body.decode()
+    assert trace["completed_at"] >= trace["started_at"]
+
+
 def test_analyze_news_chunk_rejects_missing_or_invented_items(monkeypatch) -> None:
     invalid = analysis_output()
     invalid["analyses"] = invalid["analyses"][:1]
@@ -157,17 +187,26 @@ def test_batch_summary_is_structured_and_bounded(monkeypatch) -> None:
         lambda *args: (200, chat_body(summary)),
     )
 
+    traces: list[dict[str, Any]] = []
     result = news_ai.summarize_news_batch(
         analysis_output()["analyses"],
         provider_code="deepseek",
         api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
         model_name="deepseek-v4-flash",
+        trace_sink=lambda trace: traces.append(dict(trace)),
     )
 
     assert result == summary
+    assert len(traces) == 1
+    assert traces[0]["call_type"] == "summary"
+    assert traces[0]["news_ids"] == ["news-1", "news-2"]
+    assert traces[0]["status"] == "completed"
+    assert traces[0]["request_json"]["model"] == "deepseek-v4-flash"
+    assert json.loads(traces[0]["response_text"]) == summary
+    assert "provider-key" not in json.dumps(traces[0]["request_json"])
 
 
-@pytest.mark.parametrize("count", [0, 3])
+@pytest.mark.parametrize("count", [0, 6])
 def test_chunk_size_is_bounded(count: int) -> None:
     items = [sample_items()[0] | {"id": f"news-{index}"} for index in range(count)]
 
@@ -230,6 +269,45 @@ def test_recovery_depth_is_bounded(monkeypatch) -> None:
     assert failed == 5
     assert error is not None and error.category == "timeout"
     assert calls == [5]
+
+
+def test_five_news_groups_are_analyzed_concurrently(monkeypatch) -> None:
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def analyze(items, **_kwargs):
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        release.wait(1)
+        with lock:
+            active -= 1
+        return ([{"id": item["id"]} for item in items], 0, None)
+
+    monkeypatch.setattr(news_ai, "_analyze_chunk_bounded", analyze)
+    items = [sample_items()[0] | {"id": f"news-{index}"} for index in range(10)]
+    chunks = list(news_ai._chunks(items, news_ai.CHUNK_SIZE))
+
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+    outcomes = list(
+        news_ai._analyze_chunks_concurrently(
+            chunks,
+            provider_code="deepseek",
+            api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+            model_name="deepseek-v4-flash",
+            deadline=time.monotonic() + 2,
+        )
+    )
+    timer.cancel()
+
+    assert news_ai.CHUNK_SIZE == 5
+    assert [len(chunk) for chunk in chunks] == [5, 5]
+    assert maximum_active == 2
+    assert sum(len(result[0]) for _, result in outcomes) == 10
 
 
 def test_chunk_wall_clock_timeout_releases_the_batch(monkeypatch) -> None:

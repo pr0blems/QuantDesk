@@ -66,6 +66,11 @@ def test_strategy_indicator_scan_uses_price_volume_and_cross_conditions() -> Non
     assert by_name["MA金叉"]["triggered"] is True
     assert by_name["MACD金叉放量"]["triggered"] is True
     assert all(item["metrics"] for item in result["items"])
+    triggered_strengths = [
+        item["strength"] for item in result["items"] if item["triggered"] is True
+    ]
+    assert all(70 <= strength <= 100 for strength in triggered_strengths)
+    assert all(isinstance(strength, float) for strength in triggered_strengths)
 
 
 def test_directional_strategy_scan_exposes_inverse_bearish_conditions() -> None:
@@ -89,3 +94,5 @@ def test_directional_strategy_scan_exposes_inverse_bearish_conditions() -> None:
     assert by_key["strong_gap_open"]["bearish_triggered"] is True
     assert by_key["strong_gap_open"]["bearish_name"] == "强势低开"
     assert by_key["strong_gap_open"]["direction"] == "bearish"
+    assert 70 <= by_key["strong_gap_open"]["bearish_strength"] <= 100
+    assert by_key["strong_gap_open"]["bullish_strength"] < 70

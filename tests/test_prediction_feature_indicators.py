@@ -52,6 +52,10 @@ def test_prediction_feature_scan_returns_eight_real_engine_inputs() -> None:
     assert by_name["订单失衡"]["status"] == "bearish"
     assert by_name["近百档失衡"]["status"] == "neutral"
     assert by_name["周期趋势"]["metrics"][0]["value"] == "+0.400"
+    assert by_name["周期趋势"]["normalized_value"] == 0.4
+    assert by_name["周期趋势"]["bullish_strength"] > 50
+    assert by_name["周期趋势"]["bearish_strength"] < 50
+    assert by_name["主动成交"]["quality_score"] == 0.9
 
 
 def test_prediction_feature_scan_uses_selected_trend_and_source_freshness() -> None:

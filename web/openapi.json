@@ -530,6 +530,62 @@
             "title": "Indicator Keys",
             "type": "array"
           },
+          "live_safety_margin_bps": {
+            "default": 10,
+            "maximum": 500.0,
+            "minimum": 0.0,
+            "title": "Live Safety Margin Bps",
+            "type": "number"
+          },
+          "market_flow_score_weight": {
+            "default": 20,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Market Flow Score Weight",
+            "type": "number"
+          },
+          "maximum_market_age_seconds": {
+            "default": 120,
+            "maximum": 3600.0,
+            "minimum": 5.0,
+            "title": "Maximum Market Age Seconds",
+            "type": "integer"
+          },
+          "minimum_calibration_samples": {
+            "default": 1000,
+            "maximum": 5000.0,
+            "minimum": 30.0,
+            "title": "Minimum Calibration Samples",
+            "type": "integer"
+          },
+          "minimum_combined_score": {
+            "default": 70,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Minimum Combined Score",
+            "type": "number"
+          },
+          "minimum_feature_quality": {
+            "default": 0.7,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Minimum Feature Quality",
+            "type": "number"
+          },
+          "minimum_indicator_score": {
+            "default": 65,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Minimum Indicator Score",
+            "type": "number"
+          },
+          "minimum_market_flow_quality": {
+            "default": 0.5,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Minimum Market Flow Quality",
+            "type": "number"
+          },
           "minimum_news_confidence": {
             "default": 0.6,
             "maximum": 1.0,
@@ -566,12 +622,26 @@
             "title": "News Lookback Hours",
             "type": "integer"
           },
+          "news_score_weight": {
+            "default": 45,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "News Score Weight",
+            "type": "number"
+          },
           "opportunity_interval_minutes": {
             "default": 15,
             "maximum": 1440.0,
             "minimum": 5.0,
             "title": "Opportunity Interval Minutes",
             "type": "integer"
+          },
+          "technical_score_weight": {
+            "default": 35,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Technical Score Weight",
+            "type": "number"
           },
           "timeframe": {
             "default": "1h",
@@ -585,6 +655,49 @@
           }
         },
         "title": "AiMonitorConfigUpdate",
+        "type": "object"
+      },
+      "AiMonitorCostConfigUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "prediction_fee_bps_per_side": {
+            "default": 5,
+            "maximum": 500.0,
+            "minimum": 0.0,
+            "title": "Prediction Fee Bps Per Side",
+            "type": "number"
+          },
+          "prediction_fee_enabled": {
+            "default": true,
+            "title": "Prediction Fee Enabled",
+            "type": "boolean"
+          },
+          "prediction_funding_bps_per_8h": {
+            "default": 1,
+            "maximum": 500.0,
+            "minimum": 0.0,
+            "title": "Prediction Funding Bps Per 8H",
+            "type": "number"
+          },
+          "prediction_funding_enabled": {
+            "default": true,
+            "title": "Prediction Funding Enabled",
+            "type": "boolean"
+          },
+          "prediction_slippage_bps_per_side": {
+            "default": 3,
+            "maximum": 500.0,
+            "minimum": 0.0,
+            "title": "Prediction Slippage Bps Per Side",
+            "type": "number"
+          },
+          "prediction_slippage_enabled": {
+            "default": true,
+            "title": "Prediction Slippage Enabled",
+            "type": "boolean"
+          }
+        },
+        "title": "AiMonitorCostConfigUpdate",
         "type": "object"
       },
       "AiMonitorNewsAnalyzeRequest": {
@@ -5482,6 +5595,52 @@
         "summary": "Update Config"
       }
     },
+    "/api/v2/ai-monitor/cost-config": {
+      "put": {
+        "description": "Persist cost assumptions used by virtual prediction statistics and gates.",
+        "operationId": "update_cost_config_api_v2_ai_monitor_cost_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorCostConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Cost Config Api V2 Ai Monitor Cost Config Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Cost Config"
+      }
+    },
     "/api/v2/ai-monitor/indicators": {
       "get": {
         "operationId": "indicators_api_v2_ai_monitor_indicators_get",
@@ -5730,6 +5889,53 @@
         "summary": "Opportunity Fundamentals"
       }
     },
+    "/api/v2/ai-monitor/opportunities/{opportunity_id}/model-calls": {
+      "get": {
+        "description": "Return exact persisted prompts and raw provider responses for an opportunity's news.",
+        "operationId": "opportunity_model_calls_api_v2_ai_monitor_opportunities__opportunity_id__model_calls_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "opportunity_id",
+            "required": true,
+            "schema": {
+              "title": "Opportunity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opportunity Model Calls Api V2 Ai Monitor Opportunities  Opportunity Id  Model Calls Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Opportunity Model Calls"
+      }
+    },
     "/api/v2/ai-monitor/opportunities/{opportunity_id}/news": {
       "get": {
         "operationId": "opportunity_news_api_v2_ai_monitor_opportunities__opportunity_id__news_get",
@@ -5785,11 +5991,50 @@
             "name": "limit",
             "required": false,
             "schema": {
-              "default": 300,
+              "default": 500,
               "maximum": 500,
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "news_score_min",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 100,
+              "minimum": 0,
+              "title": "News Score Min",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "indicator_score_min",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 100,
+              "minimum": 0,
+              "title": "Indicator Score Min",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "direction",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "long",
+                "short"
+              ],
+              "title": "Direction",
+              "type": "string"
             }
           }
         ],

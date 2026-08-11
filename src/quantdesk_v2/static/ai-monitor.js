@@ -14,10 +14,13 @@ class AiMonitorDashboard extends HTMLElement {
       runs: [],
       opportunities: [],
       opportunityAnalytics: null,
+      predictionFilters: { newsScoreMin: 0, indicatorScoreMin: 0, direction: "all" },
+      predictionAnalyticsRequestId: 0,
       draftSymbols: new Set(),
       symbolSearch: "",
       opportunityTab: "current",
       opportunityDirectionCounts: { long: 0, short: 0 },
+      historyOpportunityDirectionCounts: { long: 0, short: 0 },
       opportunityRequestId: 0,
       running: false,
       busyRun: "",
@@ -29,9 +32,13 @@ class AiMonitorDashboard extends HTMLElement {
     this.timers = [];
     this.scrollPaused = false;
     this.eventsBound = false;
-    this.conclusionPanels = { fundamentals: "", analysis: "", news: "" };
+    this.conclusionPanels = { fundamentals: "", news: "", market: "", analysis: "" };
     this.conclusionNewsRequestId = 0;
     this.conclusionFundamentalRequestId = 0;
+    this.newsLogicFocus = null;
+    this.newsModelCalls = [];
+    this.newsModelCallIndex = 0;
+    this.newsModelCallsRequestId = 0;
     this.renderShell();
   }
 
@@ -45,7 +52,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260810-18">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260811-4">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -59,6 +66,7 @@ class AiMonitorDashboard extends HTMLElement {
             <button id="open-news-config" type="button">新闻分析配置</button>
             <button id="run-news" type="button">立即分析新闻</button>
             <button id="run-opportunity" class="primary-action" type="button">立即发现机会</button>
+            <button id="open-weight-config" type="button">权重设置</button>
             <button id="open-config" type="button">指标配置</button>
             <button id="ai-refresh" type="button">刷新</button>
           </div>
@@ -106,6 +114,23 @@ class AiMonitorDashboard extends HTMLElement {
                   <label><span>技术指标周期</span><select id="config-timeframe"><option value="15m">15 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select><small>采用对应周期最新一根已收盘 K 线</small></label>
                   <label><span>最低新闻置信度</span><div><input id="config-confidence" type="number" min="0" max="100" step="1" required><em>%</em></div><small>AI 置信度 × 股票相关度</small></label>
                   <label><span>最少关联新闻</span><div><input id="config-mentions" type="number" min="1" max="20" step="1" required><em>条</em></div><small>同一股票达到数量后才进入指标确认</small></label>
+                  <label><span>最低技术强度</span><div><input id="config-indicator-score" type="number" min="0" max="100" step="1" required><em>分</em></div><small>连续方向评分，所选指标仍需全部满足</small></label>
+                  <label><span>最低组合评分</span><div><input id="config-combined-score" type="number" min="0" max="100" step="1" required><em>分</em></div><small>仅作为影子准入门槛，不触发实盘</small></label>
+                  <label><span>最大实时行情延迟</span><div><input id="config-market-age" type="number" min="5" max="3600" step="1" required><em>秒</em></div><small>超过时只保留研究信号</small></label>
+                  <label><span>最低资金流数据质量</span><div><input id="config-market-flow-quality" type="number" min="0" max="100" step="1" required><em>%</em></div><small>资金盘口权重启用时，低于门槛仅保留研究信号</small></label>
+                  <label><span>预测因子最低质量</span><div><input id="config-feature-quality" type="number" min="0" max="100" step="1" required><em>%</em></div><small>仅在选择预测因子时生效</small></label>
+                  <label><span>历史校准样本门槛</span><div><input id="config-calibration-samples" type="number" min="30" max="5000" step="10" required><em>条</em></div><small>默认按实盘研究标准要求 1,000 条</small></label>
+                  <label><span>成本安全边际</span><div><input id="config-safety-margin" type="number" min="0" max="500" step="0.5" required><em>bps</em></div><small>毛优势置信下限还需额外覆盖该数值</small></label>
+                </section>
+                <section id="weight-config" class="weight-config">
+                  <header><div><strong>组合评分权重</strong><small>控制新闻、技术指标和资金盘口对机会组合评分的影响；合计必须为 100%。</small></div><span id="weight-total-state">合计 100%</span></header>
+                  <div class="weight-grid">
+                    <label class="news"><span><b>新闻评分</b><small>AI 置信度 × 股票关联度</small></span><div><input id="config-news-weight" class="score-weight-input" type="number" min="0" max="100" step="0.1" required><em>%</em></div></label>
+                    <label class="technical"><span><b>技术指标</b><small>所选技术条件的连续方向强度</small></span><div><input id="config-technical-weight" class="score-weight-input" type="number" min="0" max="100" step="0.1" required><em>%</em></div></label>
+                    <label class="market"><span><b>资金盘口</b><small>主力量比、交易深度与挂单增速</small></span><div><input id="config-market-flow-weight" class="score-weight-input" type="number" min="0" max="100" step="0.1" required><em>%</em></div></label>
+                  </div>
+                  <div class="weight-preview" aria-label="权重占比预览"><i class="news"></i><i class="technical"></i><i class="market"></i></div>
+                  <footer><span><i class="news"></i>新闻</span><span><i class="technical"></i>技术指标</span><span><i class="market"></i>资金盘口</span><small>权重只影响组合分；AND 指标确认与盘口强反向冲突仍独立生效。保存后从下一轮扫描生效，历史信号保留生成时权重。</small></footer>
                 </section>
                 <section class="symbol-block">
                   <header><div><strong>监控品种</strong><small>机会扫描只处理这里配置的美股合约；扫描仍需新闻偏多且技术指标全部满足。</small></div><span id="symbol-count">正在读取</span></header>
@@ -128,12 +153,33 @@ class AiMonitorDashboard extends HTMLElement {
               <div class="view-head"><div><span class="eyebrow">DISCOVERED OPPORTUNITIES</span><h2>发现机会</h2><p>先展示新闻识别出的美股候选，再标明技术指标确认进度；全部满足后才生成虚拟预测。</p></div></div>
               <nav class="opportunity-tabs" role="tablist" aria-label="机会记录范围">
                 <button class="active" type="button" role="tab" aria-selected="true" data-opportunity-tab="current"><span>当前机会</span><small id="current-direction-counts" class="direction-counts"><b class="long">多 --</b><i>/</i><b class="short">空 --</b></small></button>
-                <button type="button" role="tab" aria-selected="false" data-opportunity-tab="history"><span>历史机会</span><small>过期记录</small></button>
+                <button type="button" role="tab" aria-selected="false" data-opportunity-tab="history"><span>历史机会</span><small id="history-direction-counts" class="direction-counts"><b class="long">多 --</b><i>/</i><b class="short">空 --</b></small></button>
               </nav>
               <div id="opportunity-list" class="opportunity-list"><div class="empty-state">暂无符合新闻条件的美股候选</div></div>
             </section>
             <section id="view-predictions" class="ai-view">
               <div class="view-head"><div><span class="eyebrow">OPPORTUNITY ANALYTICS</span><h2>预测统计分析</h2><p id="prediction-note">基于历史机会的入场价格与有效期结束价格，统计实际方向表现。</p></div></div>
+              <section id="strategy-readiness" class="strategy-readiness"><div class="analytics-loading">正在评估实盘准备门槛…</div></section>
+              <div class="analytics-control-grid">
+                <form id="prediction-filter-form" class="analytics-filters">
+                  <header><div><strong>筛选统计</strong><small>汇总指标和下方明细使用相同条件</small></div><span id="prediction-filter-result">全部历史样本</span></header>
+                  <div class="analytics-filter-grid">
+                    <label><span>新闻评分不低于</span><div><input id="prediction-news-score-min" type="number" min="0" max="100" step="1" value="0"><em>分</em></div></label>
+                    <label><span>指标评分不低于</span><div><input id="prediction-indicator-score-min" type="number" min="0" max="100" step="1" value="0"><em>分</em></div></label>
+                    <label><span>方向筛选</span><select id="prediction-direction"><option value="all">全部方向</option><option value="long">只看做多</option><option value="short">只看做空</option></select></label>
+                    <div class="analytics-filter-actions"><button id="prediction-filter-reset" type="button">重置</button><button id="prediction-filter-apply" class="primary" type="submit">应用筛选</button></div>
+                  </div>
+                </form>
+                <form id="prediction-cost-form" class="analytics-cost-config">
+                  <header><div><strong>成本计算</strong><small>可独立启用，净收益与准备度即时重算</small></div><span id="prediction-cost-total">1h 往返 -- bps</span></header>
+                  <div class="analytics-cost-grid">
+                    <label><input id="prediction-fee-enabled" type="checkbox"><span><b>手续费</b><small>单边</small></span><div><input id="prediction-fee-bps" type="number" min="0" max="500" step="0.1" value="5"><em>bps</em></div></label>
+                    <label><input id="prediction-slippage-enabled" type="checkbox"><span><b>滑点</b><small>单边</small></span><div><input id="prediction-slippage-bps" type="number" min="0" max="500" step="0.1" value="3"><em>bps</em></div></label>
+                    <label><input id="prediction-funding-enabled" type="checkbox"><span><b>资金成本</b><small>每 8h</small></span><div><input id="prediction-funding-bps" type="number" min="0" max="500" step="0.1" value="1"><em>bps</em></div></label>
+                    <button id="prediction-cost-apply" class="primary" type="submit">保存并重算</button>
+                  </div>
+                </form>
+              </div>
               <section id="analytics-summary" class="analytics-summary" aria-label="历史机会命中统计"><div class="analytics-loading">正在计算历史机会表现…</div></section>
               <div id="prediction-list" class="prediction-list"><div class="empty-state">正在读取历史机会…</div></div>
             </section>
@@ -147,17 +193,32 @@ class AiMonitorDashboard extends HTMLElement {
           <nav class="ai-conclusion-nav" role="tablist" aria-label="机会分析详情">
             <button type="button" role="tab" aria-selected="false" data-conclusion-view="fundamentals"><span>01</span><strong>基本面信息</strong><small id="ai-conclusion-fundamental-state">正在读取</small></button>
             <button type="button" role="tab" aria-selected="false" data-conclusion-view="news"><span>02</span><strong>相关新闻列表</strong><small id="ai-conclusion-news-count">正在读取</small></button>
-            <button class="active" type="button" role="tab" aria-selected="true" data-conclusion-view="analysis"><span>03</span><strong>AI分析结论</strong><small>综合研判</small></button>
+            <button type="button" role="tab" aria-selected="false" data-conclusion-view="market"><span>03</span><strong>资金盘口指标</strong><small id="ai-conclusion-market-state">信号快照</small></button>
+            <button class="active" type="button" role="tab" aria-selected="true" data-conclusion-view="analysis"><span>04</span><strong>AI分析结论</strong><small>综合研判</small></button>
           </nav>
           <div class="ai-conclusion-main">
             <header class="ai-conclusion-head">
               <div><span class="eyebrow">AI ANALYSIS CONCLUSION</span><h2 id="ai-conclusion-title">AI 分析结论</h2><p id="ai-conclusion-subtitle">读取生成该机会时保存的新闻研判与技术指标证据。</p></div>
-              <button id="ai-conclusion-close" class="ai-conclusion-close" type="button" data-conclusion-close aria-label="关闭">×</button>
+              <div class="ai-conclusion-head-actions">
+                <button id="open-news-logic" class="news-logic-trigger" type="button">新闻分析逻辑</button>
+                <button id="ai-conclusion-close" class="ai-conclusion-close" type="button" data-conclusion-close aria-label="关闭">×</button>
+              </div>
             </header>
             <div id="ai-conclusion-body" class="ai-conclusion-body"></div>
             <footer class="ai-conclusion-foot"><span>结论基于信号生成时的数据快照</span><strong>仅作虚拟预测研究，不会触发实盘交易</strong></footer>
           </div>
         </section>
+        <div id="news-logic-modal" class="news-logic-modal hidden" aria-hidden="true">
+          <button class="news-logic-backdrop" type="button" data-news-logic-close aria-label="关闭新闻分析逻辑"></button>
+          <section class="news-logic-dialog" role="dialog" aria-modal="true" aria-labelledby="news-logic-title">
+            <header class="news-logic-head">
+              <div><span class="eyebrow">MODEL CALL AUDIT</span><h2 id="news-logic-title">新闻分析逻辑</h2><p id="news-logic-subtitle">查看实际发送给模型的提示词和模型原始返回。</p></div>
+              <button id="news-logic-close" class="ai-conclusion-close" type="button" data-news-logic-close aria-label="关闭新闻分析逻辑">×</button>
+            </header>
+            <div id="news-logic-body" class="news-logic-body"></div>
+            <footer class="news-logic-foot"><span>请求记录不保存 Authorization 请求头或 API Key</span><strong>内容来自数据库中的原始模型调用审计记录</strong></footer>
+          </section>
+        </div>
       </div>`;
   }
 
@@ -169,9 +230,11 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#run-news").addEventListener("click", () => this.createRun("news"));
     this.q("#run-opportunity").addEventListener("click", () => this.createRun("opportunity"));
     this.q("#open-news-config").addEventListener("click", () => this.openConfig("news"));
+    this.q("#open-weight-config").addEventListener("click", () => this.openConfig("weights"));
     this.q("#open-config").addEventListener("click", () => this.openConfig("indicators"));
     this.q("#ai-config-form").addEventListener("submit", (event) => this.saveConfig(event));
     this.q("#config-enabled").addEventListener("change", (event) => this.renderEnabledLabel(event.target.checked));
+    this.qa(".score-weight-input").forEach((input) => input.addEventListener("input", () => this.updateScoreWeightPreview()));
     this.q("#indicator-picker").addEventListener("change", () => this.updateIndicatorCount());
     this.q("#indicator-templates").addEventListener("click", (event) => this.applyIndicatorTemplate(event));
     this.q("#config-all-symbols").addEventListener("change", () => this.renderSymbolPicker());
@@ -181,6 +244,11 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#symbols-clear").addEventListener("click", () => { this.q("#config-all-symbols").checked = false; this.state.draftSymbols.clear(); this.renderSymbolPicker(); });
     this.q("#news-search").addEventListener("input", (event) => { this.state.newsSearch = event.target.value.trim().toLowerCase(); this.renderNews(); });
     this.q("#news-mode").addEventListener("change", (event) => { this.state.newsMode = event.target.value; this.renderNews(); });
+    this.q("#prediction-filter-form").addEventListener("submit", (event) => { event.preventDefault(); this.applyPredictionFilters(); });
+    this.q("#prediction-filter-reset").addEventListener("click", () => this.resetPredictionFilters());
+    this.q("#prediction-cost-form").addEventListener("submit", (event) => this.savePredictionCostConfig(event));
+    this.qa('#prediction-cost-form input[type="checkbox"]').forEach((input) => input.addEventListener("change", () => this.updatePredictionCostControls()));
+    this.qa('#prediction-cost-form input[type="number"]').forEach((input) => input.addEventListener("input", () => this.updatePredictionCostControls()));
     this.qa("[data-opportunity-tab]").forEach((button) => button.addEventListener("click", () => this.setOpportunityTab(button.dataset.opportunityTab)));
     this.q("#opportunity-list").addEventListener("click", (event) => {
       const conclusionButton = event.target.closest("[data-ai-conclusion]");
@@ -216,8 +284,25 @@ class AiMonitorDashboard extends HTMLElement {
     });
     this.qa("[data-conclusion-close]").forEach((button) => button.addEventListener("click", () => this.closeAiConclusion()));
     this.qa("[data-conclusion-view]").forEach((button) => button.addEventListener("click", () => this.showAiConclusionView(button.dataset.conclusionView)));
+    this.q("#open-news-logic").addEventListener("click", (event) => this.openNewsAnalysisLogic(event.currentTarget));
+    this.qa("[data-news-logic-close]").forEach((button) => button.addEventListener("click", () => this.closeNewsAnalysisLogic()));
+    this.q("#news-logic-body").addEventListener("click", (event) => {
+      const callButton = event.target.closest("[data-news-call-index]");
+      if (callButton) {
+        this.newsModelCallIndex = Number(callButton.dataset.newsCallIndex || 0);
+        this.renderNewsAnalysisLogic();
+        return;
+      }
+      const copyButton = event.target.closest("[data-copy-call-section]");
+      if (copyButton) this.copyNewsModelCallSection(copyButton.dataset.copyCallSection, copyButton);
+    });
     this.shadowRoot.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !this.q("#ai-conclusion-modal").classList.contains("hidden")) this.closeAiConclusion();
+      if (event.key !== "Escape") return;
+      if (!this.q("#news-logic-modal").classList.contains("hidden")) {
+        this.closeNewsAnalysisLogic();
+      } else if (!this.q("#ai-conclusion-modal").classList.contains("hidden")) {
+        this.closeAiConclusion();
+      }
     });
     this.q("#news-stream").addEventListener("mouseenter", () => { this.scrollPaused = true; });
     this.q("#news-stream").addEventListener("mouseleave", () => { this.scrollPaused = false; });
@@ -312,9 +397,14 @@ class AiMonitorDashboard extends HTMLElement {
   openConfig(section) {
     this.showView("config");
     window.requestAnimationFrame(() => {
-      const target = section === "news" ? this.q("#config-news-interval") : this.q("#indicator-config");
+      const target = section === "news"
+        ? this.q("#config-news-interval")
+        : section === "weights"
+        ? this.q("#weight-config")
+        : this.q("#indicator-config");
       target?.scrollIntoView({ behavior: "smooth", block: "center" });
       if (section === "news") target?.focus();
+      if (section === "weights") this.q("#config-news-weight")?.focus();
     });
   }
 
@@ -474,6 +564,18 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#config-timeframe").value = config.timeframe;
     this.q("#config-confidence").value = Math.round(Number(config.minimum_news_confidence) * 100);
     this.q("#config-mentions").value = config.minimum_news_mentions;
+    this.q("#config-indicator-score").value = Number(config.minimum_indicator_score ?? 65);
+    this.q("#config-combined-score").value = Number(config.minimum_combined_score ?? 70);
+    this.q("#config-market-age").value = Number(config.maximum_market_age_seconds ?? 120);
+    this.q("#config-market-flow-quality").value = Math.round(Number(config.minimum_market_flow_quality ?? 0.5) * 100);
+    this.q("#config-feature-quality").value = Math.round(Number(config.minimum_feature_quality ?? 0.7) * 100);
+    this.q("#config-calibration-samples").value = Number(config.minimum_calibration_samples ?? 1000);
+    this.q("#config-safety-margin").value = Number(config.live_safety_margin_bps ?? 10);
+    this.q("#config-news-weight").value = Number(config.news_score_weight ?? 45);
+    this.q("#config-technical-weight").value = Number(config.technical_score_weight ?? 35);
+    this.q("#config-market-flow-weight").value = Number(config.market_flow_score_weight ?? 20);
+    this.updateScoreWeightPreview();
+    this.renderPredictionCostConfig(config);
     this.state.draftSymbols = new Set(config.monitor_symbols || []);
     this.q("#config-all-symbols").checked = this.state.draftSymbols.size === 0;
     this.renderSymbolPicker();
@@ -490,8 +592,83 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#config-saved-at").textContent = config.persisted ? `上次保存 ${this.formatDate(config.updated_at)}` : "当前为安全默认值，保存后才启用周期任务";
   }
 
+  renderPredictionCostConfig(config = this.state.config || {}) {
+    this.q("#prediction-fee-enabled").checked = Boolean(config.prediction_fee_enabled ?? true);
+    this.q("#prediction-fee-bps").value = Number(config.prediction_fee_bps_per_side ?? 5);
+    this.q("#prediction-slippage-enabled").checked = Boolean(config.prediction_slippage_enabled ?? true);
+    this.q("#prediction-slippage-bps").value = Number(config.prediction_slippage_bps_per_side ?? 3);
+    this.q("#prediction-funding-enabled").checked = Boolean(config.prediction_funding_enabled ?? true);
+    this.q("#prediction-funding-bps").value = Number(config.prediction_funding_bps_per_8h ?? 1);
+    this.updatePredictionCostControls();
+  }
+
+  updatePredictionCostControls() {
+    const parts = [
+      ["fee", 2],
+      ["slippage", 2],
+      ["funding", 1 / 8],
+    ];
+    let oneHourCost = 0;
+    parts.forEach(([key, multiplier]) => {
+      const enabled = this.q(`#prediction-${key}-enabled`).checked;
+      const input = this.q(`#prediction-${key}-bps`);
+      input.disabled = !enabled;
+      input.closest("label")?.classList.toggle("disabled", !enabled);
+      if (enabled) oneHourCost += Math.max(0, Number(input.value) || 0) * multiplier;
+    });
+    this.q("#prediction-cost-total").textContent = `1h 往返 ${oneHourCost.toFixed(2)} bps`;
+  }
+
+  async savePredictionCostConfig(event) {
+    event.preventDefault();
+    const button = this.q("#prediction-cost-apply");
+    button.disabled = true;
+    button.textContent = "保存中…";
+    try {
+      const payload = {
+        prediction_fee_enabled: this.q("#prediction-fee-enabled").checked,
+        prediction_fee_bps_per_side: Math.max(0, Number(this.q("#prediction-fee-bps").value) || 0),
+        prediction_slippage_enabled: this.q("#prediction-slippage-enabled").checked,
+        prediction_slippage_bps_per_side: Math.max(0, Number(this.q("#prediction-slippage-bps").value) || 0),
+        prediction_funding_enabled: this.q("#prediction-funding-enabled").checked,
+        prediction_funding_bps_per_8h: Math.max(0, Number(this.q("#prediction-funding-bps").value) || 0),
+      };
+      this.state.config = await this.api("/cost-config", { method: "PUT", body: JSON.stringify(payload) });
+      this.renderPredictionCostConfig(this.state.config);
+      await this.loadPredictionAnalytics();
+      this.showBanner("成本配置已保存；命中率、净收益和实盘准备度已按当前设置重算。", "success");
+    } catch (error) {
+      this.showBanner(error.message || "成本配置保存失败", "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = "保存并重算";
+    }
+  }
+
   renderEnabledLabel(enabled) {
     this.q("#config-enabled-label").textContent = enabled ? "已开启" : "已暂停";
+  }
+
+  scoreWeightValues() {
+    return {
+      news: Math.max(0, Number(this.q("#config-news-weight").value) || 0),
+      technical: Math.max(0, Number(this.q("#config-technical-weight").value) || 0),
+      market: Math.max(0, Number(this.q("#config-market-flow-weight").value) || 0),
+    };
+  }
+
+  updateScoreWeightPreview() {
+    const values = this.scoreWeightValues();
+    const total = values.news + values.technical + values.market;
+    const valid = Math.abs(total - 100) <= 0.01;
+    const state = this.q("#weight-total-state");
+    state.textContent = `合计 ${total.toFixed(1).replace(".0", "")}%${valid ? " · 可保存" : " · 需调整为 100%"}`;
+    state.classList.toggle("invalid", !valid);
+    const scale = total > 0 ? 100 / total : 0;
+    this.q(".weight-preview .news").style.width = `${values.news * scale}%`;
+    this.q(".weight-preview .technical").style.width = `${values.technical * scale}%`;
+    this.q(".weight-preview .market").style.width = `${values.market * scale}%`;
+    return valid;
   }
 
   updateIndicatorCount() {
@@ -558,6 +735,8 @@ class AiMonitorDashboard extends HTMLElement {
 
   async saveConfig(event) {
     event.preventDefault();
+    if (!this.updateScoreWeightPreview()) { this.showBanner("新闻、技术指标与资金盘口权重合计必须为 100%。", "error"); this.q("#weight-config")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+    const scoreWeights = this.scoreWeightValues();
     const indicatorKeys = this.qa('#indicator-picker input[type="checkbox"]:checked').map((input) => input.value);
     if (!indicatorKeys.length) { this.showBanner("请至少选择一个技术指标。", "error"); return; }
     if (this.indicatorSelectionConflicts(indicatorKeys).length) { this.showBanner("当前指标组合存在无法同时满足的互斥条件，请改用推荐组合或取消冲突指标。", "error"); return; }
@@ -578,6 +757,16 @@ class AiMonitorDashboard extends HTMLElement {
         monitor_symbols: monitorSymbols,
         minimum_news_confidence: Number(this.q("#config-confidence").value) / 100,
         minimum_news_mentions: Number(this.q("#config-mentions").value),
+        minimum_indicator_score: Number(this.q("#config-indicator-score").value),
+        minimum_combined_score: Number(this.q("#config-combined-score").value),
+        maximum_market_age_seconds: Number(this.q("#config-market-age").value),
+        minimum_market_flow_quality: Number(this.q("#config-market-flow-quality").value) / 100,
+        minimum_feature_quality: Number(this.q("#config-feature-quality").value) / 100,
+        minimum_calibration_samples: Number(this.q("#config-calibration-samples").value),
+        live_safety_margin_bps: Number(this.q("#config-safety-margin").value),
+        news_score_weight: scoreWeights.news,
+        technical_score_weight: scoreWeights.technical,
+        market_flow_score_weight: scoreWeights.market,
       };
       this.state.config = await this.api("/config", { method: "PUT", body: JSON.stringify(payload) });
       this.renderConfig();
@@ -627,7 +816,7 @@ class AiMonitorDashboard extends HTMLElement {
     target.innerHTML = `<div class="empty-state opportunity-empty"><strong>正在读取${tab === "history" ? "历史" : "当前"}机会…</strong></div>`;
     try {
       const [data, analytics] = await Promise.all([
-        this.api(`/opportunities?limit=${tab === "history" ? "300" : "160"}&include_expired=${tab === "history" ? "true" : "false"}`),
+        this.api("/opportunities?limit=300&include_expired=true"),
         tab === "history"
           ? this.api("/opportunity-analytics?limit=300").catch(() => null)
           : Promise.resolve(null),
@@ -636,10 +825,15 @@ class AiMonitorDashboard extends HTMLElement {
       const now = Date.now();
       if (analytics) this.state.opportunityAnalytics = analytics;
       const outcomes = new Map((analytics?.items || []).map((item) => [item.id, item]));
-      const visible = (data.items || []).filter((item) => {
+      const items = data.items || [];
+      const isActive = (item) => {
         const active = ["candidate", "discovered"].includes(item.status) && this.parseDate(item.expires_at).getTime() > now;
-        return tab === "history" ? !active : active;
-      }).map((item) => ({ ...item, outcome: outcomes.get(item.id) || null }));
+        return active;
+      };
+      const currentItems = items.filter(isActive);
+      const historyItems = items.filter((item) => !isActive(item));
+      const visible = (tab === "history" ? historyItems : currentItems)
+        .map((item) => ({ ...item, outcome: outcomes.get(item.id) || null }));
       if (tab === "current") {
         const unique = new Map();
         visible.forEach((item) => {
@@ -647,15 +841,22 @@ class AiMonitorDashboard extends HTMLElement {
           if (!unique.has(instrument)) unique.set(instrument, item);
         });
         this.state.opportunities = [...unique.values()];
-        this.state.opportunityDirectionCounts = this.state.opportunities.reduce((counts, item) => {
-          if (item.direction === "short") counts.short += 1;
-          else counts.long += 1;
-          return counts;
-        }, { long: 0, short: 0 });
-        this.renderOpportunityDirectionCounts();
       } else {
         this.state.opportunities = visible;
       }
+      const countDirections = (records) => records.reduce((counts, item) => {
+        if (item.direction === "short") counts.short += 1;
+        else counts.long += 1;
+        return counts;
+      }, { long: 0, short: 0 });
+      const uniqueCurrent = new Map();
+      currentItems.forEach((item) => {
+        const instrument = String(item.contract_symbol || item.symbol || "").trim().toUpperCase();
+        if (!uniqueCurrent.has(instrument)) uniqueCurrent.set(instrument, item);
+      });
+      this.state.opportunityDirectionCounts = countDirections([...uniqueCurrent.values()]);
+      this.state.historyOpportunityDirectionCounts = countDirections(historyItems);
+      this.renderOpportunityDirectionCounts();
       this.renderOpportunities();
     } catch (error) {
       if (requestId !== this.state.opportunityRequestId) return;
@@ -664,11 +865,16 @@ class AiMonitorDashboard extends HTMLElement {
   }
 
   renderOpportunityDirectionCounts() {
-    const target = this.q("#current-direction-counts");
-    if (!target) return;
-    const counts = this.state.opportunityDirectionCounts;
-    target.innerHTML = `<b class="long">多 ${this.number(counts.long)}</b><i>/</i><b class="short">空 ${this.number(counts.short)}</b>`;
-    target.setAttribute("aria-label", `做多 ${counts.long} 个，做空 ${counts.short} 个`);
+    const groups = [
+      ["#current-direction-counts", this.state.opportunityDirectionCounts, "当前机会"],
+      ["#history-direction-counts", this.state.historyOpportunityDirectionCounts, "历史机会"],
+    ];
+    groups.forEach(([selector, counts, label]) => {
+      const target = this.q(selector);
+      if (!target) return;
+      target.innerHTML = `<b class="long">多 ${this.number(counts.long)}</b><i>/</i><b class="short">空 ${this.number(counts.short)}</b>`;
+      target.setAttribute("aria-label", `${label}：做多 ${counts.long} 次，做空 ${counts.short} 次`);
+    });
   }
 
   setOpportunityTab(tab) {
@@ -696,11 +902,14 @@ class AiMonitorDashboard extends HTMLElement {
       const indicatorItems = evidence.indicators || [];
       const matchedCount = Number(evidence.matched_indicator_count ?? indicatorItems.filter((indicator) => indicator.matched).length);
       const requiredCount = Number(evidence.required_indicator_count ?? indicatorItems.length);
-      const indicators = indicatorItems.slice(0, 10).map((indicator) => `<span class="evidence-chip ${indicator.matched ? "matched" : "unmatched"}">${indicator.matched ? "✓" : "×"} ${this.escape(indicator.name)}</span>`).join("");
+      const indicators = indicatorItems.slice(0, 10).map((indicator) => `<span class="evidence-chip ${indicator.matched ? "matched" : "unmatched"}">${indicator.matched ? "✓" : "×"} ${this.escape(indicator.name)} <b>${Number(indicator.strength ?? 0).toFixed(0)}</b></span>`).join("");
       const indicatorRemainder = indicatorItems.length > 10 ? `<span class="evidence-chip remainder">另有 ${indicatorItems.length - 10} 项</span>` : "";
       const news = (evidence.news || []).slice(0, 3).map((entry) => `<li><time>${this.formatUnix(entry.ts)}</time><span>${this.escape(entry.title)}</span><b>${Math.round(Number(entry.score || 0) * 100)}%</b></li>`).join("");
       const market = evidence.market || {};
       const confirmed = item.status === "discovered";
+      const readiness = evidence.live_readiness || {};
+      const shadowReady = readiness.status === "shadow_ready";
+      const readinessBadge = `<span class="readiness-badge ${shadowReady ? "shadow" : "research"}">${shadowReady ? "影子候选" : "研究信号"}</span>`;
       const historyState = item.status === "dismissed" ? "已结束" : "已过期";
       const marketAvailable = evidence.market_available !== false;
       const directionLabel = item.direction === "short" ? "做空" : "做多";
@@ -721,8 +930,8 @@ class AiMonitorDashboard extends HTMLElement {
         : `<button class="opportunity-symbol unavailable" type="button" disabled title="该股票暂无对应的合约技术行情">${this.escape(item.symbol)}</button>`;
       const conclusionControl = `<button class="ai-conclusion-trigger" type="button" data-ai-conclusion="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 的 AI 分析结论">AI分析结论</button>`;
       return `<article class="opportunity-item ${this.escape(item.status)} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}">
-        <header><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span>${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${conclusionControl}</div><div class="opportunity-score"><b>${Number(item.combined_score).toFixed(1)}</b><span>组合评分</span></div></header>
-        <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}"><span><em>新闻评分</em><b>${Number(item.news_score).toFixed(1)}</b></span><span><em>指标满足</em><b>${matchedCount} / ${requiredCount}</b></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b></span><span><em>信号状态</em><b>${historicalTab ? historyState : confirmed ? "技术已确认" : "等待确认"}</b></span>${outcomeMetric}</div>
+        <header><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span>${readinessBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${conclusionControl}</div><div class="opportunity-score"><b>${Number(item.combined_score).toFixed(1)}</b><span>组合评分</span></div></header>
+        <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}"><span><em>新闻评分</em><b>${Number(item.news_score).toFixed(1)}</b></span><span><em>指标强度</em><b>${Number(item.indicator_score).toFixed(1)}</b><small>满足 ${matchedCount} / ${requiredCount}</small></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b></span><span><em>信号状态</em><b>${historicalTab ? historyState : shadowReady ? "可影子观察" : confirmed ? "仅研究" : "等待确认"}</b></span>${outcomeMetric}</div>
         <div class="opportunity-signal" aria-label="虚拟买入信号信息">
           <span><em>信号时间</em><b>${signalStart}</b></span>
           <span class="validity"><em>信号有效期间</em><b>${signalDuration}</b><small>${signalStart} — ${signalEnd}</small></span>
@@ -731,7 +940,7 @@ class AiMonitorDashboard extends HTMLElement {
         </div>
         <div class="evidence-chips">${indicators}${indicatorRemainder}</div>
         <ul class="opportunity-news">${news}</ul>
-        <footer><span>发现 ${this.formatDate(item.discovered_at)}</span><span>有效至 ${this.formatDate(item.expires_at)}</span><em>${historicalTab ? `历史机会 · ${outcomeLabel}` : confirmed ? "已写入虚拟预测" : item.status === "candidate" ? marketAvailable ? "等待全部指标确认" : "新闻候选 · 暂无技术行情" : "历史机会"}</em></footer>
+        <footer><span>发现 ${this.formatDate(item.discovered_at)}</span><span>有效至 ${this.formatDate(item.expires_at)}</span><em>${historicalTab ? `历史机会 · ${outcomeLabel}` : shadowReady ? "影子候选 · 仍不执行交易" : confirmed ? `研究预测 · ${(readiness.failed_reasons || ["未通过影子准入"]).slice(0, 1).join("")}` : item.status === "candidate" ? marketAvailable ? "等待全部指标确认" : "新闻候选 · 暂无技术行情" : "历史机会"}</em></footer>
       </article>`;
     }).join("");
   }
@@ -745,6 +954,8 @@ class AiMonitorDashboard extends HTMLElement {
     const evidence = item.evidence || {};
     const newsItems = Array.isArray(evidence.news) ? evidence.news : [];
     const indicatorItems = Array.isArray(evidence.indicators) ? evidence.indicators : [];
+    const marketFlow = evidence.market_flow && typeof evidence.market_flow === "object" ? evidence.market_flow : {};
+    const scoreWeightLabel = this.scoreWeightSummary(evidence);
     const matchedCount = Number(evidence.matched_indicator_count ?? indicatorItems.filter((indicator) => indicator.matched).length);
     const requiredCount = Number(evidence.required_indicator_count ?? indicatorItems.length);
     const confirmed = item.status === "discovered" || evidence.confirmed === true;
@@ -753,8 +964,11 @@ class AiMonitorDashboard extends HTMLElement {
     const directionText = item.direction === "short" ? "偏空" : "偏多";
     const uniqueReasons = [...new Set(newsItems.map((entry) => String(entry.reason || "").trim()).filter(Boolean))];
     const primaryReason = uniqueReasons[0] || "关联新闻已形成方向判断，但模型未提供更详细的文字理由。";
+    const flowConflict = marketFlow.hard_conflict === true;
     const technicalConclusion = confirmed
-      ? `配置的 ${requiredCount} 项技术条件已全部满足，信号已进入虚拟预测。`
+      ? `配置的 ${requiredCount} 项技术条件已全部满足，资金盘口未出现强反向冲突，信号已进入虚拟预测。`
+      : flowConflict
+      ? `技术条件满足 ${matchedCount}/${requiredCount}，但资金盘口与预测方向强冲突，暂不进入虚拟预测。`
       : `当前满足 ${matchedCount}/${requiredCount} 项技术条件，仍属于新闻候选，尚未形成正式虚拟预测。`;
     const newsMarkup = newsItems.length
       ? newsItems.map((entry) => {
@@ -777,13 +991,13 @@ class AiMonitorDashboard extends HTMLElement {
             return `<span><em>${this.escape(label || "指标值")}</em><b>${this.escape(value ?? "--")}</b></span>`;
           }).join("");
           return `<article class="ai-conclusion-indicator ${indicator.matched ? "matched" : "unmatched"}">
-            <header><strong>${indicator.matched ? "✓" : "×"} ${this.escape(indicator.name || indicator.key)}</strong><span>${indicator.matched ? "已满足" : "未满足"}</span></header>
+            <header><strong>${indicator.matched ? "✓" : "×"} ${this.escape(indicator.name || indicator.key)}</strong><span>${indicator.matched ? "已满足" : "未满足"} · 强度 ${Number(indicator.strength ?? 0).toFixed(1)}</span></header>
             <p>${this.escape(indicator.summary || "暂无指标摘要")}</p>
             ${metrics ? `<div>${metrics}</div>` : ""}
           </article>`;
         }).join("")
       : '<div class="ai-conclusion-empty">该机会没有可展示的技术指标证据。</div>';
-    const statusLabel = confirmed ? "技术已确认" : "等待技术确认";
+    const statusLabel = confirmed ? "技术与盘口已确认" : flowConflict ? "资金盘口反向" : "等待技术确认";
     const marketPrice = evidence.market?.price == null ? "--" : this.compactNumber(evidence.market.price);
     const analysisMarkup = `
       <section class="ai-conclusion-summary ${directionClass}">
@@ -792,8 +1006,8 @@ class AiMonitorDashboard extends HTMLElement {
       </section>
       <section class="ai-conclusion-scores" aria-label="AI 分析评分">
         <article><span>新闻评分</span><b>${Number(item.news_score).toFixed(1)}</b><small>AI 置信度 × 股票关联度</small></article>
-        <article><span>技术指标</span><b>${matchedCount} / ${requiredCount}</b><small>全部满足才确认</small></article>
-        <article><span>组合评分</span><b>${Number(item.combined_score).toFixed(1)}</b><small>新闻 55% + 指标 45%</small></article>
+        <article><span>技术指标</span><b>${Number(item.indicator_score).toFixed(1)}</b><small>${matchedCount} / ${requiredCount} 全部满足</small></article>
+        <article><span>组合评分</span><b>${Number(item.combined_score).toFixed(1)}</b><small>${this.escape(scoreWeightLabel)}</small></article>
         <article><span>参考价格</span><b>${this.escape(marketPrice)}</b><small>信号扫描时行情</small></article>
       </section>
       <section class="ai-conclusion-section"><header><div><span>01</span><h3>最终结论</h3></div><small>${statusLabel}</small></header><div class="ai-conclusion-verdict"><p>方向判断：<strong class="${directionClass}">${directionLabel} ${this.escape(item.symbol)}</strong>。${this.escape(technicalConclusion)}</p><p>主要依据：${this.escape(uniqueReasons.join("；") || primaryReason)}</p></div></section>
@@ -804,7 +1018,9 @@ class AiMonitorDashboard extends HTMLElement {
       fundamentals: '<div class="ai-conclusion-loading">正在读取数据库基本面信息…</div>',
       analysis: analysisMarkup,
       news: this.renderAiRelatedNewsList(newsItems, item, true),
+      market: this.renderMarketFlowPanel(item),
     };
+    this.q("#ai-conclusion-market-state").textContent = marketFlow.version ? `评分 ${Number(marketFlow.score ?? 50).toFixed(1)}` : "旧信号无快照";
     this.q("#ai-conclusion-news-count").textContent = `关联 ${Math.max(newsItems.length, (item.news_ids || []).length)} 条`;
     this.showAiConclusionView("analysis");
     this.conclusionFocus = trigger || null;
@@ -817,7 +1033,7 @@ class AiMonitorDashboard extends HTMLElement {
   }
 
   showAiConclusionView(view) {
-    if (!["fundamentals", "news", "analysis"].includes(view)) return;
+    if (!["fundamentals", "news", "market", "analysis"].includes(view)) return;
     this.state.conclusionView = view;
     this.qa("[data-conclusion-view]").forEach((button) => {
       const active = button.dataset.conclusionView === view;
@@ -826,13 +1042,55 @@ class AiMonitorDashboard extends HTMLElement {
     });
     const item = this.conclusionOpportunity;
     if (item) {
-      const viewTitle = ({ fundamentals: "基本面信息", news: "相关新闻列表", analysis: "AI 分析结论" })[view];
+      const viewTitle = ({ fundamentals: "基本面信息", news: "相关新闻列表", market: "资金盘口指标", analysis: "AI 分析结论" })[view];
       this.q("#ai-conclusion-title").textContent = `${item.symbol} · ${viewTitle}`;
       this.q("#ai-conclusion-subtitle").textContent = `${item.contract_symbol} · ${this.formatDate(item.discovered_at)} · ${item.timeframe} 周期`;
     }
     const target = this.q("#ai-conclusion-body");
     target.innerHTML = this.conclusionPanels[view] || '<div class="ai-conclusion-loading">正在读取相关内容…</div>';
     target.scrollTop = 0;
+  }
+
+  renderMarketFlowPanel(item) {
+    const flow = item?.evidence?.market_flow;
+    if (!flow || typeof flow !== "object" || !flow.version) {
+      return '<div class="ai-market-flow-empty"><strong>该历史信号没有资金盘口快照</strong><span>新一轮信号扫描会写入换手率、主力量比、交易深度和挂单变化；旧记录不会用当前行情反向补造。</span></div>';
+    }
+    const value = (raw, suffix = "") => raw == null || !Number.isFinite(Number(raw)) ? "--" : `${Number(raw).toFixed(2)}${suffix}`;
+    const ratio = (raw) => raw == null || !Number.isFinite(Number(raw)) ? "--" : Number(raw).toFixed(3);
+    const amount = (raw) => raw == null || !Number.isFinite(Number(raw)) ? "--" : this.compactNumber(Number(raw));
+    const directionClass = item.direction === "short" ? "short" : "long";
+    const directionLabel = item.direction === "short" ? "做空" : "做多";
+    const stateLabel = flow.hard_conflict ? "强反向冲突" : flow.confirms_direction ? "确认预测方向" : "中性观察";
+    const turnoverLabel = flow.turnover_source === "underlying_volume_over_shares" ? "美股成交量 ÷ 总股本" : flow.turnover_source === "contract_value_over_market_cap_proxy" ? "合约成交额 ÷ 市值代理" : "暂无可靠分母";
+    const sourceLabel = flow.sources?.depth === "binance_futures_market_by_price" ? "Binance 合约深度" : "深度暂缺";
+    const activeSource = flow.sources?.active_flow === "binance_futures_taker" ? "Taker 主动成交" : "盘口压力代理";
+    return `<section class="ai-market-flow-panel">
+      <header class="${directionClass}"><div><span class="eyebrow">MARKET FLOW SNAPSHOT</span><h3>资金流与盘口结构</h3><p>生成信号时保存的实时快照，不使用当前行情覆盖历史判断。</p></div><strong>${Number(flow.score ?? 50).toFixed(1)}<small>${directionLabel}资金评分 · ${stateLabel}</small></strong></header>
+      <section class="ai-market-flow-grid" aria-label="资金盘口指标">
+        <article><span>换手率</span><b>${value(flow.turnover_rate_pct, "%")}</b><small>${this.escape(turnoverLabel)}</small></article>
+        <article class="${flow.confirms_direction ? "positive" : flow.hard_conflict ? "negative" : ""}"><span>主力量比</span><b>${ratio(flow.main_force_ratio)}</b><small>0 买方弱 · 1 买方强</small></article>
+        <article><span>主动买入占比</span><b>${value(flow.active_buy_ratio == null ? null : Number(flow.active_buy_ratio) * 100, "%")}</b><small>${this.escape(activeSource)}</small></article>
+        <article><span>盘口失衡 / 近5档</span><b>${value(flow.book_imbalance)} / ${value(flow.book_imbalance_5)}</b><small>-1 卖压 · +1 买压</small></article>
+        <article><span>买方 / 卖方深度</span><b>${amount(flow.bid_depth_notional)} / ${amount(flow.ask_depth_notional)}</b><small>前100档名义金额</small></article>
+        <article><span>近5档买 / 卖</span><b>${amount(flow.bid_depth_notional_5)} / ${amount(flow.ask_depth_notional_5)}</b><small>最接近成交价的挂单</small></article>
+        <article><span>买 / 卖挂单档位</span><b>${Number(flow.bid_level_count || 0)} / ${Number(flow.ask_level_count || 0)}</b><small>价格档数代理，非真实订单笔数</small></article>
+        <article><span>5秒挂单增速</span><b>${value(flow.bid_depth_change_5s_pct, "%")} / ${value(flow.ask_depth_change_5s_pct, "%")}</b><small>买方 / 卖方深度变化</small></article>
+        <article><span>30秒挂单增速</span><b>${value(flow.bid_depth_change_30s_pct, "%")} / ${value(flow.ask_depth_change_30s_pct, "%")}</b><small>过滤瞬时盘口噪声</small></article>
+        <article><span>买卖价差</span><b>${value(flow.spread_bps, " bps")}</b><small>越低通常流动性越好</small></article>
+      </section>
+      <section class="ai-market-flow-method"><div><strong>如何参与机会判断</strong><span>${this.escape(this.scoreWeightSummary(item.evidence || {}))}</span></div><p>主力量比综合主动成交 50%、近5档盘口压力 30%、挂单增速 20%。当至少两类资金数据有效且与预测方向的得分低于 35 分时，作为强反向冲突阻止生成虚拟预测。</p><footer><span>${this.escape(sourceLabel)}</span><span>数据质量 ${value(Number(flow.data_quality ?? 0) * 100, "%")}</span><span>${this.escape(flow.note || "买卖挂单数量使用可见价格档位代理。")}</span></footer></section>
+    </section>`;
+  }
+
+  scoreWeightSummary(evidence = {}) {
+    const weights = evidence.score_weights && typeof evidence.score_weights === "object" ? evidence.score_weights : {};
+    const percent = (value, fallback) => {
+      const parsed = Number(value);
+      const normalized = Number.isFinite(parsed) ? (parsed <= 1 ? parsed * 100 : parsed) : fallback;
+      return Number(normalized.toFixed(1)).toString();
+    };
+    return `新闻 ${percent(weights.news, 45)}% + 技术指标 ${percent(weights.technical, 35)}% + 资金盘口 ${percent(weights.market_flow, 20)}%`;
   }
 
   async loadAiRelatedNews(item, fallbackItems) {
@@ -850,6 +1108,123 @@ class AiMonitorDashboard extends HTMLElement {
       this.q("#ai-conclusion-news-count").textContent = `关联 ${fallbackItems.length} 条`;
       if (this.state.conclusionView === "news") this.showAiConclusionView("news");
     }
+  }
+
+  openNewsAnalysisLogic(trigger) {
+    if (!this.conclusionOpportunity) return;
+    this.newsLogicFocus = trigger || null;
+    this.newsModelCalls = [];
+    this.newsModelCallIndex = 0;
+    this.q("#news-logic-title").textContent = `${this.conclusionOpportunity.symbol} · 新闻分析逻辑`;
+    this.q("#news-logic-subtitle").textContent = `${this.conclusionOpportunity.contract_symbol} · 正在读取模型调用审计记录`;
+    this.q("#news-logic-body").innerHTML = '<div class="news-model-call-loading">正在读取实际提示词与模型原始响应…</div>';
+    const modal = this.q("#news-logic-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.q("#news-logic-close").focus({ preventScroll: true });
+    this.loadNewsModelCalls(this.conclusionOpportunity);
+  }
+
+  async loadNewsModelCalls(item) {
+    const requestId = ++this.newsModelCallsRequestId;
+    try {
+      const data = await this.api(`/opportunities/${encodeURIComponent(item.id)}/model-calls`);
+      if (requestId !== this.newsModelCallsRequestId || this.conclusionOpportunity?.id !== item.id) return;
+      this.newsModelCalls = Array.isArray(data.items) ? data.items : [];
+      this.newsModelCallIndex = 0;
+      this.newsModelCallsNote = data.note || "";
+      this.renderNewsAnalysisLogic();
+    } catch (error) {
+      if (requestId !== this.newsModelCallsRequestId || this.conclusionOpportunity?.id !== item.id) return;
+      this.q("#news-logic-body").innerHTML = `<div class="news-model-call-empty error"><strong>模型调用记录读取失败</strong><span>${this.escape(error.message || "请稍后重试")}</span></div>`;
+    }
+  }
+
+  renderNewsAnalysisLogic() {
+    const item = this.conclusionOpportunity;
+    if (!item) return;
+    const calls = this.newsModelCalls;
+    this.q("#news-logic-title").textContent = `${item.symbol} · 新闻分析逻辑`;
+    this.q("#news-logic-subtitle").textContent = `${item.contract_symbol} · 实际提示词与模型原始返回`;
+    if (!calls.length) {
+      this.q("#news-logic-body").innerHTML = `<div class="news-model-call-empty"><strong>该机会没有原始模型调用记录</strong><span>${this.escape(this.newsModelCallsNote || "该机会生成时尚未启用原始调用审计；重新分析关联新闻后即可查看。")}</span><small>系统不会根据解析结果伪造历史提示词或原始响应。</small></div>`;
+      return;
+    }
+    const selectedIndex = Math.max(0, Math.min(this.newsModelCallIndex, calls.length - 1));
+    this.newsModelCallIndex = selectedIndex;
+    const call = calls[selectedIndex];
+    const request = call.request_json && typeof call.request_json === "object" ? call.request_json : {};
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const systemPrompt = messages.filter((entry) => entry?.role === "system").map((entry) => String(entry.content || "")).join("\n\n");
+    const userPrompt = messages.filter((entry) => entry?.role === "user").map((entry) => String(entry.content || "")).join("\n\n");
+    const requestParameters = { ...request };
+    delete requestParameters.messages;
+    const rawResponse = call.response_text || "";
+    const responseEnvelope = call.response_envelope || "";
+    const tabs = calls.map((entry, index) => `<button class="${index === selectedIndex ? "active" : ""}" type="button" data-news-call-index="${index}"><span>调用 ${String(index + 1).padStart(2, "0")}</span><strong>${this.escape(entry.model_name || "未知模型")}</strong><small>${this.escape((entry.news_ids || []).length)} 条新闻 · ${this.formatDate(entry.started_at)}</small></button>`).join("");
+    const promptBlock = (title, role, content, key) => `<article class="news-model-raw-block"><header><div><span>${role}</span><h3>${title}</h3></div><button type="button" data-copy-call-section="${key}">复制原文</button></header><pre><code>${this.escape(content || "（空）")}</code></pre></article>`;
+    this.q("#news-logic-body").innerHTML = `
+      <nav class="news-model-call-tabs" aria-label="模型调用记录">${tabs}</nav>
+      <section class="news-model-call-meta">
+        <article><span>服务商</span><b>${this.escape(call.provider_code || "--")}</b></article>
+        <article><span>模型</span><b>${this.escape(call.model_name || "--")}</b></article>
+        <article><span>新闻数量</span><b>${(call.news_ids || []).length} 条</b></article>
+        <article><span>调用状态</span><b class="${call.status === "completed" ? "success" : "failed"}">${call.status === "completed" ? "调用成功" : `调用失败 · ${this.escape(call.error_category || "unknown")}`}</b></article>
+        <article><span>调用时间</span><b>${this.formatDate(call.started_at)}</b></article>
+      </section>
+      <section class="news-model-audit-note"><strong>数据库原始审计</strong><span>以下内容是本次请求实际发送和收到的原文；认证请求头与 API Key 从未写入记录。</span><em>批次 ${this.escape(call.batch_id || "--")}</em></section>
+      ${promptBlock("System 提示词", "SYSTEM", systemPrompt, "system")}
+      ${promptBlock("User 提示词 / 新闻输入", "USER", userPrompt, "user")}
+      ${promptBlock("请求参数", "REQUEST", this.prettyJson(requestParameters), "request")}
+      ${promptBlock("模型返回原始文本", "RAW OUTPUT", rawResponse || "模型未返回可读取的 message content", "response")}
+      ${promptBlock("服务商完整响应包", "HTTP BODY", this.prettyJson(responseEnvelope) || "服务商未返回响应正文", "envelope")}`;
+    this.q("#news-logic-body").scrollTop = 0;
+  }
+
+  prettyJson(value) {
+    if (value == null || value === "") return "";
+    try {
+      const parsed = typeof value === "string" ? JSON.parse(value) : value;
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+
+  async copyNewsModelCallSection(section, button) {
+    const call = this.newsModelCalls[this.newsModelCallIndex];
+    if (!call) return;
+    const request = call.request_json && typeof call.request_json === "object" ? call.request_json : {};
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const values = {
+      system: messages.filter((entry) => entry?.role === "system").map((entry) => String(entry.content || "")).join("\n\n"),
+      user: messages.filter((entry) => entry?.role === "user").map((entry) => String(entry.content || "")).join("\n\n"),
+      request: this.prettyJson(request),
+      response: String(call.response_text || ""),
+      envelope: this.prettyJson(call.response_envelope),
+    };
+    const value = values[section];
+    if (value == null) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      const original = button.textContent;
+      button.textContent = "已复制";
+      window.setTimeout(() => { if (button.isConnected) button.textContent = original; }, 1200);
+    } catch {
+      this.showBanner("浏览器未允许复制，请直接选择代码块内容。", "error");
+    }
+  }
+
+  closeNewsAnalysisLogic(restoreFocus = true) {
+    const modal = this.q("#news-logic-modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    this.newsModelCallsRequestId += 1;
+    this.newsModelCalls = [];
+    const focusTarget = this.newsLogicFocus;
+    this.newsLogicFocus = null;
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
   }
 
   renderAiRelatedNewsList(items, opportunity, compactEvidence = false) {
@@ -970,6 +1345,7 @@ class AiMonitorDashboard extends HTMLElement {
   closeAiConclusion() {
     const modal = this.q("#ai-conclusion-modal");
     if (!modal || modal.classList.contains("hidden")) return;
+    this.closeNewsAnalysisLogic(false);
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
     this.conclusionNewsRequestId += 1;
@@ -981,33 +1357,84 @@ class AiMonitorDashboard extends HTMLElement {
   }
 
   async loadPredictionAnalytics() {
+    const requestId = ++this.state.predictionAnalyticsRequestId;
     try {
-      const data = await this.api("/opportunity-analytics?limit=300");
+      const filters = this.state.predictionFilters;
+      const params = new URLSearchParams({
+        limit: "500",
+        news_score_min: String(filters.newsScoreMin),
+        indicator_score_min: String(filters.indicatorScoreMin),
+        direction: filters.direction,
+      });
+      const applyButton = this.q("#prediction-filter-apply");
+      if (applyButton) applyButton.disabled = true;
+      const data = await this.api(`/opportunity-analytics?${params}`);
+      if (requestId !== this.state.predictionAnalyticsRequestId) return;
       this.state.opportunityAnalytics = data;
       this.renderPredictionAnalytics();
     } catch (error) {
       this.showBanner(error.message || "预测统计分析读取失败", "error");
+    } finally {
+      const applyButton = this.q("#prediction-filter-apply");
+      if (applyButton && requestId === this.state.predictionAnalyticsRequestId) applyButton.disabled = false;
     }
+  }
+
+  applyPredictionFilters() {
+    const clampScore = (value) => Math.min(100, Math.max(0, Number(value) || 0));
+    const directionValue = this.q("#prediction-direction").value;
+    this.state.predictionFilters = {
+      newsScoreMin: clampScore(this.q("#prediction-news-score-min").value),
+      indicatorScoreMin: clampScore(this.q("#prediction-indicator-score-min").value),
+      direction: ["long", "short"].includes(directionValue) ? directionValue : "all",
+    };
+    this.q("#prediction-news-score-min").value = String(this.state.predictionFilters.newsScoreMin);
+    this.q("#prediction-indicator-score-min").value = String(this.state.predictionFilters.indicatorScoreMin);
+    this.loadPredictionAnalytics();
+  }
+
+  resetPredictionFilters() {
+    this.state.predictionFilters = { newsScoreMin: 0, indicatorScoreMin: 0, direction: "all" };
+    this.q("#prediction-news-score-min").value = "0";
+    this.q("#prediction-indicator-score-min").value = "0";
+    this.q("#prediction-direction").value = "all";
+    this.loadPredictionAnalytics();
   }
 
   renderPredictionAnalytics() {
     const data = this.state.opportunityAnalytics || {};
     const summary = data.summary || {};
     const items = data.items || [];
+    const readiness = data.readiness || {};
+    const costConfig = data.cost_config || {};
     const metricBps = (value) => value == null ? "--" : this.formatBps(value);
     const hitRate = summary.hit_rate == null ? "--" : `${Number(summary.hit_rate).toFixed(1)}%`;
-    const coverage = `${Number(summary.coverage_rate || 0).toFixed(1)}% 可结算`;
-    this.q("#prediction-note").textContent = data.note || "按历史机会到期行情统计，不执行任何下单。";
+    const filters = data.filters || {};
+    const directionLabel = ({ long: "做多", short: "做空", all: "全部方向" })[filters.direction] || "全部方向";
+    const filterResult = this.q("#prediction-filter-result");
+    if (filterResult) filterResult.textContent = `${this.number(summary.historical_count)} 条 · ${directionLabel} · 新闻 ≥ ${Number(filters.news_score_min || 0).toFixed(0)} · 指标 ≥ ${Number(filters.indicator_score_min || 0).toFixed(0)}`;
+    const costTotal = this.q("#prediction-cost-total");
+    if (costTotal && costConfig.example_one_hour_total_bps != null) costTotal.textContent = `1h 往返 ${Number(costConfig.example_one_hour_total_bps).toFixed(2)} bps`;
+    const readinessTarget = this.q("#strategy-readiness");
+    if (readinessTarget) {
+      const criteria = Array.isArray(readiness.criteria) ? readiness.criteria : [];
+      readinessTarget.innerHTML = `
+        <header><div><span>LIVE READINESS GATE</span><h3>${readiness.quantitative_ready ? "量化门槛已通过，可进入影子验证" : "当前仅限研究，尚未达到影子验证门槛"}</h3><p>${this.escape(readiness.note || "量化门槛通过后仍需模拟盘、影子运行和人工审批。")}</p></div><strong class="${readiness.quantitative_ready ? "passed" : "blocked"}">${this.number(readiness.passed_count)} / ${this.number(readiness.total_count)}<small>通过项</small></strong></header>
+        <div class="readiness-criteria">${criteria.map((item) => `<article class="${item.passed ? "passed" : "blocked"}"><span>${item.passed ? "✓" : "×"} ${this.escape(item.label)}</span><b>${item.current == null ? "--" : this.escape(item.current)}</b><small>要求 ${this.escape(item.required)}</small></article>`).join("")}</div>
+        <footer><strong>实盘仍需完成</strong>${(readiness.paper_and_shadow_requirements || []).map((item) => `<span>${this.escape(item)}</span>`).join("")}</footer>`;
+    }
+    this.q("#prediction-note").textContent = data.note || "按历史虚拟预测的成本后结果统计，不执行任何下单。";
     this.q("#analytics-summary").innerHTML = `
-      <article><span>历史机会</span><strong>${this.number(summary.historical_count)}</strong><small>当前统计样本</small></article>
-      <article><span>有效样本</span><strong>${this.number(summary.settled_count)}</strong><small>${coverage} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)}</small></article>
+      <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)}</small></article>
+      <article><span>多 / 空方向</span><strong class="analytics-directions"><b>${this.number(summary.long_count)}</b><i>/</i><em>${this.number(summary.short_count)}</em></strong><small>做多 / 做空样本分布</small></article>
       <article class="positive"><span>命中次数</span><strong>${this.number(summary.win_count)}</strong><small>未命中 ${this.number(summary.loss_count)} · 持平 ${this.number(summary.flat_count)}</small></article>
       <article class="${Number(summary.hit_rate || 0) >= 50 ? "positive" : "negative"}"><span>命中概率</span><strong>${hitRate}</strong><small>命中 ÷ 有方向结果</small></article>
-      <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均方向收益</span><strong>${metricBps(summary.average_directional_return_bps)}</strong><small>按买入方向计算</small></article>
-      <article><span>最佳 / 最差</span><strong class="analytics-range"><b>${metricBps(summary.best_directional_return_bps)}</b><i>${metricBps(summary.worst_directional_return_bps)}</i></strong><small>方向收益区间</small></article>`;
+      <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均净收益</span><strong>${metricBps(summary.average_directional_return_bps)}</strong><small>毛 ${metricBps(summary.average_gross_return_bps)} · 成本 ${metricBps(summary.average_estimated_cost_bps)}</small><small>费 ${metricBps(summary.average_fee_cost_bps)} · 滑 ${metricBps(summary.average_slippage_cost_bps)} · 资金 ${metricBps(summary.average_funding_cost_bps)}</small></article>
+      <article><span>平均 MFE / MAE</span><strong class="analytics-range"><b>${metricBps(summary.average_max_favorable_bps)}</b><i>${metricBps(summary.average_max_adverse_bps)}</i></strong><small>持有期最大有利 / 不利波动</small></article>
+      <article><span>影子候选 / 研究</span><strong class="analytics-directions"><b>${this.number(summary.shadow_ready_count)}</b><i>/</i><em>${this.number(summary.research_only_count)}</em></strong><small>生成信号时的准入状态</small></article>`;
     const target = this.q("#prediction-list");
-    if (!items.length) { target.innerHTML = '<div class="empty-state opportunity-empty"><strong>暂无历史机会统计</strong><span>当前机会到期后，会自动进入这里计算命中表现。</span></div>'; return; }
-    target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>买入价格</th><th>到期价格</th><th>方向收益</th><th>结果</th><th>有效期结束</th></tr></thead><tbody>${items.map((item) => `<tr><td>${this.formatDate(item.signal_time)}</td><td><strong>${this.escape(item.symbol)}</strong><small>${this.escape(item.contract_symbol)}</small></td><td><span class="prediction-direction ${item.direction === "short" ? "short" : ""}">${item.direction === "long" ? "做多" : "做空"}</span></td><td><span class="technical-state ${item.technical_confirmed ? "confirmed" : "candidate"}">${item.technical_confirmed ? "技术已确认" : "新闻候选"}</span></td><td>${Number(item.news_score).toFixed(1)} / ${Number(item.indicator_score).toFixed(1)}<small>组合 ${Number(item.combined_score).toFixed(1)}</small></td><td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}</td><td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${item.settled_price_at ? this.formatDate(item.settled_price_at) : "到期行情不足"}</small></td><td class="${Number(item.directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${item.directional_return_bps == null ? "--" : this.formatBps(item.directional_return_bps)}</td><td><span class="prediction-result ${this.escape(item.result || "unavailable")}">${this.analyticsResultLabel(item.result)}</span></td><td>${this.formatDate(item.expires_at)}<small>${this.escape(item.timeframe)} 信号</small></td></tr>`).join("")}</tbody></table></div>`;
+    if (!items.length) { target.innerHTML = '<div class="empty-state opportunity-empty"><strong>没有符合当前筛选条件的历史机会</strong><span>请降低评分下限、切换方向或重置筛选。</span></div>'; return; }
+    target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>买入价格</th><th>到期价格</th><th>毛收益 / 净收益</th><th>MFE / MAE</th><th>成本后结果</th><th>有效期结束</th></tr></thead><tbody>${items.map((item) => `<tr><td>${this.formatDate(item.signal_time)}</td><td><strong>${this.escape(item.symbol)}</strong><small>${this.escape(item.contract_symbol)}</small></td><td><span class="prediction-direction ${item.direction === "short" ? "short" : ""}">${item.direction === "long" ? "做多" : "做空"}</span></td><td><span class="technical-state ${item.technical_confirmed ? "confirmed" : "candidate"}">${item.technical_confirmed ? "技术已确认" : "新闻候选"}</span></td><td>${Number(item.news_score).toFixed(1)} / ${Number(item.indicator_score).toFixed(1)}<small>组合 ${Number(item.combined_score).toFixed(1)}</small></td><td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}</td><td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${item.settled_price_at ? this.formatDate(item.settled_price_at) : "到期行情不足"}</small></td><td class="${Number(item.directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${metricBps(item.gross_directional_return_bps)}<small>净 ${metricBps(item.net_directional_return_bps)} · 成本 ${metricBps(item.estimated_cost_bps)}</small><small>费 ${metricBps(item.fee_cost_bps)} · 滑 ${metricBps(item.slippage_cost_bps)} · 资金 ${metricBps(item.funding_cost_bps)}</small></td><td>${metricBps(item.max_favorable_bps)}<small>${metricBps(item.max_adverse_bps)}</small></td><td><span class="prediction-result ${this.escape(item.result || "unavailable")}">${this.analyticsResultLabel(item.result)}</span></td><td>${this.formatDate(item.expires_at)}<small>${this.escape(item.timeframe)} 信号</small></td></tr>`).join("")}</tbody></table></div>`;
   }
 
   showBanner(message, tone = "success") {

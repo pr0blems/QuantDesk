@@ -434,6 +434,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/cost-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update Cost Config
+         * @description Persist cost assumptions used by virtual prediction statistics and gates.
+         */
+        put: operations["update_cost_config_api_v2_ai_monitor_cost_config_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/indicators": {
         parameters: {
             query?: never;
@@ -514,6 +534,26 @@ export interface paths {
         };
         /** Opportunity Fundamentals */
         get: operations["opportunity_fundamentals_api_v2_ai_monitor_opportunities__opportunity_id__fundamentals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/ai-monitor/opportunities/{opportunity_id}/model-calls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Opportunity Model Calls
+         * @description Return exact persisted prompts and raw provider responses for an opportunity's news.
+         */
+        get: operations["opportunity_model_calls_api_v2_ai_monitor_opportunities__opportunity_id__model_calls_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1921,6 +1961,46 @@ export interface components {
             /** Indicator Keys */
             indicator_keys?: string[];
             /**
+             * Live Safety Margin Bps
+             * @default 10
+             */
+            live_safety_margin_bps: number;
+            /**
+             * Market Flow Score Weight
+             * @default 20
+             */
+            market_flow_score_weight: number;
+            /**
+             * Maximum Market Age Seconds
+             * @default 120
+             */
+            maximum_market_age_seconds: number;
+            /**
+             * Minimum Calibration Samples
+             * @default 1000
+             */
+            minimum_calibration_samples: number;
+            /**
+             * Minimum Combined Score
+             * @default 70
+             */
+            minimum_combined_score: number;
+            /**
+             * Minimum Feature Quality
+             * @default 0.7
+             */
+            minimum_feature_quality: number;
+            /**
+             * Minimum Indicator Score
+             * @default 65
+             */
+            minimum_indicator_score: number;
+            /**
+             * Minimum Market Flow Quality
+             * @default 0.5
+             */
+            minimum_market_flow_quality: number;
+            /**
              * Minimum News Confidence
              * @default 0.6
              */
@@ -1943,16 +2023,59 @@ export interface components {
              */
             news_lookback_hours: number;
             /**
+             * News Score Weight
+             * @default 45
+             */
+            news_score_weight: number;
+            /**
              * Opportunity Interval Minutes
              * @default 15
              */
             opportunity_interval_minutes: number;
+            /**
+             * Technical Score Weight
+             * @default 35
+             */
+            technical_score_weight: number;
             /**
              * Timeframe
              * @default 1h
              * @enum {string}
              */
             timeframe: "15m" | "1h" | "4h";
+        };
+        /** AiMonitorCostConfigUpdate */
+        AiMonitorCostConfigUpdate: {
+            /**
+             * Prediction Fee Bps Per Side
+             * @default 5
+             */
+            prediction_fee_bps_per_side: number;
+            /**
+             * Prediction Fee Enabled
+             * @default true
+             */
+            prediction_fee_enabled: boolean;
+            /**
+             * Prediction Funding Bps Per 8H
+             * @default 1
+             */
+            prediction_funding_bps_per_8h: number;
+            /**
+             * Prediction Funding Enabled
+             * @default true
+             */
+            prediction_funding_enabled: boolean;
+            /**
+             * Prediction Slippage Bps Per Side
+             * @default 3
+             */
+            prediction_slippage_bps_per_side: number;
+            /**
+             * Prediction Slippage Enabled
+             * @default true
+             */
+            prediction_slippage_enabled: boolean;
         };
         /** AiMonitorNewsAnalyzeRequest */
         AiMonitorNewsAnalyzeRequest: {
@@ -4011,6 +4134,41 @@ export interface operations {
             };
         };
     };
+    update_cost_config_api_v2_ai_monitor_cost_config_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorCostConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     indicators_api_v2_ai_monitor_indicators_get: {
         parameters: {
             query?: {
@@ -4179,6 +4337,39 @@ export interface operations {
             };
         };
     };
+    opportunity_model_calls_api_v2_ai_monitor_opportunities__opportunity_id__model_calls_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                opportunity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     opportunity_news_api_v2_ai_monitor_opportunities__opportunity_id__news_get: {
         parameters: {
             query?: never;
@@ -4216,6 +4407,9 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                news_score_min?: number;
+                indicator_score_min?: number;
+                direction?: "all" | "long" | "short";
             };
             header?: never;
             path?: never;

@@ -6,7 +6,8 @@ import re
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from queue import Queue
@@ -16,7 +17,7 @@ from sqlalchemy import Engine, or_, select, update
 from sqlalchemy.orm import sessionmaker
 
 from .ai_providers import AiProviderPreset
-from .models import AiModelConfig, News, NewsAiBatch
+from .models import AiModelConfig, News, NewsAiBatch, NewsAiModelCall, NewsAiModelCallItem
 from .security import CredentialCipher, SecurityError
 from .strategy_ai import (
     StrategyAiError,
@@ -27,10 +28,11 @@ from .strategy_ai import (
     _validate_chat_configuration,
 )
 
-CHUNK_SIZE = 2
+CHUNK_SIZE = 5
+NEWS_ANALYSIS_MAX_WORKERS = 4
 MONITOR_REALTIME_SHARE = 0.7
 MONITOR_BATCH_DEADLINE_SECONDS = 180.0
-ANALYSIS_REQUEST_TIMEOUT_SECONDS = 15.0
+ANALYSIS_REQUEST_TIMEOUT_SECONDS = 45.0
 SUMMARY_REQUEST_TIMEOUT_SECONDS = 20.0
 CHUNK_WALL_TIMEOUT_SECONDS = 60.0
 NEWS_CLAIM_STALE_SECONDS = 5 * 60
@@ -40,6 +42,7 @@ MAX_SUMMARY_CHARS = 520
 MAX_REASON_CHARS = 240
 MAX_RELATED_STOCKS = 8
 MAX_RELATED_INDUSTRIES = 6
+MAX_TRACE_RESPONSE_CHARS = 2_000_000
 AI_SENTIMENTS = frozenset({"bull", "neutral", "bear"})
 IMPACT_STRENGTHS = frozenset({"low", "medium", "high"})
 TIME_HORIZONS = frozenset({"intraday", "short_term", "medium_term", "long_term"})
@@ -48,7 +51,7 @@ NEWS_CATEGORIES = frozenset(
 )
 _SYMBOL_RE = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_AI_REQUEST_SLOTS = threading.BoundedSemaphore(2)
+_AI_REQUEST_SLOTS = threading.BoundedSemaphore(NEWS_ANALYSIS_MAX_WORKERS)
 
 
 class NewsAiError(RuntimeError):
@@ -72,6 +75,8 @@ def analyze_news_chunk(
     api_key: str,
     model_name: str,
     timeout_seconds: float = 30.0,
+    trace_sink: Callable[[Mapping[str, Any]], None] | None = None,
+    attempt_depth: int = 0,
 ) -> list[dict[str, Any]]:
     """Analyze one bounded chunk and return validated per-news decisions."""
 
@@ -141,8 +146,40 @@ def analyze_news_chunk(
         "stream": False,
     }
     _configure_json_response(payload, provider, max_tokens=4_000)
-    model_output = _request_model_json(endpoint, payload, api_key, timeout_seconds)
-    return _validate_analyses(model_output, expected_ids)
+    trace: dict[str, Any] = {
+        "call_type": "analysis",
+        "attempt_depth": attempt_depth,
+        "provider_code": provider_code,
+        "model_name": model_name,
+        "news_ids": [item["id"] for item in normalized_items],
+        "request_json": payload,
+        "response_text": None,
+        "response_envelope": None,
+        "status": "failed",
+        "error_category": None,
+        "started_at": datetime.now(UTC).replace(tzinfo=None),
+    }
+    try:
+        model_output = _request_model_json(
+            endpoint,
+            payload,
+            api_key,
+            timeout_seconds,
+            trace=trace,
+        )
+        analyses = _validate_analyses(model_output, expected_ids)
+        trace["status"] = "completed"
+        return analyses
+    except NewsAiError as exc:
+        trace["error_category"] = exc.category
+        raise
+    finally:
+        trace["completed_at"] = datetime.now(UTC).replace(tzinfo=None)
+        if trace_sink is not None:
+            try:
+                trace_sink(trace)
+            except Exception as exc:  # pragma: no cover - audit failure must not drop analyses
+                print(f"[news-ai] model call audit error: {type(exc).__name__}")
 
 
 def summarize_news_batch(
@@ -152,6 +189,7 @@ def summarize_news_batch(
     api_key: str,
     model_name: str,
     timeout_seconds: float = 60.0,
+    trace_sink: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Generate a batch-level US-equity conclusion from validated item decisions."""
 
@@ -198,7 +236,45 @@ def summarize_news_batch(
         "stream": False,
     }
     _configure_json_response(payload, provider, max_tokens=3_000)
-    return _validate_summary(_request_model_json(endpoint, payload, api_key, timeout_seconds))
+    trace: dict[str, Any] = {
+        "call_type": "summary",
+        "attempt_depth": 0,
+        "provider_code": provider_code,
+        "model_name": model_name,
+        "news_ids": [
+            str(item.get("id") or "").strip()
+            for item in analyses
+            if str(item.get("id") or "").strip()
+        ],
+        "request_json": payload,
+        "response_text": None,
+        "response_envelope": None,
+        "status": "failed",
+        "error_category": None,
+        "started_at": datetime.now(UTC).replace(tzinfo=None),
+    }
+    try:
+        summary = _validate_summary(
+            _request_model_json(
+                endpoint,
+                payload,
+                api_key,
+                timeout_seconds,
+                trace=trace,
+            )
+        )
+        trace["status"] = "completed"
+        return summary
+    except NewsAiError as exc:
+        trace["error_category"] = exc.category
+        raise
+    finally:
+        trace["completed_at"] = datetime.now(UTC).replace(tzinfo=None)
+        if trace_sink is not None:
+            try:
+                trace_sink(trace)
+            except Exception as exc:  # pragma: no cover - audit failure must not drop summary
+                print(f"[news-ai] model call audit error: {type(exc).__name__}")
 
 
 def run_news_ai_batch(
@@ -219,6 +295,10 @@ def run_news_ai_batch(
     model_name = ""
     api_key = ""
     deadline = time.monotonic() + MONITOR_BATCH_DEADLINE_SECONDS
+
+    def persist_trace(trace: Mapping[str, Any]) -> None:
+        _persist_model_call_trace(session_factory, batch_id, trace)
+
     try:
         with session_factory() as db:
             batch = db.get(NewsAiBatch, batch_id)
@@ -271,71 +351,86 @@ def run_news_ai_batch(
             raise NewsAiError("empty_batch")
 
         chunks = list(_chunks(news_items, CHUNK_SIZE))
-        for chunk_index, chunk in enumerate(chunks):
+        for window_start in range(0, len(chunks), NEWS_ANALYSIS_MAX_WORKERS):
             if time.monotonic() >= deadline:
                 with session_factory() as db:
                     batch = db.get(NewsAiBatch, batch_id)
                     if batch is None:
                         return
-                    batch.failed_count += sum(len(item) for item in chunks[chunk_index:])
+                    remaining_chunks = chunks[window_start:]
+                    batch.failed_count += sum(len(item) for item in remaining_chunks)
                     batch.error_message = _error_message(NewsAiError("timeout"))
+                    _release_news_claims(
+                        db,
+                        batch_id,
+                        [
+                            str(item["id"])
+                            for remaining_chunk in remaining_chunks
+                            for item in remaining_chunk
+                        ],
+                    )
                     db.commit()
                 break
-            chunk_results, chunk_failed, last_error = _analyze_chunk_bounded(
-                chunk,
+            window = chunks[
+                window_start : window_start + NEWS_ANALYSIS_MAX_WORKERS
+            ]
+            for chunk, outcome in _analyze_chunks_concurrently(
+                window,
                 provider_code=provider_code,
                 api_key=api_key,
                 model_name=model_name,
                 deadline=deadline,
-            )
-            with session_factory() as db:
-                batch = db.get(NewsAiBatch, batch_id)
-                if batch is None:
-                    return
-                batch.failed_count += chunk_failed
-                if not chunk_results:
-                    batch.error_message = _error_message(last_error)
-                    _release_news_claims(
-                        db,
-                        batch_id,
-                        [str(item["id"]) for item in chunk],
-                    )
-                    db.commit()
-                    continue
-                analyzed_at = datetime.now(UTC).replace(tzinfo=None)
-                completed_news_ids: set[str] = set()
-                for result in chunk_results:
-                    news = db.get(News, result["id"])
-                    if news is None or news.ai_claim_batch_id != batch_id:
-                        batch.failed_count += 1
+                trace_sink=persist_trace,
+            ):
+                chunk_results, chunk_failed, last_error = outcome
+                with session_factory() as db:
+                    batch = db.get(NewsAiBatch, batch_id)
+                    if batch is None:
+                        return
+                    batch.failed_count += chunk_failed
+                    if not chunk_results:
+                        batch.error_message = _error_message(last_error)
+                        _release_news_claims(
+                            db,
+                            batch_id,
+                            [str(item["id"]) for item in chunk],
+                        )
+                        db.commit()
                         continue
-                    news.rule_sentiment = news.rule_sentiment or news.sentiment or "neutral"
-                    news.related_us_stocks = result["related_us_stocks"]
-                    news.related_industries = result["related_industries"]
-                    news.ai_sentiment = result["sentiment"]
-                    news.ai_confidence = Decimal(str(result["confidence"]))
-                    news.ai_impact_strength = result["impact_strength"]
-                    news.ai_time_horizon = result["time_horizon"]
-                    news.ai_category = result["category"]
-                    news.ai_reason = result["reason"]
-                    news.ai_model = model_name
-                    news.ai_batch_id = batch_id
-                    news.ai_claim_batch_id = None
-                    news.ai_claimed_at = None
-                    news.ai_analyzed_at = analyzed_at
-                    news.sentiment = result["sentiment"]
-                    batch.processed_count += 1
-                    completed_news_ids.add(str(result["id"]))
-                failed_news_ids = [
-                    str(item["id"])
-                    for item in chunk
-                    if str(item["id"]) not in completed_news_ids
-                ]
-                _release_news_claims(db, batch_id, failed_news_ids)
-                if batch.failed_count == 0:
-                    batch.error_message = None
-                db.commit()
-            analyses.extend(chunk_results)
+                    analyzed_at = datetime.now(UTC).replace(tzinfo=None)
+                    completed_news_ids: set[str] = set()
+                    for result in chunk_results:
+                        news = db.get(News, result["id"])
+                        if news is None or news.ai_claim_batch_id != batch_id:
+                            batch.failed_count += 1
+                            continue
+                        news.rule_sentiment = news.rule_sentiment or news.sentiment or "neutral"
+                        news.related_us_stocks = result["related_us_stocks"]
+                        news.related_industries = result["related_industries"]
+                        news.ai_sentiment = result["sentiment"]
+                        news.ai_confidence = Decimal(str(result["confidence"]))
+                        news.ai_impact_strength = result["impact_strength"]
+                        news.ai_time_horizon = result["time_horizon"]
+                        news.ai_category = result["category"]
+                        news.ai_reason = result["reason"]
+                        news.ai_model = model_name
+                        news.ai_batch_id = batch_id
+                        news.ai_claim_batch_id = None
+                        news.ai_claimed_at = None
+                        news.ai_analyzed_at = analyzed_at
+                        news.sentiment = result["sentiment"]
+                        batch.processed_count += 1
+                        completed_news_ids.add(str(result["id"]))
+                    failed_news_ids = [
+                        str(item["id"])
+                        for item in chunk
+                        if str(item["id"]) not in completed_news_ids
+                    ]
+                    _release_news_claims(db, batch_id, failed_news_ids)
+                    if batch.failed_count == 0:
+                        batch.error_message = None
+                    db.commit()
+                analyses.extend(chunk_results)
 
         with session_factory() as db:
             analyses = _stored_batch_analyses(db, batch_id)
@@ -352,6 +447,7 @@ def run_news_ai_batch(
                     timeout_seconds=_bounded_request_timeout(
                         deadline, SUMMARY_REQUEST_TIMEOUT_SECONDS
                     ),
+                    trace_sink=persist_trace,
                 )
             except NewsAiError as exc:
                 summary_error = exc
@@ -404,6 +500,7 @@ def _analyze_with_recovery(
     model_name: str,
     _depth: int = 0,
     deadline: float | None = None,
+    trace_sink: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], int, NewsAiError | None]:
     """Recover malformed output with one bounded split so one group cannot stall a batch."""
 
@@ -417,6 +514,8 @@ def _analyze_with_recovery(
                 timeout_seconds=_bounded_request_timeout(
                     deadline, ANALYSIS_REQUEST_TIMEOUT_SECONDS
                 ),
+                trace_sink=trace_sink,
+                attempt_depth=_depth,
             ),
             0,
             None,
@@ -432,6 +531,7 @@ def _analyze_with_recovery(
             model_name=model_name,
             _depth=_depth + 1,
             deadline=deadline,
+            trace_sink=trace_sink,
         )
         right, right_failed, right_error = _analyze_with_recovery(
             items[midpoint:],
@@ -440,6 +540,7 @@ def _analyze_with_recovery(
             model_name=model_name,
             _depth=_depth + 1,
             deadline=deadline,
+            trace_sink=trace_sink,
         )
         return (
             [*left, *right],
@@ -455,10 +556,14 @@ def _analyze_chunk_bounded(
     api_key: str,
     model_name: str,
     deadline: float,
+    trace_sink: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], int, NewsAiError | None]:
     """Apply a real wall-clock cap even when DNS or TLS ignores socket timeouts."""
 
-    if not _AI_REQUEST_SLOTS.acquire(blocking=False):
+    remaining = max(0.0, deadline - time.monotonic())
+    if remaining <= 0 or not _AI_REQUEST_SLOTS.acquire(
+        timeout=min(CHUNK_WALL_TIMEOUT_SECONDS, remaining)
+    ):
         return [], len(items), NewsAiError("timeout")
     result_queue: Queue[tuple[str, Any]] = Queue(maxsize=1)
 
@@ -473,6 +578,7 @@ def _analyze_chunk_bounded(
                         api_key=api_key,
                         model_name=model_name,
                         deadline=deadline,
+                        trace_sink=trace_sink,
                     ),
                 )
             )
@@ -493,6 +599,50 @@ def _analyze_chunk_bounded(
     if isinstance(value, NewsAiError):
         return [], len(items), value
     raise value
+
+
+def _analyze_chunks_concurrently(
+    chunks: Sequence[Sequence[Mapping[str, Any]]],
+    *,
+    provider_code: str,
+    api_key: str,
+    model_name: str,
+    deadline: float,
+    trace_sink: Callable[[Mapping[str, Any]], None] | None = None,
+) -> Iterator[
+    tuple[
+        Sequence[Mapping[str, Any]],
+        tuple[list[dict[str, Any]], int, NewsAiError | None],
+    ]
+]:
+    """Analyze up to four five-news groups and yield each as it finishes."""
+
+    if not chunks:
+        return
+    max_workers = min(NEWS_ANALYSIS_MAX_WORKERS, len(chunks))
+    with ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="news-ai-group",
+    ) as executor:
+        futures: dict[Future[Any], Sequence[Mapping[str, Any]]] = {
+            executor.submit(
+                _analyze_chunk_bounded,
+                chunk,
+                provider_code=provider_code,
+                api_key=api_key,
+                model_name=model_name,
+                deadline=deadline,
+                trace_sink=trace_sink,
+            ): chunk
+            for chunk in chunks
+        }
+        for future in as_completed(futures):
+            chunk = futures[future]
+            try:
+                outcome = future.result()
+            except Exception:
+                outcome = ([], len(chunk), NewsAiError("upstream"))
+            yield chunk, outcome
 
 
 def _bounded_request_timeout(deadline: float | None, requested: float) -> float:
@@ -637,6 +787,8 @@ def _request_model_json(
     payload: dict[str, Any],
     api_key: str,
     timeout_seconds: float,
+    *,
+    trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -660,6 +812,8 @@ def _request_model_json(
     except (StrategyAiError, OSError) as exc:
         category = exc.category if isinstance(exc, StrategyAiError) else "upstream"
         raise NewsAiError(category) from None
+    if trace is not None:
+        trace["response_envelope"] = _raw_response_text(response_body)
     if status in {401, 403}:
         raise NewsAiError("not_configured")
     if status in {408, 504}:
@@ -668,12 +822,28 @@ def _request_model_json(
         raise NewsAiError("upstream")
     try:
         response_payload = _strict_json_bytes(response_body)
-        output = _strict_json_text(_chat_output_text(response_payload))
+        response_text = _chat_output_text(response_payload)
+        if trace is not None:
+            trace["response_text"] = str(response_text)[:MAX_TRACE_RESPONSE_CHARS]
+        output = _strict_json_text(response_text)
     except StrategyAiError as exc:
         raise NewsAiError(exc.category) from None
     if not isinstance(output, dict):
         raise NewsAiError("invalid_output")
     return output
+
+
+def _raw_response_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")[:MAX_TRACE_RESPONSE_CHARS]
+    if isinstance(value, str):
+        return value[:MAX_TRACE_RESPONSE_CHARS]
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[
+            :MAX_TRACE_RESPONSE_CHARS
+        ]
+    except (TypeError, ValueError):
+        return str(value)[:MAX_TRACE_RESPONSE_CHARS]
 
 
 def _configure_json_response(payload: dict[str, Any], provider: str, *, max_tokens: int) -> None:
@@ -1030,6 +1200,55 @@ def _fail_batch(session_factory: sessionmaker, batch_id: str, message: str) -> N
             db.commit()
     except Exception:
         return
+
+
+def _persist_model_call_trace(
+    session_factory: sessionmaker,
+    batch_id: str,
+    trace: Mapping[str, Any],
+) -> None:
+    news_ids = list(
+        dict.fromkeys(str(item).strip() for item in trace.get("news_ids", []) if str(item).strip())
+    )
+    started_at = trace.get("started_at")
+    completed_at = trace.get("completed_at")
+    now = datetime.now(UTC).replace(tzinfo=None)
+    with session_factory() as db:
+        call = NewsAiModelCall(
+            batch_id=batch_id,
+            call_type=str(trace.get("call_type") or "analysis")[:16],
+            attempt_depth=max(0, int(trace.get("attempt_depth") or 0)),
+            provider_code=str(trace.get("provider_code") or "unknown")[:32],
+            model_name=str(trace.get("model_name") or "unknown")[:128],
+            news_ids_json=news_ids,
+            request_json=dict(trace.get("request_json") or {}),
+            response_text=(
+                str(trace["response_text"])[:MAX_TRACE_RESPONSE_CHARS]
+                if trace.get("response_text") is not None
+                else None
+            ),
+            response_envelope=(
+                str(trace["response_envelope"])[:MAX_TRACE_RESPONSE_CHARS]
+                if trace.get("response_envelope") is not None
+                else None
+            ),
+            status="completed" if trace.get("status") == "completed" else "failed",
+            error_category=(
+                str(trace["error_category"])[:32]
+                if trace.get("error_category")
+                else None
+            ),
+            started_at=started_at if isinstance(started_at, datetime) else now,
+            completed_at=completed_at if isinstance(completed_at, datetime) else now,
+            created_at=now,
+        )
+        db.add(call)
+        db.flush()
+        db.add_all(
+            NewsAiModelCallItem(call_id=call.id, news_id=news_id)
+            for news_id in news_ids
+        )
+        db.commit()
 
 
 def _error_message(error: NewsAiError | None) -> str:
