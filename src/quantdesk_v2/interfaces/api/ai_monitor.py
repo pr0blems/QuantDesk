@@ -24,6 +24,7 @@ from ...models import (
     AuditLog,
     CompanyProfile,
     News,
+    NewsAiAnalysisRecord,
     NewsAiBatch,
     NewsAiModelCall,
     Security,
@@ -37,6 +38,7 @@ from ...schemas import (
     AiMonitorConfigUpdate,
     AiMonitorCostConfigUpdate,
     AiMonitorNewsAnalyzeRequest,
+    AiMonitorNewsSystemPromptUpdate,
     AiMonitorReplayRequest,
     AiMonitorRunRequest,
 )
@@ -460,6 +462,65 @@ def get_config(
     return _config_out(db.get(AiMonitorConfig, user.id))
 
 
+@router.get("/news-system-prompt")
+def get_news_system_prompt(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    config = db.get(AiMonitorConfig, user.id)
+    data = ai_monitor.config_data(config)
+    return {
+        "system_prompt": data["news_system_prompt"],
+        "default_system_prompt": ai_monitor.DEFAULT_NEWS_ANALYSIS_SYSTEM_PROMPT,
+        "is_custom": bool(data["news_system_prompt_is_custom"]),
+        "max_length": 8000,
+        "updated_at": _utc_out(config.updated_at) if config is not None else None,
+    }
+
+
+@router.put("/news-system-prompt")
+def update_news_system_prompt(
+    payload: AiMonitorNewsSystemPromptUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Persist the user-level system prompt used by subsequent news model calls."""
+
+    _require_expected_user(request, user)
+    config = db.get(AiMonitorConfig, user.id)
+    if config is None:
+        defaults = ai_monitor.default_config_data()
+        config = AiMonitorConfig(
+            user_id=user.id,
+            indicator_keys_json=list(defaults["indicator_keys"]),
+            monitor_symbols_json=list(defaults["monitor_symbols"]),
+        )
+        db.add(config)
+    config.news_system_prompt = payload.system_prompt
+    _audit(
+        db,
+        request,
+        user.id,
+        "ai_monitor.news_system_prompt.update",
+        str(user.id),
+        {
+            "is_custom": payload.system_prompt is not None,
+            "character_count": len(payload.system_prompt or ""),
+        },
+    )
+    db.commit()
+    db.refresh(config)
+    data = ai_monitor.config_data(config)
+    return {
+        "system_prompt": data["news_system_prompt"],
+        "default_system_prompt": ai_monitor.DEFAULT_NEWS_ANALYSIS_SYSTEM_PROMPT,
+        "is_custom": bool(data["news_system_prompt_is_custom"]),
+        "max_length": 8000,
+        "updated_at": _utc_out(config.updated_at),
+    }
+
+
 @router.put("/config")
 def update_config(
     payload: AiMonitorConfigUpdate,
@@ -746,6 +807,83 @@ def opportunity_news(
         .order_by(News.ts.desc(), News.id.desc())
     ).all()
     return {"items": [_news_out(item) for item in items], "total": len(items)}
+
+
+@router.get("/opportunities/{opportunity_id}/news-analysis-records")
+def opportunity_news_analysis_records(
+    opportunity_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Return the symbol's auditable seven-day rolling AI news memory."""
+
+    opportunity = db.scalar(
+        select(AiMonitorOpportunity).where(
+            AiMonitorOpportunity.public_id == opportunity_id,
+            AiMonitorOpportunity.user_id == user.id,
+        )
+    )
+    if opportunity is None:
+        raise HTTPException(status_code=404, detail="opportunity not found")
+    symbol = str(opportunity.symbol or "").strip().upper()
+    cutoff = utcnow() - timedelta(days=7)
+    opportunity_news_ids = {
+        str(item) for item in (opportunity.news_ids_json or []) if str(item)
+    }
+    rows = db.execute(
+        select(NewsAiAnalysisRecord, News)
+        .join(News, News.id == NewsAiAnalysisRecord.news_id)
+        .where(
+            NewsAiAnalysisRecord.user_id == user.id,
+            NewsAiAnalysisRecord.symbol == symbol,
+            NewsAiAnalysisRecord.analyzed_at >= cutoff,
+        )
+        .order_by(
+            NewsAiAnalysisRecord.analyzed_at.desc(),
+            NewsAiAnalysisRecord.id.desc(),
+        )
+        .limit(200)
+    ).all()
+    items = [
+        {
+            "id": int(record.id),
+            "symbol": record.symbol,
+            "news_id": record.news_id,
+            "news_title": news.title_zh or news.title,
+            "news_original_title": news.title,
+            "news_source": news.source,
+            "news_link": news.link,
+            "news_published_at": int(record.news_published_at),
+            "direction": record.direction,
+            "confidence": float(record.confidence),
+            "relevance": float(record.relevance),
+            "impact_strength": record.impact_strength,
+            "time_horizon": record.time_horizon,
+            "category": record.category,
+            "analysis_reason": record.analysis_reason,
+            "memory_effect": record.memory_effect,
+            "memory_reason": record.memory_reason,
+            "previous_direction": record.previous_direction,
+            "previous_confidence": (
+                float(record.previous_confidence)
+                if record.previous_confidence is not None
+                else None
+            ),
+            "prior_record_id": record.prior_record_id,
+            "context_record_ids": list(record.context_record_ids_json or []),
+            "model_name": record.model_name,
+            "analyzed_at": _utc_out(record.analyzed_at),
+            "belongs_to_opportunity": record.news_id in opportunity_news_ids,
+        }
+        for record, news in rows
+    ]
+    return {
+        "symbol": symbol,
+        "window_days": 7,
+        "cutoff_at": _utc_out(cutoff),
+        "items": items,
+        "total": len(items),
+    }
 
 
 @router.get("/opportunities/{opportunity_id}/model-calls")
@@ -1095,7 +1233,7 @@ def prediction_records(
     ).all()
     return {
         "items": [_prediction_out(item) for item in items],
-        "note": "仅记录 AI 机会触发的虚拟预测和到期结果；不会调用模拟盘或实盘下单。",
+        "note": "仅记录 AI 机会触发的预测和到期结果；不会调用模拟盘或实盘下单。",
     }
 
 

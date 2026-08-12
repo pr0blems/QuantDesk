@@ -488,6 +488,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/news-system-prompt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get News System Prompt */
+        get: operations["get_news_system_prompt_api_v2_ai_monitor_news_system_prompt_get"];
+        /**
+         * Update News System Prompt
+         * @description Persist the user-level system prompt used by subsequent news model calls.
+         */
+        put: operations["update_news_system_prompt_api_v2_ai_monitor_news_system_prompt_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/news/analyze": {
         parameters: {
             query?: never;
@@ -571,6 +592,26 @@ export interface paths {
         };
         /** Opportunity News */
         get: operations["opportunity_news_api_v2_ai_monitor_opportunities__opportunity_id__news_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/ai-monitor/opportunities/{opportunity_id}/news-analysis-records": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Opportunity News Analysis Records
+         * @description Return the symbol's auditable seven-day rolling AI news memory.
+         */
+        get: operations["opportunity_news_analysis_records_api_v2_ai_monitor_opportunities__opportunity_id__news_analysis_records_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2116,6 +2157,11 @@ export interface components {
         AiMonitorNewsAnalyzeRequest: {
             /** News Id */
             news_id: string;
+        };
+        /** AiMonitorNewsSystemPromptUpdate */
+        AiMonitorNewsSystemPromptUpdate: {
+            /** System Prompt */
+            system_prompt?: string | null;
         };
         /**
          * AiMonitorReplayRequest
@@ -4289,6 +4335,63 @@ export interface operations {
             };
         };
     };
+    get_news_system_prompt_api_v2_ai_monitor_news_system_prompt_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    update_news_system_prompt_api_v2_ai_monitor_news_system_prompt_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorNewsSystemPromptUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     analyze_single_news_api_v2_ai_monitor_news_analyze_post: {
         parameters: {
             query?: never;
@@ -4425,6 +4528,39 @@ export interface operations {
         };
     };
     opportunity_news_api_v2_ai_monitor_opportunities__opportunity_id__news_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                opportunity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    opportunity_news_analysis_records_api_v2_ai_monitor_opportunities__opportunity_id__news_analysis_records_get: {
         parameters: {
             query?: never;
             header?: never;

@@ -2051,7 +2051,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260812-29"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260812-34"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2061,7 +2061,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260812-29"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260812-34"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -2144,9 +2144,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "历史机会" in component
     assert 'id="include-expired"' not in component
     assert "const bySignalTimeDesc = (left, right) =>" in component
-    assert 'const isUnsettled = (item) => item.prediction_status !== "completed"' in component
-    assert "items.filter((item) => isActive(item) && isUnsettled(item)).sort(bySignalTimeDesc)" in component
-    assert "items.filter((item) => !isActive(item) && isUnsettled(item)).sort(bySignalTimeDesc)" in component
+    assert 'const isAwaitingSettlement = (item) => ["pending", "unavailable"].includes(String(item.prediction_status || ""))' in component
+    assert 'items.filter((item) => isActive(item) && item.prediction_status !== "completed").sort(bySignalTimeDesc)' in component
+    assert "items.filter(isAwaitingSettlement).sort(bySignalTimeDesc)" in component
     assert "this.parseDate(item.expires_at).getTime() > now" in component
     assert "`${raw}Z`" in component
     assert "if (!unique.has(instrument)) unique.set(instrument, item)" in component
@@ -2158,6 +2158,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "做多 ${counts.long} 次，做空 ${counts.short} 次" in component
     assert ".opportunity-tabs .direction-counts .long" in stylesheet
     assert ".opportunity-tabs .direction-counts .short" in stylesheet
+    assert ".opportunity-tabs .direction-counts .pending" in stylesheet
     assert "已剔除行情不足" in component
     assert ".opportunity-tabs" in stylesheet
     assert ".opportunity-status-tabs" in stylesheet
@@ -2197,7 +2198,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "尚未入场" in component
     assert ".opportunity-signal .trigger-progress" in stylesheet
     assert 'class="virtual-entry-gate ${entryState.tone} ${triggeredPosition ? "position-active" : ""}"' in component
-    assert "VIRTUAL ENTRY GATE" in component
+    assert "ENTRY GATE" in component
     assert "冻结触发价格" in component
     assert "真实订单关闭" in component
     assert component.index('${symbolControl}<small>') < component.index('${conclusionControl}</div>')
@@ -2207,7 +2208,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "closeAiConclusion()" in component
     assert "AI 新闻研判" in component
     assert "技术指标验证" in component
-    assert "仅作虚拟预测研究，不会触发实盘交易" in component
+    assert "仅作预测研究，不会触发实盘交易" in component
+    assert "虚拟" not in component
+    assert "VIRTUAL" not in component
     assert 'id="open-news-logic"' in component
     assert "新闻分析逻辑" in component
     assert "openNewsAnalysisLogic(trigger)" in component
@@ -2263,6 +2266,15 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".ai-conclusion-dialog" in stylesheet
     assert ".ai-market-flow-grid" in stylesheet
     assert ".news-logic-trigger" in stylesheet
+    assert 'id="open-news-system-prompt"' in component
+    assert 'id="news-system-prompt-modal"' in component
+    assert 'data-conclusion-view="memory"' in component
+    assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/news-analysis-records`)' in component
+    assert "一周新闻研判追踪" in component
+    assert 'this.api("/news-system-prompt"' in component
+    assert ".news-system-prompt-trigger" in stylesheet
+    assert ".news-system-prompt-dialog" in stylesheet
+    assert ".ai-memory-timeline" in stylesheet
     assert ".news-logic-dialog" in stylesheet
     assert ".news-model-call-tabs" in stylesheet
     assert ".news-model-raw-block" in stylesheet
@@ -2338,7 +2350,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "select(AiMonitorPrediction, AiMonitorOpportunity)" in analytics_source
     assert "AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id" in analytics_source
     assert 'AiMonitorPrediction.status == "completed"' in analytics_source
-    assert "直接统计已经完成结算的虚拟预测" in analytics_source
+    assert "直接统计已经完成结算的预测" in analytics_source
     assert '@router.get("/opportunity-analytics")' in (
         ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py"
     ).read_text(encoding="utf-8")

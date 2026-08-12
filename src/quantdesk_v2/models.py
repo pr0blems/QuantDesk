@@ -299,6 +299,124 @@ class NewsAiModelCallItem(Base):
     )
 
 
+class NewsAiAnalysisRecord(Base):
+    __tablename__ = "news_ai_analysis_records"
+    __table_args__ = (
+        CheckConstraint(
+            "direction IN ('bull', 'neutral', 'bear')",
+            name="valid_direction",
+        ),
+        CheckConstraint(
+            "memory_effect IN ('initial', 'maintain', 'strengthen', 'weaken', 'reverse')",
+            name="valid_memory_effect",
+        ),
+        UniqueConstraint(
+            "batch_id",
+            "news_id",
+            "symbol",
+            name="uq_news_ai_analysis_record_batch_news_symbol",
+        ),
+        Index(
+            "ix_news_ai_analysis_records_user_symbol_time",
+            "user_id",
+            "symbol",
+            "analyzed_at",
+        ),
+        Index(
+            "ix_news_ai_analysis_records_news",
+            "news_id",
+            "analyzed_at",
+        ),
+        {
+            "comment": "美股新闻 AI 一周滚动研判记忆与判断变化记录",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="新闻研判记忆主键"
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="产生该研判记录的用户",
+    )
+    batch_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("news_ai_batches.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属新闻 AI 分析批次",
+    )
+    news_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("news.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="本次研判对应的新闻",
+    )
+    symbol: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="关联美股代码"
+    )
+    direction: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="本次对股票的影响方向"
+    )
+    confidence: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), nullable=False, comment="新闻研判置信度"
+    )
+    relevance: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), nullable=False, comment="新闻与股票的关联度"
+    )
+    impact_strength: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="影响强度"
+    )
+    time_horizon: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="影响周期"
+    )
+    category: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="新闻类别"
+    )
+    analysis_reason: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="本次新闻研判依据"
+    )
+    memory_effect: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="相对历史判断的变化类型"
+    )
+    memory_reason: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="本次新闻如何影响历史判断"
+    )
+    previous_direction: Mapped[str | None] = mapped_column(
+        String(16), comment="前序记忆记录的方向"
+    )
+    previous_confidence: Mapped[Decimal | None] = mapped_column(
+        Numeric(5, 4), comment="前序记忆记录的置信度"
+    )
+    prior_record_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "news_ai_analysis_records.id",
+            ondelete="SET NULL",
+            name="fk_news_ai_memory_prior_record",
+        ),
+        comment="直接承接的前序新闻研判记录",
+    )
+    context_record_ids_json: Mapped[list[int]] = mapped_column(
+        JSON, nullable=False, comment="本次模型实际收到的历史记忆记录 ID"
+    )
+    model_name: Mapped[str] = mapped_column(
+        String(128), nullable=False, comment="执行研判的 AI 模型"
+    )
+    news_published_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="新闻发布时间 Unix 时间戳"
+    )
+    analyzed_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="本次研判完成时间（UTC）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="记录创建时间（UTC）"
+    )
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -624,6 +742,11 @@ class AiMonitorConfig(Base):
     )
     market_flow_score_weight: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), default=Decimal("20.00"), nullable=False, comment="资金盘口组合权重百分比"
+    )
+    news_system_prompt: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="User-configured system prompt for AI news analysis",
     )
     prediction_fee_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, comment="预测统计是否扣除手续费"

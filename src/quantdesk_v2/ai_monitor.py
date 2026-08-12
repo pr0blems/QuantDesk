@@ -35,7 +35,12 @@ from .models import (
     utcnow,
 )
 from .monitor import MonitorRepository, MonitorUnavailable
-from .news_ai import CHUNK_SIZE, run_news_ai_batch
+from .news_ai import (
+    CHUNK_SIZE,
+    DEFAULT_NEWS_ANALYSIS_SYSTEM_PROMPT,
+    effective_news_analysis_system_prompt,
+    run_news_ai_batch,
+)
 from .prediction_feature_indicators import evaluate_prediction_feature_indicators
 from .strategy_indicators import BEARISH_STRATEGY_NAMES, evaluate_strategy_indicators
 
@@ -230,6 +235,8 @@ def default_config_data() -> dict[str, Any]:
         "news_score_weight": 45.0,
         "technical_score_weight": 35.0,
         "market_flow_score_weight": 20.0,
+        "news_system_prompt": DEFAULT_NEWS_ANALYSIS_SYSTEM_PROMPT,
+        "news_system_prompt_is_custom": False,
         "prediction_fee_enabled": True,
         "prediction_fee_bps_per_side": PREDICTION_FEE_BPS_PER_SIDE,
         "prediction_slippage_enabled": True,
@@ -270,6 +277,12 @@ def config_data(config: AiMonitorConfig | None) -> dict[str, Any]:
         "news_score_weight": float(config.news_score_weight),
         "technical_score_weight": float(config.technical_score_weight),
         "market_flow_score_weight": float(config.market_flow_score_weight),
+        "news_system_prompt": effective_news_analysis_system_prompt(
+            config.news_system_prompt
+        ),
+        "news_system_prompt_is_custom": bool(
+            str(config.news_system_prompt or "").strip()
+        ),
         "prediction_fee_enabled": bool(config.prediction_fee_enabled),
         "prediction_fee_bps_per_side": float(config.prediction_fee_bps_per_side),
         "prediction_slippage_enabled": bool(config.prediction_slippage_enabled),
@@ -912,7 +925,7 @@ def virtual_entry_gate_snapshot(
         "reference_price": round(float(entry_price), 12) if entry_price > 0 else None,
         "checked_at": checked_at_text,
         "checks": checks,
-        "note": "仅生成虚拟预测记录，不会调用模拟盘或实盘下单接口。",
+        "note": "仅生成预测记录，不会调用模拟盘或实盘下单接口。",
     }
 
 
@@ -1121,7 +1134,7 @@ def virtual_position_snapshot(
             if settled
             else None
         ),
-        "note": "浮盈亏按虚拟方向和最新合约行情计算；每 10,000 U 为标准化名义本金，不代表真实持仓。",
+        "note": "浮盈亏按预测方向和最新合约行情计算；每 10,000 U 为标准化名义本金，不代表真实持仓。",
     }
 
 
@@ -2665,7 +2678,7 @@ def historical_opportunity_analytics(
             "indicator_score_min": float(indicator_score_min),
             "direction": direction,
         },
-        "note": "直接统计已经完成结算的虚拟预测；命中率和净收益按右侧当前启用的手续费、滑点与资金成本动态重算，不会执行任何交易。",
+        "note": "直接统计已经完成结算的预测；命中率和净收益按右侧当前启用的手续费、滑点与资金成本动态重算，不会执行任何交易。",
     }
 
 

@@ -27,6 +27,7 @@ class AiMonitorDashboard extends HTMLElement {
       opportunityStatusCounts: { all: 0, triggered: 0, ready: 0, waiting: 0, failed: 0 },
       opportunityDirectionCounts: { long: 0, short: 0 },
       historyOpportunityDirectionCounts: { long: 0, short: 0 },
+      historyOpportunitySettlementCounts: { total: 0, pending: 0, unavailable: 0 },
       opportunityRequestId: 0,
       opportunitiesLoading: false,
       opportunityLoadingTab: "",
@@ -44,13 +45,18 @@ class AiMonitorDashboard extends HTMLElement {
     this.timers = [];
     this.scrollPaused = false;
     this.eventsBound = false;
-    this.conclusionPanels = { fundamentals: "", news: "", market: "", analysis: "" };
+    this.conclusionPanels = { fundamentals: "", news: "", memory: "", market: "", analysis: "" };
     this.conclusionNewsRequestId = 0;
+    this.conclusionMemoryRequestId = 0;
     this.conclusionFundamentalRequestId = 0;
     this.newsLogicFocus = null;
     this.newsModelCalls = [];
     this.newsModelCallIndex = 0;
     this.newsModelCallsRequestId = 0;
+    this.newsSystemPromptFocus = null;
+    this.newsSystemPromptDefault = "";
+    this.newsSystemPromptIsCustom = false;
+    this.newsSystemPromptRequestId = 0;
     this.scoreTrendFocus = null;
     this.scoreTrendOpportunity = null;
     this.handleVisibilityChange = () => {
@@ -71,13 +77,13 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260812-16">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260812-19">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
             <span class="eyebrow">DISCOVERED OPPORTUNITIES</span>
             <h1><i aria-hidden="true">✦</i> 发现机会</h1>
-            <p>每 15 分钟分析最新 10 条新闻 × 美股技术指标确认 · 机会只生成虚拟预测</p>
+            <p>每 15 分钟分析最新 10 条新闻 × 美股技术指标确认 · 机会只生成预测，不执行真实交易</p>
           </div>
           <div class="ai-head-actions">
             <span id="ai-clock" class="ai-clock"></span>
@@ -169,7 +175,7 @@ class AiMonitorDashboard extends HTMLElement {
               </form>
             </section>
             <section id="view-opportunities" class="ai-view active">
-              <div class="view-head"><div><span class="eyebrow">DISCOVERED OPPORTUNITIES</span><h2>发现机会</h2><p>先展示新闻识别出的美股候选，再按策略组、技术强度、组合评分及资金冲突生成虚拟预测。</p></div></div>
+              <div class="view-head"><div><span class="eyebrow">DISCOVERED OPPORTUNITIES</span><h2>发现机会</h2><p>先展示新闻识别出的美股候选，再按策略组、技术强度、组合评分及资金冲突生成预测。</p></div></div>
               <nav class="opportunity-tabs" role="tablist" aria-label="机会记录范围">
                 <button class="active" type="button" role="tab" aria-selected="true" data-opportunity-tab="current"><span>当前机会</span><small id="current-direction-counts" class="direction-counts"><b class="long">多 --</b><i>/</i><b class="short">空 --</b></small></button>
                 <button type="button" role="tab" aria-selected="false" data-opportunity-tab="history"><span>历史机会</span><small id="history-direction-counts" class="direction-counts"><b class="long">多 --</b><i>/</i><b class="short">空 --</b></small></button>
@@ -184,7 +190,7 @@ class AiMonitorDashboard extends HTMLElement {
               <div id="opportunity-list" class="opportunity-list"><div class="empty-state">暂无符合新闻条件的美股候选</div></div>
             </section>
             <section id="view-predictions" class="ai-view">
-              <div class="view-head"><div><span class="eyebrow">OPPORTUNITY ANALYTICS</span><h2>预测统计分析</h2><p id="prediction-note">按止盈、止损、综合评分退出和最大持有期退出统计虚拟表现。</p></div></div>
+              <div class="view-head"><div><span class="eyebrow">OPPORTUNITY ANALYTICS</span><h2>预测统计分析</h2><p id="prediction-note">按止盈、止损、综合评分退出和最大持有期退出统计预测表现。</p></div></div>
               <section id="strategy-readiness" class="strategy-readiness"><div class="analytics-loading">正在评估实盘准备门槛…</div></section>
               <section id="historical-replay" class="historical-replay">
                 <header><div><span>POINT-IN-TIME REPLAY</span><h3>独立历史回放与样本外准入</h3><p>从币安官方归档补采 K 线；只使用信号时点之前的新闻和已收盘 K 线，不污染实时预测。</p></div><strong id="replay-status">尚未运行</strong></header>
@@ -230,7 +236,7 @@ class AiMonitorDashboard extends HTMLElement {
             <button id="score-trend-close" class="ai-conclusion-close" type="button" data-score-trend-close aria-label="关闭评分走势">×</button>
           </header>
           <div id="score-trend-body" class="score-trend-body"></div>
-          <footer class="score-trend-foot"><span>当前机会评分随扫描更新</span><strong>虚拟预测入场评分保持冻结</strong></footer>
+          <footer class="score-trend-foot"><span>当前机会评分随扫描更新</span><strong>预测入场评分保持冻结</strong></footer>
         </section>
       </div>
       <div id="ai-conclusion-modal" class="ai-conclusion-modal hidden" aria-hidden="true">
@@ -239,19 +245,21 @@ class AiMonitorDashboard extends HTMLElement {
           <nav class="ai-conclusion-nav" role="tablist" aria-label="机会分析详情">
             <button type="button" role="tab" aria-selected="false" data-conclusion-view="fundamentals"><span>01</span><strong>基本面信息</strong><small id="ai-conclusion-fundamental-state">正在读取</small></button>
             <button type="button" role="tab" aria-selected="false" data-conclusion-view="news"><span>02</span><strong>相关新闻列表</strong><small id="ai-conclusion-news-count">正在读取</small></button>
-            <button type="button" role="tab" aria-selected="false" data-conclusion-view="market"><span>03</span><strong>资金盘口指标</strong><small id="ai-conclusion-market-state">信号快照</small></button>
-            <button class="active" type="button" role="tab" aria-selected="true" data-conclusion-view="analysis"><span>04</span><strong>AI分析结论</strong><small>综合研判</small></button>
+            <button type="button" role="tab" aria-selected="false" data-conclusion-view="memory"><span>03</span><strong>AI新闻分析记录</strong><small id="ai-conclusion-memory-count">一周记忆</small></button>
+            <button type="button" role="tab" aria-selected="false" data-conclusion-view="market"><span>04</span><strong>资金盘口指标</strong><small id="ai-conclusion-market-state">信号快照</small></button>
+            <button class="active" type="button" role="tab" aria-selected="true" data-conclusion-view="analysis"><span>05</span><strong>AI分析结论</strong><small>综合研判</small></button>
           </nav>
           <div class="ai-conclusion-main">
             <header class="ai-conclusion-head">
               <div><span class="eyebrow">AI ANALYSIS CONCLUSION</span><h2 id="ai-conclusion-title">AI 分析结论</h2><p id="ai-conclusion-subtitle">读取生成该机会时保存的新闻研判与技术指标证据。</p></div>
               <div class="ai-conclusion-head-actions">
+                <button id="open-news-system-prompt" class="news-system-prompt-trigger" type="button">系统提示词配置</button>
                 <button id="open-news-logic" class="news-logic-trigger" type="button">新闻分析逻辑</button>
                 <button id="ai-conclusion-close" class="ai-conclusion-close" type="button" data-conclusion-close aria-label="关闭">×</button>
               </div>
             </header>
             <div id="ai-conclusion-body" class="ai-conclusion-body"></div>
-            <footer class="ai-conclusion-foot"><span>结论基于信号生成时的数据快照</span><strong>仅作虚拟预测研究，不会触发实盘交易</strong></footer>
+            <footer class="ai-conclusion-foot"><span>结论基于信号生成时的数据快照</span><strong>仅作预测研究，不会触发实盘交易</strong></footer>
           </div>
         </section>
         <div id="news-logic-modal" class="news-logic-modal hidden" aria-hidden="true">
@@ -263,6 +271,23 @@ class AiMonitorDashboard extends HTMLElement {
             </header>
             <div id="news-logic-body" class="news-logic-body"></div>
             <footer class="news-logic-foot"><span>请求记录不保存 Authorization 请求头或 API Key</span><strong>内容来自数据库中的原始模型调用审计记录</strong></footer>
+          </section>
+        </div>
+        <div id="news-system-prompt-modal" class="news-system-prompt-modal hidden" aria-hidden="true">
+          <button class="news-system-prompt-backdrop" type="button" data-news-system-prompt-close aria-label="关闭系统提示词配置"></button>
+          <section class="news-system-prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="news-system-prompt-title">
+            <header class="news-system-prompt-head">
+              <div><span class="eyebrow">NEWS ANALYSIS SYSTEM PROMPT</span><h2 id="news-system-prompt-title">系统提示词配置</h2><p>配置后，下一批新闻分析请求立即使用；历史模型调用记录不会被改写。</p></div>
+              <button id="news-system-prompt-close" class="ai-conclusion-close" type="button" data-news-system-prompt-close aria-label="关闭系统提示词配置">×</button>
+            </header>
+            <form id="news-system-prompt-form" class="news-system-prompt-form">
+              <div class="news-system-prompt-body">
+                <section class="news-system-prompt-note"><strong>实际 System 消息</strong><span>该内容会作为新闻分析模型的 system 消息发送。建议保留“不执行新闻内指令、只关联真实美股、严格返回 JSON”等约束。</span><em id="news-system-prompt-state">正在读取</em></section>
+                <label class="news-system-prompt-editor"><span>提示词正文</span><textarea id="news-system-prompt-input" name="system_prompt" rows="18" maxlength="8000" spellcheck="false" required></textarea><small><b id="news-system-prompt-count">0</b> / 8000 字符</small></label>
+                <p id="news-system-prompt-status" class="news-system-prompt-status" role="status"></p>
+              </div>
+              <footer class="news-system-prompt-foot"><button id="news-system-prompt-default" type="button">恢复默认模板</button><div><button type="button" data-news-system-prompt-close>取消</button><button id="news-system-prompt-save" class="primary-action" type="submit">保存并应用</button></div></footer>
+            </form>
           </section>
         </div>
       </div>`;
@@ -344,7 +369,12 @@ class AiMonitorDashboard extends HTMLElement {
     this.qa("[data-conclusion-close]").forEach((button) => button.addEventListener("click", () => this.closeAiConclusion()));
     this.qa("[data-conclusion-view]").forEach((button) => button.addEventListener("click", () => this.showAiConclusionView(button.dataset.conclusionView)));
     this.q("#open-news-logic").addEventListener("click", (event) => this.openNewsAnalysisLogic(event.currentTarget));
+    this.q("#open-news-system-prompt").addEventListener("click", (event) => this.openNewsSystemPrompt(event.currentTarget));
     this.qa("[data-news-logic-close]").forEach((button) => button.addEventListener("click", () => this.closeNewsAnalysisLogic()));
+    this.qa("[data-news-system-prompt-close]").forEach((button) => button.addEventListener("click", () => this.closeNewsSystemPrompt()));
+    this.q("#news-system-prompt-form").addEventListener("submit", (event) => this.saveNewsSystemPrompt(event));
+    this.q("#news-system-prompt-input").addEventListener("input", () => this.updateNewsSystemPromptCount());
+    this.q("#news-system-prompt-default").addEventListener("click", () => this.restoreDefaultNewsSystemPrompt());
     this.q("#news-logic-body").addEventListener("click", (event) => {
       const callButton = event.target.closest("[data-news-call-index]");
       if (callButton) {
@@ -359,6 +389,8 @@ class AiMonitorDashboard extends HTMLElement {
       if (event.key !== "Escape") return;
       if (!this.q("#score-trend-modal").classList.contains("hidden")) {
         this.closeScoreTrend();
+      } else if (!this.q("#news-system-prompt-modal").classList.contains("hidden")) {
+        this.closeNewsSystemPrompt();
       } else if (!this.q("#news-logic-modal").classList.contains("hidden")) {
         this.closeNewsAnalysisLogic();
       } else if (!this.q("#ai-conclusion-modal").classList.contains("hidden")) {
@@ -918,9 +950,9 @@ class AiMonitorDashboard extends HTMLElement {
         const active = ["candidate", "discovered"].includes(item.status) && this.parseDate(item.expires_at).getTime() > now;
         return active;
       };
-      const isUnsettled = (item) => item.prediction_status !== "completed";
-      const currentItems = items.filter((item) => isActive(item) && isUnsettled(item)).sort(bySignalTimeDesc);
-      const historyItems = items.filter((item) => !isActive(item) && isUnsettled(item)).sort(bySignalTimeDesc);
+      const isAwaitingSettlement = (item) => ["pending", "unavailable"].includes(String(item.prediction_status || ""));
+      const currentItems = items.filter((item) => isActive(item) && item.prediction_status !== "completed").sort(bySignalTimeDesc);
+      const historyItems = items.filter(isAwaitingSettlement).sort(bySignalTimeDesc);
       const visible = (tab === "history" ? historyItems : currentItems)
         .map((item) => ({ ...item, outcome: null }));
       if (tab === "current") {
@@ -946,6 +978,12 @@ class AiMonitorDashboard extends HTMLElement {
       const uniqueCurrentItems = [...uniqueCurrent.values()];
       this.state.opportunityDirectionCounts = countDirections(uniqueCurrentItems);
       this.state.historyOpportunityDirectionCounts = countDirections(historyItems);
+      this.state.historyOpportunitySettlementCounts = historyItems.reduce((counts, item) => {
+        counts.total += 1;
+        if (item.prediction_status === "pending") counts.pending += 1;
+        if (item.prediction_status === "unavailable") counts.unavailable += 1;
+        return counts;
+      }, { total: 0, pending: 0, unavailable: 0 });
       this.state.opportunityStatusCounts = uniqueCurrentItems.reduce((counts, item) => {
         const status = this.virtualEntryState(item, this.virtualEntryGate(item)).tone;
         counts.all += 1;
@@ -980,7 +1018,10 @@ class AiMonitorDashboard extends HTMLElement {
     groups.forEach(([selector, counts, label]) => {
       const target = this.q(selector);
       if (!target) return;
-      target.innerHTML = `<b class="long">多 ${this.number(counts.long)}</b><i>/</i><b class="short">空 ${this.number(counts.short)}</b>`;
+      const settlementPrefix = selector === "#history-direction-counts"
+        ? `<b class="pending">未完成 ${this.number(this.state.historyOpportunitySettlementCounts.total)}</b><i>·</i>`
+        : "";
+      target.innerHTML = `${settlementPrefix}<b class="long">多 ${this.number(counts.long)}</b><i>/</i><b class="short">空 ${this.number(counts.short)}</b>`;
       target.setAttribute("aria-label", `${label}：做多 ${counts.long} 次，做空 ${counts.short} 次`);
     });
   }
@@ -1107,7 +1148,7 @@ class AiMonitorDashboard extends HTMLElement {
         <article><span>当前组合分</span><b>${state.latest.combined.toFixed(1)}</b><small>${this.escape(this.formatDate(state.latest.calculated_at))}</small></article>
         <article class="${state.direction}"><span>较上次</span><b>${state.arrow} ${state.badge}</b><small>${history.length} 个扫描点</small></article>
         <article><span>区间最高 / 最低</span><b>${Math.max(...values).toFixed(1)} / ${Math.min(...values).toFixed(1)}</b><small>仅当前机会生命周期</small></article>
-        <article><span>预测入场分</span><b>${entryScore == null ? "--" : entryScore.toFixed(1)}</b><small>${entryScore == null ? "尚未生成虚拟预测" : "冻结，不随行情改写"}</small></article>
+        <article><span>预测入场分</span><b>${entryScore == null ? "--" : entryScore.toFixed(1)}</b><small>${entryScore == null ? "尚未生成预测" : "冻结，不随行情改写"}</small></article>
       </section>
       <section class="score-trend-chart-panel">
         <header><div><strong>评分变化折线图</strong><small>纵轴 0–100 分 · 横轴为机会扫描时间</small></div><div class="score-trend-legend">${series.map((definition) => `<span class="${definition.key}"><i></i>${definition.label}</span>`).join("")}</div></header>
@@ -1200,13 +1241,13 @@ class AiMonitorDashboard extends HTMLElement {
         : item.prediction_status === "unavailable"
         ? "退出行情不足"
         : "监控退出条件";
-      return { tone: "triggered", label: `已触发虚拟${direction}`, detail: suffix, triggered: true };
+      return { tone: "triggered", label: direction, detail: suffix, triggered: true };
     }
     if (hasPrediction) {
       return { tone: "failed", label: "触发失败", detail: "未取得有效入场价格", triggered: false };
     }
     if (gate.entry_ready) {
-      return { tone: "ready", label: "条件已满足", detail: "等待虚拟预测记录写入", triggered: false };
+      return { tone: "ready", label: "条件已满足", detail: "等待预测记录写入", triggered: false };
     }
     const failed = (gate.checks || []).filter((check) => !check.passed);
     return { tone: "waiting", label: "尚未触发", detail: failed.length ? `仍有 ${failed.length} 项条件未满足` : "等待下一轮扫描", triggered: false };
@@ -1275,7 +1316,7 @@ class AiMonitorDashboard extends HTMLElement {
     return {
       phase,
       label: labels[phase] || "监控退出条件",
-      detail: details[phase] || "等待后台根据价格、评分或最大持有条件处理虚拟退出。",
+      detail: details[phase] || "等待后台根据价格、评分或最大持有条件处理退出。",
       dueAt,
       graceDeadline,
       lastAttemptAt: source.last_attempt_at,
@@ -1343,9 +1384,10 @@ class AiMonitorDashboard extends HTMLElement {
       return;
     }
     const waitingSettlementCount = visibleOpportunities.filter((item) => item.prediction_status === "pending").length;
+    const unavailableSettlementCount = visibleOpportunities.filter((item) => item.prediction_status === "unavailable").length;
     const settlementGuide = historicalTab ? `<aside class="settlement-guide" aria-label="历史机会退出生命周期说明">
-      <div><span>EXIT LIFECYCLE</span><strong>“监控退出条件”不是等待买入</strong><p>虚拟预测已触发；后台持续检查 15 分钟 K 线的止盈、止损以及评分转弱/反转，任一条件先满足即退出。最大持有时间只是强制退出上限。</p></div>
-      <b>${this.number(waitingSettlementCount)}<small>当前等待</small></b>
+      <div><span>EXIT LIFECYCLE</span><strong>“监控退出条件”不是等待买入</strong><p>预测已触发；后台持续检查 15 分钟 K 线的止盈、止损以及评分转弱/反转，任一条件先满足即退出。最大持有时间只是强制退出上限。</p></div>
+      <b>${this.number(waitingSettlementCount + unavailableSettlementCount)}<small>未完成：待结 ${this.number(waitingSettlementCount)} · 行情不足 ${this.number(unavailableSettlementCount)}</small></b>
       <ul><li>后台每 20 秒扫描</li><li>价格 / 评分条件优先</li><li>到上限强制退出</li><li>缺行情每 5 分钟重试</li></ul>
     </aside>` : "";
     const markup = settlementGuide + visibleOpportunities.map((item) => {
@@ -1364,7 +1406,11 @@ class AiMonitorDashboard extends HTMLElement {
       const readiness = evidence.live_readiness || {};
       const shadowReady = readiness.status === "shadow_ready";
       const readinessBadge = `<span class="readiness-badge ${shadowReady ? "shadow" : "research"}">${shadowReady ? "影子候选" : "研究信号"}</span>`;
-      const historyState = item.status === "dismissed" ? "已结束" : "已过期";
+      const historyState = item.prediction_status === "pending"
+        ? "等待结算"
+        : item.prediction_status === "unavailable"
+        ? "行情不足"
+        : item.status === "dismissed" ? "已结束" : "已过期";
       const marketAvailable = evidence.market_available !== false;
       const directionLabel = item.direction === "short" ? "做空" : "做多";
       const directionClass = item.direction === "short" ? "short" : "long";
@@ -1402,8 +1448,8 @@ class AiMonitorDashboard extends HTMLElement {
       const entryTime = item.prediction_created_at || entryGate.checked_at;
       const gateScope = entryGate.frozen ? "触发时条件已冻结" : "当前扫描条件";
       const triggeredPosition = entryState.triggered && !historicalTab;
-      const virtualEntryPanel = `<section class="virtual-entry-gate ${entryState.tone} ${triggeredPosition ? "position-active" : ""}" aria-label="虚拟买入触发条件与状态">
-        <div class="virtual-entry-state"><span>VIRTUAL ENTRY GATE</span><strong>${this.escape(entryState.label)}</strong><small>${this.escape(entryState.detail)} · ${gateScope} · 真实订单关闭</small></div>
+      const virtualEntryPanel = `<section class="virtual-entry-gate ${entryState.tone} ${triggeredPosition ? "position-active" : ""}" aria-label="买入触发条件与状态">
+        <div class="virtual-entry-state"><span>ENTRY GATE</span><strong>${this.escape(entryState.label)}</strong><small>${this.escape(entryState.detail)} · ${gateScope} · 真实订单关闭</small></div>
         <div class="virtual-entry-checks">${entryGateChecks}</div>
         ${triggeredPosition ? "" : `<div class="virtual-entry-price"><span>${entryPriceLabel}</span><b>${displayedEntryPrice > 0 ? this.escape(this.compactNumber(displayedEntryPrice)) : "--"}</b><small>${entryState.triggered ? `触发 ${this.formatDate(entryTime)}` : `检查 ${this.formatDate(entryTime)}`}</small></div>`}
       </section>`;
@@ -1422,8 +1468,8 @@ class AiMonitorDashboard extends HTMLElement {
         : position.valuation_state === "settled"
         ? "预测已结算"
         : "持仓观察中";
-      const positionPanel = triggeredPosition ? `<section class="virtual-position ${positionTone}" aria-label="虚拟持仓实时盈亏">
-        <div class="virtual-position-title"><span>VIRTUAL POSITION · ${this.state.displayLeverage}X DISPLAY</span><strong>虚拟${directionLabel} · ${targetStateLabel}</strong><small>触发 ${this.formatDate(entryTime)} · 有效至 ${signalEnd} · 不会发送真实订单</small></div>
+      const positionPanel = triggeredPosition ? `<section class="virtual-position ${positionTone}" aria-label="持仓实时盈亏">
+        <div class="virtual-position-title"><span>POSITION · ${this.state.displayLeverage}X DISPLAY</span><strong>${directionLabel} · ${targetStateLabel}</strong><small>触发 ${this.formatDate(entryTime)} · 有效至 ${signalEnd} · 不会发送真实订单</small></div>
         <div class="virtual-position-metrics">
           <span><em>冻结入场价</em><b>${position.entry_price > 0 ? this.escape(this.compactNumber(position.entry_price)) : "--"}</b><small>触发时价格，不随行情变化</small></span>
           <span class="live-mark"><em>${markLabel}</em><b>${position.current_price > 0 ? this.escape(this.compactNumber(position.current_price)) : "--"}</b><small>${position.market_at ? this.formatDate(position.market_at) : "等待最新行情"}</small></span>
@@ -1434,13 +1480,13 @@ class AiMonitorDashboard extends HTMLElement {
         </div>
       </section>` : "";
       const waitingDetail = entryState.tone === "ready"
-        ? "条件已满足，等待虚拟预测写入"
+        ? "条件已满足，等待预测写入"
         : `${signalGateChecks.length - passedGateCount} 项条件未满足 · 尚未入场`;
       const signalSummaryPanel = `<div class="opportunity-signal ${historicalTab ? "historical-signal" : "candidate-signal"}" aria-label="${historicalTab ? "历史信号" : "待触发候选"}信息">
         <span><em>信号时间</em><b>${signalStart}</b></span>
         <span class="validity"><em>信号有效期间</em><b>${signalDuration}</b><small>${signalStart} — ${signalEnd}</small></span>
         <span><em>${historicalTab ? "历史方向" : "候选方向"}</em><b class="signal-${directionClass}">${directionLabel}</b><small>${historicalTab ? "按该方向统计结果" : "仅为研判方向，尚未买入"}</small></span>
-        <span class="trigger-progress ${entryState.tone}"><em>${historicalTab ? "触发结果" : "触发进度"}</em><b>${passedGateCount} / ${signalGateChecks.length}</b><small>${historicalTab ? entryState.triggered ? "已生成虚拟预测" : "未生成虚拟预测" : waitingDetail}</small></span>
+        <span class="trigger-progress ${entryState.tone}"><em>${historicalTab ? "触发结果" : "触发进度"}</em><b>${passedGateCount} / ${signalGateChecks.length}</b><small>${historicalTab ? entryState.triggered ? "已生成预测" : "未生成预测" : waitingDetail}</small></span>
       </div>`;
       const outcome = historicalTab ? item.outcome : null;
       const predictionStatus = String(item.prediction_status || "");
@@ -1468,7 +1514,7 @@ class AiMonitorDashboard extends HTMLElement {
       const outcomeMetric = historicalTab
         ? `<span class="history-result ${this.escape(outcomeResult)}"><em>${outcome ? "是否命中" : "预测状态"}</em><b>${this.escape(outcomeLabel)}</b><small>${this.escape(outcomeReturn)}</small></span>`
         : "";
-      const settlementPanel = historicalTab && outcomeResult === "pending" ? `<section class="settlement-detail ${this.escape(settlementState.phase)}" aria-label="虚拟退出生命周期详情">
+      const settlementPanel = historicalTab && outcomeResult === "pending" ? `<section class="settlement-detail ${this.escape(settlementState.phase)}" aria-label="退出生命周期详情">
         <div><span>SETTLEMENT STATUS</span><strong>${this.escape(settlementState.label)}</strong><small>${this.escape(settlementState.detail)}</small></div>
         <span><em>最大持有上限</em><b>${this.formatDate(settlementState.dueAt)}</b><small>due_at 仅是强制退出上限，价格或评分条件可提前退出</small></span>
         <span><em>下次预计处理</em><b>${settlementState.nextRetryAt ? this.formatDate(settlementState.nextRetryAt) : "后台下轮扫描"}</b><small>${settlementState.lastAttemptAt ? `最近尝试 ${this.formatDate(settlementState.lastAttemptAt)}` : `使用 ${this.escape(settlementState.priceTimeframe)} K 线监控退出`}</small></span>
@@ -1517,9 +1563,9 @@ class AiMonitorDashboard extends HTMLElement {
     const primaryReason = uniqueReasons[0] || "关联新闻已形成方向判断，但模型未提供更详细的文字理由。";
     const flowConflict = marketFlow.hard_conflict === true;
     const technicalConclusion = confirmed
-      ? `技术策略组已确认：${coreMatchedCount} 项核心指标同向，${passedGroups.length} 个策略组达标；技术强度与组合评分均已过线，资金盘口未出现强反向冲突，信号已进入虚拟预测。`
+      ? `技术策略组已确认：${coreMatchedCount} 项核心指标同向，${passedGroups.length} 个策略组达标；技术强度与组合评分均已过线，资金盘口未出现强反向冲突，信号已进入预测。`
       : flowConflict
-      ? `技术策略组已达到门槛，但资金盘口与预测方向强冲突，暂不进入虚拟预测。`
+      ? `技术策略组已达到门槛，但资金盘口与预测方向强冲突，暂不进入预测。`
       : `当前 ${coreMatchedCount} 项核心指标同向、${availableCount}/${requiredCount} 项有可用数据，通过 ${passedGroups.length} 个策略组；技术强度或组合评分尚未达到准入线。`;
     const newsMarkup = newsItems.length
       ? newsItems.map((entry) => {
@@ -1570,6 +1616,7 @@ class AiMonitorDashboard extends HTMLElement {
       fundamentals: '<div class="ai-conclusion-loading">正在读取数据库基本面信息…</div>',
       analysis: analysisMarkup,
       news: this.renderAiRelatedNewsList(newsItems, item, true),
+      memory: '<div class="ai-conclusion-loading">正在读取近 7 天 AI 新闻分析记录…</div>',
       market: this.renderMarketFlowPanel(item),
     };
     this.q("#ai-conclusion-market-state").textContent = marketFlow.version ? `评分 ${Number(marketFlow.score ?? 50).toFixed(1)}` : "旧信号无快照";
@@ -1581,11 +1628,12 @@ class AiMonitorDashboard extends HTMLElement {
     modal.setAttribute("aria-hidden", "false");
     this.q("#ai-conclusion-close").focus({ preventScroll: true });
     this.loadAiRelatedNews(item, newsItems);
+    this.loadAiNewsAnalysisRecords(item);
     this.loadAiFundamentals(item);
   }
 
   showAiConclusionView(view) {
-    if (!["fundamentals", "news", "market", "analysis"].includes(view)) return;
+    if (!["fundamentals", "news", "memory", "market", "analysis"].includes(view)) return;
     this.state.conclusionView = view;
     this.qa("[data-conclusion-view]").forEach((button) => {
       const active = button.dataset.conclusionView === view;
@@ -1594,7 +1642,7 @@ class AiMonitorDashboard extends HTMLElement {
     });
     const item = this.conclusionOpportunity;
     if (item) {
-      const viewTitle = ({ fundamentals: "基本面信息", news: "相关新闻列表", market: "资金盘口指标", analysis: "AI 分析结论" })[view];
+      const viewTitle = ({ fundamentals: "基本面信息", news: "相关新闻列表", memory: "AI 新闻分析记录", market: "资金盘口指标", analysis: "AI 分析结论" })[view];
       this.q("#ai-conclusion-title").textContent = `${item.symbol} · ${viewTitle}`;
       this.q("#ai-conclusion-subtitle").textContent = `${item.contract_symbol} · ${this.formatDate(item.discovered_at)} · ${item.timeframe} 周期`;
     }
@@ -1631,7 +1679,7 @@ class AiMonitorDashboard extends HTMLElement {
         <article><span>30秒挂单增速</span><b>${value(flow.bid_depth_change_30s_pct, "%")} / ${value(flow.ask_depth_change_30s_pct, "%")}</b><small>过滤瞬时盘口噪声</small></article>
         <article><span>买卖价差</span><b>${value(flow.spread_bps, " bps")}</b><small>越低通常流动性越好</small></article>
       </section>
-      <section class="ai-market-flow-method"><div><strong>如何参与机会判断</strong><span>${this.escape(this.scoreWeightSummary(item.evidence || {}))}</span></div><p>主力量比综合主动成交 50%、近5档盘口压力 30%、挂单增速 20%。当至少两类资金数据有效且与预测方向的得分低于 35 分时，作为强反向冲突阻止生成虚拟预测。</p><footer><span>${this.escape(sourceLabel)}</span><span>数据质量 ${value(Number(flow.data_quality ?? 0) * 100, "%")}</span><span>${this.escape(flow.note || "买卖挂单数量使用可见价格档位代理。")}</span></footer></section>
+      <section class="ai-market-flow-method"><div><strong>如何参与机会判断</strong><span>${this.escape(this.scoreWeightSummary(item.evidence || {}))}</span></div><p>主力量比综合主动成交 50%、近5档盘口压力 30%、挂单增速 20%。当至少两类资金数据有效且与预测方向的得分低于 35 分时，作为强反向冲突阻止生成预测。</p><footer><span>${this.escape(sourceLabel)}</span><span>数据质量 ${value(Number(flow.data_quality ?? 0) * 100, "%")}</span><span>${this.escape(flow.note || "买卖挂单数量使用可见价格档位代理。")}</span></footer></section>
     </section>`;
   }
 
@@ -1660,6 +1708,150 @@ class AiMonitorDashboard extends HTMLElement {
       this.q("#ai-conclusion-news-count").textContent = `关联 ${fallbackItems.length} 条`;
       if (this.state.conclusionView === "news") this.showAiConclusionView("news");
     }
+  }
+
+  async loadAiNewsAnalysisRecords(item) {
+    const requestId = ++this.conclusionMemoryRequestId;
+    try {
+      const data = await this.api(`/opportunities/${encodeURIComponent(item.id)}/news-analysis-records`);
+      if (requestId !== this.conclusionMemoryRequestId || this.conclusionOpportunity?.id !== item.id) return;
+      const records = Array.isArray(data.items) ? data.items : [];
+      this.conclusionPanels.memory = this.renderAiNewsAnalysisRecords(records, item, Number(data.window_days || 7));
+      this.q("#ai-conclusion-memory-count").textContent = `${records.length} 条 · ${Number(data.window_days || 7)} 天`;
+      if (this.state.conclusionView === "memory") this.showAiConclusionView("memory");
+    } catch {
+      if (requestId !== this.conclusionMemoryRequestId || this.conclusionOpportunity?.id !== item.id) return;
+      this.conclusionPanels.memory = '<div class="ai-memory-empty"><strong>新闻分析记录读取失败</strong><span>数据库暂时无法返回该股票的一周滚动研判记忆。</span></div>';
+      this.q("#ai-conclusion-memory-count").textContent = "读取失败";
+      if (this.state.conclusionView === "memory") this.showAiConclusionView("memory");
+    }
+  }
+
+  renderAiNewsAnalysisRecords(records, opportunity, windowDays = 7) {
+    if (!records.length) return `<div class="ai-memory-empty"><strong>${this.escape(opportunity.symbol)} 暂无 AI 新闻分析记录</strong><span>功能启用后，新分析的新闻会按股票写入 ${windowDays} 天滚动记忆；历史新闻不会伪造回溯结论。</span></div>`;
+    const directionLabel = (value) => ({ bull: "偏多", bear: "偏空", neutral: "中性" })[value] || "中性";
+    const effectLabel = (value) => ({ initial: "首次判断", maintain: "维持判断", strengthen: "增强判断", weaken: "减弱判断", reverse: "判断反转" })[value] || "完成回溯";
+    const chain = records.map((record, index) => {
+      const direction = ["bull", "bear", "neutral"].includes(record.direction) ? record.direction : "neutral";
+      const effect = ["initial", "maintain", "strengthen", "weaken", "reverse"].includes(record.memory_effect) ? record.memory_effect : "maintain";
+      const title = record.news_title || record.news_original_title || "未命名新闻";
+      const link = this.safeUrl(record.news_link);
+      const titleMarkup = link ? `<a href="${this.escape(link)}" target="_blank" rel="noopener noreferrer">${this.escape(title)}</a>` : `<h4>${this.escape(title)}</h4>`;
+      const prior = record.prior_record_id ? `承接 #${this.escape(record.prior_record_id)}` : "无前序判断";
+      return `<article class="ai-memory-record ${direction} effect-${effect}">
+        <div class="ai-memory-line"><i></i><span>${String(records.length - index).padStart(2, "0")}</span></div>
+        <div class="ai-memory-card">
+          <header><div><span>${this.escape(record.news_source || "未知来源")}</span><time>${this.formatUnix(record.news_published_at)}</time>${record.belongs_to_opportunity ? '<em>本机会关联</em>' : ""}</div><strong class="${effect}">${effectLabel(effect)}</strong></header>
+          ${titleMarkup}
+          <section class="ai-memory-verdict"><b class="${direction}">${directionLabel(direction)}</b><span>置信度 ${Math.round(Number(record.confidence || 0) * 100)}%</span><span>关联度 ${Math.round(Number(record.relevance || 0) * 100)}%</span><span>${this.impactLabel(record.impact_strength)}</span><span>${this.horizonLabel(record.time_horizon)}</span></section>
+          <p><strong>本次研判：</strong>${this.escape(record.analysis_reason || "模型未提供判断依据")}</p>
+          <p class="memory-impact"><strong>对历史判断的影响：</strong>${this.escape(record.memory_reason || "已与一周内历史记录完成对比")}</p>
+          <footer><span>${prior}</span><span>引用 ${Number(record.context_record_ids?.length || 0)} 条历史记忆</span><span>模型 ${this.escape(record.model_name || "--")}</span><time>分析 ${this.formatDate(record.analyzed_at)}</time></footer>
+        </div>
+      </article>`;
+    }).join("");
+    return `<section class="ai-memory-panel"><header><div><span class="eyebrow">AI NEWS MEMORY</span><h3>${this.escape(opportunity.symbol)} · 一周新闻研判追踪</h3><p>新新闻会参考近 ${windowDays} 天历史研判，识别维持、增强、减弱或反转；以下记录均来自实际模型分析。</p></div><strong>${records.length}<small>条记忆</small></strong></header><div class="ai-memory-summary"><span>追踪窗口 <b>${windowDays} 天</b></span><span>最新方向 <b class="${this.escape(records[0].direction || "neutral")}">${directionLabel(records[0].direction)}</b></span><span>最近变化 <b>${effectLabel(records[0].memory_effect)}</b></span><span>数据库持久化 <b>已启用</b></span></div><div class="ai-memory-timeline">${chain}</div></section>`;
+  }
+
+  async openNewsSystemPrompt(trigger) {
+    this.newsSystemPromptFocus = trigger || null;
+    const requestId = ++this.newsSystemPromptRequestId;
+    const modal = this.q("#news-system-prompt-modal");
+    const input = this.q("#news-system-prompt-input");
+    const saveButton = this.q("#news-system-prompt-save");
+    const state = this.q("#news-system-prompt-state");
+    const status = this.q("#news-system-prompt-status");
+    input.value = "";
+    input.disabled = true;
+    saveButton.disabled = true;
+    state.textContent = "正在读取";
+    state.className = "loading";
+    status.textContent = "";
+    status.className = "news-system-prompt-status";
+    this.updateNewsSystemPromptCount();
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.q("#news-system-prompt-close").focus({ preventScroll: true });
+    try {
+      const data = await this.api("/news-system-prompt");
+      if (requestId !== this.newsSystemPromptRequestId || modal.classList.contains("hidden")) return;
+      this.newsSystemPromptDefault = String(data.default_system_prompt || "").trim();
+      this.newsSystemPromptIsCustom = data.is_custom === true;
+      input.value = String(data.system_prompt || this.newsSystemPromptDefault);
+      state.textContent = this.newsSystemPromptIsCustom ? "自定义提示词生效中" : "当前使用系统默认模板";
+      state.className = this.newsSystemPromptIsCustom ? "custom" : "default";
+      input.disabled = false;
+      saveButton.disabled = false;
+      this.updateNewsSystemPromptCount();
+      input.focus({ preventScroll: true });
+    } catch (error) {
+      if (requestId !== this.newsSystemPromptRequestId) return;
+      state.textContent = "读取失败";
+      state.className = "error";
+      status.textContent = error.message || "系统提示词读取失败，请稍后重试。";
+      status.className = "news-system-prompt-status error";
+    }
+  }
+
+  updateNewsSystemPromptCount() {
+    const input = this.q("#news-system-prompt-input");
+    const count = this.q("#news-system-prompt-count");
+    if (input && count) count.textContent = String(input.value.length);
+  }
+
+  restoreDefaultNewsSystemPrompt() {
+    const input = this.q("#news-system-prompt-input");
+    if (!input || !this.newsSystemPromptDefault) return;
+    input.value = this.newsSystemPromptDefault;
+    this.q("#news-system-prompt-status").textContent = "已载入默认模板，点击“保存并应用”后恢复默认配置。";
+    this.q("#news-system-prompt-status").className = "news-system-prompt-status notice";
+    this.updateNewsSystemPromptCount();
+    input.focus({ preventScroll: true });
+  }
+
+  async saveNewsSystemPrompt(event) {
+    event.preventDefault();
+    const input = this.q("#news-system-prompt-input");
+    const saveButton = this.q("#news-system-prompt-save");
+    const status = this.q("#news-system-prompt-status");
+    const value = input.value.trim();
+    if (value.length < 40) {
+      status.textContent = "系统提示词至少需要 40 个字符。";
+      status.className = "news-system-prompt-status error";
+      input.focus({ preventScroll: true });
+      return;
+    }
+    saveButton.disabled = true;
+    input.disabled = true;
+    status.textContent = "正在保存并应用…";
+    status.className = "news-system-prompt-status loading";
+    try {
+      const useDefault = value === this.newsSystemPromptDefault;
+      const data = await this.api("/news-system-prompt", {
+        method: "PUT",
+        body: JSON.stringify({ system_prompt: useDefault ? null : value }),
+      });
+      this.newsSystemPromptDefault = String(data.default_system_prompt || this.newsSystemPromptDefault);
+      this.newsSystemPromptIsCustom = data.is_custom === true;
+      this.closeNewsSystemPrompt();
+      this.showBanner(this.newsSystemPromptIsCustom ? "系统提示词已保存，下一批新闻分析将使用新配置。" : "已恢复默认系统提示词，下一批新闻分析将使用默认模板。", "success");
+    } catch (error) {
+      status.textContent = error.message || "系统提示词保存失败，请稍后重试。";
+      status.className = "news-system-prompt-status error";
+      saveButton.disabled = false;
+      input.disabled = false;
+    }
+  }
+
+  closeNewsSystemPrompt(restoreFocus = true) {
+    const modal = this.q("#news-system-prompt-modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    this.newsSystemPromptRequestId += 1;
+    const focusTarget = this.newsSystemPromptFocus;
+    this.newsSystemPromptFocus = null;
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
   }
 
   openNewsAnalysisLogic(trigger) {
@@ -1898,9 +2090,11 @@ class AiMonitorDashboard extends HTMLElement {
     const modal = this.q("#ai-conclusion-modal");
     if (!modal || modal.classList.contains("hidden")) return;
     this.closeNewsAnalysisLogic(false);
+    this.closeNewsSystemPrompt(false);
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
     this.conclusionNewsRequestId += 1;
+    this.conclusionMemoryRequestId += 1;
     this.conclusionFundamentalRequestId += 1;
     this.conclusionOpportunity = null;
     const focusTarget = this.conclusionFocus;
@@ -2055,7 +2249,7 @@ class AiMonitorDashboard extends HTMLElement {
         <div class="readiness-criteria">${criteria.map((item) => `<article class="${item.passed ? "passed" : "blocked"}"><span>${item.passed ? "✓" : "×"} ${this.escape(item.label)}</span><b>${item.current == null ? "--" : this.escape(item.current)}</b><small>要求 ${this.escape(item.required)}</small></article>`).join("")}</div>
         <footer><strong>实盘仍需完成</strong>${(readiness.paper_and_shadow_requirements || []).map((item) => `<span>${this.escape(item)}</span>`).join("")}</footer>`;
     }
-    this.q("#prediction-note").textContent = `${data.note || "按历史虚拟预测的成本后结果统计，不执行任何下单。"} 页面收益率按 ${this.state.displayLeverage} 倍杠杆换算展示，并保留标的原始收益；不改变信号或下单逻辑。`;
+    this.q("#prediction-note").textContent = `${data.note || "按历史预测的成本后结果统计，不执行任何下单。"} 页面收益率按 ${this.state.displayLeverage} 倍杠杆换算展示，并保留标的原始收益；不改变信号或下单逻辑。`;
     this.q("#analytics-summary").innerHTML = `
       <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)} · 旧口径剔除 ${this.number(summary.excluded_legacy_settlement_count)}</small></article>
       <article><span>多 / 空方向</span><strong class="analytics-directions"><b>${this.number(summary.long_count)}</b><i>/</i><em>${this.number(summary.short_count)}</em></strong><small>做多 / 做空样本分布</small></article>

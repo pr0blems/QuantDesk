@@ -716,6 +716,25 @@
         "title": "AiMonitorNewsAnalyzeRequest",
         "type": "object"
       },
+      "AiMonitorNewsSystemPromptUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "system_prompt": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt"
+          }
+        },
+        "title": "AiMonitorNewsSystemPromptUpdate",
+        "type": "object"
+      },
       "AiMonitorReplayRequest": {
         "additionalProperties": false,
         "description": "Create an isolated point-in-time historical replay.",
@@ -5771,6 +5790,75 @@
         "summary": "News"
       }
     },
+    "/api/v2/ai-monitor/news-system-prompt": {
+      "get": {
+        "operationId": "get_news_system_prompt_api_v2_ai_monitor_news_system_prompt_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get News System Prompt Api V2 Ai Monitor News System Prompt Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get News System Prompt"
+      },
+      "put": {
+        "description": "Persist the user-level system prompt used by subsequent news model calls.",
+        "operationId": "update_news_system_prompt_api_v2_ai_monitor_news_system_prompt_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorNewsSystemPromptUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update News System Prompt Api V2 Ai Monitor News System Prompt Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update News System Prompt"
+      }
+    },
     "/api/v2/ai-monitor/news/analyze": {
       "post": {
         "description": "Analyze one explicitly selected news record with the user's default AI model.",
@@ -6013,6 +6101,53 @@
           }
         ],
         "summary": "Opportunity News"
+      }
+    },
+    "/api/v2/ai-monitor/opportunities/{opportunity_id}/news-analysis-records": {
+      "get": {
+        "description": "Return the symbol's auditable seven-day rolling AI news memory.",
+        "operationId": "opportunity_news_analysis_records_api_v2_ai_monitor_opportunities__opportunity_id__news_analysis_records_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "opportunity_id",
+            "required": true,
+            "schema": {
+              "title": "Opportunity Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opportunity News Analysis Records Api V2 Ai Monitor Opportunities  Opportunity Id  News Analysis Records Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Opportunity News Analysis Records"
       }
     },
     "/api/v2/ai-monitor/opportunity-analytics": {

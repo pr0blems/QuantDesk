@@ -703,6 +703,26 @@ class AiMonitorCostConfigUpdate(BaseModel):
     prediction_funding_bps_per_8h: float = Field(default=1, ge=0, le=500)
 
 
+class AiMonitorNewsSystemPromptUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    system_prompt: str | None = Field(default=None, max_length=8000)
+
+    @field_validator("system_prompt")
+    @classmethod
+    def normalize_system_prompt(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if len(normalized) < 40:
+            raise ValueError("system prompt must contain at least 40 characters")
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", normalized):
+            raise ValueError("system prompt contains unsupported control characters")
+        return normalized
+
+
 class AiMonitorRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

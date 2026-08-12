@@ -591,6 +591,28 @@ def test_prediction_exit_migration_follows_replay_and_backfills_legacy_rows() ->
     assert "legacy_horizon_close" in migration
 
 
+def test_news_system_prompt_migration_follows_prediction_exit_lifecycle() -> None:
+    migration = (
+        ROOT / "migrations/versions/0052_ai_news_system_prompt.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "0052_ai_news_prompt"' in migration
+    assert 'down_revision: str | None = "0051_ai_prediction_exit"' in migration
+    assert '"ai_monitor_configs"' in migration
+    assert '"news_system_prompt"' in migration
+
+
+def test_news_analysis_memory_migration_follows_system_prompt() -> None:
+    migration = (
+        ROOT / "migrations/versions/0053_news_ai_analysis_memory.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "0053_news_ai_memory"' in migration
+    assert 'down_revision: str | None = "0052_ai_news_prompt"' in migration
+    assert '"news_ai_analysis_records"' in migration
+    assert '"memory_effect"' in migration
+
+
 def test_readiness_cost_model_cannot_be_disabled() -> None:
     disabled = {
         "prediction_fee_enabled": False,
