@@ -1609,6 +1609,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "openScoreTrend(opportunityId, trigger)" in component
     assert "evidence.score_history" in component
     assert 'class="score-trend-chart"' in component
+    assert 'class="score-line ${definition.key}"' in component
+    assert 'style="--series:${definition.color}"' not in component
     assert "virtualEntryGate(item)" in component
     assert "virtualEntryState(item, gate)" in component
     assert "virtualPositionSnapshot(item)" in component
@@ -1684,6 +1686,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".opportunity-score.down" in stylesheet
     assert ".score-trend-modal" in stylesheet
     assert ".score-trend-chart" in stylesheet
+    assert ".score-line.combined" in stylesheet
+    assert ".score-line.market_flow" in stylesheet
     assert ".virtual-entry-gate" in stylesheet
     assert ".virtual-entry-checks" in stylesheet
     assert ".virtual-entry-price" in stylesheet

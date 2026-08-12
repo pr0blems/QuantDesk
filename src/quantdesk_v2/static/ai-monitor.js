@@ -1094,7 +1094,7 @@ class AiMonitorDashboard extends HTMLElement {
     const lines = series.map((definition) => {
       const points = history.map((point, index) => `${x(index).toFixed(2)},${y(point[definition.key]).toFixed(2)}`).join(" ");
       const dots = definition.key === "combined" ? history.map((point, index) => `<circle cx="${x(index).toFixed(2)}" cy="${y(point.combined).toFixed(2)}" r="3.5"><title>${this.escape(this.formatDate(point.calculated_at))} · ${point.combined.toFixed(1)}</title></circle>`).join("") : "";
-      return `<g class="score-line ${definition.key}" style="--series:${definition.color}"><polyline points="${points}"></polyline>${dots}</g>`;
+      return `<g class="score-line ${definition.key}"><polyline points="${points}"></polyline>${dots}</g>`;
     }).join("");
     const timeLabels = history.length === 1
       ? [{ index: 0, anchor: "middle" }]
@@ -1116,7 +1116,7 @@ class AiMonitorDashboard extends HTMLElement {
         <article><span>预测入场分</span><b>${entryScore == null ? "--" : entryScore.toFixed(1)}</b><small>${entryScore == null ? "尚未生成虚拟预测" : "冻结，不随行情改写"}</small></article>
       </section>
       <section class="score-trend-chart-panel">
-        <header><div><strong>评分变化折线图</strong><small>纵轴 0–100 分 · 横轴为机会扫描时间</small></div><div class="score-trend-legend">${series.map((definition) => `<span style="--series:${definition.color}"><i></i>${definition.label}</span>`).join("")}</div></header>
+        <header><div><strong>评分变化折线图</strong><small>纵轴 0–100 分 · 横轴为机会扫描时间</small></div><div class="score-trend-legend">${series.map((definition) => `<span class="${definition.key}"><i></i>${definition.label}</span>`).join("")}</div></header>
         <svg class="score-trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this.escape(item.symbol)} 组合评分走势">
           <g class="score-grid">${grid}</g>
           <g class="score-threshold"><line x1="${padding.left}" y1="${y(threshold)}" x2="${width - padding.right}" y2="${y(threshold)}"></line><text x="${width - padding.right - 4}" y="${y(threshold) - 6}">准入线 ${threshold.toFixed(0)}</text></g>

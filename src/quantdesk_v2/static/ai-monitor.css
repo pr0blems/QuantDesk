@@ -433,12 +433,16 @@ button:disabled { cursor: wait; opacity: .55; }
 .score-trend-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px 10px; color: var(--ai-muted); font-size: 9px; }
 .score-trend-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .score-trend-legend i { width: 15px; height: 2px; background: var(--series); }
+.score-trend-legend .combined, .score-line.combined { --series: #ad9cff; }
+.score-trend-legend .news, .score-line.news { --series: #dfbd67; }
+.score-trend-legend .technical, .score-line.technical { --series: #5bd6aa; }
+.score-trend-legend .market_flow, .score-line.market_flow { --series: #5dc4d8; }
 .score-trend-chart { width: 100%; height: auto; display: block; background: #0d1514; }
 .score-grid line { stroke: rgba(119, 157, 151, .16); stroke-width: 1; }
 .score-grid text, .score-time-label { fill: #768d89; font: 10px Consolas, monospace; }
 .score-threshold line { stroke: rgba(223, 189, 103, .65); stroke-width: 1; stroke-dasharray: 6 5; }
 .score-threshold text { fill: var(--ai-gold); font: 10px Consolas, monospace; text-anchor: end; }
-.score-line polyline { fill: none; stroke: var(--series); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.score-line polyline { fill: none; stroke: var(--series); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .score-line:not(.combined) polyline { stroke-width: 1.25; opacity: .72; }
 .score-line circle { fill: #0d1514; stroke: var(--series); stroke-width: 2; }
 .score-trend-ledger { margin-top: 12px; }
