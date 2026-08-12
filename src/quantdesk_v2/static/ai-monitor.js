@@ -184,7 +184,7 @@ class AiMonitorDashboard extends HTMLElement {
               <div id="opportunity-list" class="opportunity-list"><div class="empty-state">暂无符合新闻条件的美股候选</div></div>
             </section>
             <section id="view-predictions" class="ai-view">
-              <div class="view-head"><div><span class="eyebrow">OPPORTUNITY ANALYTICS</span><h2>预测统计分析</h2><p id="prediction-note">基于历史机会的入场价格与有效期结束价格，统计实际方向表现。</p></div></div>
+              <div class="view-head"><div><span class="eyebrow">OPPORTUNITY ANALYTICS</span><h2>预测统计分析</h2><p id="prediction-note">按止盈、止损、综合评分退出和最大持有期退出统计虚拟表现。</p></div></div>
               <section id="strategy-readiness" class="strategy-readiness"><div class="analytics-loading">正在评估实盘准备门槛…</div></section>
               <section id="historical-replay" class="historical-replay">
                 <header><div><span>POINT-IN-TIME REPLAY</span><h3>独立历史回放与样本外准入</h3><p>从币安官方归档补采 K 线；只使用信号时点之前的新闻和已收盘 K 线，不污染实时预测。</p></div><strong id="replay-status">尚未运行</strong></header>
@@ -904,16 +904,9 @@ class AiMonitorDashboard extends HTMLElement {
       target.innerHTML = `<div class="empty-state opportunity-empty"><strong>正在读取${tab === "history" ? "历史" : "当前"}机会…</strong></div>`;
     }
     try {
-      const [data, analytics] = await Promise.all([
-        this.api("/opportunities?limit=300&include_expired=true"),
-        tab === "history"
-          ? this.api("/opportunity-analytics?limit=300").catch(() => null)
-          : Promise.resolve(null),
-      ]);
+      const data = await this.api("/opportunities?limit=300&include_expired=true");
       if (requestId !== this.state.opportunityRequestId || tab !== this.state.opportunityTab) return;
       const now = Date.now();
-      if (analytics) this.state.opportunityAnalytics = analytics;
-      const outcomes = new Map((analytics?.items || []).map((item) => [item.id, item]));
       const bySignalTimeDesc = (left, right) => {
         const leftTime = this.parseDate(left.discovered_at).getTime();
         const rightTime = this.parseDate(right.discovered_at).getTime();
@@ -925,10 +918,11 @@ class AiMonitorDashboard extends HTMLElement {
         const active = ["candidate", "discovered"].includes(item.status) && this.parseDate(item.expires_at).getTime() > now;
         return active;
       };
-      const currentItems = items.filter(isActive).sort(bySignalTimeDesc);
-      const historyItems = items.filter((item) => !isActive(item)).sort(bySignalTimeDesc);
+      const isUnsettled = (item) => item.prediction_status !== "completed";
+      const currentItems = items.filter((item) => isActive(item) && isUnsettled(item)).sort(bySignalTimeDesc);
+      const historyItems = items.filter((item) => !isActive(item) && isUnsettled(item)).sort(bySignalTimeDesc);
       const visible = (tab === "history" ? historyItems : currentItems)
-        .map((item) => ({ ...item, outcome: outcomes.get(item.id) || null }));
+        .map((item) => ({ ...item, outcome: null }));
       if (tab === "current") {
         const unique = new Map();
         visible.forEach((item) => {
@@ -1204,8 +1198,8 @@ class AiMonitorDashboard extends HTMLElement {
       const suffix = item.prediction_status === "completed"
         ? "已结算"
         : item.prediction_status === "unavailable"
-        ? "结算行情不足"
-        : "等待结算";
+        ? "退出行情不足"
+        : "监控退出条件";
       return { tone: "triggered", label: `已触发虚拟${direction}`, detail: suffix, triggered: true };
     }
     if (hasPrediction) {
@@ -1258,28 +1252,30 @@ class AiMonitorDashboard extends HTMLElement {
       : item?.prediction_status === "unavailable"
       ? "unavailable"
       : Number.isFinite(dueMs) && now < dueMs
-      ? "scheduled"
+      ? "monitoring_exit"
       : Number.isFinite(graceMs) && now > graceMs
       ? "overdue"
       : "awaiting_market_data");
     const labels = {
-      scheduled: "观察周期尚未结束",
-      awaiting_market_data: "等待到期行情",
-      overdue: "结算处理已超时",
-      completed: "结算已完成",
-      unavailable: "结算行情不足",
+      monitoring_exit: "正在监控退出条件",
+      scheduled: "正在监控退出条件",
+      awaiting_market_data: "已达持有上限，等待行情",
+      overdue: "退出处理已超时",
+      completed: "退出结算已完成",
+      unavailable: "退出行情不足",
     };
     const details = {
-      scheduled: "到达预测结算时间后，后台会读取结算时点附近的 15 分钟 K 线。",
-      awaiting_market_data: `已经到达结算时间；到期 K 线未到齐时每 ${Number(source.retry_interval_minutes || 5)} 分钟重试。`,
+      monitoring_exit: "后台正在按 15 分钟 K 线监控止盈、止损与评分转弱/反转；最大持有上限前任一条件先触发即退出。",
+      scheduled: "后台正在按 15 分钟 K 线监控止盈、止损与评分转弱/反转；最大持有上限前任一条件先触发即退出。",
+      awaiting_market_data: `已经达到最大持有上限；退出 K 线未到齐时每 ${Number(source.retry_interval_minutes || 5)} 分钟重试。`,
       overdue: `已经超过 ${graceHours} 小时宽限期，后台补偿任务将其转为“行情不足”。`,
-      completed: "已取得结算时点附近行情，并完成方向收益与命中结果计算。",
-      unavailable: `宽限期内始终没有取得有效到期行情，因此不计入命中率。`,
+      completed: "已按最先触发的价格、评分或最大持有条件退出，并完成方向收益与命中结果计算。",
+      unavailable: `宽限期内始终没有取得有效退出行情，因此不计入命中率。`,
     };
     return {
       phase,
-      label: labels[phase] || "等待结算",
-      detail: details[phase] || "等待后台结算任务处理。",
+      label: labels[phase] || "监控退出条件",
+      detail: details[phase] || "等待后台根据价格、评分或最大持有条件处理虚拟退出。",
       dueAt,
       graceDeadline,
       lastAttemptAt: source.last_attempt_at,
@@ -1347,10 +1343,10 @@ class AiMonitorDashboard extends HTMLElement {
       return;
     }
     const waitingSettlementCount = visibleOpportunities.filter((item) => item.prediction_status === "pending").length;
-    const settlementGuide = historicalTab ? `<aside class="settlement-guide" aria-label="历史机会结算说明">
-      <div><span>SETTLEMENT GUIDE</span><strong>“等待结算”不是等待买入</strong><p>它表示虚拟预测已经触发；系统正在等待观察周期结束，或等待结算时点附近的 15 分钟 K 线。结算完成后才计算命中与成本后收益。</p></div>
+    const settlementGuide = historicalTab ? `<aside class="settlement-guide" aria-label="历史机会退出生命周期说明">
+      <div><span>EXIT LIFECYCLE</span><strong>“监控退出条件”不是等待买入</strong><p>虚拟预测已触发；后台持续检查 15 分钟 K 线的止盈、止损以及评分转弱/反转，任一条件先满足即退出。最大持有时间只是强制退出上限。</p></div>
       <b>${this.number(waitingSettlementCount)}<small>当前等待</small></b>
-      <ul><li>后台每 20 秒扫描</li><li>缺行情每 5 分钟重试</li><li>最长宽限 6 小时</li><li>仍无行情则标记“行情不足”</li></ul>
+      <ul><li>后台每 20 秒扫描</li><li>价格 / 评分条件优先</li><li>到上限强制退出</li><li>缺行情每 5 分钟重试</li></ul>
     </aside>` : "";
     const markup = settlementGuide + visibleOpportunities.map((item) => {
       const evidence = item.evidence || {};
@@ -1415,7 +1411,7 @@ class AiMonitorDashboard extends HTMLElement {
       const riskPlan = position.risk_plan || {};
       const positionTone = position.profit_state || "flat";
       const markLabel = position.valuation_state === "settled"
-        ? "到期结算价"
+        ? "实际退出价"
         : position.market_stale
         ? "最近价格 · 行情延迟"
         : "实时价格";
@@ -1454,7 +1450,7 @@ class AiMonitorDashboard extends HTMLElement {
       const outcomeLabel = outcome
         ? this.analyticsResultLabel(outcomeResult)
         : outcomeResult === "pending"
-        ? "等待结算"
+        ? "监控退出条件"
         : outcomeResult === "unavailable"
         ? "行情不足"
         : confirmed
@@ -1463,20 +1459,20 @@ class AiMonitorDashboard extends HTMLElement {
       const outcomeReturn = outcome?.directional_return_bps != null
         ? `${this.state.displayLeverage}x 净收益 ${this.formatLeveragedReturnFromBps(outcome.directional_return_bps)} · 标的 ${this.formatBps(outcome.directional_return_bps)}`
         : outcomeResult === "pending"
-        ? `预测结算 ${this.formatDate(settlementState.dueAt)} · ${settlementState.label}`
+        ? `最大持有上限 ${this.formatDate(settlementState.dueAt)} · ${settlementState.label}`
         : outcomeResult === "unavailable"
-        ? "结算宽限期内未取得行情"
+        ? "退出行情宽限期内未取得行情"
         : confirmed
         ? "历史信号未关联预测记录"
         : `核心同向 ${Number(indicatorPolicy.core_matched_count ?? matchedCount)} 项 · 通过 ${passedGroupCount} 个策略组`;
       const outcomeMetric = historicalTab
         ? `<span class="history-result ${this.escape(outcomeResult)}"><em>${outcome ? "是否命中" : "预测状态"}</em><b>${this.escape(outcomeLabel)}</b><small>${this.escape(outcomeReturn)}</small></span>`
         : "";
-      const settlementPanel = historicalTab && outcomeResult === "pending" ? `<section class="settlement-detail ${this.escape(settlementState.phase)}" aria-label="等待结算详情">
+      const settlementPanel = historicalTab && outcomeResult === "pending" ? `<section class="settlement-detail ${this.escape(settlementState.phase)}" aria-label="虚拟退出生命周期详情">
         <div><span>SETTLEMENT STATUS</span><strong>${this.escape(settlementState.label)}</strong><small>${this.escape(settlementState.detail)}</small></div>
-        <span><em>预测结算时间</em><b>${this.formatDate(settlementState.dueAt)}</b><small>虚拟买入时间 + ${this.escape(item.timeframe)} 观察周期</small></span>
-        <span><em>下次预计处理</em><b>${settlementState.nextRetryAt ? this.formatDate(settlementState.nextRetryAt) : "后台下轮扫描"}</b><small>${settlementState.lastAttemptAt ? `最近尝试 ${this.formatDate(settlementState.lastAttemptAt)}` : `使用 ${this.escape(settlementState.priceTimeframe)} 到期行情`}</small></span>
-        <span><em>宽限截止时间</em><b>${this.formatDate(settlementState.graceDeadline)}</b><small>超过后仍无行情则不计入统计</small></span>
+        <span><em>最大持有上限</em><b>${this.formatDate(settlementState.dueAt)}</b><small>due_at 仅是强制退出上限，价格或评分条件可提前退出</small></span>
+        <span><em>下次预计处理</em><b>${settlementState.nextRetryAt ? this.formatDate(settlementState.nextRetryAt) : "后台下轮扫描"}</b><small>${settlementState.lastAttemptAt ? `最近尝试 ${this.formatDate(settlementState.lastAttemptAt)}` : `使用 ${this.escape(settlementState.priceTimeframe)} K 线监控退出`}</small></span>
+        <span><em>行情补偿截止</em><b>${this.formatDate(settlementState.graceDeadline)}</b><small>达到持有上限后仍无退出行情，超过此时间则不计入统计</small></span>
       </section>` : "";
       const symbolControl = marketAvailable
         ? `<button class="opportunity-symbol" type="button" data-opportunity-id="${this.escape(item.id)}" data-open-contract="${this.escape(item.contract_symbol)}" data-timeframe="${this.escape(item.timeframe)}" title="打开 ${this.escape(item.symbol)} 的合约 K 线研究与预测模拟">${this.escape(item.symbol)}</button>`
@@ -2061,7 +2057,7 @@ class AiMonitorDashboard extends HTMLElement {
     }
     this.q("#prediction-note").textContent = `${data.note || "按历史虚拟预测的成本后结果统计，不执行任何下单。"} 页面收益率按 ${this.state.displayLeverage} 倍杠杆换算展示，并保留标的原始收益；不改变信号或下单逻辑。`;
     this.q("#analytics-summary").innerHTML = `
-      <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)}</small></article>
+      <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)} · 旧口径剔除 ${this.number(summary.excluded_legacy_settlement_count)}</small></article>
       <article><span>多 / 空方向</span><strong class="analytics-directions"><b>${this.number(summary.long_count)}</b><i>/</i><em>${this.number(summary.short_count)}</em></strong><small>做多 / 做空样本分布</small></article>
       <article class="positive"><span>命中次数</span><strong>${this.number(summary.win_count)}</strong><small>未命中 ${this.number(summary.loss_count)} · 持平 ${this.number(summary.flat_count)}</small></article>
       <article class="${Number(summary.hit_rate || 0) >= 50 ? "positive" : "negative"}"><span>命中概率</span><strong>${hitRate}</strong><small>命中 ÷ 有方向结果</small></article>
@@ -2070,7 +2066,7 @@ class AiMonitorDashboard extends HTMLElement {
       <article><span>影子候选 / 研究</span><strong class="analytics-directions"><b>${this.number(summary.shadow_ready_count)}</b><i>/</i><em>${this.number(summary.research_only_count)}</em></strong><small>生成信号时的准入状态</small></article>`;
     const target = this.q("#prediction-list");
     if (!items.length) { target.innerHTML = '<div class="empty-state opportunity-empty"><strong>没有符合当前筛选条件的历史机会</strong><span>请降低评分下限、切换方向或重置筛选。</span></div>'; return; }
-    target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>买入价格</th><th>到期价格</th><th>${this.state.displayLeverage}x 毛 / 净收益率</th><th>MFE / MAE</th><th>成本后结果</th><th>有效期结束</th></tr></thead><tbody>${items.map((item) => `<tr><td>${this.formatDate(item.signal_time)}</td><td><strong>${this.escape(item.symbol)}</strong><small>${this.escape(item.contract_symbol)}</small></td><td><span class="prediction-direction ${item.direction === "short" ? "short" : ""}">${item.direction === "long" ? "做多" : "做空"}</span></td><td><span class="technical-state ${item.technical_confirmed ? "confirmed" : "candidate"}">${item.technical_confirmed ? "技术已确认" : "新闻候选"}</span></td><td>${Number(item.news_score).toFixed(1)} / ${Number(item.indicator_score).toFixed(1)}<small>组合 ${Number(item.combined_score).toFixed(1)}</small></td><td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}</td><td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${item.settled_price_at ? this.formatDate(item.settled_price_at) : "到期行情不足"}</small></td><td class="${Number(item.directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净 ${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)} · 标的净 ${metricBps(item.net_directional_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(item.estimated_cost_bps || 0)))} · 费/滑点/资金已计入</small></td><td>${metricBps(item.max_favorable_bps)}<small>${metricBps(item.max_adverse_bps)}</small></td><td><span class="prediction-result ${this.escape(item.result || "unavailable")}">${this.analyticsResultLabel(item.result)}</span></td><td>${this.formatDate(item.expires_at)}<small>${this.escape(item.timeframe)} 信号</small></td></tr>`).join("")}</tbody></table></div>`;
+    target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>入场价格</th><th>退出价格 / 原因</th><th>${this.state.displayLeverage}x 毛 / 净收益率</th><th>MFE / MAE</th><th>成本后结果</th><th>最大持有期</th></tr></thead><tbody>${items.map((item) => `<tr><td>${this.formatDate(item.signal_time)}</td><td><strong>${this.escape(item.symbol)}</strong><small>${this.escape(item.contract_symbol)}</small></td><td><span class="prediction-direction ${item.direction === "short" ? "short" : ""}">${item.direction === "long" ? "做多" : "做空"}</span></td><td><span class="technical-state ${item.technical_confirmed ? "confirmed" : "candidate"}">${item.technical_confirmed ? "技术已确认" : "新闻候选"}</span></td><td>${Number(item.news_score).toFixed(1)} / ${Number(item.indicator_score).toFixed(1)}<small>组合 ${Number(item.combined_score).toFixed(1)}</small></td><td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}</td><td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${this.exitReasonLabel(item.exit_reason)} · ${item.settled_price_at ? this.formatDate(item.settled_price_at) : "退出行情不足"}</small></td><td class="${Number(item.directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净 ${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)} · 标的净 ${metricBps(item.net_directional_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(item.estimated_cost_bps || 0)))} · 费/滑点/资金已计入</small></td><td>${metricBps(item.max_favorable_bps)}<small>${metricBps(item.max_adverse_bps)}</small></td><td><span class="prediction-result ${this.escape(item.result || "unavailable")}">${this.analyticsResultLabel(item.result)}</span></td><td>${this.formatDate(item.expires_at)}<small>${this.escape(item.timeframe)} 上限</small></td></tr>`).join("")}</tbody></table></div>`;
     target.insertAdjacentHTML("beforeend", this.predictionPaginationMarkup(data.pagination || {}, items.length));
   }
 
@@ -2134,6 +2130,7 @@ class AiMonitorDashboard extends HTMLElement {
   horizonLabel(value) { return ({ intraday: "日内", short_term: "短期", medium_term: "中期", long_term: "长期" })[value] || "周期待定"; }
   categoryLabel(value) { return ({ macro: "宏观", company: "公司", earnings: "财报", policy: "政策", geopolitics: "地缘", commodity: "商品", crypto: "加密", other: "其他" })[value] || "分类待定"; }
   analyticsResultLabel(value) { return ({ win: "命中", loss: "未命中", flat: "持平", unavailable: "行情不足" })[value] || "行情不足"; }
+  exitReasonLabel(value) { return ({ take_profit: "触发止盈", stop_loss: "触发止损", score_breakdown: "综合评分转弱", score_reversal: "方向反转", max_holding_time: "最大持有期退出", legacy_horizon_close: "旧版到期结算" })[value] || "退出原因待确认"; }
 }
 
 if (!window.customElements.get("ai-monitor-dashboard")) {

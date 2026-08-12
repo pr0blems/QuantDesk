@@ -11,8 +11,8 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -105,7 +105,14 @@ def create_replay_run(
             "news_policy": "published_at <= signal_at; no future articles",
             "indicator_policy": "closed candles only; prediction_* features are unavailable",
             "entry_policy": "next bar open after signal bar closes",
-            "exit_policy": "entry bar close after one timeframe",
+            "exit_candle_policy": (
+                "15m closed candles for execution and score cadence; signal indicators "
+                "remain on the configured timeframe"
+            ),
+            "exit_policy": (
+                "each closed bar: first stop/target touch; then confirmed score exit; "
+                "hard time cap last"
+            ),
             "sample_policy": "60% train + two-bar embargo + remaining OOS",
             "realtime_tables_untouched": True,
         },
@@ -165,6 +172,53 @@ def replay_run_out(run: AiMonitorReplayRun) -> dict[str, Any]:
         "created_at": _as_utc(run.created_at),
         "updated_at": _as_utc(run.updated_at),
     }
+
+
+def _record_kline_manifest(
+    db: Session,
+    run: AiMonitorReplayRun,
+    *,
+    symbol: str,
+    data_type: str,
+    timeframe: str,
+    purpose: str,
+    candles: Sequence[Mapping[str, Any]],
+    archive: Mapping[str, Any],
+) -> AiMonitorReplayDatasetManifest:
+    """Create or refresh a replay kline manifest without duplicate recovery rows."""
+
+    manifest = db.scalar(
+        select(AiMonitorReplayDatasetManifest).where(
+            AiMonitorReplayDatasetManifest.run_id == run.id,
+            AiMonitorReplayDatasetManifest.source == "binance_vision",
+            AiMonitorReplayDatasetManifest.symbol == symbol,
+            AiMonitorReplayDatasetManifest.data_type == data_type,
+        )
+    )
+    if manifest is None:
+        manifest = AiMonitorReplayDatasetManifest(
+            run_id=run.id,
+            user_id=run.user_id,
+            source="binance_vision",
+            symbol=symbol,
+            data_type=data_type,
+        )
+        db.add(manifest)
+    manifest.coverage_start_at = (
+        _ms_datetime(candles[0]["open_time"]) if candles else None
+    )
+    manifest.coverage_end_at = (
+        _ms_datetime(candles[-1]["open_time"]) if candles else None
+    )
+    manifest.row_count = len(candles)
+    manifest.sha256 = _hash_json(archive.get("sha256s") or [])
+    manifest.exact_point_in_time = True
+    manifest.details_json = {
+        **dict(archive),
+        "timeframe": timeframe,
+        "purpose": purpose,
+    }
+    return manifest
 
 
 def execute_replay_run(engine: Engine, run_public_id: str, symbols_config: Any) -> None:
@@ -265,15 +319,29 @@ def _execute(
             news_manifest.row_count = news_count
             news_manifest.sha256 = news_dataset_hash
             news_manifest.details_json = news_details
-        completed = set(
-            db.scalars(
-                select(AiMonitorReplayDatasetManifest.symbol).where(
-                    AiMonitorReplayDatasetManifest.run_id == run.id,
-                    AiMonitorReplayDatasetManifest.source == "binance_vision",
-                    AiMonitorReplayDatasetManifest.data_type == "klines",
-                )
-            ).all()
+        manifest_types_by_symbol: dict[str, set[str]] = {}
+        for manifest_symbol, data_type in db.execute(
+            select(
+                AiMonitorReplayDatasetManifest.symbol,
+                AiMonitorReplayDatasetManifest.data_type,
+            ).where(
+                AiMonitorReplayDatasetManifest.run_id == run.id,
+                AiMonitorReplayDatasetManifest.source == "binance_vision",
+            )
+        ).all():
+            manifest_types_by_symbol.setdefault(str(manifest_symbol), set()).add(
+                str(data_type)
+            )
+        required_manifest_types = (
+            {"klines"}
+            if run.timeframe == "15m"
+            else {"klines", "exit_klines_15m"}
         )
+        completed = {
+            manifest_symbol
+            for manifest_symbol, data_types in manifest_types_by_symbol.items()
+            if required_manifest_types.issubset(data_types)
+        }
         run.total_events = news_count
         run.completed_symbols = len(completed)
         run.generated_signals = int(
@@ -304,46 +372,78 @@ def _execute(
             if run is None or run.status != "running":
                 return
             symbol = reverse_map.get(contract, contract.removesuffix("USDT"))
-            archive = ensure_archive_klines(
-                repository.engine,
-                contract,
-                run.timeframe,
-                max(
-                    run.start_at,
-                    _ms_datetime(
-                        int(
-                            (run.config_snapshot_json or {})
-                            .get("contract_onboard_ms", {})
-                            .get(contract, 0)
-                        )
-                    )
-                    if int(
+            archive_start = max(
+                run.start_at,
+                _ms_datetime(
+                    int(
                         (run.config_snapshot_json or {})
                         .get("contract_onboard_ms", {})
                         .get(contract, 0)
                     )
-                    else run.start_at,
-                ),
+                )
+                if int(
+                    (run.config_snapshot_json or {})
+                    .get("contract_onboard_ms", {})
+                    .get(contract, 0)
+                )
+                else run.start_at,
+            )
+            archive = ensure_archive_klines(
+                repository.engine,
+                contract,
+                run.timeframe,
+                archive_start,
                 run.end_at,
             )
+            exit_archive = archive
+            if run.timeframe != "15m":
+                exit_archive = ensure_archive_klines(
+                    repository.engine,
+                    contract,
+                    "15m",
+                    archive_start,
+                    run.end_at,
+                )
+            # Archive upserts use independent engine transactions. End the
+            # session's earlier repeatable-read snapshot before loading them.
+            db.commit()
             candles = _load_candles(
                 db, contract, run.timeframe, run.start_at, run.end_at
             )
-            manifest = AiMonitorReplayDatasetManifest(
-                run_id=run.id,
-                user_id=run.user_id,
-                source="binance_vision",
+            _record_kline_manifest(
+                db,
+                run,
                 symbol=contract,
                 data_type="klines",
-                coverage_start_at=_ms_datetime(candles[0]["open_time"]) if candles else None,
-                coverage_end_at=_ms_datetime(candles[-1]["open_time"]) if candles else None,
-                row_count=len(candles),
-                sha256=_hash_json(archive["sha256s"]),
-                exact_point_in_time=True,
-                details_json=archive,
+                timeframe=run.timeframe,
+                purpose="signal_generation",
+                candles=candles,
+                archive=archive,
             )
-            db.add(manifest)
-            generated = _replay_symbol(db, run, symbol, contract, news_by_symbol.get(symbol, []), candles)
+            exit_candles = candles
+            if run.timeframe != "15m":
+                exit_candles = _load_candles(
+                    db, contract, "15m", run.start_at, run.end_at
+                )
+                _record_kline_manifest(
+                    db,
+                    run,
+                    symbol=contract,
+                    data_type="exit_klines_15m",
+                    timeframe="15m",
+                    purpose="exit_execution_and_score_cadence",
+                    candles=exit_candles,
+                    archive=exit_archive,
+                )
+            generated = _replay_symbol(
+                db,
+                run,
+                symbol,
+                contract,
+                news_by_symbol.get(symbol, []),
+                candles,
+                exit_candles,
+            )
             run.completed_symbols += 1
             run.generated_signals += generated
             run.settled_signals += generated
@@ -574,6 +674,206 @@ def _load_candles(
     return [dict(item) for item in rows]
 
 
+def _historical_exit_decision(
+    candles: Sequence[Mapping[str, Any]],
+    score_observations: Iterable[Mapping[str, Any]],
+    *,
+    entry_price: float,
+    direction: str,
+    risk_plan: Mapping[str, Any],
+    start_ms: int,
+    due_ms: int,
+    timeframe_ms: int,
+    exit_threshold: float,
+) -> dict[str, Any] | None:
+    """Replay the live exit policy using only information known at each bar close.
+
+    Price barriers are evaluated before the score observed at that bar's close.
+    Score reversals exit immediately, while weakening in the original direction
+    needs two consecutive observations below the frozen entry threshold.  The
+    hard cap is considered last, so equal-time decisions have the same
+    conservative priority as the live settlement path.
+    """
+
+    score_iterator = iter(score_observations)
+    pending_score: dict[str, Any] | None = None
+    score_history_exhausted = False
+    normalized_direction = "short" if direction == "short" else "long"
+    consecutive_low_scores = 0
+    latest_score: dict[str, Any] | None = None
+    observed_bar_count = 0
+    for candle in candles:
+        try:
+            open_ms = int(candle.get("open_time") or 0)
+            if 0 < open_ms < 1_000_000_000_000:
+                open_ms *= 1_000
+            close_price = float(candle.get("close") or 0)
+        except (TypeError, ValueError):
+            continue
+        close_ms = open_ms + timeframe_ms
+        # A candle opening at the cap has not closed yet.  Its high/low must not
+        # influence a decision whose information cutoff is ``due_ms``.
+        if open_ms < start_ms or open_ms >= due_ms or close_ms > due_ms:
+            continue
+        if close_price <= 0:
+            continue
+        observed_bar_count += 1
+        barrier = ai_monitor.prediction_price_barrier_exit(
+            [candle],
+            entry_price,
+            normalized_direction,
+            risk_plan,
+            open_ms,
+            close_ms,
+            timeframe_ms=timeframe_ms,
+        )
+        if barrier is not None:
+            return {
+                **barrier,
+                "observed_bar_count": observed_bar_count,
+                "score_at_exit": latest_score,
+            }
+
+        while not score_history_exhausted and (
+            pending_score is None
+            or int(pending_score.get("price_time_ms") or 0) < close_ms
+        ):
+            try:
+                pending_score = dict(next(score_iterator))
+            except StopIteration:
+                score_history_exhausted = True
+                pending_score = None
+                break
+        score = (
+            pending_score
+            if pending_score is not None
+            and int(pending_score.get("price_time_ms") or 0) == close_ms
+            else None
+        )
+        if score is not None:
+            pending_score = None
+            latest_score = score
+            observed_direction = str(score.get("direction") or normalized_direction)
+            if (
+                observed_direction in {"long", "short"}
+                and observed_direction != normalized_direction
+            ):
+                return {
+                    "reason": "score_reversal",
+                    "price": close_price,
+                    "price_time_ms": close_ms,
+                    "same_bar_conflict": False,
+                    "gap_execution": False,
+                    "confirmation_points": 1,
+                    "exit_threshold": exit_threshold,
+                    "observed_bar_count": observed_bar_count,
+                    "score_at_exit": latest_score,
+                }
+            try:
+                combined = float(score.get("combined"))
+            except (TypeError, ValueError):
+                consecutive_low_scores = 0
+            else:
+                consecutive_low_scores = (
+                    consecutive_low_scores + 1
+                    if combined < exit_threshold
+                    else 0
+                )
+                if consecutive_low_scores >= 2:
+                    return {
+                        "reason": "score_breakdown",
+                        "price": close_price,
+                        "price_time_ms": close_ms,
+                        "same_bar_conflict": False,
+                        "gap_execution": False,
+                        "confirmation_points": 2,
+                        "exit_threshold": exit_threshold,
+                        "observed_bar_count": observed_bar_count,
+                        "score_at_exit": latest_score,
+                    }
+
+        if close_ms >= due_ms:
+            return {
+                "reason": "max_holding_time",
+                "price": close_price,
+                "price_time_ms": close_ms,
+                "same_bar_conflict": False,
+                "gap_execution": False,
+                "observed_bar_count": observed_bar_count,
+                "score_at_exit": latest_score,
+            }
+    return None
+
+
+def _historical_score_observation(
+    news: Sequence[Mapping[str, Any]],
+    evaluated: Mapping[str, Any],
+    *,
+    held_direction: str,
+    observed_at_seconds: int,
+    configured_keys: Sequence[str],
+    minimum_news_score: float,
+    minimum_news_mentions: int,
+    news_lookback_seconds: int,
+    minimum_indicator_score: float,
+    minimum_combined_score: float,
+    news_weight: float,
+    technical_weight: float,
+) -> dict[str, Any]:
+    """Build one point-in-time score observation from a closed historical bar."""
+
+    usable_weight = max(news_weight + technical_weight, 1.0)
+    directions = (held_direction, "short" if held_direction == "long" else "long")
+    candidates: dict[str, dict[str, Any]] = {}
+    for candidate_direction in directions:
+        news_snapshot = _historical_news_snapshot(
+            news,
+            direction=candidate_direction,
+            signal_at_seconds=observed_at_seconds,
+            minimum_score=minimum_news_score,
+            minimum_mentions=minimum_news_mentions,
+            lookback_seconds=news_lookback_seconds,
+        )
+        indicator_snapshot = _historical_indicator_snapshot(
+            evaluated, configured_keys, candidate_direction
+        )
+        news_score = (
+            sum(float(item["score"]) for item in news_snapshot) / len(news_snapshot)
+            if news_snapshot
+            else 0.0
+        )
+        technical_score = float(indicator_snapshot["score"])
+        combined_score = (
+            news_score * news_weight + technical_score * technical_weight
+        ) / usable_weight
+        candidates[candidate_direction] = {
+            "direction": candidate_direction,
+            "news": news_score,
+            "technical": technical_score,
+            "combined": combined_score,
+            "entry_confirmed": bool(
+                news_snapshot
+                and indicator_snapshot["available_keys"]
+                and indicator_snapshot["policy_passed"]
+                and technical_score >= minimum_indicator_score
+                and combined_score >= minimum_combined_score
+            ),
+        }
+    opposite_direction = directions[1]
+    selected = (
+        candidates[opposite_direction]
+        if candidates[opposite_direction]["entry_confirmed"]
+        else candidates[held_direction]
+    )
+    return {
+        "price_time_ms": observed_at_seconds * 1_000,
+        "direction": selected["direction"],
+        "news": round(float(selected["news"]), 4),
+        "technical": round(float(selected["technical"]), 4),
+        "combined": round(float(selected["combined"]), 4),
+    }
+
+
 def _replay_symbol(
     db: Session,
     run: AiMonitorReplayRun,
@@ -581,11 +881,16 @@ def _replay_symbol(
     contract: str,
     news: Sequence[Mapping[str, Any]],
     candles: Sequence[Mapping[str, Any]],
+    exit_candles: Sequence[Mapping[str, Any]] | None = None,
 ) -> int:
     if len(candles) < 122 or not news:
         return 0
     interval_ms = TIMEFRAME_SECONDS[run.timeframe] * 1000
+    exit_interval_ms = TIMEFRAME_SECONDS["15m"] * 1000
     open_times = [int(item["open_time"]) for item in candles]
+    close_times = [open_time + interval_ms for open_time in open_times]
+    execution_candles = exit_candles if exit_candles is not None else candles
+    execution_open_times = [int(item["open_time"]) for item in execution_candles]
     config = dict(run.config_snapshot_json or {})
     min_news = float(config.get("minimum_news_confidence", 0.6)) * 100
     min_news_mentions = max(1, int(config.get("minimum_news_mentions", 1)))
@@ -649,16 +954,88 @@ def _replay_symbol(
         news_weight = float(config.get("news_score_weight", 45))
         technical_weight = float(config.get("technical_score_weight", 35))
         usable_weight = max(news_weight + technical_weight, 1.0)
-        combined_score = (news_score * news_weight + indicator_score * technical_weight) / usable_weight
+        combined_score = (
+            news_score * news_weight + indicator_score * technical_weight
+        ) / usable_weight
         if combined_score < min_combined:
             continue
         entry_price = float(candles[entry_index]["open"])
-        exit_price = float(candles[due_index]["close"])
-        if entry_price <= 0 or exit_price <= 0:
+        if entry_price <= 0:
             continue
         signal_at = _ms_datetime(signal_at_ms)
-        entry_at = _ms_datetime(open_times[entry_index])
-        due_at = _ms_datetime(open_times[due_index] + interval_ms)
+        entry_at_ms = open_times[entry_index]
+        due_at_ms = open_times[due_index] + interval_ms
+        entry_at = _ms_datetime(entry_at_ms)
+        due_at = _ms_datetime(due_at_ms)
+        risk_plan = ai_monitor.virtual_risk_plan_snapshot(
+            entry_price=entry_price,
+            direction=direction,
+            timeframe=run.timeframe,
+        )
+        execution_start = bisect_left(execution_open_times, entry_at_ms)
+        execution_end = bisect_left(execution_open_times, due_at_ms)
+        path = execution_candles[execution_start:execution_end]
+        expected_execution_times = list(
+            range(entry_at_ms, due_at_ms, exit_interval_ms)
+        )
+        if [int(item["open_time"]) for item in path] != expected_execution_times:
+            # Never bridge a missing execution candle with a later close; doing
+            # so would hide an unobserved barrier or score transition.
+            continue
+
+        def score_observation_stream(
+            execution_path: Sequence[Mapping[str, Any]] = path,
+            held_direction: str = direction,
+            frozen_news_weight: float = news_weight,
+            frozen_technical_weight: float = technical_weight,
+        ) -> Iterable[dict[str, Any]]:
+            for execution_bar in execution_path:
+                observed_at_ms = int(execution_bar["open_time"]) + exit_interval_ms
+                closed_signal_index = bisect_right(close_times, observed_at_ms) - 1
+                if closed_signal_index < 119:
+                    continue
+                bar_evaluation = evaluate_directional_strategy_indicators(
+                    candles[
+                        max(0, closed_signal_index - 119) : closed_signal_index + 1
+                    ],
+                    run.timeframe,
+                )
+                yield _historical_score_observation(
+                    news,
+                    bar_evaluation,
+                    held_direction=held_direction,
+                    observed_at_seconds=observed_at_ms // 1_000,
+                    configured_keys=configured_keys,
+                    minimum_news_score=min_news,
+                    minimum_news_mentions=min_news_mentions,
+                    news_lookback_seconds=news_lookback_seconds,
+                    minimum_indicator_score=min_indicator,
+                    minimum_combined_score=min_combined,
+                    news_weight=frozen_news_weight,
+                    technical_weight=frozen_technical_weight,
+                )
+
+        exit_threshold = max(0.0, min_combined - 5.0)
+        exit_decision = _historical_exit_decision(
+            path,
+            score_observation_stream(),
+            entry_price=entry_price,
+            direction=direction,
+            risk_plan=risk_plan,
+            start_ms=entry_at_ms,
+            due_ms=due_at_ms,
+            timeframe_ms=exit_interval_ms,
+            exit_threshold=exit_threshold,
+        )
+        if exit_decision is None:
+            continue
+        exit_reason = str(exit_decision["reason"])
+        exit_price = float(exit_decision["price"])
+        exit_at = _ms_datetime(int(exit_decision["price_time_ms"]))
+        exit_score = exit_decision.get("score_at_exit")
+        exit_score = dict(exit_score) if isinstance(exit_score, Mapping) else {}
+        if exit_price <= 0:
+            continue
         dedup_key = hashlib.sha256(
             f"{run.id}|{contract}|{direction}|{signal_at_ms}".encode()
         ).hexdigest()
@@ -699,6 +1076,12 @@ def _replay_symbol(
                 },
                 "configured_indicator_keys": configured_keys,
                 "unavailable_indicator_keys": indicator_snapshot["unavailable_keys"],
+                "risk_plan": risk_plan,
+                "score_exit_threshold": exit_threshold,
+                "exit_candle_timeframe": "15m",
+                "exit_policy": (
+                    "first_price_barrier_then_confirmed_score_exit_then_hard_time_cap"
+                ),
             },
         )
         db.add(signal)
@@ -707,11 +1090,21 @@ def _replay_symbol(
         if direction == "short":
             gross = -gross
         costs = ai_monitor.prediction_cost_breakdown(
-            signal_at, due_at, CONSERVATIVE_COST_MODEL
+            signal_at, exit_at, CONSERVATIVE_COST_MODEL
         )
         net = gross - float(costs["total_cost_bps"])
-        path = candles[entry_index : due_index + 1]
-        favorable, adverse = _path_metrics(path, entry_price, direction)
+        observed_path = path[: int(exit_decision["observed_bar_count"])]
+        metric_path = (
+            observed_path[:-1]
+            if exit_reason in {"take_profit", "stop_loss"}
+            else observed_path
+        )
+        favorable, adverse = _path_metrics(
+            metric_path,
+            entry_price,
+            direction,
+            terminal_price=exit_price,
+        )
         result = "win" if net > 0 else "loss" if net < 0 else "flat"
         db.add(
             AiMonitorReplayOutcome(
@@ -719,7 +1112,7 @@ def _replay_symbol(
                 run_id=run.id,
                 user_id=run.user_id,
                 sample_split=split,
-                exit_at=due_at,
+                exit_at=exit_at,
                 exit_price=Decimal(str(exit_price)),
                 gross_directional_return_bps=Decimal(str(round(gross, 8))),
                 estimated_cost_bps=Decimal(str(costs["total_cost_bps"])),
@@ -728,9 +1121,25 @@ def _replay_symbol(
                 max_adverse_bps=Decimal(str(round(adverse, 8))),
                 result=result,
                 settlement_json={
-                    "version": "historical_replay_settlement_v1",
+                    "version": "historical_replay_barrier_score_v3",
                     "entry_policy": "next_bar_open",
-                    "exit_policy": "one_timeframe_later_close",
+                    "exit_policy": (
+                        "first_price_barrier_then_confirmed_score_exit_then_hard_time_cap"
+                    ),
+                    "exit_reason": exit_reason,
+                    "risk_plan": risk_plan,
+                    "score_at_exit": {
+                        "direction": exit_score.get("direction"),
+                        "technical": exit_score.get("technical"),
+                        "combined": exit_score.get("combined"),
+                        "breakdown_threshold": round(exit_threshold, 4),
+                        "confirmation_points": exit_decision.get(
+                            "confirmation_points"
+                        ),
+                    },
+                    "same_bar_conflict": bool(
+                        exit_decision.get("same_bar_conflict")
+                    ),
                     "cost_breakdown": costs,
                 },
             )
@@ -919,10 +1328,17 @@ def _criterion(key: str, label: str, passed: bool, current: Any, required: str) 
 
 
 def _path_metrics(
-    candles: Sequence[Mapping[str, Any]], entry: float, direction: str
+    candles: Sequence[Mapping[str, Any]],
+    entry: float,
+    direction: str,
+    *,
+    terminal_price: float | None = None,
 ) -> tuple[float, float]:
-    highs = [float(item["high"]) for item in candles]
-    lows = [float(item["low"]) for item in candles]
+    highs = [entry, *(float(item["high"]) for item in candles)]
+    lows = [entry, *(float(item["low"]) for item in candles)]
+    if terminal_price is not None and terminal_price > 0:
+        highs.append(terminal_price)
+        lows.append(terminal_price)
     if direction == "long":
         favorable = (max(highs) / entry - 1) * 10_000
         adverse = (min(lows) / entry - 1) * 10_000

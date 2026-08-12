@@ -882,6 +882,12 @@ class AiMonitorPrediction(Base):
             "readiness_status IN ('research_only', 'shadow_ready')",
             name="valid_readiness_status",
         ),
+        CheckConstraint(
+            "exit_reason IS NULL OR exit_reason IN "
+            "('take_profit', 'stop_loss', 'score_breakdown', 'score_reversal', "
+            "'max_holding_time', 'legacy_horizon_close')",
+            name="valid_exit_reason",
+        ),
         UniqueConstraint("public_id", name="uq_ai_monitor_predictions_public_id"),
         UniqueConstraint("opportunity_id", name="uq_ai_monitor_predictions_opportunity_id"),
         ForeignKeyConstraint(
@@ -943,6 +949,12 @@ class AiMonitorPrediction(Base):
     )
     exit_price: Mapped[Decimal | None] = mapped_column(
         Numeric(30, 12), comment="预测到期时的参考价格"
+    )
+    exit_at: Mapped[datetime | None] = mapped_column(
+        DateTime, comment="Virtual position exit time (UTC)"
+    )
+    exit_reason: Mapped[str | None] = mapped_column(
+        String(32), comment="Virtual exit trigger"
     )
     raw_return_bps: Mapped[Decimal | None] = mapped_column(
         Numeric(20, 8), comment="到期价格相对入场价的原始涨跌基点"

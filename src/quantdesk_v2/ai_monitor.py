@@ -53,7 +53,7 @@ PREDICTION_SETTLEMENT_POLL_SECONDS = 20
 PREDICTION_FEE_BPS_PER_SIDE = 5.0
 PREDICTION_SLIPPAGE_BPS_PER_SIDE = 3.0
 PREDICTION_FUNDING_BPS_PER_8H = 1.0
-PREDICTION_SETTLEMENT_VERSION = "path_cost_v2"
+PREDICTION_SETTLEMENT_VERSION = "barrier_score_cost_v3"
 INDICATOR_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
         "key": "trend_confirmation",
@@ -558,6 +558,269 @@ def append_score_history(
     return history[-max(2, int(limit)) :]
 
 
+def prediction_live_score_snapshot(
+    prediction: AiMonitorPrediction,
+    candidate: Mapping[str, Any],
+    repository: MonitorRepository,
+    market_flow_inputs: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Rescore a pending prediction using only its frozen strategy identity."""
+
+    evidence = dict(prediction.evidence_json or {})
+    configured_keys = evidence.get("configured_indicator_keys")
+    if not isinstance(configured_keys, list):
+        frozen_indicators = evidence.get("indicators")
+        configured_keys = (
+            [
+                str(item.get("key"))
+                for item in frozen_indicators
+                if isinstance(item, Mapping) and item.get("key")
+            ]
+            if isinstance(frozen_indicators, list)
+            else []
+        )
+    configured_keys = [str(key) for key in configured_keys if str(key)]
+    if not configured_keys:
+        return None
+
+    direction = str(candidate.get("direction") or prediction.direction)
+    if direction not in {"long", "short"}:
+        return None
+    try:
+        scan = repository.strategy_indicators(
+            prediction.contract_symbol,
+            prediction.timeframe,
+        )
+    except MonitorUnavailable:
+        return None
+    _, indicator_evidence = match_configured_indicators(
+        scan,
+        configured_keys,
+        direction,
+    )
+    indicator_policy = configured_indicator_policy(indicator_evidence)
+    if int(indicator_policy.get("core_available_count") or 0) <= 0:
+        return None
+    technical_score = float(indicator_policy["technical_score"])
+
+    stored_weights = evidence.get("score_weights")
+    if isinstance(stored_weights, Mapping):
+        try:
+            raw_weights = {
+                key: float(stored_weights[key])
+                for key in ("news", "technical", "market_flow")
+            }
+            total_weight = sum(raw_weights.values())
+            if (
+                total_weight <= 0
+                or any(value < 0 or not math.isfinite(value) for value in raw_weights.values())
+            ):
+                raise ValueError("invalid frozen score weights")
+            weights = {
+                key: value / total_weight for key, value in raw_weights.items()
+            }
+        except (KeyError, TypeError, ValueError):
+            weights = opportunity_score_weights()
+    else:
+        weights = opportunity_score_weights()
+
+    flow = market_flow_snapshot(
+        market_flow_inputs,
+        symbol=prediction.symbol,
+        contract_symbol=prediction.contract_symbol,
+        direction=direction,
+        now=now,
+    )
+    news_score = float(candidate.get("news_score") or 0)
+    flow_score = float(flow["score"])
+    combined_score = round(
+        news_score * weights["news"]
+        + technical_score * weights["technical"]
+        + flow_score * weights["market_flow"],
+        4,
+    )
+    market = dict(
+        market_flow_inputs.get("ticker", {}).get(prediction.contract_symbol.upper(), {})
+    )
+    reference_price = float(market.get("price") or 0)
+    reference_time_ms = int(market.get("ts") or 0)
+    if 0 < reference_time_ms < 1_000_000_000_000:
+        reference_time_ms *= 1_000
+    if not (0 < reference_time_ms <= _datetime_ms(now)):
+        reference_time_ms = 0
+    frozen_readiness = evidence.get("live_readiness")
+    frozen_readiness = (
+        dict(frozen_readiness) if isinstance(frozen_readiness, Mapping) else {}
+    )
+    minimum_indicator_score = float(
+        frozen_readiness.get("minimum_indicator_score", 65.0)
+    )
+    minimum_combined_score = float(
+        frozen_readiness.get("minimum_combined_score", 70.0)
+    )
+    entry_confirmed = bool(
+        indicator_policy.get("passed")
+        and technical_score >= minimum_indicator_score
+        and combined_score >= minimum_combined_score
+        and not bool(flow.get("hard_conflict"))
+    )
+    return {
+        "news": news_score,
+        "technical": technical_score,
+        "market_flow": flow_score,
+        "combined": combined_score,
+        "direction": direction,
+        "calculated_at": now.isoformat(),
+        "reference_price": (
+            reference_price if reference_price > 0 and reference_time_ms else None
+        ),
+        "reference_price_time_ms": reference_time_ms or None,
+        "entry_confirmed": entry_confirmed,
+        "strategy_identity": {
+            "timeframe": prediction.timeframe,
+            "indicator_keys": configured_keys,
+            "score_weights": {
+                key: round(value, 8) for key, value in weights.items()
+            },
+            "minimum_indicator_score": minimum_indicator_score,
+            "minimum_combined_score": minimum_combined_score,
+        },
+    }
+
+
+def refresh_pending_prediction_scores(
+    db: Session,
+    *,
+    user_id: int,
+    news_rows: Sequence[News],
+    symbol_map: Mapping[str, str],
+    repository: MonitorRepository,
+    market_flow_inputs: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+) -> int:
+    """Refresh pending ledgers from raw news using each prediction's frozen policy."""
+
+    statement = (
+        select(AiMonitorPrediction)
+        .where(
+            AiMonitorPrediction.user_id == user_id,
+            AiMonitorPrediction.status == "pending",
+        )
+        .order_by(AiMonitorPrediction.id)
+        .limit(500)
+        .execution_options(populate_existing=True)
+        .with_for_update(skip_locked=True)
+    )
+    predictions = list(db.scalars(statement).all())
+    candidate_cache: dict[
+        tuple[float, int, int], dict[tuple[str, str], dict[str, Any]]
+    ] = {}
+    updated = 0
+    for prediction in predictions:
+        evidence = dict(prediction.evidence_json or {})
+        try:
+            minimum_confidence = max(
+                0.0,
+                min(1.0, float(evidence.get("minimum_news_score", 60.0)) / 100.0),
+            )
+            minimum_mentions = max(
+                1,
+                int(evidence.get("minimum_news_mentions", 1)),
+            )
+            news_lookback_hours = max(
+                1,
+                min(168, int(evidence.get("news_lookback_hours", 24))),
+            )
+        except (TypeError, ValueError):
+            minimum_confidence, minimum_mentions, news_lookback_hours = 0.6, 1, 24
+        policy_key = (minimum_confidence, minimum_mentions, news_lookback_hours)
+        if policy_key not in candidate_cache:
+            news_cutoff = int(
+                (now.replace(tzinfo=UTC) - timedelta(hours=news_lookback_hours)).timestamp()
+            )
+            directional = aggregate_news_candidates(
+                [
+                    row
+                    for row in news_rows
+                    if int(_row_value(row, "ts", 0) or 0) >= news_cutoff
+                ],
+                symbol_map,
+                minimum_confidence=minimum_confidence,
+                minimum_mentions=minimum_mentions,
+            )
+            candidate_cache[policy_key] = {
+                (str(item.get("symbol") or ""), str(item.get("direction") or "")): item
+                for item in directional
+            }
+        candidates = candidate_cache[policy_key]
+        held_candidate = candidates.get((prediction.symbol, prediction.direction)) or {
+            "symbol": prediction.symbol,
+            "contract_symbol": prediction.contract_symbol,
+            "direction": prediction.direction,
+            "news_score": 0.0,
+            "news": [],
+        }
+        opposite_direction = "short" if prediction.direction == "long" else "long"
+        opposite_candidate = candidates.get((prediction.symbol, opposite_direction))
+        held_snapshot = prediction_live_score_snapshot(
+            prediction,
+            held_candidate,
+            repository,
+            market_flow_inputs,
+            now,
+        )
+        opposite_snapshot = (
+            prediction_live_score_snapshot(
+                prediction,
+                opposite_candidate,
+                repository,
+                market_flow_inputs,
+                now,
+            )
+            if opposite_candidate is not None
+            else None
+        )
+        snapshot = (
+            opposite_snapshot
+            if opposite_snapshot is not None
+            and bool(opposite_snapshot.get("entry_confirmed"))
+            else held_snapshot
+        )
+        if snapshot is None:
+            continue
+        frozen_seed = {
+            "news": float(prediction.signal_news_score or 0),
+            "technical": float(prediction.signal_indicator_score or 0),
+            "market_flow": float(
+                (evidence.get("signal_scores") or {}).get("market_flow") or 0
+            ),
+            "combined": float(prediction.confidence_score),
+            "direction": prediction.direction,
+            "calculated_at": prediction.predicted_at.isoformat(),
+        }
+        evidence["live_score_history"] = append_score_history(
+            {"score_history": evidence.get("live_score_history")},
+            snapshot,
+            seed_snapshots=[frozen_seed],
+        )
+        evidence["latest_live_score"] = snapshot
+        evidence["score_exit_policy"] = {
+            "version": "two_scan_hysteresis_v1",
+            "direction_reversal_points": 1,
+            "score_breakdown_points": 2,
+            "combined_hysteresis_points": 5.0,
+            "news_policy": {
+                "minimum_confidence": minimum_confidence,
+                "minimum_mentions": minimum_mentions,
+                "lookback_hours": news_lookback_hours,
+            },
+        }
+        prediction.evidence_json = evidence
+        updated += 1
+    return updated
+
+
 def virtual_entry_gate_snapshot(
     *,
     direction: str,
@@ -744,7 +1007,7 @@ def virtual_risk_plan_snapshot(
             round(take_profit_price, 12) if take_profit_price > 0 else None
         ),
         "risk_reward_ratio": 2.0,
-        "execution_policy": "display_only_until_path_settlement_v1",
+        "execution_policy": "price_barrier_then_score_exit_v2",
     }
 
 
@@ -782,7 +1045,8 @@ def virtual_position_snapshot(
             0.0, (datetime.now(UTC) - market_datetime).total_seconds()
         )
     if settled:
-        market_at = prediction.due_at.replace(tzinfo=UTC).isoformat()
+        settled_at = getattr(prediction, "exit_at", None) or prediction.due_at
+        market_at = settled_at.replace(tzinfo=UTC).isoformat()
         market_age_seconds = None
     if entry_price <= 0 or current_price <= 0:
         return {
@@ -849,6 +1113,14 @@ def virtual_position_snapshot(
         "profit_state": "profit" if net_bps > 0 else "loss" if net_bps < 0 else "flat",
         "target_state": target_state,
         "risk_plan": risk_plan,
+        "exit_reason": getattr(prediction, "exit_reason", None) if settled else None,
+        "exit_at": (
+            (getattr(prediction, "exit_at", None) or prediction.due_at)
+            .replace(tzinfo=UTC)
+            .isoformat()
+            if settled
+            else None
+        ),
         "note": "浮盈亏按虚拟方向和最新合约行情计算；每 10,000 U 为标准化名义本金，不代表真实持仓。",
     }
 
@@ -1162,6 +1434,263 @@ def prediction_path_metrics(
     }
 
 
+def prediction_price_barrier_exit(
+    candles: Sequence[Mapping[str, Any]],
+    entry_price: float,
+    direction: str,
+    risk_plan: Mapping[str, Any],
+    start_ms: int,
+    end_ms: int,
+    *,
+    timeframe_ms: int = 15 * 60 * 1_000,
+) -> dict[str, Any] | None:
+    """Return the first stop/target touched by the observed price path.
+
+    When one candle touches both barriers, intrabar ordering is unknowable from
+    OHLC data.  The research ledger deliberately assumes the stop was hit
+    first, avoiding optimistic look-ahead bias.
+    """
+
+    if entry_price <= 0 or end_ms < start_ms:
+        return None
+    stop_price = float(risk_plan.get("stop_loss_price") or 0)
+    target_price = float(risk_plan.get("take_profit_price") or 0)
+    if stop_price <= 0 or target_price <= 0:
+        return None
+    normalized_direction = "short" if direction == "short" else "long"
+    normalized: list[tuple[int, float, float, float]] = []
+    for candle in candles:
+        try:
+            open_time = int(candle.get("open_time") or 0)
+            if 0 < open_time < 1_000_000_000_000:
+                open_time *= 1_000
+            open_price = float(candle.get("open") or 0)
+            high_price = float(candle.get("high") or 0)
+            low_price = float(candle.get("low") or 0)
+        except (TypeError, ValueError):
+            continue
+        # OHLC high/low values are only causal after the candle has closed.
+        # In particular, a candle opening exactly at the hard holding cap must
+        # never contribute its future range to an earlier virtual exit.
+        close_time = open_time + timeframe_ms
+        if not (start_ms <= open_time and close_time <= end_ms):
+            continue
+        if open_price <= 0 or high_price <= 0 or low_price <= 0:
+            continue
+        normalized.append((open_time, open_price, high_price, low_price))
+    for open_time, open_price, high_price, low_price in sorted(normalized):
+        if normalized_direction == "short":
+            if open_price >= stop_price:
+                return {
+                    "reason": "stop_loss",
+                    "price": open_price,
+                    "price_time_ms": open_time,
+                    "same_bar_conflict": False,
+                    "gap_execution": True,
+                }
+            if open_price <= target_price:
+                return {
+                    "reason": "take_profit",
+                    "price": target_price,
+                    "price_time_ms": open_time,
+                    "same_bar_conflict": False,
+                    "gap_execution": True,
+                }
+            stop_hit = high_price >= stop_price
+            target_hit = low_price <= target_price
+        else:
+            if open_price <= stop_price:
+                return {
+                    "reason": "stop_loss",
+                    "price": open_price,
+                    "price_time_ms": open_time,
+                    "same_bar_conflict": False,
+                    "gap_execution": True,
+                }
+            if open_price >= target_price:
+                return {
+                    "reason": "take_profit",
+                    "price": target_price,
+                    "price_time_ms": open_time,
+                    "same_bar_conflict": False,
+                    "gap_execution": True,
+                }
+            stop_hit = low_price <= stop_price
+            target_hit = high_price >= target_price
+        reason = "stop_loss" if stop_hit else "take_profit" if target_hit else ""
+        if not reason:
+            continue
+        return {
+            "reason": reason,
+            "price": stop_price if reason == "stop_loss" else target_price,
+            "price_time_ms": close_time,
+            "same_bar_conflict": bool(stop_hit and target_hit),
+            "gap_execution": False,
+        }
+    return None
+
+
+def prediction_score_exit_signal(
+    evidence: Mapping[str, Any] | None,
+    direction: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+) -> dict[str, Any] | None:
+    """Detect a confirmed score breakdown or directional reversal.
+
+    A score weakening exit needs two consecutive scans below a five-point
+    hysteresis band.  A directional reversal exits immediately.  This keeps a
+    single noisy refresh from closing the virtual position.
+    """
+
+    source = evidence or {}
+    raw_history = source.get("live_score_history") or source.get("score_history")
+    if not isinstance(raw_history, list):
+        return None
+    readiness = source.get("live_readiness")
+    readiness = dict(readiness) if isinstance(readiness, Mapping) else {}
+    entry_threshold = float(readiness.get("minimum_combined_score", 70.0))
+    exit_threshold = max(0.0, entry_threshold - 5.0)
+    observations: list[dict[str, Any]] = []
+    for raw in raw_history:
+        if not isinstance(raw, Mapping):
+            continue
+        calculated_at = raw.get("calculated_at")
+        try:
+            observed_at = datetime.fromisoformat(str(calculated_at).replace("Z", "+00:00"))
+            observed_ms = _datetime_ms(observed_at)
+            combined = float(raw.get("combined"))
+        except (TypeError, ValueError):
+            continue
+        if not (start_ms <= observed_ms <= end_ms):
+            continue
+        try:
+            technical = (
+                float(raw.get("technical"))
+                if raw.get("technical") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            technical = None
+        try:
+            reference_price = (
+                float(raw.get("reference_price"))
+                if raw.get("reference_price") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            reference_price = None
+        try:
+            reference_price_time_ms = (
+                int(raw.get("reference_price_time_ms"))
+                if raw.get("reference_price_time_ms") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            reference_price_time_ms = None
+        observations.append(
+            {
+                "calculated_at": str(calculated_at),
+                "price_time_ms": observed_ms,
+                "combined": combined,
+                "direction": str(raw.get("direction") or direction),
+                "technical": technical,
+                "reference_price": reference_price,
+                "reference_price_time_ms": reference_price_time_ms,
+            }
+        )
+    observations.sort(key=lambda item: item["price_time_ms"])
+    if not observations:
+        return None
+    consecutive_low_scores = 0
+    for observation in observations:
+        if (
+            observation["direction"] in {"long", "short"}
+            and observation["direction"] != direction
+        ):
+            return {
+                **observation,
+                "reason": "score_reversal",
+                "exit_threshold": exit_threshold,
+                "confirmation_points": 1,
+            }
+        consecutive_low_scores = (
+            consecutive_low_scores + 1
+            if observation["combined"] < exit_threshold
+            else 0
+        )
+        if consecutive_low_scores >= 2:
+            return {
+                **observation,
+                "reason": "score_breakdown",
+                "exit_threshold": exit_threshold,
+                "confirmation_points": 2,
+            }
+    return None
+
+
+def prediction_score_exit_price(
+    candles: Sequence[Mapping[str, Any]],
+    score_signal: Mapping[str, Any],
+    *,
+    end_ms: int,
+) -> dict[str, Any] | None:
+    """Resolve a causal execution price for a score-driven virtual exit.
+
+    New observations freeze the executable reference price at scoring time.
+    Legacy observations without such a price may use only the first candle open
+    at or after the signal, never a nearest price from before the signal or a
+    future candle close.
+    """
+
+    try:
+        signal_ms = int(score_signal["price_time_ms"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if signal_ms > end_ms:
+        return None
+    try:
+        reference_price = float(score_signal.get("reference_price") or 0)
+        reference_time_ms = int(score_signal.get("reference_price_time_ms") or 0)
+    except (TypeError, ValueError):
+        reference_price = 0.0
+        reference_time_ms = 0
+    if (
+        reference_price > 0
+        and 0 < reference_time_ms <= signal_ms
+    ):
+        return {
+            "price": reference_price,
+            # The decision cannot execute before the score was calculated,
+            # even when the frozen ticker snapshot itself is slightly older.
+            "price_time_ms": signal_ms,
+            "price_source": "frozen_score_reference",
+            "reference_price_time_ms": reference_time_ms,
+        }
+
+    candidates: list[tuple[int, float]] = []
+    for candle in candles:
+        try:
+            open_time = int(candle.get("open_time") or 0)
+            if 0 < open_time < 1_000_000_000_000:
+                open_time *= 1_000
+            open_price = float(candle.get("open") or 0)
+        except (TypeError, ValueError):
+            continue
+        if signal_ms <= open_time <= end_ms and open_price > 0:
+            candidates.append((open_time, open_price))
+    if not candidates:
+        return None
+    open_time, open_price = min(candidates, key=lambda item: item[0])
+    return {
+        "price": open_price,
+        "price_time_ms": open_time,
+        "price_source": "first_open_after_score",
+        "reference_price_time_ms": None,
+    }
+
+
 def edge_calibration_summary(
     returns_bps: Sequence[float], minimum_samples: int
 ) -> dict[str, Any]:
@@ -1204,6 +1733,7 @@ def historical_edge_calibration(
             AiMonitorPrediction.user_id == user_id,
             AiMonitorPrediction.direction == direction,
             AiMonitorPrediction.status == "completed",
+            AiMonitorPrediction.settlement_version == PREDICTION_SETTLEMENT_VERSION,
             AiMonitorPrediction.directional_return_bps.is_not(None),
             AiMonitorPrediction.signal_indicator_score
             >= Decimal(str(minimum_indicator_score)),
@@ -1651,6 +2181,38 @@ def historical_settlement_price(
     return {"price": price, "price_time_ms": price_time}
 
 
+def historical_closed_settlement_price(
+    candles: Sequence[Mapping[str, Any]],
+    settles_at_ms: int,
+    *,
+    timeframe_ms: int = 15 * 60 * 1_000,
+) -> dict[str, Any] | None:
+    """Return the last candle close observable at a hard holding-time cap."""
+
+    candidates: list[tuple[int, float]] = []
+    for candle in candles:
+        try:
+            open_time = int(candle.get("open_time") or 0)
+            if 0 < open_time < 1_000_000_000_000:
+                open_time *= 1_000
+            close_price = float(candle.get("close") or 0)
+        except (TypeError, ValueError):
+            continue
+        close_time = open_time + timeframe_ms
+        if open_time > 0 and close_price > 0 and close_time <= settles_at_ms:
+            candidates.append((close_time, close_price))
+    if not candidates:
+        return None
+    close_time, close_price = max(candidates, key=lambda item: item[0])
+    if settles_at_ms - close_time > timeframe_ms * 3:
+        return None
+    return {
+        "price": close_price,
+        "price_time_ms": close_time,
+        "price_source": "last_closed_candle_at_cap",
+    }
+
+
 def summarize_historical_opportunities(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Aggregate observed outcomes for the historical-opportunity dashboard."""
 
@@ -1768,6 +2330,7 @@ def strategy_readiness_report(
         .where(
             AiMonitorPrediction.user_id == user_id,
             AiMonitorPrediction.status == "completed",
+            AiMonitorPrediction.settlement_version == PREDICTION_SETTLEMENT_VERSION,
             AiMonitorPrediction.directional_return_bps.is_not(None),
         )
         .order_by(AiMonitorPrediction.predicted_at.desc(), AiMonitorPrediction.id.desc())
@@ -1779,7 +2342,7 @@ def strategy_readiness_report(
     qualifying_cost_config = readiness_cost_config(cost_config)
     costs = [
         prediction_estimated_cost_bps(
-            item.predicted_at, item.due_at, qualifying_cost_config
+            item.predicted_at, item.exit_at or item.due_at, qualifying_cost_config
         )
         for item in predictions
     ]
@@ -1949,6 +2512,7 @@ def historical_opportunity_analytics(
         .where(
             *conditions,
             AiMonitorPrediction.status == "completed",
+            AiMonitorPrediction.settlement_version == PREDICTION_SETTLEMENT_VERSION,
             AiMonitorPrediction.result.is_not(None),
             AiMonitorPrediction.entry_price.is_not(None),
             AiMonitorPrediction.exit_price.is_not(None),
@@ -1959,9 +2523,10 @@ def historical_opportunity_analytics(
     outcomes: list[dict[str, Any]] = []
     for prediction, opportunity in rows:
         gross_return = float(prediction.directional_return_bps or 0)
+        actual_exit_at = prediction.exit_at or prediction.due_at
         cost_breakdown = prediction_cost_breakdown(
             prediction.predicted_at,
-            prediction.due_at,
+            actual_exit_at,
             current_config,
         )
         estimated_cost = float(cost_breakdown["total_cost_bps"])
@@ -1990,7 +2555,8 @@ def historical_opportunity_analytics(
             "combined_score": float(prediction.confidence_score),
             "entry_price": float(prediction.entry_price),
             "exit_price": float(prediction.exit_price),
-            "settled_price_at": prediction.due_at,
+            "settled_price_at": actual_exit_at,
+            "exit_reason": prediction.exit_reason or "legacy_horizon_close",
             "raw_return_bps": float(prediction.raw_return_bps or 0),
             "gross_directional_return_bps": gross_return,
             "estimated_cost_bps": estimated_cost,
@@ -2027,6 +2593,7 @@ def historical_opportunity_analytics(
             ),
             "signal_time": prediction.predicted_at,
             "expires_at": prediction.due_at,
+            "exit_at": actual_exit_at,
             }
         )
     status_rows = db.execute(
@@ -2035,14 +2602,38 @@ def historical_opportunity_analytics(
             AiMonitorOpportunity,
             AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
         )
-        .where(*conditions)
+        .where(
+            *conditions,
+            or_(
+                AiMonitorPrediction.status != "completed",
+                AiMonitorPrediction.settlement_version
+                == PREDICTION_SETTLEMENT_VERSION,
+            ),
+        )
         .group_by(AiMonitorPrediction.status)
     ).all()
+    legacy_completed_count = int(
+        db.scalar(
+            select(func.count(AiMonitorPrediction.id))
+            .join(
+                AiMonitorOpportunity,
+                AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
+            )
+            .where(
+                *conditions,
+                AiMonitorPrediction.status == "completed",
+                AiMonitorPrediction.settlement_version
+                != PREDICTION_SETTLEMENT_VERSION,
+            )
+        )
+        or 0
+    )
     status_counts = {str(status): int(count) for status, count in status_rows}
     summary = summarize_historical_opportunities(outcomes)
     summary["discarded_unavailable_count"] = status_counts.get("unavailable", 0)
     summary["pending_count"] = status_counts.get("pending", 0)
     summary["total_prediction_count"] = sum(status_counts.values())
+    summary["excluded_legacy_settlement_count"] = legacy_completed_count
     page_size = max(1, int(limit))
     total_items = len(outcomes)
     total_pages = max(1, (total_items + page_size - 1) // page_size)
@@ -2084,7 +2675,7 @@ def settle_due_predictions(
     *,
     user_id: int | None = None,
 ) -> dict[str, int]:
-    """Settle due predictions, retrying delayed market data before giving up."""
+    """Manage virtual exits using barriers, score decay, then a hard time cap."""
 
     now = utcnow()
     retry_before = now - timedelta(minutes=PREDICTION_SETTLEMENT_RETRY_MINUTES)
@@ -2093,12 +2684,12 @@ def settle_due_predictions(
     statement = (
         select(AiMonitorPrediction)
         .where(
-            AiMonitorPrediction.due_at <= now,
             AiMonitorPrediction.updated_at <= retry_before,
             or_(
                 AiMonitorPrediction.status == "pending",
                 (
                     (AiMonitorPrediction.status == "unavailable")
+                    & (AiMonitorPrediction.due_at <= now)
                     & (AiMonitorPrediction.due_at >= backfill_since)
                 ),
             ),
@@ -2108,6 +2699,14 @@ def settle_due_predictions(
     )
     if user_id is not None:
         statement = statement.where(AiMonitorPrediction.user_id == user_id)
+    # Hold each candidate row until the surrounding transaction commits.  A
+    # second scheduler/process skips rows already owned by another worker
+    # instead of calculating the same settlement from stale evidence.  SQLite
+    # safely omits the unsupported locking clause; production MySQL emits
+    # ``FOR UPDATE SKIP LOCKED``.
+    statement = statement.execution_options(populate_existing=True).with_for_update(
+        skip_locked=True
+    )
     items = db.scalars(statement).all()
     window_ms = 45 * 60 * 1_000
     grouped: dict[str, list[AiMonitorPrediction]] = {}
@@ -2115,7 +2714,7 @@ def settle_due_predictions(
         grouped.setdefault(item.contract_symbol, []).append(item)
     candles_by_symbol: dict[str, list[dict[str, Any]]] = {}
     for symbol, symbol_items in grouped.items():
-        targets = [_datetime_ms(item.due_at) for item in symbol_items]
+        targets = [_datetime_ms(min(item.due_at, now)) for item in symbol_items]
         starts = [
             _datetime_ms(
                 getattr(
@@ -2144,14 +2743,88 @@ def settle_due_predictions(
     recovered = 0
     deferred = 0
     unavailable = 0
+    take_profit = 0
+    stop_loss = 0
+    score_exit = 0
+    max_holding = 0
     for item in items:
         previous_status = item.status
-        settlement = historical_settlement_price(
-            candles_by_symbol.get(item.contract_symbol, []),
-            _datetime_ms(item.due_at),
-        )
-        exit_price = float(settlement["price"]) if settlement is not None else 0.0
         entry_price = float(item.entry_price or 0)
+        predicted_at = getattr(
+            item,
+            "predicted_at",
+            item.due_at
+            - timedelta(
+                seconds=_TIMEFRAME_SECONDS.get(getattr(item, "timeframe", "15m"), 900)
+            ),
+        )
+        start_ms = _datetime_ms(predicted_at)
+        observed_until = min(item.due_at, now)
+        observed_until_ms = _datetime_ms(observed_until)
+        candles = candles_by_symbol.get(item.contract_symbol, [])
+        evidence = dict(getattr(item, "evidence_json", None) or {})
+        stored_risk_plan = evidence.get("risk_plan")
+        risk_plan = (
+            dict(stored_risk_plan)
+            if isinstance(stored_risk_plan, Mapping)
+            else virtual_risk_plan_snapshot(
+                entry_price=entry_price,
+                direction=item.direction,
+                timeframe=getattr(item, "timeframe", "15m"),
+            )
+        )
+        barrier_exit = prediction_price_barrier_exit(
+            candles,
+            entry_price,
+            item.direction,
+            risk_plan,
+            start_ms,
+            observed_until_ms,
+        )
+        score_signal = prediction_score_exit_signal(
+            evidence,
+            item.direction,
+            start_ms=start_ms,
+            end_ms=observed_until_ms,
+        )
+        score_settlement = (
+            prediction_score_exit_price(
+                candles,
+                score_signal,
+                end_ms=observed_until_ms,
+            )
+            if score_signal is not None
+            else None
+        )
+        exit_decision: dict[str, Any] | None = barrier_exit
+        if score_signal is not None and score_settlement is not None:
+            score_decision = {
+                **score_signal,
+                "price": float(score_settlement["price"]),
+                "price_time_ms": int(score_settlement["price_time_ms"]),
+            }
+            if (
+                exit_decision is None
+                or int(score_decision["price_time_ms"])
+                < int(exit_decision["price_time_ms"])
+            ):
+                exit_decision = score_decision
+        if exit_decision is None and item.due_at <= now:
+            settlement = historical_closed_settlement_price(
+                candles,
+                _datetime_ms(item.due_at),
+            )
+            if settlement is not None:
+                exit_decision = {
+                    "reason": "max_holding_time",
+                    "price": float(settlement["price"]),
+                    "price_time_ms": int(settlement["price_time_ms"]),
+                    "same_bar_conflict": False,
+                    "gap_execution": False,
+                }
+        if exit_decision is None and item.due_at > now:
+            continue
+        exit_price = float(exit_decision["price"]) if exit_decision is not None else 0.0
         if entry_price <= 0 or exit_price <= 0:
             item.updated_at = now
             if entry_price > 0 and item.due_at > grace_cutoff:
@@ -2164,33 +2837,51 @@ def settle_due_predictions(
                 unavailable += 1
             continue
         outcome = prediction_outcome(entry_price, exit_price, item.direction)
-        predicted_at = getattr(
-            item,
-            "predicted_at",
-            item.due_at
-            - timedelta(
-                seconds=_TIMEFRAME_SECONDS.get(getattr(item, "timeframe", "15m"), 900)
+        exit_at = datetime.fromtimestamp(
+            int(exit_decision["price_time_ms"]) / 1_000,
+            UTC,
+        ).replace(tzinfo=None)
+        cost_model = evidence.get("cost_model")
+        cost_model = dict(cost_model) if isinstance(cost_model, Mapping) else {}
+        actual_cost_config = {
+            "prediction_fee_enabled": bool(cost_model.get("fee_enabled", True)),
+            "prediction_fee_bps_per_side": float(
+                cost_model.get("fee_bps_per_side", PREDICTION_FEE_BPS_PER_SIDE)
             ),
-        )
-        stored_estimated_cost = getattr(item, "estimated_cost_bps", None)
-        estimated_cost = (
-            float(stored_estimated_cost)
-            if stored_estimated_cost is not None
-            else prediction_estimated_cost_bps(predicted_at, item.due_at)
+            "prediction_slippage_enabled": bool(
+                cost_model.get("slippage_enabled", True)
+            ),
+            "prediction_slippage_bps_per_side": float(
+                cost_model.get(
+                    "slippage_bps_per_side", PREDICTION_SLIPPAGE_BPS_PER_SIDE
+                )
+            ),
+            "prediction_funding_enabled": bool(cost_model.get("funding_enabled", True)),
+            "prediction_funding_bps_per_8h": float(
+                cost_model.get("funding_bps_per_8h", PREDICTION_FUNDING_BPS_PER_8H)
+            ),
+        }
+        estimated_cost = prediction_estimated_cost_bps(
+            predicted_at,
+            exit_at,
+            actual_cost_config,
         )
         net_outcome = prediction_net_outcome(
             float(outcome["directional_return_bps"]), estimated_cost
         )
         path_metrics = prediction_path_metrics(
-            candles_by_symbol.get(item.contract_symbol, []),
+            candles,
             entry_price,
             item.direction,
-            _datetime_ms(predicted_at),
-            _datetime_ms(item.due_at),
+            start_ms,
+            int(exit_decision["price_time_ms"]),
         )
+        exit_reason = str(exit_decision["reason"])
         item.status = "completed"
         item.result = str(outcome["result"])
         item.exit_price = Decimal(str(exit_price))
+        item.exit_at = exit_at
+        item.exit_reason = exit_reason
         item.raw_return_bps = Decimal(str(outcome["raw_return_bps"]))
         item.directional_return_bps = Decimal(str(outcome["directional_return_bps"]))
         item.estimated_cost_bps = Decimal(str(net_outcome["estimated_cost_bps"]))
@@ -2209,9 +2900,47 @@ def settle_due_predictions(
             else None
         )
         item.settlement_version = PREDICTION_SETTLEMENT_VERSION
+        evidence["settlement"] = {
+            "version": PREDICTION_SETTLEMENT_VERSION,
+            "exit_reason": exit_reason,
+            "exit_at": exit_at.replace(tzinfo=UTC).isoformat(),
+            "exit_price": exit_price,
+            "same_bar_conflict": bool(exit_decision.get("same_bar_conflict")),
+            "gap_execution": bool(exit_decision.get("gap_execution")),
+            "price_source": exit_decision.get("price_source") or "closed_candle_path",
+            "reference_price_time_ms": exit_decision.get("reference_price_time_ms"),
+            "risk_plan": risk_plan,
+            "score_signal": (
+                {
+                    key: exit_decision.get(key)
+                    for key in (
+                        "combined",
+                        "technical",
+                        "exit_threshold",
+                        "confirmation_points",
+                    )
+                    if exit_decision.get(key) is not None
+                }
+                if exit_reason in {"score_breakdown", "score_reversal"}
+                else None
+            ),
+            "cost_breakdown": prediction_cost_breakdown(
+                predicted_at, exit_at, actual_cost_config
+            ),
+            "policy": "first_price_barrier_then_confirmed_score_exit_then_hard_time_cap",
+        }
+        item.evidence_json = evidence
         item.completed_at = now
         item.updated_at = now
         completed += 1
+        if exit_reason == "take_profit":
+            take_profit += 1
+        elif exit_reason == "stop_loss":
+            stop_loss += 1
+        elif exit_reason in {"score_breakdown", "score_reversal"}:
+            score_exit += 1
+        else:
+            max_holding += 1
         if previous_status == "unavailable":
             recovered += 1
     db.flush()
@@ -2220,7 +2949,79 @@ def settle_due_predictions(
         "recovered": recovered,
         "deferred": deferred,
         "unavailable": unavailable,
+        "take_profit": take_profit,
+        "stop_loss": stop_loss,
+        "score_exit": score_exit,
+        "max_holding": max_holding,
     }
+
+
+def reopen_legacy_prediction_settlements(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    limit: int = 500,
+) -> int:
+    """Move old horizon-close outcomes back to the auditable exit lifecycle.
+
+    Legacy completed rows are deliberately removed from statistics first.  The
+    regular settlement worker then rebuilds them from historical candle paths
+    using price barriers, score exits and the hard holding-time cap.
+    """
+
+    statement = (
+        select(AiMonitorPrediction)
+        .where(
+            AiMonitorPrediction.status == "completed",
+            or_(
+                AiMonitorPrediction.exit_reason == "legacy_horizon_close",
+                AiMonitorPrediction.settlement_version
+                != PREDICTION_SETTLEMENT_VERSION,
+            ),
+        )
+        .order_by(AiMonitorPrediction.predicted_at, AiMonitorPrediction.id)
+        .limit(max(1, min(int(limit), 5000)))
+    )
+    if user_id is not None:
+        statement = statement.where(AiMonitorPrediction.user_id == user_id)
+    # Reopening and settlement share the same row-level ownership protocol so
+    # they cannot reset/complete one legacy row concurrently.  Refreshing an
+    # identity-map hit is important because evidence_json is replaced as one
+    # immutable JSON value.
+    statement = statement.execution_options(populate_existing=True).with_for_update(
+        skip_locked=True
+    )
+    items = list(db.scalars(statement).all())
+    repair_started_at = utcnow()
+    retry_ready_at = repair_started_at - timedelta(
+        minutes=PREDICTION_SETTLEMENT_RETRY_MINUTES + 1
+    )
+    for item in items:
+        evidence = dict(item.evidence_json or {})
+        evidence["settlement_repair"] = {
+            "requested_at": repair_started_at.replace(tzinfo=UTC).isoformat(),
+            "source_version": item.settlement_version,
+            "source_exit_reason": item.exit_reason,
+            "target_version": PREDICTION_SETTLEMENT_VERSION,
+            "status": "pending_recalculation",
+        }
+        item.status = "pending"
+        item.result = None
+        item.exit_price = None
+        item.exit_at = None
+        item.exit_reason = None
+        item.raw_return_bps = None
+        item.directional_return_bps = None
+        item.net_directional_return_bps = None
+        item.net_result = None
+        item.max_favorable_bps = None
+        item.max_adverse_bps = None
+        item.completed_at = None
+        item.settlement_version = "repair_pending_v3"
+        item.evidence_json = evidence
+        item.updated_at = retry_ready_at
+    db.flush()
+    return len(items)
 
 
 def backfill_prediction_path_metrics(
@@ -2705,9 +3506,10 @@ def _scan_opportunities(
     )
     cleanup = cleanup_unpredicted_opportunities(db, run.user_id)
     risk_plan_backfill = backfill_prediction_risk_plans(db, run.user_id)
-    cutoff = int(
-        (datetime.now(UTC) - timedelta(hours=int(config["news_lookback_hours"]))).timestamp()
-    )
+    # Pending predictions may have been created with a longer lookback than the
+    # user's current configuration.  Load the schema-bounded maximum once, then
+    # apply each frozen lookback independently during rescoring.
+    cutoff = int((now.replace(tzinfo=UTC) - timedelta(hours=168)).timestamp())
     news_rows = db.scalars(
         select(News)
         .where(
@@ -2716,9 +3518,21 @@ def _scan_opportunities(
             News.related_us_stocks.is_not(None),
         )
         .order_by(News.ts.desc(), News.id.desc())
-        .limit(1000)
     ).all()
-    model_call_audit = _news_model_call_audit_index(db, run.user_id, news_rows)
+    current_news_cutoff = int(
+        (
+            now.replace(tzinfo=UTC)
+            - timedelta(hours=int(config["news_lookback_hours"]))
+        ).timestamp()
+    )
+    current_news_rows = [
+        row for row in news_rows if int(row.ts) >= current_news_cutoff
+    ]
+    model_call_audit = _news_model_call_audit_index(
+        db,
+        run.user_id,
+        current_news_rows,
+    )
     repository = MonitorRepository(engine, symbols_config)
     symbol_map = contract_symbol_map(repository)
     supported_contracts = sorted(set(symbol_map.values()))
@@ -2735,7 +3549,7 @@ def _scan_opportunities(
     settlement = settle_due_predictions(db, repository, user_id=run.user_id)
     path_backfill = backfill_prediction_path_metrics(db, repository, user_id=run.user_id)
     directional_candidates = aggregate_news_candidates(
-        news_rows,
+        current_news_rows,
         symbol_map,
         minimum_confidence=float(config["minimum_news_confidence"]),
         minimum_mentions=int(config["minimum_news_mentions"]),
@@ -2775,6 +3589,15 @@ def _scan_opportunities(
         key.startswith("prediction_") for key in indicator_keys
     )
     market_flow_inputs = _market_flow_input_maps(db, repository)
+    rescored_pending_predictions = refresh_pending_prediction_scores(
+        db,
+        user_id=run.user_id,
+        news_rows=news_rows,
+        symbol_map=symbol_map,
+        repository=repository,
+        market_flow_inputs=market_flow_inputs,
+        now=now,
+    )
     for candidate in candidates:
         contract_symbol = str(candidate.get("contract_symbol") or "")
         if not contract_symbol:
@@ -2948,12 +3771,20 @@ def _scan_opportunities(
         )
         if readiness["status"] == "shadow_ready":
             shadow_ready += 1
+        reference_price_time_ms = int(market.get("ts") or 0)
+        if 0 < reference_price_time_ms < 1_000_000_000_000:
+            reference_price_time_ms *= 1_000
+        if not (0 < reference_price_time_ms <= _datetime_ms(now)):
+            reference_price_time_ms = 0
         score_snapshot = {
             "news": float(candidate["news_score"]),
             "technical": indicator_score,
             "market_flow": flow_score,
             "combined": combined_score,
+            "direction": str(candidate["direction"]),
             "calculated_at": now.isoformat(),
+            "reference_price": entry_price if entry_price > 0 and reference_price_time_ms else None,
+            "reference_price_time_ms": reference_price_time_ms or None,
         }
         prediction_score_seed: list[dict[str, Any]] = []
         if existing_prediction is not None:
@@ -3016,6 +3847,7 @@ def _scan_opportunities(
             "indicators": indicator_evidence,
             "indicator_policy": indicator_policy,
             "matched_indicator_count": len(matched_indicator_keys),
+            "configured_indicator_keys": indicator_keys,
             "available_indicator_count": sum(
                 bool(item.get("available")) for item in indicator_evidence
             ),
@@ -3031,6 +3863,7 @@ def _scan_opportunities(
             "virtual_entry_gate": virtual_entry_gate,
             "minimum_news_score": float(config["minimum_news_confidence"]) * 100,
             "minimum_news_mentions": int(config["minimum_news_mentions"]),
+            "news_lookback_hours": int(config["news_lookback_hours"]),
             "market_quality": market_quality,
             "live_readiness": readiness,
             "model_audit": {
@@ -3174,6 +4007,7 @@ def _scan_opportunities(
         "path_metrics_backfill": path_backfill,
         "opportunity_cleanup": cleanup,
         "risk_plan_backfill": risk_plan_backfill,
+        "rescored_pending_predictions": rescored_pending_predictions,
         "monitor_symbols": monitor_symbols,
         "monitor_scope": "selected" if monitor_symbols else "all",
         "indicator_keys": indicator_keys,
@@ -3305,6 +4139,7 @@ def _worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
         try:
             with factory() as db:
                 recover_stale_runs(db)
+                reopen_legacy_prediction_settlements(db)
                 settle_due_predictions(db, repository)
                 db.commit()
                 user_ids = list(

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.dialects import mysql
+from sqlalchemy.dialects import mysql, sqlite
 
 from quantdesk_v2 import news_ai
 from quantdesk_v2.ai_monitor import (
@@ -20,6 +20,7 @@ from quantdesk_v2.ai_monitor import (
     edge_calibration_summary,
     enqueue_news_analysis,
     filter_monitored_candidates,
+    historical_closed_settlement_price,
     historical_settlement_price,
     indicator_catalog,
     indicator_conflicts,
@@ -30,9 +31,15 @@ from quantdesk_v2.ai_monitor import (
     opportunity_score_weights,
     prediction_cost_breakdown,
     prediction_estimated_cost_bps,
+    prediction_live_score_snapshot,
     prediction_net_outcome,
     prediction_outcome,
     prediction_path_metrics,
+    prediction_price_barrier_exit,
+    prediction_score_exit_price,
+    prediction_score_exit_signal,
+    refresh_pending_prediction_scores,
+    reopen_legacy_prediction_settlements,
     settle_due_predictions,
     settleable_historical_outcomes,
     signal_readiness_snapshot,
@@ -90,6 +97,81 @@ def test_prediction_settlement_metadata_explains_pending_market_retry() -> None:
     assert metadata["grace_hours"] == 6
     assert metadata["poll_interval_seconds"] == 20
     assert metadata["next_retry_at"] > _utc_out(now)
+
+
+def test_prediction_settlement_metadata_monitors_exit_before_time_cap() -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    item = SimpleNamespace(
+        status="pending",
+        predicted_at=now - timedelta(minutes=10),
+        due_at=now + timedelta(minutes=50),
+        updated_at=now - timedelta(minutes=4),
+    )
+
+    metadata = _prediction_settlement_out(item)
+
+    assert metadata is not None
+    assert metadata["phase"] == "monitoring_exit"
+    assert metadata["next_retry_at"] < metadata["due_at"]
+
+
+def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None:
+    original_evidence = {"settlement": {"version": "path_cost_v2"}}
+    item = SimpleNamespace(
+        status="completed",
+        result="win",
+        exit_price=Decimal("102"),
+        exit_at=datetime(2026, 8, 10, 9, 0),
+        exit_reason="legacy_horizon_close",
+        raw_return_bps=Decimal("200"),
+        directional_return_bps=Decimal("200"),
+        net_directional_return_bps=Decimal("184"),
+        net_result="win",
+        max_favorable_bps=Decimal("250"),
+        max_adverse_bps=Decimal("-30"),
+        completed_at=datetime(2026, 8, 10, 9, 1),
+        settlement_version="path_cost_v2",
+        evidence_json=original_evidence,
+        updated_at=datetime(2026, 8, 10, 9, 1),
+    )
+
+    class Scalars:
+        def all(self):
+            return [item]
+
+    class Database:
+        flushed = False
+        statement = None
+
+        def scalars(self, statement):
+            self.statement = statement
+            return Scalars()
+
+        def flush(self):
+            self.flushed = True
+
+    database = Database()
+    repaired = reopen_legacy_prediction_settlements(database)
+    mysql_compiled = database.statement.compile(dialect=mysql.dialect())
+    mysql_sql = str(mysql_compiled)
+    sqlite_sql = str(database.statement.compile(dialect=sqlite.dialect()))
+
+    assert repaired == 1
+    assert item.status == "pending"
+    assert item.result is None
+    assert item.exit_price is None
+    assert item.exit_reason is None
+    assert item.settlement_version == "repair_pending_v3"
+    assert item.evidence_json["settlement_repair"]["status"] == "pending_recalculation"
+    assert database.flushed is True
+    assert "FOR UPDATE SKIP LOCKED" in mysql_sql
+    assert "FOR UPDATE" not in sqlite_sql
+    assert "ai_monitor_predictions.status = %s" in mysql_sql
+    assert "ai_monitor_predictions.exit_reason = %s" in mysql_sql
+    assert {"completed", "legacy_horizon_close"}.issubset(
+        set(mysql_compiled.params.values())
+    )
+    assert database.statement.get_execution_options()["populate_existing"] is True
 
 
 def test_ai_monitor_catalog_reuses_all_contract_research_indicators() -> None:
@@ -499,6 +581,273 @@ def test_live_score_history_seeds_legacy_snapshot_and_is_bounded() -> None:
     assert history[-1]["combined"] == 99
 
 
+def test_pending_prediction_rescore_uses_its_frozen_timeframe_and_weights() -> None:
+    now = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
+    prediction = SimpleNamespace(
+        symbol="TEST",
+        contract_symbol="TESTUSDT",
+        timeframe="4h",
+        direction="long",
+        evidence_json={
+            "configured_indicator_keys": ["moving_average_bull", "trend_breakout"],
+            "score_weights": {"news": 1.0, "technical": 0.0, "market_flow": 0.0},
+            "live_readiness": {"minimum_combined_score": 88.0},
+        },
+    )
+
+    class Repository:
+        calls: list[tuple[str, str]] = []
+
+        def strategy_indicators(self, symbol, timeframe):
+            self.calls.append((symbol, timeframe))
+            return {
+                "items": [
+                    {
+                        "key": "moving_average_bull",
+                        "available": True,
+                        "status": "matched",
+                        "bullish_triggered": True,
+                        "bullish_strength": 80,
+                    },
+                    {
+                        "key": "trend_breakout",
+                        "available": True,
+                        "status": "matched",
+                        "bullish_triggered": True,
+                        "bullish_strength": 70,
+                    },
+                ],
+                "prediction_features": {"items": []},
+            }
+
+    repository = Repository()
+    snapshot = prediction_live_score_snapshot(
+        prediction,
+        {"direction": "long", "news_score": 81.0},
+        repository,
+        {
+            "ticker": {
+                "TESTUSDT": {
+                    "price": 123.5,
+                    "ts": int(now.timestamp()),
+                }
+            }
+        },
+        now,
+    )
+
+    assert snapshot is not None
+    assert repository.calls == [("TESTUSDT", "4h")]
+    assert snapshot["combined"] == 81.0
+    assert snapshot["strategy_identity"] == {
+        "timeframe": "4h",
+        "indicator_keys": ["moving_average_bull", "trend_breakout"],
+        "score_weights": {"news": 1.0, "technical": 0.0, "market_flow": 0.0},
+        "minimum_indicator_score": 65.0,
+        "minimum_combined_score": 88.0,
+    }
+    assert snapshot["reference_price"] == 123.5
+    assert snapshot["reference_price_time_ms"] == int(now.timestamp() * 1000)
+
+
+def test_pending_rescore_aggregates_raw_news_with_frozen_threshold_and_side() -> None:
+    now = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
+    prediction = SimpleNamespace(
+        id=7,
+        user_id=3,
+        symbol="TEST",
+        contract_symbol="TESTUSDT",
+        timeframe="1h",
+        direction="long",
+        signal_news_score=Decimal("85"),
+        signal_indicator_score=Decimal("75"),
+        confidence_score=Decimal("80"),
+        predicted_at=now - timedelta(minutes=15),
+        evidence_json={
+            "minimum_news_score": 80.0,
+            "minimum_news_mentions": 2,
+            "configured_indicator_keys": ["moving_average_bull", "trend_breakout"],
+            "score_weights": {"news": 1.0, "technical": 0.0, "market_flow": 0.0},
+            "live_readiness": {
+                "minimum_indicator_score": 65.0,
+                "minimum_combined_score": 70.0,
+            },
+            "signal_scores": {"market_flow": 50.0},
+        },
+    )
+
+    class Scalars:
+        def all(self):
+            return [prediction]
+
+    class Database:
+        statement = None
+
+        def scalars(self, statement):
+            self.statement = statement
+            return Scalars()
+
+    class Repository:
+        def strategy_indicators(self, _symbol, timeframe):
+            assert timeframe == "1h"
+            return {
+                "items": [
+                    {
+                        "key": "moving_average_bull",
+                        "available": True,
+                        "status": "matched",
+                        "bearish_triggered": True,
+                        "bearish_strength": 90,
+                    },
+                    {
+                        "key": "trend_breakout",
+                        "available": True,
+                        "status": "matched",
+                        "bearish_triggered": True,
+                        "bearish_strength": 90,
+                    },
+                ],
+                "prediction_features": {"items": []},
+            }
+
+    news_rows = [
+        SimpleNamespace(
+            id=str(index),
+            ts=int(now.timestamp()) - index,
+            source="test",
+            title=f"short-{index}",
+            title_zh=None,
+            ai_reason="frozen policy candidate",
+            ai_confidence=0.9,
+            related_us_stocks=[
+                {"symbol": "TEST", "direction": "short", "relevance": 1.0}
+            ],
+        )
+        for index in (1, 2)
+    ]
+    database = Database()
+
+    updated = refresh_pending_prediction_scores(
+        database,
+        user_id=3,
+        news_rows=news_rows,
+        symbol_map={"TEST": "TESTUSDT"},
+        repository=Repository(),
+        market_flow_inputs={
+            "ticker": {
+                "TESTUSDT": {"price": 101.0, "ts": int(now.timestamp())}
+            }
+        },
+        now=now,
+    )
+
+    assert updated == 1
+    latest = prediction.evidence_json["latest_live_score"]
+    assert latest["direction"] == "short"
+    assert latest["combined"] == 90.0
+    assert latest["entry_confirmed"] is True
+    assert prediction.evidence_json["score_exit_policy"]["news_policy"] == {
+        "minimum_confidence": 0.8,
+        "minimum_mentions": 2,
+        "lookback_hours": 24,
+    }
+
+
+def test_two_empty_frozen_news_scans_confirm_score_breakdown() -> None:
+    start = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
+    prediction = SimpleNamespace(
+        id=8,
+        user_id=3,
+        symbol="TEST",
+        contract_symbol="TESTUSDT",
+        timeframe="1h",
+        direction="long",
+        signal_news_score=Decimal("90"),
+        signal_indicator_score=Decimal("80"),
+        confidence_score=Decimal("90"),
+        predicted_at=start - timedelta(minutes=15),
+        evidence_json={
+            "minimum_news_score": 80.0,
+            "minimum_news_mentions": 2,
+            "news_lookback_hours": 1,
+            "configured_indicator_keys": ["moving_average_bull", "trend_breakout"],
+            "score_weights": {"news": 1.0, "technical": 0.0, "market_flow": 0.0},
+            "live_readiness": {
+                "minimum_indicator_score": 65.0,
+                "minimum_combined_score": 70.0,
+            },
+            "signal_scores": {"market_flow": 50.0},
+        },
+    )
+
+    class Scalars:
+        def all(self):
+            return [prediction]
+
+    class Database:
+        def scalars(self, _statement):
+            return Scalars()
+
+    class Repository:
+        def strategy_indicators(self, _symbol, _timeframe):
+            return {
+                "items": [
+                    {
+                        "key": key,
+                        "available": True,
+                        "status": "matched",
+                        "bullish_triggered": True,
+                        "bullish_strength": 90,
+                    }
+                    for key in ("moving_average_bull", "trend_breakout")
+                ],
+                "prediction_features": {"items": []},
+            }
+
+    market_inputs = {
+        "ticker": {"TESTUSDT": {"price": 101.0, "ts": int(start.timestamp())}}
+    }
+    expired_opposite_news = [
+        SimpleNamespace(
+            id=f"old-{index}",
+            ts=int((start - timedelta(hours=2)).timestamp()) - index,
+            source="test",
+            title="expired opposite news",
+            title_zh=None,
+            ai_reason="outside frozen lookback",
+            ai_confidence=0.99,
+            related_us_stocks=[
+                {"symbol": "TEST", "direction": "short", "relevance": 1.0}
+            ],
+        )
+        for index in (1, 2)
+    ]
+    for observed_at in (start, start + timedelta(minutes=15)):
+        market_inputs["ticker"]["TESTUSDT"]["ts"] = int(observed_at.timestamp())
+        assert (
+            refresh_pending_prediction_scores(
+                Database(),
+                user_id=3,
+                news_rows=expired_opposite_news,
+                symbol_map={"TEST": "TESTUSDT"},
+                repository=Repository(),
+                market_flow_inputs=market_inputs,
+                now=observed_at,
+            )
+            == 1
+        )
+
+    signal = prediction_score_exit_signal(
+        prediction.evidence_json,
+        "long",
+        start_ms=int((start - timedelta(minutes=15)).timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=15)).timestamp() * 1000),
+    )
+    assert signal is not None
+    assert signal["reason"] == "score_breakdown"
+    assert signal["confirmation_points"] == 2
+
+
 def test_virtual_position_uses_directional_pnl_and_frozen_risk_levels() -> None:
     risk_plan = virtual_risk_plan_snapshot(
         entry_price=100,
@@ -708,6 +1057,196 @@ def test_ai_monitor_prediction_cost_and_path_metrics_are_direction_aware() -> No
     ) == {"max_favorable_bps": 200.0, "max_adverse_bps": -300.0}
 
 
+def test_prediction_exit_uses_first_barrier_and_same_bar_is_conservative() -> None:
+    start = 1_800_000_000_000
+    risk_plan = {
+        "stop_loss_price": 98,
+        "take_profit_price": 104,
+    }
+    target = prediction_price_barrier_exit(
+        [{"open_time": start, "open": 100, "high": 104.5, "low": 99}],
+        100,
+        "long",
+        risk_plan,
+        start,
+        start + 900_000,
+    )
+    conflict = prediction_price_barrier_exit(
+        [{"open_time": start, "open": 100, "high": 105, "low": 97}],
+        100,
+        "long",
+        risk_plan,
+        start,
+        start + 900_000,
+    )
+
+    assert target is not None and target["reason"] == "take_profit"
+    assert target["price"] == 104
+    assert conflict is not None and conflict["reason"] == "stop_loss"
+    assert conflict["same_bar_conflict"] is True
+
+
+def test_prediction_exit_ignores_a_candle_that_has_not_closed_at_boundary() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    risk_plan = {"stop_loss_price": 98, "take_profit_price": 104}
+
+    result = prediction_price_barrier_exit(
+        [
+            {"open_time": start, "open": 100, "high": 103, "low": 99},
+            {
+                "open_time": start + interval,
+                "open": 100,
+                "high": 105,
+                "low": 99,
+            },
+        ],
+        100,
+        "long",
+        risk_plan,
+        start,
+        start + interval,
+        timeframe_ms=interval,
+    )
+
+    assert result is None
+
+
+def test_score_exit_price_is_never_before_the_score_signal() -> None:
+    signal_ms = 1_800_000_600_000
+    frozen = prediction_score_exit_price(
+        [],
+        {
+            "price_time_ms": signal_ms,
+            "reference_price": 101.5,
+            "reference_price_time_ms": signal_ms - 10_000,
+        },
+        end_ms=signal_ms,
+    )
+    legacy = prediction_score_exit_price(
+        [
+            {
+                "open_time": signal_ms - 900_000,
+                "open": 98,
+                "close": 99,
+            },
+            {"open_time": signal_ms + 300_000, "open": 102, "close": 103},
+        ],
+        {"price_time_ms": signal_ms},
+        end_ms=signal_ms + 900_000,
+    )
+
+    assert frozen == {
+        "price": 101.5,
+        "price_time_ms": signal_ms,
+        "price_source": "frozen_score_reference",
+        "reference_price_time_ms": signal_ms - 10_000,
+    }
+    assert legacy is not None
+    assert legacy["price"] == 102
+    assert legacy["price_time_ms"] == signal_ms + 300_000
+    assert legacy["price_time_ms"] >= signal_ms
+
+
+def test_hard_cap_uses_only_a_close_observable_at_the_cap() -> None:
+    cap_ms = 1_800_000_900_000
+    interval = 900_000
+
+    result = historical_closed_settlement_price(
+        [
+            {
+                "open_time": cap_ms - interval,
+                "open": 100,
+                "close": 101,
+            },
+            {"open_time": cap_ms, "open": 102, "close": 999},
+        ],
+        cap_ms,
+        timeframe_ms=interval,
+    )
+
+    assert result == {
+        "price": 101.0,
+        "price_time_ms": cap_ms,
+        "price_source": "last_closed_candle_at_cap",
+    }
+
+
+def test_prediction_score_exit_requires_hysteresis_or_direction_reversal() -> None:
+    start = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
+    evidence = {
+        "live_readiness": {"minimum_combined_score": 70},
+        "live_score_history": [
+            {"calculated_at": start.isoformat(), "combined": 72, "direction": "long"},
+            {
+                "calculated_at": (start + timedelta(minutes=5)).isoformat(),
+                "combined": 64,
+                "direction": "long",
+            },
+            {
+                "calculated_at": (start + timedelta(minutes=10)).isoformat(),
+                "combined": 63,
+                "direction": "long",
+            },
+        ],
+    }
+    result = prediction_score_exit_signal(
+        evidence,
+        "long",
+        start_ms=int(start.timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=15)).timestamp() * 1000),
+    )
+    reversal = prediction_score_exit_signal(
+        {
+            "live_score_history": [
+                {
+                    "calculated_at": (start + timedelta(minutes=5)).isoformat(),
+                    "combined": 80,
+                    "direction": "short",
+                }
+            ]
+        },
+        "long",
+        start_ms=int(start.timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=15)).timestamp() * 1000),
+    )
+
+    assert result is not None and result["reason"] == "score_breakdown"
+    assert result["confirmation_points"] == 2
+    assert reversal is not None and reversal["reason"] == "score_reversal"
+
+    recovered_later = prediction_score_exit_signal(
+        {
+            "live_readiness": {"minimum_combined_score": 70},
+            "live_score_history": [
+                {
+                    "calculated_at": (start + timedelta(minutes=1)).isoformat(),
+                    "combined": 64,
+                    "direction": "long",
+                },
+                {
+                    "calculated_at": (start + timedelta(minutes=2)).isoformat(),
+                    "combined": 63,
+                    "direction": "long",
+                },
+                {
+                    "calculated_at": (start + timedelta(minutes=3)).isoformat(),
+                    "combined": 80,
+                    "direction": "long",
+                },
+            ],
+        },
+        "long",
+        start_ms=int(start.timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=15)).timestamp() * 1000),
+    )
+    assert recovered_later is not None
+    assert recovered_later["reason"] == "score_breakdown"
+    assert recovered_later["price_time_ms"] == int(
+        (start + timedelta(minutes=2)).timestamp() * 1000
+    )
+
+
 def test_ai_monitor_prediction_cost_components_are_optional_and_configurable() -> None:
     predicted_at = datetime(2026, 8, 11, 8, 0)
     due_at = predicted_at + timedelta(hours=4)
@@ -841,8 +1380,10 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
 
     class Database:
         flushed = False
+        statement = None
 
-        def scalars(self, _statement):
+        def scalars(self, statement):
+            self.statement = statement
             return Scalars()
 
         def flush(self):
@@ -854,7 +1395,13 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
         def kline_range(self, symbol, timeframe, start_ms, end_ms):
             self.calls.append((symbol, timeframe, start_ms, end_ms))
             if symbol in {"AAPLUSDT", "TSLAUSDT"}:
-                return [{"open_time": due_ms, "open": 102, "close": 102}]
+                return [
+                    {
+                        "open_time": due_ms - 15 * 60 * 1_000,
+                        "open": 102,
+                        "close": 102,
+                    }
+                ]
             return []
 
         def _query(self, *_args, **_kwargs):
@@ -864,16 +1411,30 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
     repository = Repository()
 
     result = settle_due_predictions(database, repository)
+    mysql_compiled = database.statement.compile(dialect=mysql.dialect())
+    mysql_sql = str(mysql_compiled)
+    sqlite_sql = str(database.statement.compile(dialect=sqlite.dialect()))
 
-    assert result == {"completed": 2, "recovered": 1, "deferred": 1, "unavailable": 1}
+    assert result == {
+        "completed": 2,
+        "recovered": 1,
+        "deferred": 1,
+        "unavailable": 1,
+        "take_profit": 0,
+        "stop_loss": 0,
+        "score_exit": 0,
+        "max_holding": 2,
+    }
     assert settled.status == "completed"
     assert settled.exit_price == Decimal("102.0")
     assert settled.result == "win"
     assert settled.net_result == "win"
-    assert settled.net_directional_return_bps == Decimal("183.96875")
+    assert float(settled.net_directional_return_bps) == pytest.approx(183.96875)
     assert settled.max_favorable_bps == Decimal("200.0")
     assert settled.max_adverse_bps == Decimal("0.0")
-    assert settled.settlement_version == "path_cost_v2"
+    assert settled.settlement_version == "barrier_score_cost_v3"
+    assert settled.exit_reason == "max_holding_time"
+    assert settled.exit_at.timestamp() == pytest.approx(due_at.timestamp(), abs=0.001)
     assert missing.status == "pending"
     assert missing.exit_price is None
     assert retry.status == "completed"
@@ -881,6 +1442,11 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
     assert retry.result == "loss"
     assert expired_missing.status == "unavailable"
     assert database.flushed is True
+    assert "FOR UPDATE SKIP LOCKED" in mysql_sql
+    assert "FOR UPDATE" not in sqlite_sql
+    assert mysql_sql.count("ai_monitor_predictions.status = %s") == 2
+    assert {"pending", "unavailable"}.issubset(set(mysql_compiled.params.values()))
+    assert database.statement.get_execution_options()["populate_existing"] is True
     assert {call[0] for call in repository.calls} == {
         "AAPLUSDT",
         "MSFTUSDT",
@@ -1075,6 +1641,8 @@ def test_strategy_readiness_uses_the_latest_bounded_prediction_window() -> None:
     assert "AiMonitorPrediction.predicted_at.desc()" in readiness
     assert ".limit(5000)" in readiness
     assert "predictions.reverse()" in readiness
+    assert "settlement_version == PREDICTION_SETTLEMENT_VERSION" in readiness
+    assert "item.exit_at or item.due_at" in readiness
 
 
 def test_market_flow_snapshot_combines_real_inputs_and_blocks_opposite_direction() -> None:
@@ -1483,7 +2051,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260812-26"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260812-29"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -1493,7 +2061,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260812-26"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260812-29"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -1576,8 +2144,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "历史机会" in component
     assert 'id="include-expired"' not in component
     assert "const bySignalTimeDesc = (left, right) =>" in component
-    assert "items.filter(isActive).sort(bySignalTimeDesc)" in component
-    assert "items.filter((item) => !isActive(item)).sort(bySignalTimeDesc)" in component
+    assert 'const isUnsettled = (item) => item.prediction_status !== "completed"' in component
+    assert "items.filter((item) => isActive(item) && isUnsettled(item)).sort(bySignalTimeDesc)" in component
+    assert "items.filter((item) => !isActive(item) && isUnsettled(item)).sort(bySignalTimeDesc)" in component
     assert "this.parseDate(item.expires_at).getTime() > now" in component
     assert "`${raw}Z`" in component
     assert "if (!unique.has(instrument)) unique.set(instrument, item)" in component
@@ -1708,12 +2277,19 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'predictionStatus === "unavailable"' in component
     assert "技术未确认" in component
     assert "未生成预测" in component
-    assert "结算宽限期内未取得行情" in component
+    assert "退出行情宽限期内未取得行情" in component
+    assert 'monitoring_exit: "正在监控退出条件"' in component
+    assert "止盈、止损与评分转弱/反转" in component
+    assert "due_at 仅是强制退出上限，价格或评分条件可提前退出" in component
+    assert "等待观察周期结束，或等待结算时点附近" not in component
+    assert "到期结算价" not in component
+    assert "预测结算 ${this.formatDate(settlementState.dueAt)}" not in component
     assert ".opportunity-metrics.with-result" in stylesheet
     assert ".history-result.win" in stylesheet
     assert ".history-result.not_created" in stylesheet
     assert ".history-result.pending" in stylesheet
-    assert 'this.api("/opportunity-analytics?limit=300")' in component
+    assert 'const data = await this.api("/opportunities?limit=300&include_expired=true")' in component
+    assert 'this.api("/opportunity-analytics?limit=300")' not in component
     assert "historicalReplayActive()" in component
     assert 'if (this.historicalReplayActive()) return;' in component
     assert 'items.some((item) => ["pending", "running"].includes(item.status))' in component

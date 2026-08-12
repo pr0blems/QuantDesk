@@ -155,7 +155,7 @@ def _prediction_settlement_out(item: AiMonitorPrediction | None) -> dict[str, An
     elif item.status == "unavailable":
         phase = "unavailable"
     elif now < due_at:
-        phase = "scheduled"
+        phase = "monitoring_exit"
     elif now <= grace_deadline:
         phase = "awaiting_market_data"
     else:
@@ -164,10 +164,8 @@ def _prediction_settlement_out(item: AiMonitorPrediction | None) -> dict[str, An
     next_retry_at: datetime | None = None
     if item.status == "pending":
         last_updated_at = item.updated_at or item.predicted_at
-        eligible_at = max(
-            due_at,
-            last_updated_at
-            + timedelta(minutes=ai_monitor.PREDICTION_SETTLEMENT_RETRY_MINUTES),
+        eligible_at = last_updated_at + timedelta(
+            minutes=ai_monitor.PREDICTION_SETTLEMENT_RETRY_MINUTES
         )
         next_retry_at = (
             eligible_at
@@ -179,6 +177,8 @@ def _prediction_settlement_out(item: AiMonitorPrediction | None) -> dict[str, An
         "status": item.status,
         "phase": phase,
         "due_at": _utc_out(due_at),
+        "exit_at": _utc_out(getattr(item, "exit_at", None)),
+        "exit_reason": getattr(item, "exit_reason", None),
         "grace_deadline": _utc_out(grace_deadline),
         "last_attempt_at": _utc_out(item.updated_at),
         "next_retry_at": _utc_out(next_retry_at),
@@ -291,6 +291,8 @@ def _prediction_out(item: AiMonitorPrediction) -> dict[str, Any]:
         "confidence_score": float(item.confidence_score),
         "entry_price": float(item.entry_price) if item.entry_price is not None else None,
         "exit_price": float(item.exit_price) if item.exit_price is not None else None,
+        "exit_at": _utc_out(item.exit_at),
+        "exit_reason": item.exit_reason,
         "raw_return_bps": (float(item.raw_return_bps) if item.raw_return_bps is not None else None),
         "directional_return_bps": (
             float(item.directional_return_bps) if item.directional_return_bps is not None else None
