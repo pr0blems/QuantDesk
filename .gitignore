@@ -36,6 +36,7 @@ build/
 /data/*.db*
 /src/data/
 reports/
+/backups/
 *.log
 *.tmp
 /config/api_keys.json

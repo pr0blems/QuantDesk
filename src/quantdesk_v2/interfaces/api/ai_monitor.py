@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from ... import ai_monitor
+from ... import ai_monitor, historical_replay
 from ...database import get_db
 from ...dependencies import get_current_user
 from ...models import (
@@ -19,6 +19,7 @@ from ...models import (
     AiMonitorConfig,
     AiMonitorOpportunity,
     AiMonitorPrediction,
+    AiMonitorReplayRun,
     AiMonitorRun,
     AuditLog,
     CompanyProfile,
@@ -31,11 +32,12 @@ from ...models import (
     User,
     utcnow,
 )
-from ...monitor import MonitorRepository
+from ...monitor import MonitorRepository, MonitorUnavailable
 from ...schemas import (
     AiMonitorConfigUpdate,
     AiMonitorCostConfigUpdate,
     AiMonitorNewsAnalyzeRequest,
+    AiMonitorReplayRequest,
     AiMonitorRunRequest,
 )
 
@@ -142,7 +144,79 @@ def _news_out(item: News) -> dict[str, Any]:
     }
 
 
-def _opportunity_out(item: AiMonitorOpportunity) -> dict[str, Any]:
+def _prediction_settlement_out(item: AiMonitorPrediction | None) -> dict[str, Any] | None:
+    if item is None:
+        return None
+    now = utcnow()
+    due_at = item.due_at
+    grace_deadline = due_at + timedelta(hours=ai_monitor.PREDICTION_SETTLEMENT_GRACE_HOURS)
+    if item.status == "completed":
+        phase = "completed"
+    elif item.status == "unavailable":
+        phase = "unavailable"
+    elif now < due_at:
+        phase = "scheduled"
+    elif now <= grace_deadline:
+        phase = "awaiting_market_data"
+    else:
+        phase = "overdue"
+
+    next_retry_at: datetime | None = None
+    if item.status == "pending":
+        last_updated_at = item.updated_at or item.predicted_at
+        eligible_at = max(
+            due_at,
+            last_updated_at
+            + timedelta(minutes=ai_monitor.PREDICTION_SETTLEMENT_RETRY_MINUTES),
+        )
+        next_retry_at = (
+            eligible_at
+            if eligible_at > now
+            else now + timedelta(seconds=ai_monitor.PREDICTION_SETTLEMENT_POLL_SECONDS)
+        )
+
+    return {
+        "status": item.status,
+        "phase": phase,
+        "due_at": _utc_out(due_at),
+        "grace_deadline": _utc_out(grace_deadline),
+        "last_attempt_at": _utc_out(item.updated_at),
+        "next_retry_at": _utc_out(next_retry_at),
+        "poll_interval_seconds": ai_monitor.PREDICTION_SETTLEMENT_POLL_SECONDS,
+        "retry_interval_minutes": ai_monitor.PREDICTION_SETTLEMENT_RETRY_MINUTES,
+        "grace_hours": ai_monitor.PREDICTION_SETTLEMENT_GRACE_HOURS,
+        "price_timeframe": "15m",
+    }
+
+
+def _opportunity_out(
+    item: AiMonitorOpportunity,
+    prediction: AiMonitorPrediction | None = None,
+    live_market: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    prediction_evidence = dict(prediction.evidence_json or {}) if prediction else {}
+    prediction_signal_scores = prediction_evidence.get("signal_scores")
+    prediction_signal_scores = (
+        dict(prediction_signal_scores)
+        if isinstance(prediction_signal_scores, dict)
+        else {}
+    )
+    prediction_score_snapshot = prediction_evidence.get("score_snapshot")
+    prediction_score_snapshot = (
+        dict(prediction_score_snapshot)
+        if isinstance(prediction_score_snapshot, dict)
+        else {}
+    )
+    prediction_market_flow = prediction_evidence.get("market_flow")
+    prediction_market_flow = (
+        dict(prediction_market_flow)
+        if isinstance(prediction_market_flow, dict)
+        else {}
+    )
+    prediction_market_flow_score = prediction_signal_scores.get(
+        "market_flow",
+        prediction_score_snapshot.get("market_flow", prediction_market_flow.get("score")),
+    )
     return {
         "id": item.public_id,
         "symbol": item.symbol,
@@ -156,8 +230,51 @@ def _opportunity_out(item: AiMonitorOpportunity) -> dict[str, Any]:
         "matched_indicator_keys": list(item.matched_indicator_keys_json or []),
         "news_ids": list(item.news_ids_json or []),
         "evidence": dict(item.evidence_json or {}),
+        "prediction_status": prediction.status if prediction is not None else None,
+        "prediction_settlement": _prediction_settlement_out(prediction),
+        "prediction_result": prediction.result if prediction is not None else None,
+        "prediction_entry_price": (
+            float(prediction.entry_price)
+            if prediction is not None and prediction.entry_price is not None
+            else None
+        ),
+        "prediction_combined_score": (
+            float(prediction.confidence_score) if prediction is not None else None
+        ),
+        "prediction_news_score": (
+            float(prediction.signal_news_score)
+            if prediction is not None and prediction.signal_news_score is not None
+            else None
+        ),
+        "prediction_indicator_score": (
+            float(prediction.signal_indicator_score)
+            if prediction is not None and prediction.signal_indicator_score is not None
+            else None
+        ),
+        "prediction_market_flow_score": (
+            float(prediction_market_flow_score)
+            if prediction_market_flow_score is not None
+            else None
+        ),
+        "prediction_entry_gate": (
+            ai_monitor.prediction_entry_gate_snapshot(prediction)
+            if prediction is not None
+            else None
+        ),
+        "virtual_position": (
+            ai_monitor.virtual_position_snapshot(prediction, live_market)
+            if prediction is not None
+            else None
+        ),
+        "prediction_created_at": (
+            _utc_out(prediction.predicted_at) if prediction is not None else None
+        ),
+        "prediction_due_at": (
+            _utc_out(prediction.due_at) if prediction is not None else None
+        ),
         "discovered_at": _utc_out(item.discovered_at),
         "expires_at": _utc_out(item.expires_at),
+        "updated_at": _utc_out(item.updated_at),
     }
 
 
@@ -353,16 +470,6 @@ def update_config(
     unknown = sorted(set(payload.indicator_keys) - allowed)
     if unknown:
         raise HTTPException(status_code=422, detail=f"unsupported indicator: {unknown[0]}")
-    conflicts = ai_monitor.indicator_conflicts(payload.indicator_keys)
-    if conflicts:
-        conflict = conflicts[0]
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"指标条件互相冲突：{conflict['left_name']} 与 "
-                f"{conflict['right_name']} 无法在同一根 K 线上同时满足"
-            ),
-        )
     repository = MonitorRepository(
         request.app.state.database_engine,
         request.app.state.settings.monitor_symbols_config,
@@ -418,7 +525,7 @@ def update_config(
             "indicator_count": len(payload.indicator_keys),
             "monitor_symbol_count": len(payload.monitor_symbols),
             "monitor_scope": "selected" if payload.monitor_symbols else "all",
-            "match_policy": "all",
+            "match_policy": ai_monitor.INDICATOR_MATCH_POLICY,
             "minimum_indicator_score": payload.minimum_indicator_score,
             "minimum_combined_score": payload.minimum_combined_score,
             "maximum_market_age_seconds": payload.maximum_market_age_seconds,
@@ -528,9 +635,14 @@ def indicators(
     return {
         "items": items,
         "count": len(items),
-        "match_policy": "all",
+        "match_policy": ai_monitor.INDICATOR_MATCH_POLICY,
         "templates": ai_monitor.indicator_templates(),
-        "conflict_pairs": [list(pair) for pair in ai_monitor.INDICATOR_CONFLICT_PAIRS],
+        "conflict_pairs": [],
+        "groups": {
+            key: sorted(values) for key, values in ai_monitor.INDICATOR_GROUPS.items()
+        },
+        "minimum_core_matches": 2,
+        "non_blocking_keys": sorted(ai_monitor.NON_BLOCKING_INDICATOR_KEYS),
     }
 
 
@@ -549,6 +661,7 @@ def monitor_symbols(
 
 @router.get("/opportunities")
 def opportunities(
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     limit: int = Query(default=100, ge=1, le=300),
@@ -560,29 +673,52 @@ def opportunities(
             AiMonitorOpportunity.status.in_(("candidate", "discovered")),
             AiMonitorOpportunity.expires_at > utcnow(),
         )
-    if include_expired:
-        statement = statement.order_by(
-            AiMonitorOpportunity.combined_score.desc(),
-            AiMonitorOpportunity.discovered_at.desc(),
-            AiMonitorOpportunity.id.desc(),
-        )
-    else:
-        statement = statement.order_by(
-            AiMonitorOpportunity.updated_at.desc(),
-            AiMonitorOpportunity.id.desc(),
-        )
+    statement = statement.order_by(
+        AiMonitorOpportunity.discovered_at.desc(),
+        AiMonitorOpportunity.id.desc(),
+    )
     items = db.scalars(statement.limit(300 if not include_expired else limit)).all()
     if not include_expired:
         unique: dict[str, AiMonitorOpportunity] = {}
         for item in items:
             instrument = (item.contract_symbol or item.symbol).strip().upper()
             unique.setdefault(instrument, item)
-        items = sorted(
-            unique.values(),
-            key=lambda item: (float(item.combined_score), item.updated_at, item.id),
-            reverse=True,
-        )[:limit]
-    return {"items": [_opportunity_out(item) for item in items]}
+        items = list(unique.values())[:limit]
+    prediction_by_opportunity_id = (
+        {
+            prediction.opportunity_id: prediction
+            for prediction in db.scalars(
+                select(AiMonitorPrediction).where(
+                    AiMonitorPrediction.user_id == user.id,
+                    AiMonitorPrediction.opportunity_id.in_([item.id for item in items]),
+                )
+            ).all()
+        }
+        if items
+        else {}
+    )
+    live_tickers: dict[str, dict[str, Any]] = {}
+    if items:
+        try:
+            repository = MonitorRepository(
+                request.app.state.database_engine,
+                request.app.state.settings.monitor_symbols_config,
+            )
+            live_tickers = repository.latest_tickers(
+                [item.contract_symbol for item in items]
+            )
+        except MonitorUnavailable:
+            live_tickers = {}
+    return {
+        "items": [
+            _opportunity_out(
+                item,
+                prediction_by_opportunity_id.get(item.id),
+                live_tickers.get((item.contract_symbol or "").upper()),
+            )
+            for item in items
+        ]
+    }
 
 
 @router.get("/opportunities/{opportunity_id}/news")
@@ -967,6 +1103,7 @@ def opportunity_analytics(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     limit: int = Query(default=500, ge=1, le=500),
+    page: int = Query(default=1, ge=1),
     news_score_min: float = Query(default=0, ge=0, le=100),
     indicator_score_min: float = Query(default=0, ge=0, le=100),
     direction: Literal["all", "long", "short"] = Query(default="all"),
@@ -975,15 +1112,121 @@ def opportunity_analytics(
         request.app.state.database_engine,
         request.app.state.settings.monitor_symbols_config,
     )
-    return ai_monitor.historical_opportunity_analytics(
+    result = ai_monitor.historical_opportunity_analytics(
         db,
         repository,
         user.id,
         limit=limit,
+        page=page,
         news_score_min=news_score_min,
         indicator_score_min=indicator_score_min,
         direction=direction,
     )
+    result["historical_replay_readiness"] = historical_replay.replay_readiness_report(
+        db, user.id
+    )
+    return result
+
+
+@router.get("/replays")
+def list_historical_replays(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    runs = db.scalars(
+        select(AiMonitorReplayRun)
+        .where(AiMonitorReplayRun.user_id == user.id)
+        .order_by(AiMonitorReplayRun.created_at.desc(), AiMonitorReplayRun.id.desc())
+        .limit(limit)
+    ).all()
+    return {
+        "items": [historical_replay.replay_run_out(item) for item in runs],
+        "readiness": historical_replay.replay_readiness_report(db, user.id),
+    }
+
+
+@router.get("/replays/{replay_id}")
+def historical_replay_detail(
+    replay_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    run = db.scalar(
+        select(AiMonitorReplayRun).where(
+            AiMonitorReplayRun.public_id == replay_id,
+            AiMonitorReplayRun.user_id == user.id,
+        )
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="历史回放任务不存在")
+    return {
+        **historical_replay.replay_run_out(run),
+        "readiness": historical_replay.replay_readiness_report(
+            db, user.id, run_id=run.id
+        ),
+    }
+
+
+@router.post("/replays", status_code=202)
+def create_historical_replay(
+    payload: AiMonitorReplayRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    _require_expected_user(request, user)
+    active = db.scalar(
+        select(AiMonitorReplayRun.id).where(
+            AiMonitorReplayRun.user_id == user.id,
+            AiMonitorReplayRun.status.in_(("pending", "running")),
+        )
+    )
+    if active is not None:
+        raise HTTPException(status_code=409, detail="已有历史回放正在执行")
+    repository = MonitorRepository(
+        request.app.state.database_engine,
+        request.app.state.settings.monitor_symbols_config,
+    )
+    try:
+        run = historical_replay.create_replay_run(
+            db,
+            repository,
+            user.id,
+            days=payload.days,
+            timeframe=payload.timeframe,
+            symbols=payload.symbols,
+        )
+        _audit(
+            db,
+            request,
+            user.id,
+            "ai_monitor.replay.create",
+            run.public_id,
+            {
+                "days": payload.days,
+                "timeframe": payload.timeframe,
+                "symbol_count": run.total_symbols,
+            },
+        )
+        db.commit()
+    except historical_replay.HistoricalReplayError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="已有历史回放正在执行") from None
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="历史回放任务暂时无法创建") from None
+    background_tasks.add_task(
+        historical_replay.execute_replay_run,
+        request.app.state.database_engine,
+        run.public_id,
+        request.app.state.settings.monitor_symbols_config,
+    )
+    return historical_replay.replay_run_out(run)
 
 
 @router.post("/news/analyze", status_code=202)

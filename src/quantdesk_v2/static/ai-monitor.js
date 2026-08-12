@@ -14,14 +14,26 @@ class AiMonitorDashboard extends HTMLElement {
       runs: [],
       opportunities: [],
       opportunityAnalytics: null,
+      historicalReplays: { items: [], readiness: null },
       predictionFilters: { newsScoreMin: 0, indicatorScoreMin: 0, direction: "all" },
+      predictionPage: 1,
+      predictionPageSize: 20,
+      displayLeverage: 10,
       predictionAnalyticsRequestId: 0,
       draftSymbols: new Set(),
       symbolSearch: "",
       opportunityTab: "current",
+      opportunityStatusFilter: "all",
+      opportunityStatusCounts: { all: 0, triggered: 0, ready: 0, waiting: 0, failed: 0 },
       opportunityDirectionCounts: { long: 0, short: 0 },
       historyOpportunityDirectionCounts: { long: 0, short: 0 },
       opportunityRequestId: 0,
+      opportunitiesLoading: false,
+      opportunityLoadingTab: "",
+      opportunitiesLoadedTab: "",
+      liveStateLoading: false,
+      fullLoadLoading: false,
+      newsRenderSignature: "",
       running: false,
       busyRun: "",
       newsSearch: "",
@@ -39,20 +51,27 @@ class AiMonitorDashboard extends HTMLElement {
     this.newsModelCalls = [];
     this.newsModelCallIndex = 0;
     this.newsModelCallsRequestId = 0;
+    this.scoreTrendFocus = null;
+    this.scoreTrendOpportunity = null;
+    this.handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && this.state.running) this.loadLiveState();
+    };
     this.renderShell();
   }
 
   connectedCallback() {
     this.bindEvents();
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
   }
 
   disconnectedCallback() {
     this.pause();
+    document.removeEventListener("visibilitychange", this.handleVisibilityChange);
   }
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260811-4">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260812-15">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -114,7 +133,7 @@ class AiMonitorDashboard extends HTMLElement {
                   <label><span>技术指标周期</span><select id="config-timeframe"><option value="15m">15 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select><small>采用对应周期最新一根已收盘 K 线</small></label>
                   <label><span>最低新闻置信度</span><div><input id="config-confidence" type="number" min="0" max="100" step="1" required><em>%</em></div><small>AI 置信度 × 股票相关度</small></label>
                   <label><span>最少关联新闻</span><div><input id="config-mentions" type="number" min="1" max="20" step="1" required><em>条</em></div><small>同一股票达到数量后才进入指标确认</small></label>
-                  <label><span>最低技术强度</span><div><input id="config-indicator-score" type="number" min="0" max="100" step="1" required><em>分</em></div><small>连续方向评分，所选指标仍需全部满足</small></label>
+                  <label><span>最低技术强度</span><div><input id="config-indicator-score" type="number" min="0" max="100" step="1" required><em>分</em></div><small>按最佳有效策略组计算，达到门槛后再参与组合评分</small></label>
                   <label><span>最低组合评分</span><div><input id="config-combined-score" type="number" min="0" max="100" step="1" required><em>分</em></div><small>仅作为影子准入门槛，不触发实盘</small></label>
                   <label><span>最大实时行情延迟</span><div><input id="config-market-age" type="number" min="5" max="3600" step="1" required><em>秒</em></div><small>超过时只保留研究信号</small></label>
                   <label><span>最低资金流数据质量</span><div><input id="config-market-flow-quality" type="number" min="0" max="100" step="1" required><em>%</em></div><small>资金盘口权重启用时，低于门槛仅保留研究信号</small></label>
@@ -130,10 +149,10 @@ class AiMonitorDashboard extends HTMLElement {
                     <label class="market"><span><b>资金盘口</b><small>主力量比、交易深度与挂单增速</small></span><div><input id="config-market-flow-weight" class="score-weight-input" type="number" min="0" max="100" step="0.1" required><em>%</em></div></label>
                   </div>
                   <div class="weight-preview" aria-label="权重占比预览"><i class="news"></i><i class="technical"></i><i class="market"></i></div>
-                  <footer><span><i class="news"></i>新闻</span><span><i class="technical"></i>技术指标</span><span><i class="market"></i>资金盘口</span><small>权重只影响组合分；AND 指标确认与盘口强反向冲突仍独立生效。保存后从下一轮扫描生效，历史信号保留生成时权重。</small></footer>
+                  <footer><span><i class="news"></i>新闻</span><span><i class="technical"></i>技术指标</span><span><i class="market"></i>资金盘口</span><small>权重影响组合分；策略组门槛、最低技术强度和盘口强反向冲突独立生效。保存后从下一轮扫描生效，历史信号保留生成时权重。</small></footer>
                 </section>
                 <section class="symbol-block">
-                  <header><div><strong>监控品种</strong><small>机会扫描只处理这里配置的美股合约；扫描仍需新闻偏多且技术指标全部满足。</small></div><span id="symbol-count">正在读取</span></header>
+                  <header><div><strong>监控品种</strong><small>机会扫描只处理这里配置的美股合约；候选还需通过策略组、评分及资金冲突校验。</small></div><span id="symbol-count">正在读取</span></header>
                   <div class="symbol-mode">
                     <label><input id="config-all-symbols" type="checkbox"><span>扫描全部可用品种</span></label>
                     <div class="symbol-tools"><input id="symbol-search" type="search" aria-label="搜索监控品种" placeholder="搜索 AAPL / AAPLUSDT"><button id="symbols-visible" type="button">选择筛选结果</button><button id="symbols-clear" type="button">清空选择</button></div>
@@ -141,7 +160,7 @@ class AiMonitorDashboard extends HTMLElement {
                   <div id="symbol-picker" class="symbol-picker"><div class="empty-state">正在读取可监控品种…</div></div>
                 </section>
                 <section id="indicator-config" class="indicator-block">
-                  <header><div><strong>技术指标（多选）</strong><small>采用 AND 规则：新闻候选会显示在“发现机会”；所选指标全部满足后才写入虚拟预测。</small></div><span id="indicator-count">已选 0 项</span></header>
+                  <header><div><strong>技术指标（多选）</strong><small>趋势、突破、回踩、反转按策略组择一确认；至少 2 项核心指标同向，盘口指标参与评分与冲突校验。</small></div><span id="indicator-count">已选 0 项</span></header>
                   <div id="indicator-templates" class="indicator-templates"></div>
                   <div id="indicator-conflict-warning" class="indicator-conflict-warning hidden"></div>
                   <div id="indicator-picker" class="indicator-picker"><div class="empty-state">正在读取指标目录…</div></div>
@@ -150,16 +169,32 @@ class AiMonitorDashboard extends HTMLElement {
               </form>
             </section>
             <section id="view-opportunities" class="ai-view active">
-              <div class="view-head"><div><span class="eyebrow">DISCOVERED OPPORTUNITIES</span><h2>发现机会</h2><p>先展示新闻识别出的美股候选，再标明技术指标确认进度；全部满足后才生成虚拟预测。</p></div></div>
+              <div class="view-head"><div><span class="eyebrow">DISCOVERED OPPORTUNITIES</span><h2>发现机会</h2><p>先展示新闻识别出的美股候选，再按策略组、技术强度、组合评分及资金冲突生成虚拟预测。</p></div></div>
               <nav class="opportunity-tabs" role="tablist" aria-label="机会记录范围">
                 <button class="active" type="button" role="tab" aria-selected="true" data-opportunity-tab="current"><span>当前机会</span><small id="current-direction-counts" class="direction-counts"><b class="long">多 --</b><i>/</i><b class="short">空 --</b></small></button>
                 <button type="button" role="tab" aria-selected="false" data-opportunity-tab="history"><span>历史机会</span><small id="history-direction-counts" class="direction-counts"><b class="long">多 --</b><i>/</i><b class="short">空 --</b></small></button>
+              </nav>
+              <nav id="opportunity-status-tabs" class="opportunity-status-tabs" role="tablist" aria-label="当前机会触发状态">
+                <button class="active" type="button" role="tab" aria-selected="true" data-opportunity-status="all"><span>全部</span><b id="opportunity-status-all-count">0</b></button>
+                <button type="button" role="tab" aria-selected="false" data-opportunity-status="triggered"><span>已触发</span><b id="opportunity-status-triggered-count">0</b></button>
+                <button type="button" role="tab" aria-selected="false" data-opportunity-status="ready"><span>条件满足</span><b id="opportunity-status-ready-count">0</b></button>
+                <button type="button" role="tab" aria-selected="false" data-opportunity-status="waiting"><span>待触发</span><b id="opportunity-status-waiting-count">0</b></button>
+                <button type="button" role="tab" aria-selected="false" data-opportunity-status="failed"><span>触发异常</span><b id="opportunity-status-failed-count">0</b></button>
               </nav>
               <div id="opportunity-list" class="opportunity-list"><div class="empty-state">暂无符合新闻条件的美股候选</div></div>
             </section>
             <section id="view-predictions" class="ai-view">
               <div class="view-head"><div><span class="eyebrow">OPPORTUNITY ANALYTICS</span><h2>预测统计分析</h2><p id="prediction-note">基于历史机会的入场价格与有效期结束价格，统计实际方向表现。</p></div></div>
               <section id="strategy-readiness" class="strategy-readiness"><div class="analytics-loading">正在评估实盘准备门槛…</div></section>
+              <section id="historical-replay" class="historical-replay">
+                <header><div><span>POINT-IN-TIME REPLAY</span><h3>独立历史回放与样本外准入</h3><p>从币安官方归档补采 K 线；只使用信号时点之前的新闻和已收盘 K 线，不污染实时预测。</p></div><strong id="replay-status">尚未运行</strong></header>
+                <form id="replay-form">
+                  <label><span>回放跨度</span><select id="replay-days"><option value="180">180 天</option><option value="365" selected>365 天</option><option value="730">730 天</option></select></label>
+                  <label><span>技术周期</span><select id="replay-timeframe"><option value="15m">15 分钟</option><option value="1h" selected>1 小时</option><option value="4h">4 小时</option></select></label>
+                  <div><small>默认覆盖配置中全部可映射的美股合约；准入固定计入保守手续费、滑点和资金成本。</small><button id="replay-start" class="primary" type="submit">启动历史回放</button></div>
+                </form>
+                <div id="replay-result"><div class="analytics-loading">正在读取历史回放状态…</div></div>
+              </section>
               <div class="analytics-control-grid">
                 <form id="prediction-filter-form" class="analytics-filters">
                   <header><div><strong>筛选统计</strong><small>汇总指标和下方明细使用相同条件</small></div><span id="prediction-filter-result">全部历史样本</span></header>
@@ -187,6 +222,17 @@ class AiMonitorDashboard extends HTMLElement {
         </div>
       </div>
       <contract-monitor id="opportunity-research" research-only aria-label="股票合约 K 线研究弹窗"></contract-monitor>
+      <div id="score-trend-modal" class="score-trend-modal hidden" aria-hidden="true">
+        <button class="score-trend-backdrop" type="button" data-score-trend-close aria-label="关闭评分走势"></button>
+        <section class="score-trend-dialog" role="dialog" aria-modal="true" aria-labelledby="score-trend-title">
+          <header class="score-trend-head">
+            <div><span class="eyebrow">LIVE SCORE HISTORY</span><h2 id="score-trend-title">组合评分走势</h2><p id="score-trend-subtitle">展示每次机会扫描保存的评分变化。</p></div>
+            <button id="score-trend-close" class="ai-conclusion-close" type="button" data-score-trend-close aria-label="关闭评分走势">×</button>
+          </header>
+          <div id="score-trend-body" class="score-trend-body"></div>
+          <footer class="score-trend-foot"><span>当前机会评分随扫描更新</span><strong>虚拟预测入场评分保持冻结</strong></footer>
+        </section>
+      </div>
       <div id="ai-conclusion-modal" class="ai-conclusion-modal hidden" aria-hidden="true">
         <button class="ai-conclusion-backdrop" type="button" data-conclusion-close aria-label="关闭 AI 分析结论"></button>
         <section class="ai-conclusion-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-conclusion-title">
@@ -246,11 +292,23 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#news-mode").addEventListener("change", (event) => { this.state.newsMode = event.target.value; this.renderNews(); });
     this.q("#prediction-filter-form").addEventListener("submit", (event) => { event.preventDefault(); this.applyPredictionFilters(); });
     this.q("#prediction-filter-reset").addEventListener("click", () => this.resetPredictionFilters());
+    this.q("#prediction-list").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-prediction-page]");
+      if (!button || button.disabled) return;
+      this.setPredictionPage(Number(button.dataset.predictionPage));
+    });
     this.q("#prediction-cost-form").addEventListener("submit", (event) => this.savePredictionCostConfig(event));
+    this.q("#replay-form").addEventListener("submit", (event) => this.startHistoricalReplay(event));
     this.qa('#prediction-cost-form input[type="checkbox"]').forEach((input) => input.addEventListener("change", () => this.updatePredictionCostControls()));
     this.qa('#prediction-cost-form input[type="number"]').forEach((input) => input.addEventListener("input", () => this.updatePredictionCostControls()));
     this.qa("[data-opportunity-tab]").forEach((button) => button.addEventListener("click", () => this.setOpportunityTab(button.dataset.opportunityTab)));
+    this.qa("[data-opportunity-status]").forEach((button) => button.addEventListener("click", () => this.setOpportunityStatusFilter(button.dataset.opportunityStatus)));
     this.q("#opportunity-list").addEventListener("click", (event) => {
+      const scoreButton = event.target.closest("[data-score-trend]");
+      if (scoreButton) {
+        this.openScoreTrend(scoreButton.dataset.scoreTrend, scoreButton);
+        return;
+      }
       const conclusionButton = event.target.closest("[data-ai-conclusion]");
       if (conclusionButton) {
         this.openAiConclusion(conclusionButton.dataset.aiConclusion, conclusionButton);
@@ -282,6 +340,7 @@ class AiMonitorDashboard extends HTMLElement {
         settled_price_at: opportunity.outcome?.settled_price_at,
       } : null);
     });
+    this.qa("[data-score-trend-close]").forEach((button) => button.addEventListener("click", () => this.closeScoreTrend()));
     this.qa("[data-conclusion-close]").forEach((button) => button.addEventListener("click", () => this.closeAiConclusion()));
     this.qa("[data-conclusion-view]").forEach((button) => button.addEventListener("click", () => this.showAiConclusionView(button.dataset.conclusionView)));
     this.q("#open-news-logic").addEventListener("click", (event) => this.openNewsAnalysisLogic(event.currentTarget));
@@ -298,7 +357,9 @@ class AiMonitorDashboard extends HTMLElement {
     });
     this.shadowRoot.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if (!this.q("#news-logic-modal").classList.contains("hidden")) {
+      if (!this.q("#score-trend-modal").classList.contains("hidden")) {
+        this.closeScoreTrend();
+      } else if (!this.q("#news-logic-modal").classList.contains("hidden")) {
         this.closeNewsAnalysisLogic();
       } else if (!this.q("#ai-conclusion-modal").classList.contains("hidden")) {
         this.closeAiConclusion();
@@ -342,6 +403,8 @@ class AiMonitorDashboard extends HTMLElement {
   }
 
   async loadAll(showSuccess = false) {
+    if (this.state.fullLoadLoading) return;
+    this.state.fullLoadLoading = true;
     this.q("#ai-refresh").disabled = true;
     try {
       const [overview, news, indicators, symbols] = await Promise.all([
@@ -365,12 +428,14 @@ class AiMonitorDashboard extends HTMLElement {
     } catch (error) {
       this.showBanner(error.message || "发现机会数据读取失败", "error");
     } finally {
+      this.state.fullLoadLoading = false;
       this.q("#ai-refresh").disabled = false;
     }
   }
 
   async loadLiveState() {
-    if (!this.state.running || this.state.busyRun) return;
+    if (!this.state.running || this.state.busyRun || this.state.fullLoadLoading || this.state.liveStateLoading || document.visibilityState === "hidden") return;
+    this.state.liveStateLoading = true;
     try {
       const [overview, news] = await Promise.all([this.api("/overview"), this.api("/news?limit=160")]);
       this.state.overview = overview;
@@ -383,6 +448,8 @@ class AiMonitorDashboard extends HTMLElement {
       if (this.state.view === "predictions") await this.loadPredictionAnalytics();
     } catch (error) {
       this.showBanner(error.message || "自动刷新失败", "error");
+    } finally {
+      this.state.liveStateLoading = false;
     }
   }
 
@@ -426,7 +493,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#stat-analyzed").textContent = this.number(news.analyzed_24h);
     this.q("#stat-pending").textContent = `待分析 ${this.number(news.pending)} 条`;
     this.q("#stat-opportunities").textContent = this.number(opportunities.active);
-    this.q("#stat-opportunity-note").textContent = `${config.timeframe || "1h"} · ${config.indicator_keys?.length || 0} 项全部满足`;
+    this.q("#stat-opportunity-note").textContent = `${config.timeframe || "1h"} · 策略组确认 · 至少 2 项核心同向`;
     this.q("#stat-runs").textContent = scheduler.active_runs ? `${scheduler.active_runs} 运行中` : "空闲";
     this.q("#stat-run-note").textContent = data.latest_run ? `${this.runTypeLabel(data.latest_run.run_type)} · ${this.statusLabel(data.latest_run.status)}` : "暂无执行记录";
     const state = this.q("#scheduler-state");
@@ -451,6 +518,16 @@ class AiMonitorDashboard extends HTMLElement {
       return true;
     });
     const target = this.q("#news-stream");
+    const renderSignature = JSON.stringify([
+      search,
+      mode,
+      [...this.state.analyzingNewsIds].sort(),
+      items,
+    ]);
+    if (renderSignature === this.state.newsRenderSignature) return;
+    const previousScrollTop = target.scrollTop;
+    const hadPreviousRender = Boolean(this.state.newsRenderSignature);
+    this.state.newsRenderSignature = renderSignature;
     if (!items.length) {
       target.innerHTML = '<div class="empty-state">没有符合当前筛选条件的新闻</div>';
       return;
@@ -475,6 +552,9 @@ class AiMonitorDashboard extends HTMLElement {
         <div class="news-score"><b>${item.ai_confidence == null ? "--" : `${Math.round(Number(item.ai_confidence) * 100)}%`}</b><small>${analyzed ? "AI 置信度" : "等待 AI"}</small><button class="news-analyze-action" type="button" data-analyze-news="${this.escape(item.id)}"${analyzing ? " disabled" : ""}>${analyzing ? "分析中…" : analyzed ? "重新分析" : "立即分析"}</button></div>
       </article>`;
     }).join("");
+    if (hadPreviousRender) {
+      target.scrollTop = Math.min(previousScrollTop, Math.max(0, target.scrollHeight - target.clientHeight));
+    }
   }
 
   async analyzeNewsItem(newsId) {
@@ -674,7 +754,7 @@ class AiMonitorDashboard extends HTMLElement {
   updateIndicatorCount() {
     const selected = this.qa('#indicator-picker input[type="checkbox"]:checked').map((input) => input.value);
     const count = selected.length;
-    this.q("#indicator-count").textContent = `已选 ${count} 项 · 全部满足`;
+    this.q("#indicator-count").textContent = `已选 ${count} 项 · 分组确认`;
     const conflicts = this.indicatorSelectionConflicts(selected);
     const warning = this.q("#indicator-conflict-warning");
     warning.classList.toggle("hidden", conflicts.length === 0);
@@ -698,7 +778,7 @@ class AiMonitorDashboard extends HTMLElement {
     const selected = new Set(template.indicator_keys || []);
     this.qa('#indicator-picker input[type="checkbox"]').forEach((input) => { input.checked = selected.has(input.value); });
     this.updateIndicatorCount();
-    this.showBanner(`已应用“${template.name}”组合；组合内条件仍采用全部满足规则。`, "success");
+    this.showBanner(`已应用“${template.name}”组合；系统将按策略组门槛和加权评分确认。`, "success");
   }
 
   filteredSymbols() {
@@ -772,7 +852,7 @@ class AiMonitorDashboard extends HTMLElement {
       this.renderConfig();
       await this.loadOverviewOnly();
       const scope = monitorSymbols.length ? `${monitorSymbols.length} 个监控品种` : "全部可用品种";
-      this.showBanner(`配置已保存；${scope}，${indicatorKeys.length} 个指标采用全部满足规则。`, "success");
+      this.showBanner(`配置已保存；${scope}，${indicatorKeys.length} 个指标采用策略组确认规则。`, "success");
     } catch (error) {
       this.showBanner(error.message || "配置保存失败", "error");
     } finally {
@@ -809,11 +889,20 @@ class AiMonitorDashboard extends HTMLElement {
     }
   }
 
-  async loadOpportunities() {
+  async loadOpportunities({ showLoading = false } = {}) {
     const tab = this.state.opportunityTab;
+    if (this.state.opportunitiesLoading && this.state.opportunityLoadingTab === tab) return;
     const requestId = ++this.state.opportunityRequestId;
     const target = this.q("#opportunity-list");
-    target.innerHTML = `<div class="empty-state opportunity-empty"><strong>正在读取${tab === "history" ? "历史" : "当前"}机会…</strong></div>`;
+    const switchingTab = this.state.opportunitiesLoadedTab && this.state.opportunitiesLoadedTab !== tab;
+    const firstLoad = !this.state.opportunitiesLoadedTab;
+    this.state.opportunitiesLoading = true;
+    this.state.opportunityLoadingTab = tab;
+    target.classList.add("is-refreshing");
+    target.setAttribute("aria-busy", "true");
+    if (showLoading || switchingTab || firstLoad) {
+      target.innerHTML = `<div class="empty-state opportunity-empty"><strong>正在读取${tab === "history" ? "历史" : "当前"}机会…</strong></div>`;
+    }
     try {
       const [data, analytics] = await Promise.all([
         this.api("/opportunities?limit=300&include_expired=true"),
@@ -825,13 +914,19 @@ class AiMonitorDashboard extends HTMLElement {
       const now = Date.now();
       if (analytics) this.state.opportunityAnalytics = analytics;
       const outcomes = new Map((analytics?.items || []).map((item) => [item.id, item]));
-      const items = data.items || [];
+      const bySignalTimeDesc = (left, right) => {
+        const leftTime = this.parseDate(left.discovered_at).getTime();
+        const rightTime = this.parseDate(right.discovered_at).getTime();
+        const timeDifference = (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+        return timeDifference || String(right.id || "").localeCompare(String(left.id || ""));
+      };
+      const items = [...(data.items || [])].sort(bySignalTimeDesc);
       const isActive = (item) => {
         const active = ["candidate", "discovered"].includes(item.status) && this.parseDate(item.expires_at).getTime() > now;
         return active;
       };
-      const currentItems = items.filter(isActive);
-      const historyItems = items.filter((item) => !isActive(item));
+      const currentItems = items.filter(isActive).sort(bySignalTimeDesc);
+      const historyItems = items.filter((item) => !isActive(item)).sort(bySignalTimeDesc);
       const visible = (tab === "history" ? historyItems : currentItems)
         .map((item) => ({ ...item, outcome: outcomes.get(item.id) || null }));
       if (tab === "current") {
@@ -854,13 +949,32 @@ class AiMonitorDashboard extends HTMLElement {
         const instrument = String(item.contract_symbol || item.symbol || "").trim().toUpperCase();
         if (!uniqueCurrent.has(instrument)) uniqueCurrent.set(instrument, item);
       });
-      this.state.opportunityDirectionCounts = countDirections([...uniqueCurrent.values()]);
+      const uniqueCurrentItems = [...uniqueCurrent.values()];
+      this.state.opportunityDirectionCounts = countDirections(uniqueCurrentItems);
       this.state.historyOpportunityDirectionCounts = countDirections(historyItems);
+      this.state.opportunityStatusCounts = uniqueCurrentItems.reduce((counts, item) => {
+        const status = this.virtualEntryState(item, this.virtualEntryGate(item)).tone;
+        counts.all += 1;
+        counts[status] += 1;
+        return counts;
+      }, { all: 0, triggered: 0, ready: 0, waiting: 0, failed: 0 });
       this.renderOpportunityDirectionCounts();
+      this.renderOpportunityStatusCounts();
       this.renderOpportunities();
+      this.state.opportunitiesLoadedTab = tab;
     } catch (error) {
       if (requestId !== this.state.opportunityRequestId) return;
       this.showBanner(error.message || "发现机会读取失败", "error");
+      if (!this.state.opportunitiesLoadedTab) {
+        target.innerHTML = '<div class="empty-state opportunity-empty"><strong>机会读取失败</strong><span>保留页面后重试，不会触发任何交易。</span></div>';
+      }
+    } finally {
+      if (requestId === this.state.opportunityRequestId) {
+        this.state.opportunitiesLoading = false;
+        this.state.opportunityLoadingTab = "";
+        target.classList.remove("is-refreshing");
+        target.removeAttribute("aria-busy");
+      }
     }
   }
 
@@ -885,28 +999,372 @@ class AiMonitorDashboard extends HTMLElement {
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", String(active));
     });
-    this.loadOpportunities();
+    this.q("#opportunity-status-tabs").classList.toggle("hidden", tab === "history");
+    this.loadOpportunities({ showLoading: true });
+  }
+
+  setOpportunityStatusFilter(status) {
+    if (this.state.opportunityTab !== "current") return;
+    const allowed = ["all", "triggered", "ready", "waiting", "failed"];
+    if (!allowed.includes(status) || status === this.state.opportunityStatusFilter) return;
+    this.state.opportunityStatusFilter = status;
+    this.qa("[data-opportunity-status]").forEach((button) => {
+      const active = button.dataset.opportunityStatus === status;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    this.renderOpportunities();
+  }
+
+  renderOpportunityStatusCounts() {
+    const counts = this.state.opportunityStatusCounts;
+    ["all", "triggered", "ready", "waiting", "failed"].forEach((status) => {
+      const target = this.q(`#opportunity-status-${status}-count`);
+      if (target) target.textContent = this.number(counts[status]);
+    });
+  }
+
+  opportunityScoreHistory(item) {
+    const evidence = item?.evidence || {};
+    const raw = Array.isArray(evidence.score_history) ? evidence.score_history : [];
+    const history = [];
+    const entryPoint = {
+      calculated_at: item?.prediction_created_at,
+      news: Number(item?.prediction_news_score),
+      technical: Number(item?.prediction_indicator_score),
+      market_flow: Number(item?.prediction_market_flow_score),
+      combined: Number(item?.prediction_combined_score),
+    };
+    if (entryPoint.calculated_at && [entryPoint.news, entryPoint.technical, entryPoint.market_flow, entryPoint.combined].every(Number.isFinite)) {
+      history.push(entryPoint);
+    }
+    history.push(...raw.map((point) => ({
+      calculated_at: point?.calculated_at,
+      news: Number(point?.news),
+      technical: Number(point?.technical),
+      market_flow: Number(point?.market_flow),
+      combined: Number(point?.combined),
+    })).filter((point) => point.calculated_at && [point.news, point.technical, point.market_flow, point.combined].every(Number.isFinite)));
+    const snapshot = evidence.score_snapshot || {};
+    const fallback = {
+      calculated_at: snapshot.calculated_at || item?.updated_at || item?.discovered_at,
+      news: Number(snapshot.news ?? item?.news_score),
+      technical: Number(snapshot.technical ?? item?.indicator_score),
+      market_flow: Number(snapshot.market_flow ?? evidence.market_flow?.score ?? 50),
+      combined: Number(snapshot.combined ?? item?.combined_score),
+    };
+    if (fallback.calculated_at && [fallback.news, fallback.technical, fallback.market_flow, fallback.combined].every(Number.isFinite)) history.push(fallback);
+    const unique = new Map();
+    history.forEach((point) => unique.set(String(point.calculated_at), point));
+    return [...unique.values()].sort((left, right) => this.parseDate(left.calculated_at).getTime() - this.parseDate(right.calculated_at).getTime());
+  }
+
+  scoreTrendState(history) {
+    const latest = history.at(-1);
+    const previous = history.at(-2);
+    const delta = latest && previous ? latest.combined - previous.combined : 0;
+    const direction = delta > 0.05 ? "up" : delta < -0.05 ? "down" : "flat";
+    return {
+      latest,
+      previous,
+      delta,
+      direction,
+      arrow: direction === "up" ? "↑" : direction === "down" ? "↓" : "→",
+      badge: previous ? `${delta > 0 ? "+" : ""}${delta.toFixed(1)}` : "首个点",
+    };
+  }
+
+  renderScoreTrendChart(item, history) {
+    if (!history.length) return '<div class="score-trend-empty">暂无评分历史，下一轮机会扫描后开始记录。</div>';
+    const width = 920;
+    const height = 330;
+    const padding = { left: 48, right: 22, top: 20, bottom: 42 };
+    const chartWidth = width - padding.left - padding.right;
+    const chartHeight = height - padding.top - padding.bottom;
+    const x = (index) => padding.left + (history.length === 1 ? chartWidth / 2 : chartWidth * index / (history.length - 1));
+    const y = (value) => padding.top + chartHeight * (1 - Math.max(0, Math.min(100, Number(value))) / 100);
+    const series = [
+      { key: "combined", label: "组合评分", color: "#ad9cff" },
+      { key: "news", label: "新闻评分", color: "#dfbd67" },
+      { key: "technical", label: "技术指标", color: "#5bd6aa" },
+      { key: "market_flow", label: "资金盘口", color: "#5dc4d8" },
+    ];
+    const grid = [0, 25, 50, 75, 100].map((value) => `<g><line x1="${padding.left}" y1="${y(value)}" x2="${width - padding.right}" y2="${y(value)}"></line><text x="${padding.left - 9}" y="${y(value) + 4}">${value}</text></g>`).join("");
+    const threshold = Number(this.state.config?.minimum_combined_score ?? 70);
+    const lines = series.map((definition) => {
+      const points = history.map((point, index) => `${x(index).toFixed(2)},${y(point[definition.key]).toFixed(2)}`).join(" ");
+      const dots = definition.key === "combined" ? history.map((point, index) => `<circle cx="${x(index).toFixed(2)}" cy="${y(point.combined).toFixed(2)}" r="3.5"><title>${this.escape(this.formatDate(point.calculated_at))} · ${point.combined.toFixed(1)}</title></circle>`).join("") : "";
+      return `<g class="score-line ${definition.key}" style="--series:${definition.color}"><polyline points="${points}"></polyline>${dots}</g>`;
+    }).join("");
+    const timeLabels = history.length === 1
+      ? [{ index: 0, anchor: "middle" }]
+      : [{ index: 0, anchor: "start" }, { index: Math.floor((history.length - 1) / 2), anchor: "middle" }, { index: history.length - 1, anchor: "end" }];
+    const axes = timeLabels.map(({ index, anchor }) => `<text class="score-time-label" x="${x(index)}" y="${height - 12}" text-anchor="${anchor}">${this.escape(this.formatDate(history[index].calculated_at))}</text>`).join("");
+    const state = this.scoreTrendState(history);
+    const values = history.map((point) => point.combined);
+    const entryScore = item.prediction_combined_score == null ? null : Number(item.prediction_combined_score);
+    const recentRows = history.slice(-12).reverse().map((point, index) => {
+      const prior = history[history.length - 2 - index];
+      const delta = prior ? point.combined - prior.combined : null;
+      const deltaClass = delta == null || Math.abs(delta) <= 0.05 ? "flat" : delta > 0 ? "up" : "down";
+      return `<tr><td>${this.escape(this.formatDate(point.calculated_at))}</td><td>${point.combined.toFixed(1)}</td><td class="${deltaClass}">${delta == null ? "--" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)}`}</td><td>${point.news.toFixed(1)}</td><td>${point.technical.toFixed(1)}</td><td>${point.market_flow.toFixed(1)}</td></tr>`;
+    }).join("");
+    return `<section class="score-trend-summary">
+        <article><span>当前组合分</span><b>${state.latest.combined.toFixed(1)}</b><small>${this.escape(this.formatDate(state.latest.calculated_at))}</small></article>
+        <article class="${state.direction}"><span>较上次</span><b>${state.arrow} ${state.badge}</b><small>${history.length} 个扫描点</small></article>
+        <article><span>区间最高 / 最低</span><b>${Math.max(...values).toFixed(1)} / ${Math.min(...values).toFixed(1)}</b><small>仅当前机会生命周期</small></article>
+        <article><span>预测入场分</span><b>${entryScore == null ? "--" : entryScore.toFixed(1)}</b><small>${entryScore == null ? "尚未生成虚拟预测" : "冻结，不随行情改写"}</small></article>
+      </section>
+      <section class="score-trend-chart-panel">
+        <header><div><strong>评分变化折线图</strong><small>纵轴 0–100 分 · 横轴为机会扫描时间</small></div><div class="score-trend-legend">${series.map((definition) => `<span style="--series:${definition.color}"><i></i>${definition.label}</span>`).join("")}</div></header>
+        <svg class="score-trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this.escape(item.symbol)} 组合评分走势">
+          <g class="score-grid">${grid}</g>
+          <g class="score-threshold"><line x1="${padding.left}" y1="${y(threshold)}" x2="${width - padding.right}" y2="${y(threshold)}"></line><text x="${width - padding.right - 4}" y="${y(threshold) - 6}">准入线 ${threshold.toFixed(0)}</text></g>
+          ${lines}${axes}
+        </svg>
+      </section>
+      <section class="score-trend-ledger"><header><strong>最近评分明细</strong><small>最多保留 96 个扫描点</small></header><div><table><thead><tr><th>计算时间</th><th>组合分</th><th>变化</th><th>新闻</th><th>技术</th><th>资金盘口</th></tr></thead><tbody>${recentRows}</tbody></table></div></section>`;
+  }
+
+  openScoreTrend(opportunityId, trigger) {
+    const item = this.state.opportunities.find((opportunity) => opportunity.id === opportunityId);
+    if (!item) return;
+    const history = this.opportunityScoreHistory(item);
+    const modal = this.q("#score-trend-modal");
+    this.scoreTrendOpportunity = item;
+    this.scoreTrendFocus = trigger || null;
+    this.q("#score-trend-title").textContent = `${item.symbol} · 组合评分走势`;
+    this.q("#score-trend-subtitle").textContent = `${item.contract_symbol} · ${item.timeframe} 周期 · ${history.length} 个扫描点`;
+    this.q("#score-trend-body").innerHTML = this.renderScoreTrendChart(item, history);
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.q("#score-trend-close").focus({ preventScroll: true });
+  }
+
+  closeScoreTrend() {
+    const modal = this.q("#score-trend-modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    this.scoreTrendOpportunity = null;
+    const focusTarget = this.scoreTrendFocus;
+    this.scoreTrendFocus = null;
+    if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
+  }
+
+  virtualEntryGate(item) {
+    const evidence = item?.evidence || {};
+    const frozenGate = item?.prediction_entry_gate;
+    const liveGate = evidence.virtual_entry_gate;
+    const source = frozenGate && Array.isArray(frozenGate.checks)
+      ? frozenGate
+      : liveGate && Array.isArray(liveGate.checks)
+      ? liveGate
+      : null;
+    if (source) return { ...source, frozen: source === frozenGate };
+    const config = this.state.config || {};
+    const indicatorPolicy = evidence.indicator_policy || {};
+    const marketFlow = evidence.market_flow || {};
+    const market = evidence.market || {};
+    const newsScore = Number(item?.news_score || 0);
+    const indicatorScore = Number(item?.indicator_score || 0);
+    const combinedScore = Number(item?.combined_score || 0);
+    const entryPrice = Number(item?.prediction_entry_price ?? market.price ?? 0);
+    const minimumNewsScore = Number(config.minimum_news_confidence ?? 0.6) * 100;
+    const minimumIndicatorScore = Number(config.minimum_indicator_score ?? 65);
+    const minimumCombinedScore = Number(config.minimum_combined_score ?? 70);
+    const checks = [
+      { key: "news_candidate", label: "新闻候选", passed: newsScore >= minimumNewsScore, current: newsScore, required: minimumNewsScore, detail: "新闻评分达到候选门槛" },
+      { key: "indicator_policy", label: "策略组", passed: indicatorPolicy.passed === true || evidence.technical_confirmed === true, current: indicatorPolicy.passed === true, required: true, detail: "至少一个核心技术策略组通过" },
+      { key: "indicator_score", label: "技术评分", passed: indicatorScore >= minimumIndicatorScore, current: indicatorScore, required: minimumIndicatorScore, detail: "方向一致的技术强度" },
+      { key: "combined_score", label: "组合评分", passed: combinedScore >= minimumCombinedScore, current: combinedScore, required: minimumCombinedScore, detail: "新闻、技术与盘口加权结果" },
+      { key: "market_flow_conflict", label: "盘口冲突", passed: marketFlow.hard_conflict !== true, current: marketFlow.hard_conflict === true, required: false, detail: "候选方向不得存在资金强冲突" },
+      { key: "entry_price", label: "入场价格", passed: entryPrice > 0, current: entryPrice > 0 ? entryPrice : null, required: "> 0", detail: "取得真实扫描参考价后才能冻结" },
+    ];
+    const signalConfirmed = checks.slice(0, -1).every((check) => check.passed);
+    return {
+      version: "frontend_legacy_fallback",
+      execution_mode: "virtual_prediction_only",
+      real_order_enabled: false,
+      direction: item?.direction === "short" ? "short" : "long",
+      signal_confirmed: signalConfirmed,
+      entry_ready: signalConfirmed && checks.at(-1).passed,
+      reference_price: entryPrice > 0 ? entryPrice : null,
+      checked_at: item?.prediction_created_at || item?.updated_at || item?.discovered_at,
+      checks,
+      frozen: item?.prediction_entry_price != null,
+    };
+  }
+
+  virtualEntryState(item, gate) {
+    const hasPrediction = Boolean(item?.prediction_status || item?.prediction_created_at);
+    const entryPrice = Number(item?.prediction_entry_price || 0);
+    const direction = item?.direction === "short" ? "做空" : "做多";
+    if (hasPrediction && entryPrice > 0) {
+      const suffix = item.prediction_status === "completed"
+        ? "已结算"
+        : item.prediction_status === "unavailable"
+        ? "结算行情不足"
+        : "等待结算";
+      return { tone: "triggered", label: `已触发虚拟${direction}`, detail: suffix, triggered: true };
+    }
+    if (hasPrediction) {
+      return { tone: "failed", label: "触发失败", detail: "未取得有效入场价格", triggered: false };
+    }
+    if (gate.entry_ready) {
+      return { tone: "ready", label: "条件已满足", detail: "等待虚拟预测记录写入", triggered: false };
+    }
+    const failed = (gate.checks || []).filter((check) => !check.passed);
+    return { tone: "waiting", label: "尚未触发", detail: failed.length ? `仍有 ${failed.length} 项条件未满足` : "等待下一轮扫描", triggered: false };
+  }
+
+  virtualPositionSnapshot(item) {
+    const source = item?.virtual_position;
+    if (source && typeof source === "object") return source;
+    const entry = Number(item?.prediction_entry_price || 0);
+    const current = Number(item?.evidence?.market?.price || 0);
+    if (!(entry > 0) || !(current > 0)) return { available: false };
+    const directionFactor = item?.direction === "short" ? -1 : 1;
+    const grossBps = (current / entry - 1) * 10000 * directionFactor;
+    return {
+      available: true,
+      entry_price: entry,
+      current_price: current,
+      market_at: item?.updated_at,
+      valuation_state: "scan_fallback",
+      gross_return_bps: grossBps,
+      gross_return_pct: grossBps / 100,
+      net_return_bps: grossBps,
+      net_return_pct: grossBps / 100,
+      gross_pnl_per_unit: (current - entry) * directionFactor,
+      net_pnl_per_unit: (current - entry) * directionFactor,
+      net_pnl_per_10000: grossBps,
+      profit_state: grossBps > 0 ? "profit" : grossBps < 0 ? "loss" : "flat",
+      target_state: "active",
+      risk_plan: item?.evidence?.risk_plan || {},
+    };
+  }
+
+  predictionSettlementState(item) {
+    const source = item?.prediction_settlement || {};
+    const dueAt = source.due_at || item?.prediction_due_at;
+    const dueMs = this.parseDate(dueAt).getTime();
+    const graceHours = Math.max(1, Number(source.grace_hours) || 6);
+    const graceDeadline = source.grace_deadline || (Number.isFinite(dueMs) ? new Date(dueMs + graceHours * 3600000).toISOString() : null);
+    const graceMs = this.parseDate(graceDeadline).getTime();
+    const now = Date.now();
+    const phase = source.phase || (item?.prediction_status === "completed"
+      ? "completed"
+      : item?.prediction_status === "unavailable"
+      ? "unavailable"
+      : Number.isFinite(dueMs) && now < dueMs
+      ? "scheduled"
+      : Number.isFinite(graceMs) && now > graceMs
+      ? "overdue"
+      : "awaiting_market_data");
+    const labels = {
+      scheduled: "观察周期尚未结束",
+      awaiting_market_data: "等待到期行情",
+      overdue: "结算处理已超时",
+      completed: "结算已完成",
+      unavailable: "结算行情不足",
+    };
+    const details = {
+      scheduled: "到达预测结算时间后，后台会读取结算时点附近的 15 分钟 K 线。",
+      awaiting_market_data: `已经到达结算时间；到期 K 线未到齐时每 ${Number(source.retry_interval_minutes || 5)} 分钟重试。`,
+      overdue: `已经超过 ${graceHours} 小时宽限期，后台补偿任务将其转为“行情不足”。`,
+      completed: "已取得结算时点附近行情，并完成方向收益与命中结果计算。",
+      unavailable: `宽限期内始终没有取得有效到期行情，因此不计入命中率。`,
+    };
+    return {
+      phase,
+      label: labels[phase] || "等待结算",
+      detail: details[phase] || "等待后台结算任务处理。",
+      dueAt,
+      graceDeadline,
+      lastAttemptAt: source.last_attempt_at,
+      nextRetryAt: source.next_retry_at,
+      priceTimeframe: source.price_timeframe || "15m",
+    };
+  }
+
+  signedMetric(value, digits = 2, suffix = "") {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "--";
+    return `${number > 0 ? "+" : ""}${number.toFixed(digits)}${suffix}`;
+  }
+
+  patchOpportunityCards(target, markup) {
+    const template = document.createElement("template");
+    template.innerHTML = markup;
+    const incoming = [...template.content.children];
+    const currentCards = new Map(
+      [...target.children]
+        .filter((node) => node.matches?.(".opportunity-item[data-opportunity-card]"))
+        .map((node) => [node.dataset.opportunityCard, node]),
+    );
+    const activeElement = this.shadowRoot.activeElement;
+    const previousScrollTop = target.scrollTop;
+
+    [...target.children]
+      .filter((node) => !node.matches?.(".opportunity-item[data-opportunity-card]"))
+      .forEach((node) => node.remove());
+
+    incoming.forEach((nextCard) => {
+      const key = nextCard.dataset.opportunityCard;
+      const currentCard = currentCards.get(key);
+      if (!currentCard) {
+        target.appendChild(nextCard);
+        return;
+      }
+      currentCards.delete(key);
+      const hasFocus = activeElement && currentCard.contains(activeElement);
+      if (!hasFocus && (currentCard.className !== nextCard.className || currentCard.innerHTML !== nextCard.innerHTML)) {
+        currentCard.className = nextCard.className;
+        currentCard.replaceChildren(...nextCard.childNodes);
+      }
+      target.appendChild(currentCard);
+    });
+    currentCards.forEach((node) => node.remove());
+    target.scrollTop = Math.min(previousScrollTop, Math.max(0, target.scrollHeight - target.clientHeight));
   }
 
   renderOpportunities() {
     const target = this.q("#opportunity-list");
     const historicalTab = this.state.opportunityTab === "history";
-    if (!this.state.opportunities.length) {
-      target.innerHTML = historicalTab
+    const statusFilter = this.state.opportunityStatusFilter;
+    const visibleOpportunities = historicalTab || statusFilter === "all"
+      ? this.state.opportunities
+      : this.state.opportunities.filter((item) => this.virtualEntryState(item, this.virtualEntryGate(item)).tone === statusFilter);
+    if (!visibleOpportunities.length) {
+      const statusLabel = ({ triggered: "已触发", ready: "条件满足", waiting: "待触发", failed: "触发异常" })[statusFilter];
+      const emptyMarkup = historicalTab
         ? '<div class="empty-state opportunity-empty"><strong>暂无历史机会</strong><span>信号过期或结束后会自动归入这里。</span></div>'
+        : statusFilter !== "all"
+        ? `<div class="empty-state opportunity-empty"><strong>当前没有“${statusLabel}”机会</strong><span>可切换其他状态，或等待下一轮机会扫描。</span></div>`
         : '<div class="empty-state opportunity-empty"><strong>尚未发现当前有效的美股候选</strong><span>系统会按新闻回看范围、置信度和关联股票继续扫描。</span></div>';
+      if (target.innerHTML !== emptyMarkup) target.innerHTML = emptyMarkup;
       return;
     }
-    target.innerHTML = this.state.opportunities.map((item) => {
+    const waitingSettlementCount = visibleOpportunities.filter((item) => item.prediction_status === "pending").length;
+    const settlementGuide = historicalTab ? `<aside class="settlement-guide" aria-label="历史机会结算说明">
+      <div><span>SETTLEMENT GUIDE</span><strong>“等待结算”不是等待买入</strong><p>它表示虚拟预测已经触发；系统正在等待观察周期结束，或等待结算时点附近的 15 分钟 K 线。结算完成后才计算命中与成本后收益。</p></div>
+      <b>${this.number(waitingSettlementCount)}<small>当前等待</small></b>
+      <ul><li>后台每 20 秒扫描</li><li>缺行情每 5 分钟重试</li><li>最长宽限 6 小时</li><li>仍无行情则标记“行情不足”</li></ul>
+    </aside>` : "";
+    const markup = settlementGuide + visibleOpportunities.map((item) => {
       const evidence = item.evidence || {};
       const indicatorItems = evidence.indicators || [];
+      const indicatorPolicy = evidence.indicator_policy || {};
       const matchedCount = Number(evidence.matched_indicator_count ?? indicatorItems.filter((indicator) => indicator.matched).length);
       const requiredCount = Number(evidence.required_indicator_count ?? indicatorItems.length);
-      const indicators = indicatorItems.slice(0, 10).map((indicator) => `<span class="evidence-chip ${indicator.matched ? "matched" : "unmatched"}">${indicator.matched ? "✓" : "×"} ${this.escape(indicator.name)} <b>${Number(indicator.strength ?? 0).toFixed(0)}</b></span>`).join("");
-      const indicatorRemainder = indicatorItems.length > 10 ? `<span class="evidence-chip remainder">另有 ${indicatorItems.length - 10} 项</span>` : "";
-      const news = (evidence.news || []).slice(0, 3).map((entry) => `<li><time>${this.formatUnix(entry.ts)}</time><span>${this.escape(entry.title)}</span><b>${Math.round(Number(entry.score || 0) * 100)}%</b></li>`).join("");
+      const availableCount = Number(evidence.available_indicator_count ?? indicatorItems.filter((indicator) => indicator.available !== false).length);
+      const passedGroupCount = Array.isArray(indicatorPolicy.passed_groups) ? indicatorPolicy.passed_groups.length : 0;
+      const indicators = indicatorItems.slice(0, 6).map((indicator) => `<span class="evidence-chip ${indicator.available === false ? "unavailable" : indicator.matched ? "matched" : "unmatched"}">${indicator.available === false ? "--" : indicator.matched ? "✓" : "×"} ${this.escape(indicator.name)} <b>${indicator.available === false ? "不可用" : Number(indicator.strength ?? 0).toFixed(0)}</b></span>`).join("");
+      const indicatorRemainder = indicatorItems.length > 6 ? `<span class="evidence-chip remainder">另有 ${indicatorItems.length - 6} 项</span>` : "";
+      const news = (evidence.news || []).slice(0, 2).map((entry) => `<li><time>${this.formatUnix(entry.ts)}</time><span>${this.escape(entry.title)}</span><b>${Math.round(Number(entry.score || 0) * 100)}%</b></li>`).join("");
       const market = evidence.market || {};
-      const confirmed = item.status === "discovered";
+      const confirmed = item.status === "discovered" || evidence.confirmed === true;
       const readiness = evidence.live_readiness || {};
       const shadowReady = readiness.status === "shadow_ready";
       const readinessBadge = `<span class="readiness-badge ${shadowReady ? "shadow" : "research"}">${shadowReady ? "影子候选" : "研究信号"}</span>`;
@@ -914,35 +1372,128 @@ class AiMonitorDashboard extends HTMLElement {
       const marketAvailable = evidence.market_available !== false;
       const directionLabel = item.direction === "short" ? "做空" : "做多";
       const directionClass = item.direction === "short" ? "short" : "long";
-      const signalStart = this.formatDate(item.discovered_at);
+      const signalStart = this.formatDate(item.prediction_created_at || item.discovered_at);
       const signalEnd = this.formatDate(item.expires_at);
-      const signalDuration = this.formatDuration(item.discovered_at, item.expires_at);
-      const buyPrice = market.price == null ? "--" : this.compactNumber(market.price);
+      const signalDuration = this.formatDuration(item.prediction_created_at || item.discovered_at, item.expires_at);
+      const scoreUpdatedAt = item.updated_at || evidence.score_snapshot?.calculated_at || item.discovered_at;
+      const frozenCombinedScore = item.prediction_combined_score;
+      const scoreDelta = frozenCombinedScore == null
+        ? ""
+        : ` · 入场 ${Number(frozenCombinedScore).toFixed(1)}`;
+      const scoreHistory = this.opportunityScoreHistory(item);
+      const scoreTrend = this.scoreTrendState(scoreHistory);
+      const entryGate = this.virtualEntryGate(item);
+      const entryState = this.virtualEntryState(item, entryGate);
+      const signalGateChecks = (entryGate.checks || []).filter((check) => check.key !== "entry_price");
+      const passedGateCount = signalGateChecks.filter((check) => check.passed).length;
+      const entryGateChecks = signalGateChecks.map((check) => {
+        const current = check.key === "indicator_policy"
+          ? check.passed ? "通过" : "未通过"
+          : check.key === "market_flow_conflict"
+          ? check.passed ? "无冲突" : "有冲突"
+          : check.current == null
+          ? "--"
+          : Number.isFinite(Number(check.current))
+          ? Number(check.current).toFixed(check.key === "entry_price" ? 2 : 1)
+          : String(check.current);
+        const required = typeof check.required === "number" ? check.required.toFixed(1) : String(check.required ?? "");
+        return `<span class="virtual-entry-check ${check.passed ? "passed" : "blocked"}" title="${this.escape(check.detail || "")}"><i>${check.passed ? "✓" : "×"}</i><em>${this.escape(check.label)}</em><b>${this.escape(current)}</b><small>${check.key === "market_flow_conflict" || check.key === "indicator_policy" ? "" : `门槛 ${this.escape(required)}`}</small></span>`;
+      }).join("");
+      const triggerPriceValue = Number(item.prediction_entry_price || 0);
+      const liveReferencePrice = Number(entryGate.reference_price ?? market.price ?? 0);
+      const displayedEntryPrice = triggerPriceValue > 0 ? triggerPriceValue : liveReferencePrice;
+      const entryPriceLabel = triggerPriceValue > 0 ? "冻结触发价格" : "当前参考价 · 未冻结";
+      const entryTime = item.prediction_created_at || entryGate.checked_at;
+      const gateScope = entryGate.frozen ? "触发时条件已冻结" : "当前扫描条件";
+      const triggeredPosition = entryState.triggered && !historicalTab;
+      const virtualEntryPanel = `<section class="virtual-entry-gate ${entryState.tone} ${triggeredPosition ? "position-active" : ""}" aria-label="虚拟买入触发条件与状态">
+        <div class="virtual-entry-state"><span>VIRTUAL ENTRY GATE</span><strong>${this.escape(entryState.label)}</strong><small>${this.escape(entryState.detail)} · ${gateScope} · 真实订单关闭</small></div>
+        <div class="virtual-entry-checks">${entryGateChecks}</div>
+        ${triggeredPosition ? "" : `<div class="virtual-entry-price"><span>${entryPriceLabel}</span><b>${displayedEntryPrice > 0 ? this.escape(this.compactNumber(displayedEntryPrice)) : "--"}</b><small>${entryState.triggered ? `触发 ${this.formatDate(entryTime)}` : `检查 ${this.formatDate(entryTime)}`}</small></div>`}
+      </section>`;
+      const position = this.virtualPositionSnapshot(item);
+      const riskPlan = position.risk_plan || {};
+      const positionTone = position.profit_state || "flat";
+      const markLabel = position.valuation_state === "settled"
+        ? "到期结算价"
+        : position.market_stale
+        ? "最近价格 · 行情延迟"
+        : "实时价格";
+      const targetStateLabel = position.target_state === "take_profit_reached"
+        ? "已越过止盈线"
+        : position.target_state === "stop_loss_reached"
+        ? "已越过止损线"
+        : position.valuation_state === "settled"
+        ? "预测已结算"
+        : "持仓观察中";
+      const positionPanel = triggeredPosition ? `<section class="virtual-position ${positionTone}" aria-label="虚拟持仓实时盈亏">
+        <div class="virtual-position-title"><span>VIRTUAL POSITION · ${this.state.displayLeverage}X DISPLAY</span><strong>虚拟${directionLabel} · ${targetStateLabel}</strong><small>触发 ${this.formatDate(entryTime)} · 有效至 ${signalEnd} · 不会发送真实订单</small></div>
+        <div class="virtual-position-metrics">
+          <span><em>冻结入场价</em><b>${position.entry_price > 0 ? this.escape(this.compactNumber(position.entry_price)) : "--"}</b><small>触发时价格，不随行情变化</small></span>
+          <span class="live-mark"><em>${markLabel}</em><b>${position.current_price > 0 ? this.escape(this.compactNumber(position.current_price)) : "--"}</b><small>${position.market_at ? this.formatDate(position.market_at) : "等待最新行情"}</small></span>
+          <span class="position-pnl ${positionTone}"><em>当前 ${this.state.displayLeverage}x 净收益率</em><b>${position.available ? this.formatLeveragedReturnFromPercent(position.net_return_pct) : "--"}</b><small>${position.available ? `标的净收益 ${this.signedMetric(position.net_return_pct, 2, "%")} · 含成本换算 · 不含强平` : "暂无可用实时行情"}</small></span>
+          <span class="risk-stop"><em>参考止损价</em><b>${riskPlan.stop_loss_price > 0 ? this.escape(this.compactNumber(riskPlan.stop_loss_price)) : "--"}</b><small>风险 ${riskPlan.stop_loss_pct == null ? "--" : `-${Number(riskPlan.stop_loss_pct).toFixed(2)}%`}</small></span>
+          <span class="risk-target"><em>参考止盈价</em><b>${riskPlan.take_profit_price > 0 ? this.escape(this.compactNumber(riskPlan.take_profit_price)) : "--"}</b><small>目标 ${riskPlan.take_profit_pct == null ? "--" : `+${Number(riskPlan.take_profit_pct).toFixed(2)}%`}</small></span>
+          <span><em>风险收益比</em><b>1 : ${Number(riskPlan.risk_reward_ratio || 2).toFixed(1)}</b><small>${riskPlan.method === "atr14_x_1_5" ? "ATR(14) 波动率冻结" : "按周期默认风险"} · 仅观察线</small></span>
+        </div>
+      </section>` : "";
+      const waitingDetail = entryState.tone === "ready"
+        ? "条件已满足，等待虚拟预测写入"
+        : `${signalGateChecks.length - passedGateCount} 项条件未满足 · 尚未入场`;
+      const signalSummaryPanel = `<div class="opportunity-signal ${historicalTab ? "historical-signal" : "candidate-signal"}" aria-label="${historicalTab ? "历史信号" : "待触发候选"}信息">
+        <span><em>信号时间</em><b>${signalStart}</b></span>
+        <span class="validity"><em>信号有效期间</em><b>${signalDuration}</b><small>${signalStart} — ${signalEnd}</small></span>
+        <span><em>${historicalTab ? "历史方向" : "候选方向"}</em><b class="signal-${directionClass}">${directionLabel}</b><small>${historicalTab ? "按该方向统计结果" : "仅为研判方向，尚未买入"}</small></span>
+        <span class="trigger-progress ${entryState.tone}"><em>${historicalTab ? "触发结果" : "触发进度"}</em><b>${passedGateCount} / ${signalGateChecks.length}</b><small>${historicalTab ? entryState.triggered ? "已生成虚拟预测" : "未生成虚拟预测" : waitingDetail}</small></span>
+      </div>`;
       const outcome = historicalTab ? item.outcome : null;
-      const outcomeResult = outcome?.result || "unavailable";
-      const outcomeLabel = this.analyticsResultLabel(outcomeResult);
-      const outcomeReturn = outcome?.directional_return_bps == null ? "到期行情不足" : `方向收益 ${this.formatBps(outcome.directional_return_bps)}`;
+      const predictionStatus = String(item.prediction_status || "");
+      const settlementState = this.predictionSettlementState(item);
+      const outcomeResult = outcome?.result
+        || (predictionStatus === "pending" ? "pending" : predictionStatus === "unavailable" ? "unavailable" : "not_created");
+      const outcomeLabel = outcome
+        ? this.analyticsResultLabel(outcomeResult)
+        : outcomeResult === "pending"
+        ? "等待结算"
+        : outcomeResult === "unavailable"
+        ? "行情不足"
+        : confirmed
+        ? "未生成预测"
+        : "技术未确认";
+      const outcomeReturn = outcome?.directional_return_bps != null
+        ? `${this.state.displayLeverage}x 净收益 ${this.formatLeveragedReturnFromBps(outcome.directional_return_bps)} · 标的 ${this.formatBps(outcome.directional_return_bps)}`
+        : outcomeResult === "pending"
+        ? `预测结算 ${this.formatDate(settlementState.dueAt)} · ${settlementState.label}`
+        : outcomeResult === "unavailable"
+        ? "结算宽限期内未取得行情"
+        : confirmed
+        ? "历史信号未关联预测记录"
+        : `核心同向 ${Number(indicatorPolicy.core_matched_count ?? matchedCount)} 项 · 通过 ${passedGroupCount} 个策略组`;
       const outcomeMetric = historicalTab
-        ? `<span class="history-result ${this.escape(outcomeResult)}"><em>是否命中</em><b>${this.escape(outcomeLabel)}</b><small>${this.escape(outcomeReturn)}</small></span>`
+        ? `<span class="history-result ${this.escape(outcomeResult)}"><em>${outcome ? "是否命中" : "预测状态"}</em><b>${this.escape(outcomeLabel)}</b><small>${this.escape(outcomeReturn)}</small></span>`
         : "";
+      const settlementPanel = historicalTab && outcomeResult === "pending" ? `<section class="settlement-detail ${this.escape(settlementState.phase)}" aria-label="等待结算详情">
+        <div><span>SETTLEMENT STATUS</span><strong>${this.escape(settlementState.label)}</strong><small>${this.escape(settlementState.detail)}</small></div>
+        <span><em>预测结算时间</em><b>${this.formatDate(settlementState.dueAt)}</b><small>虚拟买入时间 + ${this.escape(item.timeframe)} 观察周期</small></span>
+        <span><em>下次预计处理</em><b>${settlementState.nextRetryAt ? this.formatDate(settlementState.nextRetryAt) : "后台下轮扫描"}</b><small>${settlementState.lastAttemptAt ? `最近尝试 ${this.formatDate(settlementState.lastAttemptAt)}` : `使用 ${this.escape(settlementState.priceTimeframe)} 到期行情`}</small></span>
+        <span><em>宽限截止时间</em><b>${this.formatDate(settlementState.graceDeadline)}</b><small>超过后仍无行情则不计入统计</small></span>
+      </section>` : "";
       const symbolControl = marketAvailable
         ? `<button class="opportunity-symbol" type="button" data-opportunity-id="${this.escape(item.id)}" data-open-contract="${this.escape(item.contract_symbol)}" data-timeframe="${this.escape(item.timeframe)}" title="打开 ${this.escape(item.symbol)} 的合约 K 线研究与预测模拟">${this.escape(item.symbol)}</button>`
         : `<button class="opportunity-symbol unavailable" type="button" disabled title="该股票暂无对应的合约技术行情">${this.escape(item.symbol)}</button>`;
       const conclusionControl = `<button class="ai-conclusion-trigger" type="button" data-ai-conclusion="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 的 AI 分析结论">AI分析结论</button>`;
-      return `<article class="opportunity-item ${this.escape(item.status)} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}">
-        <header><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span>${readinessBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${conclusionControl}</div><div class="opportunity-score"><b>${Number(item.combined_score).toFixed(1)}</b><span>组合评分</span></div></header>
-        <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}"><span><em>新闻评分</em><b>${Number(item.news_score).toFixed(1)}</b></span><span><em>指标强度</em><b>${Number(item.indicator_score).toFixed(1)}</b><small>满足 ${matchedCount} / ${requiredCount}</small></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b></span><span><em>信号状态</em><b>${historicalTab ? historyState : shadowReady ? "可影子观察" : confirmed ? "仅研究" : "等待确认"}</b></span>${outcomeMetric}</div>
-        <div class="opportunity-signal" aria-label="虚拟买入信号信息">
-          <span><em>信号时间</em><b>${signalStart}</b></span>
-          <span class="validity"><em>信号有效期间</em><b>${signalDuration}</b><small>${signalStart} — ${signalEnd}</small></span>
-          <span><em>买入方向</em><b class="signal-${directionClass}">${directionLabel}</b></span>
-          <span><em>买入价格</em><b>${this.escape(buyPrice)}</b><small>扫描时参考价</small></span>
-        </div>
+      return `<article class="opportunity-item ${this.escape(item.status)} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}">
+        <header><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span>${readinessBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${conclusionControl}</div><button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b>${Number(item.combined_score).toFixed(1)}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
+        ${virtualEntryPanel}
+        <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}"><span><em>新闻评分</em><b>${Number(item.news_score).toFixed(1)}</b></span><span><em>指标强度</em><b>${Number(item.indicator_score).toFixed(1)}</b><small>${matchedCount} 项同向 · ${availableCount}/${requiredCount} 可用</small></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b></span><span><em>信号状态</em><b>${historicalTab ? historyState : shadowReady ? "可影子观察" : confirmed ? "仅研究" : "等待确认"}</b></span>${outcomeMetric}</div>
+        ${positionPanel || signalSummaryPanel}
+        ${settlementPanel}
         <div class="evidence-chips">${indicators}${indicatorRemainder}</div>
         <ul class="opportunity-news">${news}</ul>
-        <footer><span>发现 ${this.formatDate(item.discovered_at)}</span><span>有效至 ${this.formatDate(item.expires_at)}</span><em>${historicalTab ? `历史机会 · ${outcomeLabel}` : shadowReady ? "影子候选 · 仍不执行交易" : confirmed ? `研究预测 · ${(readiness.failed_reasons || ["未通过影子准入"]).slice(0, 1).join("")}` : item.status === "candidate" ? marketAvailable ? "等待全部指标确认" : "新闻候选 · 暂无技术行情" : "历史机会"}</em></footer>
+        <footer><span>发现 ${this.formatDate(item.discovered_at)}</span><span>评分更新 ${this.formatDate(scoreUpdatedAt)}</span><span>有效至 ${this.formatDate(item.expires_at)}</span><em>${historicalTab ? `历史机会 · ${outcomeLabel}` : shadowReady ? "影子候选 · 仍不执行交易" : confirmed ? `研究预测 · ${(readiness.failed_reasons || ["未通过影子准入"]).slice(0, 1).join("")}` : item.status === "candidate" ? marketAvailable ? "等待策略组与评分确认" : "新闻候选 · 暂无技术行情" : "历史机会"}</em></footer>
       </article>`;
     }).join("");
+    this.patchOpportunityCards(target, markup);
   }
 
   openAiConclusion(opportunityId, trigger) {
@@ -955,9 +1506,13 @@ class AiMonitorDashboard extends HTMLElement {
     const newsItems = Array.isArray(evidence.news) ? evidence.news : [];
     const indicatorItems = Array.isArray(evidence.indicators) ? evidence.indicators : [];
     const marketFlow = evidence.market_flow && typeof evidence.market_flow === "object" ? evidence.market_flow : {};
+    const indicatorPolicy = evidence.indicator_policy || {};
     const scoreWeightLabel = this.scoreWeightSummary(evidence);
     const matchedCount = Number(evidence.matched_indicator_count ?? indicatorItems.filter((indicator) => indicator.matched).length);
     const requiredCount = Number(evidence.required_indicator_count ?? indicatorItems.length);
+    const availableCount = Number(evidence.available_indicator_count ?? indicatorItems.filter((indicator) => indicator.available !== false).length);
+    const coreMatchedCount = Number(indicatorPolicy.core_matched_count ?? matchedCount);
+    const passedGroups = Array.isArray(indicatorPolicy.passed_groups) ? indicatorPolicy.passed_groups : [];
     const confirmed = item.status === "discovered" || evidence.confirmed === true;
     const directionClass = item.direction === "short" ? "short" : "long";
     const directionLabel = item.direction === "short" ? "做空" : "做多";
@@ -966,10 +1521,10 @@ class AiMonitorDashboard extends HTMLElement {
     const primaryReason = uniqueReasons[0] || "关联新闻已形成方向判断，但模型未提供更详细的文字理由。";
     const flowConflict = marketFlow.hard_conflict === true;
     const technicalConclusion = confirmed
-      ? `配置的 ${requiredCount} 项技术条件已全部满足，资金盘口未出现强反向冲突，信号已进入虚拟预测。`
+      ? `技术策略组已确认：${coreMatchedCount} 项核心指标同向，${passedGroups.length} 个策略组达标；技术强度与组合评分均已过线，资金盘口未出现强反向冲突，信号已进入虚拟预测。`
       : flowConflict
-      ? `技术条件满足 ${matchedCount}/${requiredCount}，但资金盘口与预测方向强冲突，暂不进入虚拟预测。`
-      : `当前满足 ${matchedCount}/${requiredCount} 项技术条件，仍属于新闻候选，尚未形成正式虚拟预测。`;
+      ? `技术策略组已达到门槛，但资金盘口与预测方向强冲突，暂不进入虚拟预测。`
+      : `当前 ${coreMatchedCount} 项核心指标同向、${availableCount}/${requiredCount} 项有可用数据，通过 ${passedGroups.length} 个策略组；技术强度或组合评分尚未达到准入线。`;
     const newsMarkup = newsItems.length
       ? newsItems.map((entry) => {
           const score = Math.round(Number(entry.score || 0) * 100);
@@ -990,8 +1545,9 @@ class AiMonitorDashboard extends HTMLElement {
             const value = metric && typeof metric === "object" ? metric.value : metric;
             return `<span><em>${this.escape(label || "指标值")}</em><b>${this.escape(value ?? "--")}</b></span>`;
           }).join("");
-          return `<article class="ai-conclusion-indicator ${indicator.matched ? "matched" : "unmatched"}">
-            <header><strong>${indicator.matched ? "✓" : "×"} ${this.escape(indicator.name || indicator.key)}</strong><span>${indicator.matched ? "已满足" : "未满足"} · 强度 ${Number(indicator.strength ?? 0).toFixed(1)}</span></header>
+          const availabilityLabel = indicator.available === false ? "数据不可用 · 不参与门槛" : indicator.matched ? "已满足" : "未满足";
+          return `<article class="ai-conclusion-indicator ${indicator.available === false ? "unavailable" : indicator.matched ? "matched" : "unmatched"}">
+            <header><strong>${indicator.available === false ? "--" : indicator.matched ? "✓" : "×"} ${this.escape(indicator.name || indicator.key)}</strong><span>${availabilityLabel}${indicator.available === false ? "" : ` · 强度 ${Number(indicator.strength ?? 0).toFixed(1)}`}</span></header>
             <p>${this.escape(indicator.summary || "暂无指标摘要")}</p>
             ${metrics ? `<div>${metrics}</div>` : ""}
           </article>`;
@@ -1006,13 +1562,13 @@ class AiMonitorDashboard extends HTMLElement {
       </section>
       <section class="ai-conclusion-scores" aria-label="AI 分析评分">
         <article><span>新闻评分</span><b>${Number(item.news_score).toFixed(1)}</b><small>AI 置信度 × 股票关联度</small></article>
-        <article><span>技术指标</span><b>${Number(item.indicator_score).toFixed(1)}</b><small>${matchedCount} / ${requiredCount} 全部满足</small></article>
+        <article><span>技术指标</span><b>${Number(item.indicator_score).toFixed(1)}</b><small>${coreMatchedCount} 项核心同向 · ${passedGroups.length} 组通过</small></article>
         <article><span>组合评分</span><b>${Number(item.combined_score).toFixed(1)}</b><small>${this.escape(scoreWeightLabel)}</small></article>
         <article><span>参考价格</span><b>${this.escape(marketPrice)}</b><small>信号扫描时行情</small></article>
       </section>
       <section class="ai-conclusion-section"><header><div><span>01</span><h3>最终结论</h3></div><small>${statusLabel}</small></header><div class="ai-conclusion-verdict"><p>方向判断：<strong class="${directionClass}">${directionLabel} ${this.escape(item.symbol)}</strong>。${this.escape(technicalConclusion)}</p><p>主要依据：${this.escape(uniqueReasons.join("；") || primaryReason)}</p></div></section>
       <section class="ai-conclusion-section"><header><div><span>02</span><h3>AI 新闻研判</h3></div><small>${newsItems.length} 条关联新闻</small></header><div class="ai-conclusion-news-list">${newsMarkup}</div></section>
-      <section class="ai-conclusion-section"><header><div><span>03</span><h3>技术指标验证</h3></div><small>${matchedCount} / ${requiredCount} 满足</small></header><div class="ai-conclusion-indicator-list">${indicatorMarkup}</div></section>`;
+      <section class="ai-conclusion-section"><header><div><span>03</span><h3>技术指标验证</h3></div><small>${availableCount} / ${requiredCount} 可用 · ${passedGroups.length} 组通过</small></header><div class="ai-conclusion-indicator-list">${indicatorMarkup}</div></section>`;
     this.conclusionOpportunity = item;
     this.conclusionPanels = {
       fundamentals: '<div class="ai-conclusion-loading">正在读取数据库基本面信息…</div>',
@@ -1356,22 +1912,29 @@ class AiMonitorDashboard extends HTMLElement {
     if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
   }
 
-  async loadPredictionAnalytics() {
+  async loadPredictionAnalytics({ scrollToList = false } = {}) {
     const requestId = ++this.state.predictionAnalyticsRequestId;
     try {
       const filters = this.state.predictionFilters;
       const params = new URLSearchParams({
-        limit: "500",
+        limit: String(this.state.predictionPageSize),
+        page: String(this.state.predictionPage),
         news_score_min: String(filters.newsScoreMin),
         indicator_score_min: String(filters.indicatorScoreMin),
         direction: filters.direction,
       });
       const applyButton = this.q("#prediction-filter-apply");
       if (applyButton) applyButton.disabled = true;
-      const data = await this.api(`/opportunity-analytics?${params}`);
+      const [data, replays] = await Promise.all([
+        this.api(`/opportunity-analytics?${params}`),
+        this.api("/replays?limit=5"),
+      ]);
       if (requestId !== this.state.predictionAnalyticsRequestId) return;
       this.state.opportunityAnalytics = data;
+      this.state.predictionPage = Number(data.pagination?.page || this.state.predictionPage || 1);
+      this.state.historicalReplays = replays;
       this.renderPredictionAnalytics();
+      if (scrollToList) window.requestAnimationFrame(() => this.q("#prediction-list")?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (error) {
       this.showBanner(error.message || "预测统计分析读取失败", "error");
     } finally {
@@ -1390,7 +1953,8 @@ class AiMonitorDashboard extends HTMLElement {
     };
     this.q("#prediction-news-score-min").value = String(this.state.predictionFilters.newsScoreMin);
     this.q("#prediction-indicator-score-min").value = String(this.state.predictionFilters.indicatorScoreMin);
-    this.loadPredictionAnalytics();
+    this.state.predictionPage = 1;
+    this.loadPredictionAnalytics({ scrollToList: true });
   }
 
   resetPredictionFilters() {
@@ -1398,7 +1962,78 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#prediction-news-score-min").value = "0";
     this.q("#prediction-indicator-score-min").value = "0";
     this.q("#prediction-direction").value = "all";
-    this.loadPredictionAnalytics();
+    this.state.predictionPage = 1;
+    this.loadPredictionAnalytics({ scrollToList: true });
+  }
+
+  setPredictionPage(page) {
+    const totalPages = Number(this.state.opportunityAnalytics?.pagination?.total_pages || 1);
+    const nextPage = Math.min(totalPages, Math.max(1, Number(page) || 1));
+    if (nextPage === this.state.predictionPage) return;
+    this.state.predictionPage = nextPage;
+    this.loadPredictionAnalytics({ scrollToList: true });
+  }
+
+  async startHistoricalReplay(event) {
+    event.preventDefault();
+    if (this.historicalReplayActive()) return;
+    const button = this.q("#replay-start");
+    button.disabled = true;
+    try {
+      const payload = {
+        days: Number(this.q("#replay-days").value) || 365,
+        timeframe: this.q("#replay-timeframe").value,
+        symbols: [],
+      };
+      const replay = await this.api("/replays", { method: "POST", body: JSON.stringify(payload) });
+      const replayData = this.state.historicalReplays || {};
+      const previousItems = Array.isArray(replayData.items) ? replayData.items : [];
+      this.state.historicalReplays = {
+        ...replayData,
+        items: [replay, ...previousItems.filter((item) => item.id !== replay.id)],
+      };
+      this.renderHistoricalReplay();
+      this.showBanner("历史回放已启动；任务会从币安官方归档补采并校验数据。", "success");
+      await this.loadPredictionAnalytics();
+    } catch (error) {
+      this.showBanner(error.message || "历史回放启动失败", "error");
+    } finally {
+      this.syncHistoricalReplayButton();
+    }
+  }
+
+  historicalReplayActive() {
+    const items = this.state.historicalReplays?.items || [];
+    return items.some((item) => ["pending", "running"].includes(item.status));
+  }
+
+  syncHistoricalReplayButton() {
+    const button = this.q("#replay-start");
+    if (button) button.disabled = this.historicalReplayActive();
+  }
+
+  renderHistoricalReplay() {
+    const replayData = this.state.historicalReplays || {};
+    const items = replayData.items || [];
+    const latest = items[0] || null;
+    const readiness = (this.state.opportunityAnalytics || {}).historical_replay_readiness || replayData.readiness || {};
+    const status = this.q("#replay-status");
+    const labels = { pending: "排队中", running: "正在回放", completed: "已完成", failed: "失败", cancelled: "已取消" };
+    status.textContent = latest ? `${labels[latest.status] || latest.status} · ${latest.completed_symbols}/${latest.total_symbols} 品种` : "尚未运行";
+    status.className = latest?.status || "idle";
+    this.syncHistoricalReplayButton();
+    const criteria = Array.isArray(readiness.criteria) ? readiness.criteria : [];
+    const progress = latest && latest.total_symbols ? Math.round(latest.completed_symbols / latest.total_symbols * 100) : 0;
+    this.q("#replay-result").innerHTML = `
+      <div class="replay-progress"><span style="width:${progress}%"></span></div>
+      <div class="replay-summary">
+        <article><span>任务进度</span><b>${latest ? `${progress}%` : "--"}</b><small>${latest ? `${this.number(latest.generated_signals)} 个去重信号` : "等待首次运行"}</small></article>
+        <article><span>样本外信号</span><b>${this.number(readiness.oos_summary?.sample_count)}</b><small>多 ${this.number(readiness.oos_summary?.long_count)} / 空 ${this.number(readiness.oos_summary?.short_count)}</small></article>
+        <article><span>样本外平均 ${this.state.displayLeverage}x 净收益率</span><b class="${Number(readiness.oos_summary?.average_net_return_bps || 0) > 0 ? "positive" : "negative"}">${readiness.oos_summary?.average_net_return_bps == null ? "--" : this.formatLeveragedReturnFromBps(readiness.oos_summary.average_net_return_bps)}</b><small>标的 ${readiness.oos_summary?.average_net_return_bps == null ? "--" : this.formatBps(readiness.oos_summary.average_net_return_bps)} · 强制成本后</small></article>
+        <article><span>样本外准入</span><b class="${readiness.quantitative_ready ? "positive" : "negative"}">${readiness.passed_count || 0} / ${readiness.total_count || 8}</b><small>${readiness.quantitative_ready ? "可进入影子验证" : "仍限研究"}</small></article>
+      </div>
+      ${criteria.length ? `<div class="replay-criteria">${criteria.map((item) => `<span class="${item.passed ? "passed" : "blocked"}">${item.passed ? "✓" : "×"} ${this.escape(item.label)} <b>${item.current == null ? "--" : this.escape(item.current)}</b></span>`).join("")}</div>` : `<p class="replay-note">${this.escape(readiness.note || "完成回放后显示样本外准入结果。")}</p>`}
+      ${latest?.error ? `<p class="replay-error">${this.escape(latest.error)}</p>` : ""}`;
   }
 
   renderPredictionAnalytics() {
@@ -1407,6 +2042,7 @@ class AiMonitorDashboard extends HTMLElement {
     const items = data.items || [];
     const readiness = data.readiness || {};
     const costConfig = data.cost_config || {};
+    this.renderHistoricalReplay();
     const metricBps = (value) => value == null ? "--" : this.formatBps(value);
     const hitRate = summary.hit_rate == null ? "--" : `${Number(summary.hit_rate).toFixed(1)}%`;
     const filters = data.filters || {};
@@ -1423,18 +2059,45 @@ class AiMonitorDashboard extends HTMLElement {
         <div class="readiness-criteria">${criteria.map((item) => `<article class="${item.passed ? "passed" : "blocked"}"><span>${item.passed ? "✓" : "×"} ${this.escape(item.label)}</span><b>${item.current == null ? "--" : this.escape(item.current)}</b><small>要求 ${this.escape(item.required)}</small></article>`).join("")}</div>
         <footer><strong>实盘仍需完成</strong>${(readiness.paper_and_shadow_requirements || []).map((item) => `<span>${this.escape(item)}</span>`).join("")}</footer>`;
     }
-    this.q("#prediction-note").textContent = data.note || "按历史虚拟预测的成本后结果统计，不执行任何下单。";
+    this.q("#prediction-note").textContent = `${data.note || "按历史虚拟预测的成本后结果统计，不执行任何下单。"} 页面收益率按 ${this.state.displayLeverage} 倍杠杆换算展示，并保留标的原始收益；不改变信号或下单逻辑。`;
     this.q("#analytics-summary").innerHTML = `
       <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)}</small></article>
       <article><span>多 / 空方向</span><strong class="analytics-directions"><b>${this.number(summary.long_count)}</b><i>/</i><em>${this.number(summary.short_count)}</em></strong><small>做多 / 做空样本分布</small></article>
       <article class="positive"><span>命中次数</span><strong>${this.number(summary.win_count)}</strong><small>未命中 ${this.number(summary.loss_count)} · 持平 ${this.number(summary.flat_count)}</small></article>
       <article class="${Number(summary.hit_rate || 0) >= 50 ? "positive" : "negative"}"><span>命中概率</span><strong>${hitRate}</strong><small>命中 ÷ 有方向结果</small></article>
-      <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均净收益</span><strong>${metricBps(summary.average_directional_return_bps)}</strong><small>毛 ${metricBps(summary.average_gross_return_bps)} · 成本 ${metricBps(summary.average_estimated_cost_bps)}</small><small>费 ${metricBps(summary.average_fee_cost_bps)} · 滑 ${metricBps(summary.average_slippage_cost_bps)} · 资金 ${metricBps(summary.average_funding_cost_bps)}</small></article>
+      <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均 ${this.state.displayLeverage}x 净收益率</span><strong>${this.formatLeveragedReturnFromBps(summary.average_directional_return_bps)}</strong><small>标的净 ${metricBps(summary.average_directional_return_bps)} · 毛 ${metricBps(summary.average_gross_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(summary.average_estimated_cost_bps || 0)))} · 费/滑点/资金已计入</small></article>
       <article><span>平均 MFE / MAE</span><strong class="analytics-range"><b>${metricBps(summary.average_max_favorable_bps)}</b><i>${metricBps(summary.average_max_adverse_bps)}</i></strong><small>持有期最大有利 / 不利波动</small></article>
       <article><span>影子候选 / 研究</span><strong class="analytics-directions"><b>${this.number(summary.shadow_ready_count)}</b><i>/</i><em>${this.number(summary.research_only_count)}</em></strong><small>生成信号时的准入状态</small></article>`;
     const target = this.q("#prediction-list");
     if (!items.length) { target.innerHTML = '<div class="empty-state opportunity-empty"><strong>没有符合当前筛选条件的历史机会</strong><span>请降低评分下限、切换方向或重置筛选。</span></div>'; return; }
-    target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>买入价格</th><th>到期价格</th><th>毛收益 / 净收益</th><th>MFE / MAE</th><th>成本后结果</th><th>有效期结束</th></tr></thead><tbody>${items.map((item) => `<tr><td>${this.formatDate(item.signal_time)}</td><td><strong>${this.escape(item.symbol)}</strong><small>${this.escape(item.contract_symbol)}</small></td><td><span class="prediction-direction ${item.direction === "short" ? "short" : ""}">${item.direction === "long" ? "做多" : "做空"}</span></td><td><span class="technical-state ${item.technical_confirmed ? "confirmed" : "candidate"}">${item.technical_confirmed ? "技术已确认" : "新闻候选"}</span></td><td>${Number(item.news_score).toFixed(1)} / ${Number(item.indicator_score).toFixed(1)}<small>组合 ${Number(item.combined_score).toFixed(1)}</small></td><td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}</td><td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${item.settled_price_at ? this.formatDate(item.settled_price_at) : "到期行情不足"}</small></td><td class="${Number(item.directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${metricBps(item.gross_directional_return_bps)}<small>净 ${metricBps(item.net_directional_return_bps)} · 成本 ${metricBps(item.estimated_cost_bps)}</small><small>费 ${metricBps(item.fee_cost_bps)} · 滑 ${metricBps(item.slippage_cost_bps)} · 资金 ${metricBps(item.funding_cost_bps)}</small></td><td>${metricBps(item.max_favorable_bps)}<small>${metricBps(item.max_adverse_bps)}</small></td><td><span class="prediction-result ${this.escape(item.result || "unavailable")}">${this.analyticsResultLabel(item.result)}</span></td><td>${this.formatDate(item.expires_at)}<small>${this.escape(item.timeframe)} 信号</small></td></tr>`).join("")}</tbody></table></div>`;
+    target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>买入价格</th><th>到期价格</th><th>${this.state.displayLeverage}x 毛 / 净收益率</th><th>MFE / MAE</th><th>成本后结果</th><th>有效期结束</th></tr></thead><tbody>${items.map((item) => `<tr><td>${this.formatDate(item.signal_time)}</td><td><strong>${this.escape(item.symbol)}</strong><small>${this.escape(item.contract_symbol)}</small></td><td><span class="prediction-direction ${item.direction === "short" ? "short" : ""}">${item.direction === "long" ? "做多" : "做空"}</span></td><td><span class="technical-state ${item.technical_confirmed ? "confirmed" : "candidate"}">${item.technical_confirmed ? "技术已确认" : "新闻候选"}</span></td><td>${Number(item.news_score).toFixed(1)} / ${Number(item.indicator_score).toFixed(1)}<small>组合 ${Number(item.combined_score).toFixed(1)}</small></td><td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}</td><td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${item.settled_price_at ? this.formatDate(item.settled_price_at) : "到期行情不足"}</small></td><td class="${Number(item.directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净 ${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)} · 标的净 ${metricBps(item.net_directional_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(item.estimated_cost_bps || 0)))} · 费/滑点/资金已计入</small></td><td>${metricBps(item.max_favorable_bps)}<small>${metricBps(item.max_adverse_bps)}</small></td><td><span class="prediction-result ${this.escape(item.result || "unavailable")}">${this.analyticsResultLabel(item.result)}</span></td><td>${this.formatDate(item.expires_at)}<small>${this.escape(item.timeframe)} 信号</small></td></tr>`).join("")}</tbody></table></div>`;
+    target.insertAdjacentHTML("beforeend", this.predictionPaginationMarkup(data.pagination || {}, items.length));
+  }
+
+  predictionPaginationMarkup(pagination, visibleCount) {
+    const page = Math.max(1, Number(pagination.page) || 1);
+    const pageSize = Math.max(1, Number(pagination.page_size) || this.state.predictionPageSize);
+    const total = Math.max(0, Number(pagination.total) || 0);
+    const totalPages = Math.max(1, Number(pagination.total_pages) || Math.ceil(total / pageSize) || 1);
+    const pageEntries = [];
+    if (totalPages <= 7) {
+      for (let value = 1; value <= totalPages; value += 1) pageEntries.push(value);
+    } else {
+      const candidates = [...new Set([1, page - 1, page, page + 1, totalPages].filter((value) => value >= 1 && value <= totalPages))].sort((left, right) => left - right);
+      candidates.forEach((value, index) => {
+        if (index && value - candidates[index - 1] > 1) pageEntries.push("ellipsis");
+        pageEntries.push(value);
+      });
+    }
+    return `<nav class="prediction-pagination" aria-label="预测统计分析分页">
+      <span>共 <strong>${this.number(total)}</strong> 条 · 每页 ${this.number(pageSize)} 条 · 当前显示 ${this.number(visibleCount)} 条</span>
+      <div>
+        <button type="button" data-prediction-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        ${pageEntries.map((entry) => entry === "ellipsis" ? '<i aria-hidden="true">…</i>' : `<button type="button" class="${entry === page ? "active" : ""}" data-prediction-page="${entry}" ${entry === page ? 'aria-current="page" disabled' : ""}>${entry}</button>`).join("")}
+        <button type="button" data-prediction-page="${page + 1}" ${page >= totalPages ? "disabled" : ""}>下一页</button>
+      </div>
+      <small>第 ${this.number(page)} / ${this.number(totalPages)} 页</small>
+    </nav>`;
   }
 
   showBanner(message, tone = "success") {
@@ -1450,6 +2113,8 @@ class AiMonitorDashboard extends HTMLElement {
   compactNumber(value) { return Number(value).toLocaleString("en-US", { maximumFractionDigits: 6 }); }
   formatMarketCapMillions(value, currency = "USD") { const numeric = Number(value); if (!Number.isFinite(numeric) || numeric <= 0) return "--"; const prefix = currency === "USD" ? "$" : `${currency} `; if (numeric >= 1_000_000) return `${prefix}${(numeric / 1_000_000).toFixed(2)}T`; if (numeric >= 1_000) return `${prefix}${(numeric / 1_000).toFixed(2)}B`; return `${prefix}${numeric.toFixed(2)}M`; }
   formatFinancialAmount(value, currency = "USD") { const numeric = Number(value); if (!Number.isFinite(numeric)) return "--"; const prefix = currency === "USD" ? "$" : `${currency} `; const absolute = Math.abs(numeric); if (absolute >= 1e12) return `${prefix}${(numeric / 1e12).toFixed(2)}T`; if (absolute >= 1e9) return `${prefix}${(numeric / 1e9).toFixed(2)}B`; if (absolute >= 1e6) return `${prefix}${(numeric / 1e6).toFixed(2)}M`; return `${prefix}${numeric.toLocaleString("en-US", { maximumFractionDigits: 0 })}`; }
+  formatLeveragedReturnFromBps(value) { if (value == null) return "--"; const numeric = Number(value); return Number.isFinite(numeric) ? this.signedMetric((numeric / 100) * this.state.displayLeverage, 2, "%") : "--"; }
+  formatLeveragedReturnFromPercent(value) { if (value == null) return "--"; const numeric = Number(value); return Number.isFinite(numeric) ? this.signedMetric(numeric * this.state.displayLeverage, 2, "%") : "--"; }
   formatBps(value) { const numeric = Number(value); return `${numeric > 0 ? "+" : ""}${numeric.toFixed(2)} bps`; }
   formatUnix(value) { const numeric = Number(value); return numeric ? this.formatDate(new Date(numeric * (numeric > 1e12 ? 1 : 1000))) : "--"; }
   parseDate(value) {

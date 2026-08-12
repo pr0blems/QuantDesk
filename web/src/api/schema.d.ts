@@ -630,6 +630,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/replays": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Historical Replays */
+        get: operations["list_historical_replays_api_v2_ai_monitor_replays_get"];
+        put?: never;
+        /** Create Historical Replay */
+        post: operations["create_historical_replay_api_v2_ai_monitor_replays_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/ai-monitor/replays/{replay_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Historical Replay Detail */
+        get: operations["historical_replay_detail_api_v2_ai_monitor_replays__replay_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/runs": {
         parameters: {
             query?: never;
@@ -2081,6 +2116,25 @@ export interface components {
         AiMonitorNewsAnalyzeRequest: {
             /** News Id */
             news_id: string;
+        };
+        /**
+         * AiMonitorReplayRequest
+         * @description Create an isolated point-in-time historical replay.
+         */
+        AiMonitorReplayRequest: {
+            /**
+             * Days
+             * @default 365
+             */
+            days: number;
+            /** Symbols */
+            symbols?: string[];
+            /**
+             * Timeframe
+             * @default 1h
+             * @enum {string}
+             */
+            timeframe: "15m" | "1h" | "4h";
         };
         /** AiMonitorRunRequest */
         AiMonitorRunRequest: {
@@ -4407,6 +4461,7 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                page?: number;
                 news_score_min?: number;
                 indicator_score_min?: number;
                 direction?: "all" | "long" | "short";
@@ -4468,6 +4523,107 @@ export interface operations {
             };
             header?: never;
             path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_historical_replays_api_v2_ai_monitor_replays_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_historical_replay_api_v2_ai_monitor_replays_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorReplayRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    historical_replay_detail_api_v2_ai_monitor_replays__replay_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                replay_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;

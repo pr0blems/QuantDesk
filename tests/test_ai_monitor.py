@@ -15,6 +15,8 @@ from quantdesk_v2.ai_monitor import (
     _news_model_call_audit_index,
     _take_ingested_news,
     aggregate_news_candidates,
+    append_score_history,
+    configured_indicator_policy,
     edge_calibration_summary,
     enqueue_news_analysis,
     filter_monitored_candidates,
@@ -24,6 +26,7 @@ from quantdesk_v2.ai_monitor import (
     indicator_templates,
     market_flow_snapshot,
     match_configured_indicators,
+    merged_opportunity_expiration,
     opportunity_score_weights,
     prediction_cost_breakdown,
     prediction_estimated_cost_bps,
@@ -35,9 +38,12 @@ from quantdesk_v2.ai_monitor import (
     signal_readiness_snapshot,
     strongest_candidate_per_symbol,
     summarize_historical_opportunities,
+    virtual_entry_gate_snapshot,
+    virtual_position_snapshot,
+    virtual_risk_plan_snapshot,
     weighted_opportunity_score,
 )
-from quantdesk_v2.interfaces.api.ai_monitor import _utc_out
+from quantdesk_v2.interfaces.api.ai_monitor import _prediction_settlement_out, _utc_out
 from quantdesk_v2.models import (
     AiMonitorOpportunity,
     AiMonitorPrediction,
@@ -65,6 +71,25 @@ def test_ai_monitor_api_serializes_naive_database_datetimes_as_utc() -> None:
     assert serialized.tzinfo is UTC
     assert serialized.isoformat() == "2026-08-10T07:14:27+00:00"
     assert _utc_out(None) is None
+
+
+def test_prediction_settlement_metadata_explains_pending_market_retry() -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    item = SimpleNamespace(
+        status="pending",
+        predicted_at=now - timedelta(hours=2),
+        due_at=now - timedelta(hours=1),
+        updated_at=now - timedelta(minutes=1),
+    )
+
+    metadata = _prediction_settlement_out(item)
+
+    assert metadata is not None
+    assert metadata["phase"] == "awaiting_market_data"
+    assert metadata["retry_interval_minutes"] == 5
+    assert metadata["grace_hours"] == 6
+    assert metadata["poll_interval_seconds"] == 20
+    assert metadata["next_retry_at"] > _utc_out(now)
 
 
 def test_ai_monitor_catalog_reuses_all_contract_research_indicators() -> None:
@@ -266,7 +291,7 @@ def test_news_candidates_keep_unmapped_us_stocks_visible() -> None:
     assert candidates[0]["direction"] == "long"
 
 
-def test_configured_indicators_use_all_selected_policy() -> None:
+def test_configured_indicators_use_grouped_core_policy() -> None:
     scan = {
         "items": [
             {
@@ -309,6 +334,254 @@ def test_configured_indicators_use_all_selected_policy() -> None:
     assert all(item["strength"] == 100 for item in evidence)
     assert rejected is False
     assert [item["matched"] for item in rejected_evidence] == [True, False]
+
+
+def test_configured_indicators_ignore_unavailable_observation_inputs() -> None:
+    scan = {
+        "items": [
+            {
+                "key": "moving_average_bull",
+                "name": "均线多头",
+                "bullish_triggered": True,
+                "status": "triggered",
+                "bullish_strength": 82,
+            }
+        ],
+        "prediction_features": {
+            "items": [
+                {
+                    "key": "prediction_trend",
+                    "name": "周期趋势",
+                    "direction": "bullish",
+                    "status": "bullish",
+                    "available": True,
+                    "bullish_strength": 78,
+                },
+                {
+                    "key": "prediction_aggressive_flow",
+                    "name": "主动成交",
+                    "direction": None,
+                    "status": "insufficient",
+                    "available": False,
+                },
+                {
+                    "key": "prediction_velocity",
+                    "name": "价格速度",
+                    "direction": None,
+                    "status": "insufficient",
+                    "available": False,
+                },
+            ]
+        },
+    }
+
+    matched, evidence = match_configured_indicators(
+        scan,
+        [
+            "moving_average_bull",
+            "prediction_trend",
+            "prediction_aggressive_flow",
+            "prediction_velocity",
+        ],
+    )
+    policy = configured_indicator_policy(evidence)
+
+    assert matched is True
+    assert policy["passed_groups"] == ["trend"]
+    assert policy["core_matched_count"] == 2
+    assert policy["technical_score"] == 80
+    assert [item["available"] for item in evidence[-2:]] == [False, False]
+
+
+def test_configured_indicators_accept_one_coherent_setup_group() -> None:
+    scan = {
+        "items": [
+            {
+                "key": "trend_breakout",
+                "name": "趋势突破",
+                "bullish_triggered": True,
+                "status": "triggered",
+                "bullish_strength": 88,
+            },
+            {
+                "key": "price_volume_rise",
+                "name": "量价齐升",
+                "bullish_triggered": True,
+                "status": "triggered",
+                "bullish_strength": 84,
+            },
+            {
+                "key": "new_low_reversal",
+                "name": "新低反转",
+                "bullish_triggered": False,
+                "status": "not_triggered",
+                "bullish_strength": 30,
+            },
+            {
+                "key": "oversold_bounce",
+                "name": "超跌反弹",
+                "bullish_triggered": False,
+                "status": "not_triggered",
+                "bullish_strength": 35,
+            },
+        ],
+    }
+
+    matched, evidence = match_configured_indicators(
+        scan,
+        [
+            "trend_breakout",
+            "price_volume_rise",
+            "new_low_reversal",
+            "oversold_bounce",
+        ],
+    )
+    policy = configured_indicator_policy(evidence)
+
+    assert matched is True
+    assert policy["passed_groups"] == ["breakout"]
+    assert policy["technical_score"] == 86
+
+
+def test_live_rescoring_does_not_slide_signal_expiration() -> None:
+    current = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
+    proposed = datetime(2026, 8, 12, 11, 0, tzinfo=UTC)
+
+    assert merged_opportunity_expiration(
+        current,
+        proposed,
+        has_prediction=False,
+        has_new_material_news=False,
+        newly_confirmed=False,
+    ) == current
+    assert merged_opportunity_expiration(
+        current,
+        proposed,
+        has_prediction=False,
+        has_new_material_news=True,
+        newly_confirmed=False,
+    ) == proposed
+    assert merged_opportunity_expiration(
+        current,
+        proposed,
+        has_prediction=True,
+        has_new_material_news=True,
+        newly_confirmed=False,
+    ) == current
+
+
+def test_live_score_history_seeds_legacy_snapshot_and_is_bounded() -> None:
+    first = {
+        "news": 70.0,
+        "technical": 65.0,
+        "market_flow": 50.0,
+        "combined": 64.25,
+        "calculated_at": "2026-08-12T10:00:00",
+    }
+    second = {**first, "combined": 68.5, "calculated_at": "2026-08-12T10:15:00"}
+
+    history = append_score_history({"score_snapshot": first}, second)
+
+    assert history == [first, second]
+    frozen = {**first, "combined": 61.0, "calculated_at": "2026-08-12T09:45:00"}
+    history = append_score_history(
+        {"score_history": [second]},
+        {**second, "combined": 69.0, "calculated_at": "2026-08-12T10:30:00"},
+        seed_snapshots=[frozen],
+    )
+    assert [item["combined"] for item in history] == [61.0, 68.5, 69.0]
+    for index in range(100):
+        history = append_score_history(
+            {"score_history": history},
+            {**second, "combined": index, "calculated_at": f"point-{index}"},
+        )
+    assert len(history) == 96
+    assert history[-1]["combined"] == 99
+
+
+def test_virtual_position_uses_directional_pnl_and_frozen_risk_levels() -> None:
+    risk_plan = virtual_risk_plan_snapshot(
+        entry_price=100,
+        direction="long",
+        timeframe="1h",
+        atr_pct=2,
+    )
+    assert risk_plan["stop_loss_price"] == 97
+    assert risk_plan["take_profit_price"] == 106
+    assert risk_plan["risk_reward_ratio"] == 2
+
+    prediction = SimpleNamespace(
+        evidence_json={"risk_plan": risk_plan},
+        entry_price=Decimal("100"),
+        exit_price=None,
+        status="pending",
+        direction="long",
+        timeframe="1h",
+        estimated_cost_bps=Decimal("10"),
+        due_at=datetime(2026, 8, 12, 12, 0),
+    )
+    snapshot = virtual_position_snapshot(
+        prediction,
+        {"price": 105, "ts": int(datetime(2026, 8, 12, 11, 30, tzinfo=UTC).timestamp())},
+    )
+    assert snapshot["available"] is True
+    assert snapshot["gross_return_bps"] == 500
+    assert snapshot["net_return_bps"] == 490
+    assert snapshot["net_pnl_per_unit"] == 4.9
+    assert snapshot["net_pnl_per_10000"] == 490
+    assert snapshot["profit_state"] == "profit"
+
+    short_prediction = SimpleNamespace(**{**prediction.__dict__, "direction": "short"})
+    short_snapshot = virtual_position_snapshot(
+        short_prediction,
+        {"price": 95, "ts": int(datetime(2026, 8, 12, 11, 30, tzinfo=UTC).timestamp())},
+    )
+    assert short_snapshot["gross_return_bps"] == 500
+    assert short_snapshot["net_pnl_per_unit"] == 4.9
+
+
+def test_virtual_entry_gate_requires_every_signal_condition_and_a_real_price() -> None:
+    ready = virtual_entry_gate_snapshot(
+        direction="long",
+        news_score=76.0,
+        news_mention_count=2,
+        minimum_news_score=60.0,
+        minimum_news_mentions=1,
+        indicator_policy_passed=True,
+        indicator_score=72.0,
+        minimum_indicator_score=65.0,
+        combined_score=74.0,
+        minimum_combined_score=70.0,
+        market_flow_hard_conflict=False,
+        entry_price=123.45,
+        checked_at="2026-08-12T12:00:00+00:00",
+    )
+
+    assert ready["entry_ready"] is True
+    assert ready["status"] == "ready"
+    assert ready["real_order_enabled"] is False
+    assert all(item["passed"] for item in ready["checks"])
+
+    unavailable = virtual_entry_gate_snapshot(
+        direction="short",
+        news_score=76.0,
+        news_mention_count=2,
+        minimum_news_score=60.0,
+        minimum_news_mentions=1,
+        indicator_policy_passed=True,
+        indicator_score=72.0,
+        minimum_indicator_score=65.0,
+        combined_score=74.0,
+        minimum_combined_score=70.0,
+        market_flow_hard_conflict=False,
+        entry_price=0.0,
+        checked_at="2026-08-12T12:00:00+00:00",
+    )
+
+    assert unavailable["signal_confirmed"] is True
+    assert unavailable["entry_ready"] is False
+    assert unavailable["status"] == "price_unavailable"
+    assert unavailable["checks"][-1]["passed"] is False
 
 
 def test_configured_indicators_match_the_requested_short_direction() -> None:
@@ -1113,6 +1386,17 @@ def test_news_candidates_are_visible_before_prediction_confirmation() -> None:
     assert "status IN ('candidate', 'discovered', 'expired', 'dismissed')" in migration
 
 
+def test_opportunity_scan_cleans_only_unpredicted_transient_rows() -> None:
+    monitor = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+
+    assert "def cleanup_unpredicted_opportunities" in monitor
+    assert "if row.id in prediction_ids:" in monitor
+    assert 'if row.status == "expired"' in monitor
+    assert "policy != INDICATOR_MATCH_POLICY" in monitor
+    assert "cleanup = cleanup_unpredicted_opportunities(db, run.user_id)" in monitor
+    assert '"opportunity_cleanup": cleanup' in monitor
+
+
 def test_opportunity_related_news_endpoint_is_tenant_scoped() -> None:
     api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
     endpoint = api[api.index('@router.get("/opportunities/{opportunity_id}/news")') :]
@@ -1122,6 +1406,33 @@ def test_opportunity_related_news_endpoint_is_tenant_scoped() -> None:
     assert "opportunity.news_ids_json" in endpoint
     assert "News.id.in_(news_ids)" in endpoint
     assert 'raise HTTPException(status_code=404, detail="opportunity not found")' in endpoint
+
+
+def test_opportunities_are_ordered_by_signal_time_descending() -> None:
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
+        encoding="utf-8"
+    )
+    endpoint = api[
+        api.index('@router.get("/opportunities")') : api.index(
+            '@router.get("/opportunities/{opportunity_id}/news")'
+        )
+    ]
+
+    assert "AiMonitorOpportunity.discovered_at.desc()" in endpoint
+    assert "AiMonitorOpportunity.id.desc()" in endpoint
+    assert "AiMonitorOpportunity.combined_score.desc()" not in endpoint
+    assert "AiMonitorOpportunity.updated_at.desc()" not in endpoint
+    assert "prediction_by_opportunity_id" in endpoint
+    assert "AiMonitorPrediction.opportunity_id.in_" in endpoint
+    assert "live_tickers.get((item.contract_symbol or \"\").upper())" in endpoint
+    assert '"prediction_entry_price"' in api
+    assert '"prediction_combined_score"' in api
+    assert '"prediction_market_flow_score"' in api
+    assert '"virtual_position"' in api
+    assert "ai_monitor.virtual_position_snapshot(prediction, live_market)" in api
+    assert '"prediction_entry_gate"' in api
+    assert "ai_monitor.prediction_entry_gate_snapshot(prediction)" in api
+    assert '"updated_at": _utc_out(item.updated_at)' in api
 
 
 def test_opportunity_model_call_endpoint_is_tenant_scoped_and_returns_raw_audit() -> None:
@@ -1172,7 +1483,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260811-8"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260812-25"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -1182,7 +1493,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260811-8"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260812-25"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -1245,18 +1556,28 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "await this.waitForRun(run.id)" in component
     assert ".news-analyze-action" in stylesheet
     assert 'data-ai-view="config"' not in component
-    assert "所选指标全部满足后" in component
+    assert "趋势、突破、回踩、反转按策略组择一确认" in component
     assert "监控品种" in component
     assert "每 15 分钟从数据库读取最新 10 条未分析新闻" in component
     assert "related_industries" in component
-    assert "等待全部指标确认" in component
+    assert "等待策略组与评分确认" in component
     assert "暂无技术行情" in component
     assert 'data-opportunity-tab="current"' in component
     assert 'data-opportunity-tab="history"' in component
+    assert 'id="opportunity-status-tabs"' in component
+    for status in ("all", "triggered", "ready", "waiting", "failed"):
+        assert f'data-opportunity-status="{status}"' in component
+        assert f'id="opportunity-status-{status}-count"' in component
+    assert "setOpportunityStatusFilter(status)" in component
+    assert "renderOpportunityStatusCounts()" in component
+    assert "status === this.state.opportunityStatusFilter" in component
+    assert "this.virtualEntryState(item, this.virtualEntryGate(item)).tone" in component
     assert "当前机会" in component
     assert "历史机会" in component
     assert 'id="include-expired"' not in component
-    assert 'const historyItems = items.filter((item) => !isActive(item));' in component
+    assert "const bySignalTimeDesc = (left, right) =>" in component
+    assert "items.filter(isActive).sort(bySignalTimeDesc)" in component
+    assert "items.filter((item) => !isActive(item)).sort(bySignalTimeDesc)" in component
     assert "this.parseDate(item.expires_at).getTime() > now" in component
     assert "`${raw}Z`" in component
     assert "if (!unique.has(instrument)) unique.set(instrument, item)" in component
@@ -1270,13 +1591,44 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".opportunity-tabs .direction-counts .short" in stylesheet
     assert "已剔除行情不足" in component
     assert ".opportunity-tabs" in stylesheet
-    for label in ("信号时间", "信号有效期间", "买入方向", "买入价格"):
+    assert ".opportunity-status-tabs" in stylesheet
+    assert '.opportunity-status-tabs button[data-opportunity-status="triggered"]' in stylesheet
+    for label in ("信号时间", "信号有效期间", "候选方向", "触发进度"):
         assert label in component
     assert 'id="opportunity-research" research-only' in component
     assert 'data-open-contract="${this.escape(item.contract_symbol)}"' in component
     assert 'data-opportunity-id="${this.escape(item.id)}"' in component
     assert "research.openResearch(button.dataset.openContract" in component
     assert 'data-ai-conclusion="${this.escape(item.id)}"' in component
+    assert 'id="score-trend-modal"' in component
+    assert 'data-score-trend="${this.escape(item.id)}"' in component
+    assert "opportunityScoreHistory(item)" in component
+    assert "item?.prediction_market_flow_score" in component
+    assert "const unique = new Map()" in component
+    assert "renderScoreTrendChart(item, history)" in component
+    assert "openScoreTrend(opportunityId, trigger)" in component
+    assert "evidence.score_history" in component
+    assert 'class="score-trend-chart"' in component
+    assert "virtualEntryGate(item)" in component
+    assert "virtualEntryState(item, gate)" in component
+    assert "virtualPositionSnapshot(item)" in component
+    assert "当前 ${this.state.displayLeverage}x 净收益率" in component
+    assert "冻结入场价" in component
+    assert "实时价格" in component
+    assert "参考止损价" in component
+    assert "参考止盈价" in component
+    assert "net_pnl_per_10000" in component
+    assert ".virtual-position-metrics" in stylesheet
+    assert 'check.key !== "entry_price"' in component
+    assert "候选方向" in component
+    assert "触发进度" in component
+    assert "仅为研判方向，尚未买入" in component
+    assert "尚未入场" in component
+    assert ".opportunity-signal .trigger-progress" in stylesheet
+    assert 'class="virtual-entry-gate ${entryState.tone} ${triggeredPosition ? "position-active" : ""}"' in component
+    assert "VIRTUAL ENTRY GATE" in component
+    assert "冻结触发价格" in component
+    assert "真实订单关闭" in component
     assert component.index('${symbolControl}<small>') < component.index('${conclusionControl}</div>')
     assert "AI分析结论" in component
     assert 'id="ai-conclusion-modal"' in component
@@ -1328,6 +1680,13 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".ai-related-news-card" in stylesheet
     assert ".ai-fundamental-panel" in stylesheet
     assert ".ai-conclusion-trigger" in stylesheet
+    assert ".opportunity-score.up" in stylesheet
+    assert ".opportunity-score.down" in stylesheet
+    assert ".score-trend-modal" in stylesheet
+    assert ".score-trend-chart" in stylesheet
+    assert ".virtual-entry-gate" in stylesheet
+    assert ".virtual-entry-checks" in stylesheet
+    assert ".virtual-entry-price" in stylesheet
     assert ".ai-conclusion-dialog" in stylesheet
     assert ".ai-market-flow-grid" in stylesheet
     assert ".news-logic-trigger" in stylesheet
@@ -1340,9 +1699,28 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'tab === "history"' in component
     assert 'class="history-result ${this.escape(outcomeResult)}"' in component
     assert "是否命中" in component
+    assert 'item.prediction_status || ""' in component
+    assert 'predictionStatus === "pending"' in component
+    assert 'predictionStatus === "unavailable"' in component
+    assert "技术未确认" in component
+    assert "未生成预测" in component
+    assert "结算宽限期内未取得行情" in component
     assert ".opportunity-metrics.with-result" in stylesheet
     assert ".history-result.win" in stylesheet
+    assert ".history-result.not_created" in stylesheet
+    assert ".history-result.pending" in stylesheet
     assert 'this.api("/opportunity-analytics?limit=300")' in component
+    assert "historicalReplayActive()" in component
+    assert 'if (this.historicalReplayActive()) return;' in component
+    assert 'items.some((item) => ["pending", "running"].includes(item.status))' in component
+    assert 'const replay = await this.api("/replays"' in component
+    assert "items: [replay, ...previousItems.filter" in component
+    assert "this.syncHistoricalReplayButton();" in component
+    assert "button.disabled = false" not in component[
+        component.index("async startHistoricalReplay(event)") : component.index(
+            "renderHistoricalReplay()"
+        )
+    ]
     assert 'id="prediction-filter-form"' in component
     assert 'id="prediction-news-score-min"' in component
     assert 'id="prediction-indicator-score-min"' in component
@@ -1358,9 +1736,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "筛选样本" in component
     assert "多 / 空方向" in component
     assert 'this.api("/prediction-records?limit=200")' not in component
-    for label in ("历史机会", "筛选样本", "命中次数", "命中概率", "平均净收益"):
+    for label in ("历史机会", "筛选样本", "命中次数", "命中概率", "x 净收益率"):
         assert label in component
-    for label in ("毛收益 / 净收益", "MFE / MAE", "成本后结果", "成本计算"):
+    for label in ("x 毛 / 净收益率", "MFE / MAE", "成本后结果", "成本计算"):
         assert label in component
     for label in (
         "最低技术强度",

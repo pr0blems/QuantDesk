@@ -11,9 +11,11 @@ NOW_MS = 2_000_000
 def _snapshot(**overrides):
     features = {
         "aggressive_flow": 0.31,
+        "aggressive_flow_available": True,
         "book_imbalance": -0.22,
         "book_imbalance_5": 0.01,
         "velocity": 0.08,
+        "velocity_available": True,
         "flash_imbalance": -0.12,
         "taker_flow": 0.20,
         "price_oi_impulse": -0.04,
@@ -81,3 +83,19 @@ def test_prediction_feature_scan_never_treats_missing_snapshot_as_neutral_data()
     assert result["count"] == PREDICTION_FEATURE_COUNT
     assert result["insufficient_count"] == PREDICTION_FEATURE_COUNT
     assert {item["status"] for item in result["items"]} == {"insufficient"}
+
+
+def test_prediction_feature_scan_does_not_promote_legacy_neutral_fallbacks() -> None:
+    snapshot = _snapshot(
+        features={
+            "aggressive_flow": 0.0,
+            "aggressive_flow_available": False,
+            "velocity": 0.0,
+            "velocity_available": False,
+        }
+    )
+    result = evaluate_prediction_feature_indicators(snapshot, "15m", now_ms=NOW_MS)
+    by_key = {item["key"]: item for item in result["items"]}
+
+    assert by_key["prediction_aggressive_flow"]["status"] == "insufficient"
+    assert by_key["prediction_velocity"]["status"] == "insufficient"

@@ -1016,6 +1016,203 @@ class AiMonitorPrediction(Base):
     )
 
 
+class AiMonitorReplayRun(Base):
+    """An isolated, point-in-time historical replay execution."""
+
+    __tablename__ = "ai_monitor_replay_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
+            name="valid_status",
+        ),
+        CheckConstraint("timeframe IN ('15m', '1h', '4h')", name="valid_timeframe"),
+        UniqueConstraint("public_id", name="uq_ai_monitor_replay_runs_public_id"),
+        UniqueConstraint(
+            "active_user_id", name="uq_ai_monitor_replay_runs_active_user"
+        ),
+        UniqueConstraint("id", "user_id", name="uq_ai_monitor_replay_runs_id_user_id"),
+        Index("ix_ai_monitor_replay_runs_user_created", "user_id", "created_at"),
+        Index("ix_ai_monitor_replay_runs_user_status", "user_id", "status"),
+        {
+            "comment": "独立历史回放任务；数据和结果不得写入实时机会或实时预测表",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    active_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        Computed(
+            "CASE WHEN status IN ('pending', 'running') THEN user_id ELSE NULL END",
+            persisted=True,
+        ),
+    )
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    start_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    out_of_sample_start_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    requested_symbols_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    config_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    cost_model_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    provenance_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    dataset_hash: Mapped[str | None] = mapped_column(String(64))
+    total_symbols: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_symbols: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_events: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    generated_signals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    settled_signals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class AiMonitorReplayDatasetManifest(Base):
+    """Coverage and integrity record for every dataset consumed by a replay."""
+
+    __tablename__ = "ai_monitor_replay_dataset_manifests"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "source", "symbol", "data_type", name="uq_ai_replay_manifest_source"
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "user_id"],
+            ["ai_monitor_replay_runs.id", "ai_monitor_replay_runs.user_id"],
+            name="fk_ai_replay_manifest_run_user",
+            ondelete="CASCADE",
+        ),
+        Index("ix_ai_replay_manifest_run", "run_id", "data_type"),
+        {
+            "comment": "历史回放数据来源、覆盖区间、校验和与降级说明",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), default="*", nullable=False)
+    data_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    coverage_start_at: Mapped[datetime | None] = mapped_column(DateTime)
+    coverage_end_at: Mapped[datetime | None] = mapped_column(DateTime)
+    row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    exact_point_in_time: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    details_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class AiMonitorReplaySignal(Base):
+    """Frozen signal generated only from information available at signal time."""
+
+    __tablename__ = "ai_monitor_replay_signals"
+    __table_args__ = (
+        CheckConstraint("direction IN ('long', 'short')", name="valid_direction"),
+        CheckConstraint("sample_split IN ('train', 'embargo', 'oos')", name="valid_split"),
+        UniqueConstraint("dedup_key", name="uq_ai_monitor_replay_signals_dedup_key"),
+        UniqueConstraint(
+            "id", "run_id", "user_id", name="uq_ai_monitor_replay_signals_id_run_user"
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "user_id"],
+            ["ai_monitor_replay_runs.id", "ai_monitor_replay_runs.user_id"],
+            name="fk_ai_replay_signal_run_user",
+            ondelete="CASCADE",
+        ),
+        Index("ix_ai_replay_signals_run_time", "run_id", "signal_at"),
+        Index("ix_ai_replay_signals_user_split", "user_id", "sample_split"),
+        {
+            "comment": "独立历史回放的冻结信号，不参与当前机会与实时预测",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, unique=True
+    )
+    run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    sample_split: Mapped[str] = mapped_column(String(12), nullable=False)
+    news_score: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    indicator_score: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    combined_score: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    signal_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    entry_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    dedup_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    news_snapshot_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    indicator_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class AiMonitorReplayOutcome(Base):
+    """Cost-adjusted settlement of one isolated historical replay signal."""
+
+    __tablename__ = "ai_monitor_replay_outcomes"
+    __table_args__ = (
+        CheckConstraint("result IN ('win', 'loss', 'flat')", name="valid_result"),
+        UniqueConstraint("signal_id", name="uq_ai_monitor_replay_outcomes_signal"),
+        ForeignKeyConstraint(
+            ["signal_id", "run_id", "user_id"],
+            [
+                "ai_monitor_replay_signals.id",
+                "ai_monitor_replay_signals.run_id",
+                "ai_monitor_replay_signals.user_id",
+            ],
+            name="fk_ai_replay_outcome_signal_run_user",
+            ondelete="CASCADE",
+        ),
+        Index("ix_ai_replay_outcomes_run_split", "run_id", "sample_split"),
+        {
+            "comment": "历史回放信号的保守成本后结算结果",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    signal_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sample_split: Mapped[str] = mapped_column(String(12), nullable=False)
+    exit_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    exit_price: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    gross_directional_return_bps: Mapped[Decimal] = mapped_column(
+        Numeric(20, 8), nullable=False
+    )
+    estimated_cost_bps: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    net_directional_return_bps: Mapped[Decimal] = mapped_column(
+        Numeric(20, 8), nullable=False
+    )
+    max_favorable_bps: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    max_adverse_bps: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    settlement_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    settled_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
 class UserSession(Base):
     __tablename__ = "user_sessions"
     __table_args__ = (

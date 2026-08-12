@@ -272,6 +272,12 @@ def build_feature_vector(
     positioning_at = int(positioning.get("snapshot_at_ms") or 0)
     positioning_age_ms = max(0, now_ms - positioning_at) if positioning_at else 10**12
     depth_levels = max(0, int(micro.get("depth_levels") or 0))
+    aggressive_flow_available = bool(
+        micro.get("aggressive_flow_available", micro.get("aggressive_buy_ratio") is not None)
+    )
+    velocity_available = bool(
+        micro.get("velocity_available", micro.get("price_velocity_bps_60s") is not None)
+    )
 
     endpoint_quality = positioning.get("quality_json")
     if isinstance(endpoint_quality, str):
@@ -297,7 +303,9 @@ def build_feature_vector(
         "book_imbalance_5": _clip(_number(micro.get("book_imbalance_5"))),
         "depth_levels": depth_levels,
         "aggressive_flow": _clip((_number(micro.get("aggressive_buy_ratio"), 0.5) - 0.5) * 2),
+        "aggressive_flow_available": aggressive_flow_available,
         "velocity": math.tanh(_number(micro.get("price_velocity_bps_60s")) / 8.0),
+        "velocity_available": velocity_available,
         "realized_volatility_bps": max(0.0, _number(micro.get("realized_volatility_60s"))),
         "spread_bps": max(0.0, _number(micro.get("spread_bps"))),
         "flash_imbalance": _clip(flash_imbalance * (0.35 + 0.65 * flash_activity)),
@@ -651,7 +659,9 @@ def _local_microstructure(
         "book_imbalance_5": 0.0,
         "depth_levels": 0,
         "aggressive_buy_ratio": 0.5,
+        "aggressive_flow_available": False,
         "price_velocity_bps_60s": 0.0,
+        "velocity_available": False,
         "realized_volatility_60s": max(2.0, abs(pct_24h) * 100.0 / math.sqrt(96.0)),
         "spread_bps": 0.0,
     }

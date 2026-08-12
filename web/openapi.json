@@ -716,6 +716,39 @@
         "title": "AiMonitorNewsAnalyzeRequest",
         "type": "object"
       },
+      "AiMonitorReplayRequest": {
+        "additionalProperties": false,
+        "description": "Create an isolated point-in-time historical replay.",
+        "properties": {
+          "days": {
+            "default": 365,
+            "maximum": 730.0,
+            "minimum": 30.0,
+            "title": "Days",
+            "type": "integer"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 150,
+            "title": "Symbols",
+            "type": "array"
+          },
+          "timeframe": {
+            "default": "1h",
+            "enum": [
+              "15m",
+              "1h",
+              "4h"
+            ],
+            "title": "Timeframe",
+            "type": "string"
+          }
+        },
+        "title": "AiMonitorReplayRequest",
+        "type": "object"
+      },
       "AiMonitorRunRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6000,6 +6033,17 @@
           },
           {
             "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
             "name": "news_score_min",
             "required": false,
             "schema": {
@@ -6142,6 +6186,144 @@
           }
         ],
         "summary": "Prediction Records"
+      }
+    },
+    "/api/v2/ai-monitor/replays": {
+      "get": {
+        "operationId": "list_historical_replays_api_v2_ai_monitor_replays_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Historical Replays Api V2 Ai Monitor Replays Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Historical Replays"
+      },
+      "post": {
+        "operationId": "create_historical_replay_api_v2_ai_monitor_replays_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Historical Replay Api V2 Ai Monitor Replays Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Historical Replay"
+      }
+    },
+    "/api/v2/ai-monitor/replays/{replay_id}": {
+      "get": {
+        "operationId": "historical_replay_detail_api_v2_ai_monitor_replays__replay_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "replay_id",
+            "required": true,
+            "schema": {
+              "title": "Replay Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Historical Replay Detail Api V2 Ai Monitor Replays  Replay Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Historical Replay Detail"
       }
     },
     "/api/v2/ai-monitor/runs": {

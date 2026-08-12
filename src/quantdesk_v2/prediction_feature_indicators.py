@@ -226,6 +226,13 @@ def evaluate_prediction_feature_indicators(
         if source_kind == "micro":
             source_age_ms = micro_age_ms
             available = snapshot_fresh and micro_age_ms is not None and micro_age_ms <= MICRO_MAX_AGE_MS
+            if field in {"aggressive_flow", "velocity"}:
+                # These values used to be persisted as neutral fallbacks even
+                # though the depth stream did not contain signed trades or a
+                # one-minute price series.  Treat both legacy and explicitly
+                # unavailable snapshots as missing rather than bearish/bullish
+                # failures.
+                available = available and bool(features.get(f"{field}_available", False))
         elif source_kind == "positioning":
             source_age_ms = positioning_age_ms
             available = (

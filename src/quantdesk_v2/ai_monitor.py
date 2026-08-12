@@ -49,6 +49,7 @@ RUN_STALE_SECONDS = 5 * 60
 PREDICTION_SETTLEMENT_RETRY_MINUTES = 5
 PREDICTION_SETTLEMENT_GRACE_HOURS = 6
 PREDICTION_SETTLEMENT_BACKFILL_DAYS = 7
+PREDICTION_SETTLEMENT_POLL_SECONDS = 20
 PREDICTION_FEE_BPS_PER_SIDE = 5.0
 PREDICTION_SLIPPAGE_BPS_PER_SIDE = 3.0
 PREDICTION_FUNDING_BPS_PER_8H = 1.0
@@ -97,6 +98,59 @@ INDICATOR_CONFLICT_PAIRS: tuple[tuple[str, str], ...] = (
     ("low_volume_pullback", "trend_breakout"),
     ("low_volume_pullback", "price_volume_rise"),
     ("low_volume_pullback", "macd_golden_cross_volume"),
+)
+INDICATOR_MATCH_POLICY = "grouped_weighted_v1"
+INDICATOR_GROUPS: dict[str, frozenset[str]] = {
+    "trend": frozenset(
+        {
+            "moving_average_bull",
+            "ma_golden_cross",
+            "prediction_trend",
+        }
+    ),
+    "breakout": frozenset(
+        {
+            "bollinger_breakout",
+            "trend_breakout",
+            "price_volume_rise",
+            "strong_gap_open",
+            "macd_golden_cross_volume",
+        }
+    ),
+    "pullback": frozenset(
+        {
+            "moving_average_pullback_bounce",
+            "low_volume_pullback",
+        }
+    ),
+    "reversal": frozenset(
+        {
+            "new_low_reversal",
+            "oversold_bounce",
+            "oversold_reversal",
+        }
+    ),
+    "market_flow": frozenset(
+        {
+            "prediction_aggressive_flow",
+            "prediction_book_imbalance",
+            "prediction_book_imbalance_5",
+            "prediction_velocity",
+            "prediction_flash_imbalance",
+            "prediction_taker_flow",
+            "prediction_price_oi_impulse",
+        }
+    ),
+}
+CORE_INDICATOR_GROUPS = frozenset({"trend", "breakout", "pullback", "reversal"})
+NON_BLOCKING_INDICATOR_KEYS = frozenset(
+    {
+        # The current depth stream does not provide signed trade prints or a
+        # one-minute trade-price series.  Keep these visible as observations,
+        # but never turn their neutral fallback into a failed hard condition.
+        "prediction_aggressive_flow",
+        "prediction_velocity",
+    }
 )
 _worker_lock = threading.Lock()
 _worker_started = False
@@ -187,7 +241,7 @@ def default_config_data() -> dict[str, Any]:
         "created_at": None,
         "updated_at": None,
         "persisted": False,
-        "match_policy": "all",
+        "match_policy": INDICATOR_MATCH_POLICY,
         "indicator_conflicts": [],
     }
 
@@ -229,8 +283,8 @@ def config_data(config: AiMonitorConfig | None) -> dict[str, Any]:
         "created_at": config.created_at,
         "updated_at": config.updated_at,
         "persisted": True,
-        "match_policy": "all",
-        "indicator_conflicts": indicator_conflicts(indicator_keys),
+        "match_policy": INDICATOR_MATCH_POLICY,
+        "indicator_conflicts": [],
     }
 
 
@@ -268,7 +322,7 @@ def weighted_opportunity_score(
 
 
 def indicator_templates() -> list[dict[str, Any]]:
-    """Return bounded AND-compatible presets for the configuration UI."""
+    """Return coherent market-regime presets for the configuration UI."""
 
     return [dict(item) for item in INDICATOR_TEMPLATES]
 
@@ -310,6 +364,517 @@ def indicator_catalog(timeframe: str = "1h") -> list[dict[str, Any]]:
 
 def valid_indicator_keys() -> set[str]:
     return {item["key"] for item in indicator_catalog()}
+
+
+def indicator_group(key: str) -> str:
+    normalized = str(key).strip().lower()
+    for group, keys in INDICATOR_GROUPS.items():
+        if normalized in keys:
+            return group
+    return "other"
+
+
+def configured_indicator_policy(
+    evidence: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate selected indicators as alternative market-regime groups.
+
+    Breakout, pullback and reversal are alternative entry setups, so requiring
+    every selected indicator on one bar closes the signal gate.  This policy
+    requires at least two available core indicators and lets any coherent core
+    group qualify.  Market-flow observations remain score/context inputs and
+    are protected by the separate hard-conflict check.
+    """
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for item in evidence:
+        grouped.setdefault(str(item.get("group") or "other"), []).append(item)
+
+    group_results: list[dict[str, Any]] = []
+    core_available_count = 0
+    core_matched_count = 0
+    for group, items in grouped.items():
+        available = [item for item in items if bool(item.get("available"))]
+        matched = [item for item in available if bool(item.get("matched"))]
+        is_core = group in CORE_INDICATOR_GROUPS or group == "other"
+        if is_core:
+            core_available_count += len(available)
+            core_matched_count += len(matched)
+        required = min(2, len(available)) if is_core else 0
+        strength_source = matched if is_core and required and len(matched) >= required else available
+        ranked_strengths = sorted(
+            (float(item.get("strength") or 0.0) for item in strength_source),
+            reverse=True,
+        )
+        score_width = required or min(2, len(ranked_strengths))
+        score = (
+            round(sum(ranked_strengths[:score_width]) / score_width, 4)
+            if score_width
+            else None
+        )
+        group_results.append(
+            {
+                "key": group,
+                "selected_count": len(items),
+                "available_count": len(available),
+                "matched_count": len(matched),
+                "required_count": required,
+                "passed": bool(is_core and required and len(matched) >= required),
+                "score": score,
+                "blocking": is_core,
+            }
+        )
+
+    minimum_core_matches = min(2, core_available_count) if core_available_count else 0
+    passed_groups = [
+        item for item in group_results if bool(item["blocking"]) and bool(item["passed"])
+    ]
+    passed = bool(
+        minimum_core_matches
+        and core_matched_count >= minimum_core_matches
+        and passed_groups
+    )
+    scored_groups = [
+        item for item in (passed_groups or group_results)
+        if bool(item["blocking"]) and item["score"] is not None
+    ]
+    technical_score = max(
+        (float(item["score"]) for item in scored_groups),
+        default=0.0,
+    )
+    return {
+        "version": INDICATOR_MATCH_POLICY,
+        "passed": passed,
+        "technical_score": round(technical_score, 4),
+        "minimum_core_matches": minimum_core_matches,
+        "core_available_count": core_available_count,
+        "core_matched_count": core_matched_count,
+        "passed_groups": [str(item["key"]) for item in passed_groups],
+        "groups": group_results,
+        "non_blocking_keys": sorted(NON_BLOCKING_INDICATOR_KEYS),
+    }
+
+
+def cleanup_unpredicted_opportunities(db: Session, user_id: int) -> dict[str, int]:
+    """Remove non-auditable candidates while preserving every prediction ledger row.
+
+    Expired candidates that never crossed the prediction gate are transient
+    scan state, not historical predictions.  Active candidates from an older
+    rule version are also invalid after deployment and must be rebuilt using
+    the current policy.  Rows linked to a prediction are never deleted.
+    """
+
+    rows = db.scalars(
+        select(AiMonitorOpportunity).where(AiMonitorOpportunity.user_id == user_id)
+    ).all()
+    if not rows:
+        return {"expired": 0, "stale_policy": 0, "total": 0}
+    prediction_ids = set(
+        db.scalars(
+            select(AiMonitorPrediction.opportunity_id).where(
+                AiMonitorPrediction.user_id == user_id,
+                AiMonitorPrediction.opportunity_id.in_([row.id for row in rows]),
+            )
+        ).all()
+    )
+    counts = {"expired": 0, "stale_policy": 0, "total": 0}
+    for row in rows:
+        if row.id in prediction_ids:
+            continue
+        policy = str((row.evidence_json or {}).get("match_policy") or "")
+        reason = (
+            "expired"
+            if row.status == "expired"
+            else "stale_policy"
+            if policy != INDICATOR_MATCH_POLICY
+            else ""
+        )
+        if not reason:
+            continue
+        db.delete(row)
+        counts[reason] += 1
+        counts["total"] += 1
+    if counts["total"]:
+        db.flush()
+    return counts
+
+
+def merged_opportunity_expiration(
+    current: datetime,
+    proposed: datetime,
+    *,
+    has_prediction: bool,
+    has_new_material_news: bool,
+    newly_confirmed: bool,
+) -> datetime:
+    """Keep live rescoring separate from an auditable signal lifetime."""
+
+    if has_prediction:
+        return current
+    if newly_confirmed:
+        return proposed
+    if has_new_material_news:
+        return max(current, proposed)
+    return current
+
+
+def append_score_history(
+    evidence: Mapping[str, Any] | None,
+    snapshot: Mapping[str, Any],
+    *,
+    seed_snapshots: Sequence[Mapping[str, Any]] = (),
+    limit: int = 96,
+) -> list[dict[str, Any]]:
+    """Append one bounded live-score observation without losing frozen baselines."""
+
+    source = evidence or {}
+    raw_history = source.get("score_history")
+    stored_history = (
+        [dict(item) for item in raw_history if isinstance(item, Mapping)]
+        if isinstance(raw_history, list)
+        else []
+    )
+    previous_snapshot = source.get("score_snapshot")
+    candidates = [dict(item) for item in seed_snapshots if isinstance(item, Mapping)]
+    if not stored_history and isinstance(previous_snapshot, Mapping):
+        candidates.append(dict(previous_snapshot))
+    candidates.extend(stored_history)
+    candidates.append(dict(snapshot))
+
+    # A legacy scanner used to replace evidence_json wholesale.  Re-introduce
+    # immutable prediction-time points and de-duplicate observations globally,
+    # rather than only comparing the last item in the current JSON document.
+    by_timestamp: dict[str, dict[str, Any]] = {}
+    without_timestamp: list[dict[str, Any]] = []
+    for item in candidates:
+        calculated_at = item.get("calculated_at")
+        if calculated_at:
+            by_timestamp[str(calculated_at)] = item
+        else:
+            without_timestamp.append(item)
+    history = without_timestamp + [
+        by_timestamp[key] for key in sorted(by_timestamp)
+    ]
+    return history[-max(2, int(limit)) :]
+
+
+def virtual_entry_gate_snapshot(
+    *,
+    direction: str,
+    news_score: float,
+    news_mention_count: int,
+    minimum_news_score: float,
+    minimum_news_mentions: int,
+    indicator_policy_passed: bool,
+    indicator_score: float,
+    minimum_indicator_score: float,
+    combined_score: float,
+    minimum_combined_score: float,
+    market_flow_hard_conflict: bool,
+    entry_price: float,
+    checked_at: datetime | str,
+) -> dict[str, Any]:
+    """Build an explicit, auditable gate for research-only virtual entries."""
+
+    checked_at_text = checked_at.isoformat() if isinstance(checked_at, datetime) else str(checked_at)
+    checks = [
+        {
+            "key": "news_candidate",
+            "label": "新闻候选",
+            "passed": bool(
+                news_score >= minimum_news_score
+                and news_mention_count >= minimum_news_mentions
+            ),
+            "current": round(float(news_score), 4),
+            "required": round(float(minimum_news_score), 4),
+            "detail": f"{int(news_mention_count)} 条关联新闻",
+        },
+        {
+            "key": "indicator_policy",
+            "label": "策略组",
+            "passed": bool(indicator_policy_passed),
+            "current": bool(indicator_policy_passed),
+            "required": True,
+            "detail": "至少一个核心技术策略组通过",
+        },
+        {
+            "key": "indicator_score",
+            "label": "技术评分",
+            "passed": bool(indicator_score >= minimum_indicator_score),
+            "current": round(float(indicator_score), 4),
+            "required": round(float(minimum_indicator_score), 4),
+            "detail": "方向一致的连续技术强度",
+        },
+        {
+            "key": "combined_score",
+            "label": "组合评分",
+            "passed": bool(combined_score >= minimum_combined_score),
+            "current": round(float(combined_score), 4),
+            "required": round(float(minimum_combined_score), 4),
+            "detail": "新闻、技术与资金盘口加权评分",
+        },
+        {
+            "key": "market_flow_conflict",
+            "label": "盘口冲突",
+            "passed": not bool(market_flow_hard_conflict),
+            "current": bool(market_flow_hard_conflict),
+            "required": False,
+            "detail": "候选方向资金评分不得形成强冲突",
+        },
+        {
+            "key": "entry_price",
+            "label": "入场价格",
+            "passed": bool(entry_price > 0),
+            "current": round(float(entry_price), 12) if entry_price > 0 else None,
+            "required": "> 0",
+            "detail": "必须取得真实扫描参考价后才能冻结入场",
+        },
+    ]
+    signal_confirmed = all(bool(item["passed"]) for item in checks[:-1])
+    entry_ready = signal_confirmed and bool(checks[-1]["passed"])
+    return {
+        "version": "research_virtual_entry_v1",
+        "execution_mode": "virtual_prediction_only",
+        "real_order_enabled": False,
+        "direction": "short" if direction == "short" else "long",
+        "signal_confirmed": signal_confirmed,
+        "entry_ready": entry_ready,
+        "status": (
+            "ready"
+            if entry_ready
+            else "price_unavailable"
+            if signal_confirmed
+            else "waiting_conditions"
+        ),
+        "reference_price": round(float(entry_price), 12) if entry_price > 0 else None,
+        "checked_at": checked_at_text,
+        "checks": checks,
+        "note": "仅生成虚拟预测记录，不会调用模拟盘或实盘下单接口。",
+    }
+
+
+def prediction_entry_gate_snapshot(
+    prediction: AiMonitorPrediction,
+) -> dict[str, Any]:
+    """Return the frozen virtual-entry gate, deriving it for legacy predictions."""
+
+    evidence = dict(prediction.evidence_json or {})
+    stored = evidence.get("virtual_entry_gate")
+    if isinstance(stored, Mapping):
+        return dict(stored)
+    readiness = evidence.get("live_readiness")
+    readiness = dict(readiness) if isinstance(readiness, Mapping) else {}
+    indicator_policy = evidence.get("indicator_policy")
+    indicator_policy = dict(indicator_policy) if isinstance(indicator_policy, Mapping) else {}
+    news = evidence.get("news")
+    news_items = list(news) if isinstance(news, list) else []
+    market_flow = evidence.get("market_flow")
+    market_flow = dict(market_flow) if isinstance(market_flow, Mapping) else {}
+    signal_scores = evidence.get("signal_scores")
+    signal_scores = dict(signal_scores) if isinstance(signal_scores, Mapping) else {}
+    news_score = float(
+        prediction.signal_news_score
+        if prediction.signal_news_score is not None
+        else signal_scores.get("news", 0)
+    )
+    indicator_score = float(
+        prediction.signal_indicator_score
+        if prediction.signal_indicator_score is not None
+        else signal_scores.get("indicator", 0)
+    )
+    return virtual_entry_gate_snapshot(
+        direction=prediction.direction,
+        news_score=news_score,
+        news_mention_count=len(news_items),
+        minimum_news_score=float(evidence.get("minimum_news_score", 60.0)),
+        minimum_news_mentions=int(evidence.get("minimum_news_mentions", 1)),
+        indicator_policy_passed=bool(
+            indicator_policy.get("passed", evidence.get("technical_confirmed", True))
+        ),
+        indicator_score=indicator_score,
+        minimum_indicator_score=float(readiness.get("minimum_indicator_score", 65.0)),
+        combined_score=float(prediction.confidence_score),
+        minimum_combined_score=float(readiness.get("minimum_combined_score", 70.0)),
+        market_flow_hard_conflict=bool(market_flow.get("hard_conflict")),
+        entry_price=float(prediction.entry_price or 0),
+        checked_at=prediction.predicted_at,
+    )
+
+
+def virtual_risk_plan_snapshot(
+    *,
+    entry_price: float,
+    direction: str,
+    timeframe: str,
+    atr_pct: float | None = None,
+) -> dict[str, Any]:
+    """Freeze transparent research stop/target levels at virtual entry."""
+
+    fallback_risk_pct = {"15m": 0.8, "1h": 1.5, "4h": 3.0}.get(timeframe, 1.5)
+    minimum_risk_pct = {"15m": 0.5, "1h": 0.8, "4h": 1.5}.get(timeframe, 0.8)
+    maximum_risk_pct = {"15m": 2.0, "1h": 3.5, "4h": 6.0}.get(timeframe, 3.5)
+    volatility_risk = float(atr_pct or 0) * 1.5
+    stop_loss_pct = (
+        max(minimum_risk_pct, min(maximum_risk_pct, volatility_risk))
+        if volatility_risk > 0
+        else fallback_risk_pct
+    )
+    take_profit_pct = stop_loss_pct * 2.0
+    normalized_direction = "short" if direction == "short" else "long"
+    if entry_price > 0 and normalized_direction == "short":
+        stop_loss_price = entry_price * (1 + stop_loss_pct / 100)
+        take_profit_price = entry_price * (1 - take_profit_pct / 100)
+    elif entry_price > 0:
+        stop_loss_price = entry_price * (1 - stop_loss_pct / 100)
+        take_profit_price = entry_price * (1 + take_profit_pct / 100)
+    else:
+        stop_loss_price = 0.0
+        take_profit_price = 0.0
+    return {
+        "version": "atr_risk_reward_v1",
+        "method": "atr14_x_1_5" if volatility_risk > 0 else "timeframe_fallback",
+        "timeframe": timeframe,
+        "direction": normalized_direction,
+        "entry_price": round(float(entry_price), 12) if entry_price > 0 else None,
+        "atr_pct": round(float(atr_pct), 8) if atr_pct is not None else None,
+        "stop_loss_pct": round(stop_loss_pct, 6),
+        "take_profit_pct": round(take_profit_pct, 6),
+        "stop_loss_price": round(stop_loss_price, 12) if stop_loss_price > 0 else None,
+        "take_profit_price": (
+            round(take_profit_price, 12) if take_profit_price > 0 else None
+        ),
+        "risk_reward_ratio": 2.0,
+        "execution_policy": "display_only_until_path_settlement_v1",
+    }
+
+
+def virtual_position_snapshot(
+    prediction: AiMonitorPrediction,
+    live_market: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Calculate a direction-aware, read-only mark-to-market position snapshot."""
+
+    evidence = dict(prediction.evidence_json or {})
+    stored_plan = evidence.get("risk_plan")
+    risk_plan = (
+        dict(stored_plan)
+        if isinstance(stored_plan, Mapping)
+        else virtual_risk_plan_snapshot(
+            entry_price=float(prediction.entry_price or 0),
+            direction=prediction.direction,
+            timeframe=prediction.timeframe,
+        )
+    )
+    market = dict(live_market or {})
+    entry_price = float(prediction.entry_price or 0)
+    live_price = float(market.get("price") or 0)
+    settled = prediction.status == "completed" and prediction.exit_price is not None
+    current_price = float(prediction.exit_price) if settled else live_price
+    market_timestamp = int(market.get("ts") or 0)
+    market_at = None
+    market_age_seconds = None
+    if market_timestamp > 0:
+        if market_timestamp > 10_000_000_000:
+            market_timestamp //= 1000
+        market_datetime = datetime.fromtimestamp(market_timestamp, UTC)
+        market_at = market_datetime.isoformat()
+        market_age_seconds = max(
+            0.0, (datetime.now(UTC) - market_datetime).total_seconds()
+        )
+    if settled:
+        market_at = prediction.due_at.replace(tzinfo=UTC).isoformat()
+        market_age_seconds = None
+    if entry_price <= 0 or current_price <= 0:
+        return {
+            "available": False,
+            "entry_price": entry_price if entry_price > 0 else None,
+            "current_price": current_price if current_price > 0 else None,
+            "market_at": market_at,
+            "valuation_state": "settled" if settled else "live",
+            "market_age_seconds": market_age_seconds,
+            "market_stale": bool(
+                not settled
+                and (market_age_seconds is None or market_age_seconds > 120)
+            ),
+            "risk_plan": risk_plan,
+        }
+    gross = prediction_outcome(entry_price, current_price, prediction.direction)
+    gross_bps = float(gross["directional_return_bps"])
+    estimated_cost_bps = float(prediction.estimated_cost_bps or 0)
+    net_bps = gross_bps - estimated_cost_bps
+    per_unit_gross = (
+        current_price - entry_price
+        if prediction.direction == "long"
+        else entry_price - current_price
+    )
+    per_unit_net = per_unit_gross - entry_price * estimated_cost_bps / 10_000
+    stop_loss_price = float(risk_plan.get("stop_loss_price") or 0)
+    take_profit_price = float(risk_plan.get("take_profit_price") or 0)
+    if prediction.direction == "short":
+        target_state = (
+            "take_profit_reached"
+            if take_profit_price > 0 and current_price <= take_profit_price
+            else "stop_loss_reached"
+            if stop_loss_price > 0 and current_price >= stop_loss_price
+            else "active"
+        )
+    else:
+        target_state = (
+            "take_profit_reached"
+            if take_profit_price > 0 and current_price >= take_profit_price
+            else "stop_loss_reached"
+            if stop_loss_price > 0 and current_price <= stop_loss_price
+            else "active"
+        )
+    return {
+        "available": True,
+        "entry_price": round(entry_price, 12),
+        "current_price": round(current_price, 12),
+        "market_at": market_at,
+        "valuation_state": "settled" if settled else "live",
+        "market_age_seconds": (
+            round(market_age_seconds, 3) if market_age_seconds is not None else None
+        ),
+        "market_stale": bool(
+            not settled and (market_age_seconds is None or market_age_seconds > 120)
+        ),
+        "gross_return_bps": round(gross_bps, 8),
+        "gross_return_pct": round(gross_bps / 100, 8),
+        "estimated_cost_bps": round(estimated_cost_bps, 8),
+        "net_return_bps": round(net_bps, 8),
+        "net_return_pct": round(net_bps / 100, 8),
+        "gross_pnl_per_unit": round(per_unit_gross, 12),
+        "net_pnl_per_unit": round(per_unit_net, 12),
+        "net_pnl_per_10000": round(net_bps, 8),
+        "profit_state": "profit" if net_bps > 0 else "loss" if net_bps < 0 else "flat",
+        "target_state": target_state,
+        "risk_plan": risk_plan,
+        "note": "浮盈亏按虚拟方向和最新合约行情计算；每 10,000 U 为标准化名义本金，不代表真实持仓。",
+    }
+
+
+def backfill_prediction_risk_plans(db: Session, user_id: int) -> int:
+    """Freeze deterministic fallback levels for active legacy predictions."""
+
+    items = db.scalars(
+        select(AiMonitorPrediction).where(
+            AiMonitorPrediction.user_id == user_id,
+            AiMonitorPrediction.status == "pending",
+        )
+    ).all()
+    updated = 0
+    for item in items:
+        evidence = dict(item.evidence_json or {})
+        if isinstance(evidence.get("risk_plan"), Mapping):
+            continue
+        evidence["risk_plan"] = virtual_risk_plan_snapshot(
+            entry_price=float(item.entry_price or 0),
+            direction=item.direction,
+            timeframe=item.timeframe,
+        )
+        item.evidence_json = evidence
+        updated += 1
+    return updated
 
 
 def _row_value(row: Any, name: str, default: Any = None) -> Any:
@@ -475,6 +1040,27 @@ def prediction_cost_settings(config: Mapping[str, Any] | None = None) -> dict[st
             ),
             0.0,
         ),
+    }
+
+
+def readiness_cost_config(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Force conservative costs for admission metrics even when UI costs are disabled."""
+
+    settings = prediction_cost_settings(config)
+    return {
+        "prediction_fee_enabled": True,
+        "prediction_fee_bps_per_side": max(
+            float(settings["fee_bps_per_side"]), PREDICTION_FEE_BPS_PER_SIDE
+        ),
+        "prediction_slippage_enabled": True,
+        "prediction_slippage_bps_per_side": max(
+            float(settings["slippage_bps_per_side"]), PREDICTION_SLIPPAGE_BPS_PER_SIDE
+        ),
+        "prediction_funding_enabled": True,
+        "prediction_funding_bps_per_8h": max(
+            float(settings["funding_bps_per_8h"]), PREDICTION_FUNDING_BPS_PER_8H
+        ),
+        "forced_for_readiness": True,
     }
 
 
@@ -718,7 +1304,7 @@ def signal_readiness_snapshot(
     flow_available = bool(market_flow.get("directional_data_available"))
     flow_fresh = bool(market_flow.get("fresh"))
     checks = {
-        "all_indicators_matched": bool(matched),
+        "indicator_policy_passed": bool(matched),
         "indicator_strength": indicator_score >= minimum_indicator_score,
         "combined_score": combined_score >= minimum_combined_score,
         "market_quality": bool(market_quality.get("passed")),
@@ -736,7 +1322,7 @@ def signal_readiness_snapshot(
         ),
     }
     failed_labels = {
-        "all_indicators_matched": "所选技术条件未全部满足",
+        "indicator_policy_passed": "技术指标策略组未达到确认门槛",
         "indicator_strength": "技术强度未达到准入线",
         "combined_score": "组合评分未达到准入线",
         "market_quality": "实时行情或预测因子质量不足",
@@ -1190,8 +1776,11 @@ def strategy_readiness_report(
     )
     predictions.reverse()
     gross_returns = [float(item.directional_return_bps or 0) for item in predictions]
+    qualifying_cost_config = readiness_cost_config(cost_config)
     costs = [
-        prediction_estimated_cost_bps(item.predicted_at, item.due_at, cost_config)
+        prediction_estimated_cost_bps(
+            item.predicted_at, item.due_at, qualifying_cost_config
+        )
         for item in predictions
     ]
     net_returns = [
@@ -1307,7 +1896,10 @@ def strategy_readiness_report(
         "passed_count": sum(item["passed"] for item in criteria),
         "total_count": len(criteria),
         "criteria": criteria,
-        "cost_settings": prediction_cost_settings(cost_config),
+        "cost_settings": {
+            **prediction_cost_settings(qualifying_cost_config),
+            "forced_for_readiness": True,
+        },
         "paper_and_shadow_requirements": [
             "同执行链模拟盘至少 100 笔",
             "影子运行不少于 4 周且保护事故为 0",
@@ -1323,6 +1915,7 @@ def historical_opportunity_analytics(
     user_id: int,
     *,
     limit: int = 300,
+    page: int = 1,
     news_score_min: float = 0.0,
     indicator_score_min: float = 0.0,
     direction: str = "all",
@@ -1361,7 +1954,6 @@ def historical_opportunity_analytics(
             AiMonitorPrediction.exit_price.is_not(None),
         )
         .order_by(AiMonitorPrediction.predicted_at.desc(), AiMonitorPrediction.id.desc())
-        .limit(limit)
     )
     rows = db.execute(statement).all()
     outcomes: list[dict[str, Any]] = []
@@ -1451,9 +2043,23 @@ def historical_opportunity_analytics(
     summary["discarded_unavailable_count"] = status_counts.get("unavailable", 0)
     summary["pending_count"] = status_counts.get("pending", 0)
     summary["total_prediction_count"] = sum(status_counts.values())
+    page_size = max(1, int(limit))
+    total_items = len(outcomes)
+    total_pages = max(1, (total_items + page_size - 1) // page_size)
+    current_page = min(max(1, int(page)), total_pages)
+    page_start = (current_page - 1) * page_size
+    page_items = outcomes[page_start : page_start + page_size]
     return {
         "summary": summary,
-        "items": outcomes,
+        "items": page_items,
+        "pagination": {
+            "page": current_page,
+            "page_size": page_size,
+            "total": total_items,
+            "total_pages": total_pages,
+            "has_previous": current_page > 1,
+            "has_next": current_page < total_pages,
+        },
         "readiness": strategy_readiness_report(db, user_id, current_config),
         "cost_config": {
             **active_cost_settings,
@@ -1785,7 +2391,7 @@ def strongest_candidate_per_symbol(
 def match_configured_indicators(
     scan: Mapping[str, Any], indicator_keys: Sequence[str], direction: str = "long"
 ) -> tuple[bool, list[dict[str, Any]]]:
-    """Apply the all-selected policy using conditions aligned with opportunity direction."""
+    """Apply the grouped policy using conditions aligned with signal direction."""
 
     expected_direction = "bearish" if direction == "short" else "bullish"
 
@@ -1797,8 +2403,14 @@ def match_configured_indicators(
     evidence: list[dict[str, Any]] = []
     for key in indicator_keys:
         item = by_key.get(key)
-        matched = bool(
+        status = str(item.get("status") or "") if item else "unavailable"
+        available = bool(
             item
+            and item.get("available", True) is not False
+            and status not in {"insufficient", "unavailable"}
+        )
+        matched = bool(
+            available
             and (
                 item.get("direction") == expected_direction
                 if key.startswith("prediction_")
@@ -1826,6 +2438,10 @@ def match_configured_indicators(
                 if item
                 else key,
                 "matched": matched,
+                "available": available,
+                "group": indicator_group(key),
+                "blocking": indicator_group(key) in CORE_INDICATOR_GROUPS
+                and key not in NON_BLOCKING_INDICATOR_KEYS,
                 "strength": round(max(0.0, min(100.0, strength)), 4),
                 "direction": direction,
                 "status": (item.get("bearish_status") if bearish_strategy else item.get("status"))
@@ -1839,7 +2455,8 @@ def match_configured_indicators(
                 "metrics": list(item.get("metrics") or []) if item else [],
             }
         )
-    return bool(evidence) and all(item["matched"] for item in evidence), evidence
+    policy = configured_indicator_policy(evidence)
+    return bool(policy["passed"]), evidence
 
 
 def create_run(db: Session, user_id: int, run_type: str) -> AiMonitorRun:
@@ -2086,6 +2703,8 @@ def _scan_opportunities(
         )
         .values(status="expired", updated_at=now)
     )
+    cleanup = cleanup_unpredicted_opportunities(db, run.user_id)
+    risk_plan_backfill = backfill_prediction_risk_plans(db, run.user_id)
     cutoff = int(
         (datetime.now(UTC) - timedelta(hours=int(config["news_lookback_hours"]))).timestamp()
     )
@@ -2167,21 +2786,14 @@ def _scan_opportunities(
             except MonitorUnavailable:
                 failed_symbols.append(candidate["symbol"])
                 scan = {"items": [], "prediction_features": {"items": []}, "evaluated_at": 0}
-        matched, indicator_evidence = match_configured_indicators(
+        policy_matched, indicator_evidence = match_configured_indicators(
             scan, indicator_keys, candidate["direction"]
         )
+        indicator_policy = configured_indicator_policy(indicator_evidence)
         matched_indicator_keys = [
             str(item["key"]) for item in indicator_evidence if item["matched"]
         ]
-        indicator_score = (
-            round(
-                sum(float(item["strength"]) for item in indicator_evidence)
-                / len(indicator_evidence),
-                4,
-            )
-            if indicator_keys
-            else 0.0
-        )
+        indicator_score = float(indicator_policy["technical_score"])
         news_ids = sorted({item["id"] for item in candidate["news"] if item["id"]})
         evaluated_at = int(scan.get("evaluated_at") or 0)
         fingerprint = "|".join(
@@ -2213,6 +2825,16 @@ def _scan_opportunities(
             (item for item in active_for_symbol if item.direction == candidate["direction"]),
             None,
         )
+        existing_status = existing.status if existing is not None else None
+        existing_prediction = (
+            db.scalar(
+                select(AiMonitorPrediction).where(
+                    AiMonitorPrediction.opportunity_id == existing.id
+                )
+            )
+            if existing is not None
+            else None
+        )
         if active_for_symbol and existing is None:
             for previous in active_for_symbol:
                 previous.status = "expired"
@@ -2238,12 +2860,28 @@ def _scan_opportunities(
             frozen_model_call_ids = [
                 int(item) for item in (existing.news_ai_model_call_ids_json or [])
             ]
+        existing_news_ids = set(existing.news_ids_json or []) if existing is not None else set()
+        has_new_material_news = bool(set(news_ids) - existing_news_ids)
         market = dict(
             market_flow_inputs.get("ticker", {}).get(contract_symbol.upper(), {})
         )
         entry_price = float(market.get("price") or 0)
         if market.get("price") is not None:
             market["price"] = entry_price
+        risk_metrics = scan.get("risk_metrics")
+        risk_metrics = (
+            dict(risk_metrics) if isinstance(risk_metrics, Mapping) else {}
+        )
+        risk_plan = virtual_risk_plan_snapshot(
+            entry_price=entry_price,
+            direction=str(candidate["direction"]),
+            timeframe=timeframe,
+            atr_pct=(
+                float(risk_metrics["atr_pct"])
+                if risk_metrics.get("atr_pct") is not None
+                else None
+            ),
+        )
         market_flow = market_flow_snapshot(
             market_flow_inputs,
             symbol=str(candidate["symbol"]),
@@ -2252,10 +2890,32 @@ def _scan_opportunities(
             now=now,
         )
         flow_score = float(market_flow["score"])
-        signal_confirmed = matched and not bool(market_flow["hard_conflict"])
         score_weights = opportunity_score_weights(config)
         combined_score = weighted_opportunity_score(
             candidate["news_score"], indicator_score, flow_score, config
+        )
+        technical_confirmed = bool(
+            policy_matched and indicator_score >= minimum_indicator_score
+        )
+        signal_confirmed = bool(
+            technical_confirmed
+            and combined_score >= minimum_combined_score
+            and not bool(market_flow["hard_conflict"])
+        )
+        virtual_entry_gate = virtual_entry_gate_snapshot(
+            direction=str(candidate["direction"]),
+            news_score=float(candidate["news_score"]),
+            news_mention_count=len(news_ids),
+            minimum_news_score=float(config["minimum_news_confidence"]) * 100,
+            minimum_news_mentions=int(config["minimum_news_mentions"]),
+            indicator_policy_passed=bool(policy_matched),
+            indicator_score=indicator_score,
+            minimum_indicator_score=minimum_indicator_score,
+            combined_score=combined_score,
+            minimum_combined_score=minimum_combined_score,
+            market_flow_hard_conflict=bool(market_flow["hard_conflict"]),
+            entry_price=entry_price,
+            checked_at=now,
         )
         expires_at = now + timedelta(seconds=_TIMEFRAME_SECONDS[timeframe] * 2)
         due_at = now + timedelta(seconds=_TIMEFRAME_SECONDS[timeframe])
@@ -2271,7 +2931,7 @@ def _scan_opportunities(
             requires_prediction_features=requires_prediction_features,
         )
         readiness = signal_readiness_snapshot(
-            matched=signal_confirmed,
+            matched=technical_confirmed and not bool(market_flow["hard_conflict"]),
             indicator_score=indicator_score,
             combined_score=combined_score,
             estimated_cost_bps=estimated_cost,
@@ -2288,21 +2948,89 @@ def _scan_opportunities(
         )
         if readiness["status"] == "shadow_ready":
             shadow_ready += 1
+        score_snapshot = {
+            "news": float(candidate["news_score"]),
+            "technical": indicator_score,
+            "market_flow": flow_score,
+            "combined": combined_score,
+            "calculated_at": now.isoformat(),
+        }
+        prediction_score_seed: list[dict[str, Any]] = []
+        if existing_prediction is not None:
+            prediction_evidence = dict(existing_prediction.evidence_json or {})
+            if not isinstance(prediction_evidence.get("risk_plan"), Mapping):
+                prediction_evidence["risk_plan"] = virtual_risk_plan_snapshot(
+                    entry_price=float(existing_prediction.entry_price or 0),
+                    direction=existing_prediction.direction,
+                    timeframe=existing_prediction.timeframe,
+                )
+                existing_prediction.evidence_json = prediction_evidence
+            prediction_signal_scores = prediction_evidence.get("signal_scores")
+            prediction_signal_scores = (
+                dict(prediction_signal_scores)
+                if isinstance(prediction_signal_scores, Mapping)
+                else {}
+            )
+            prediction_snapshot = prediction_evidence.get("score_snapshot")
+            prediction_snapshot = (
+                dict(prediction_snapshot)
+                if isinstance(prediction_snapshot, Mapping)
+                else {}
+            )
+            prediction_market_flow = prediction_evidence.get("market_flow")
+            prediction_market_flow = (
+                dict(prediction_market_flow)
+                if isinstance(prediction_market_flow, Mapping)
+                else {}
+            )
+            prediction_flow = prediction_signal_scores.get(
+                "market_flow",
+                prediction_snapshot.get(
+                    "market_flow", prediction_market_flow.get("score", flow_score)
+                ),
+            )
+            prediction_score_seed.append(
+                {
+                    "news": float(existing_prediction.signal_news_score or 0),
+                    "technical": float(
+                        existing_prediction.signal_indicator_score or 0
+                    ),
+                    "market_flow": float(prediction_flow),
+                    "combined": float(existing_prediction.confidence_score),
+                    "calculated_at": existing_prediction.predicted_at.isoformat(),
+                }
+            )
+        score_history = append_score_history(
+            dict(existing.evidence_json or {}) if existing is not None else None,
+            score_snapshot,
+            seed_snapshots=prediction_score_seed,
+        )
         evidence = {
-            "match_policy": "all",
+            "match_policy": INDICATOR_MATCH_POLICY,
             "indicator_scoring": "continuous_directional_v2",
             "direction": candidate["direction"],
             "confirmed": signal_confirmed,
-            "technical_confirmed": matched,
+            "technical_confirmed": technical_confirmed,
             "market_available": bool(contract_symbol),
             "news": candidate["news"][:8],
             "indicators": indicator_evidence,
+            "indicator_policy": indicator_policy,
             "matched_indicator_count": len(matched_indicator_keys),
+            "available_indicator_count": sum(
+                bool(item.get("available")) for item in indicator_evidence
+            ),
             "required_indicator_count": len(indicator_keys),
             "evaluated_bar_time": evaluated_at,
             "market": market,
             "market_flow": market_flow,
+            "risk_metrics": risk_metrics,
+            "risk_plan": risk_plan,
             "score_weights": score_weights,
+            "score_snapshot": score_snapshot,
+            "score_history": score_history,
+            "virtual_entry_gate": virtual_entry_gate,
+            "minimum_news_score": float(config["minimum_news_confidence"]) * 100,
+            "minimum_news_mentions": int(config["minimum_news_mentions"]),
             "market_quality": market_quality,
             "live_readiness": readiness,
             "model_audit": {
@@ -2347,22 +3075,32 @@ def _scan_opportunities(
             opportunity.matched_indicator_keys_json = matched_indicator_keys
             opportunity.news_ids_json = news_ids
             opportunity.evidence_json = evidence
-            opportunity.expires_at = max(opportunity.expires_at, expires_at)
+            # Live scores are recalculated on every opportunity scan, but the
+            # signal lifetime must not slide forward forever just because the
+            # same news remains inside the lookback window.  A still-unconfirmed
+            # candidate may be extended only by genuinely new evidence.  Once
+            # a prediction exists its original lifetime remains immutable.
+            newly_confirmed = bool(signal_confirmed and existing_status != "discovered")
+            if existing_prediction is None and newly_confirmed:
+                opportunity.discovered_at = now
+            opportunity.expires_at = merged_opportunity_expiration(
+                opportunity.expires_at,
+                expires_at,
+                has_prediction=existing_prediction is not None,
+                has_new_material_news=has_new_material_news,
+                newly_confirmed=newly_confirmed,
+            )
             opportunity.updated_at = now
             merged += 1
         db.flush()
-        prediction_exists = db.scalar(
-            select(AiMonitorPrediction.id).where(
-                AiMonitorPrediction.opportunity_id == opportunity.id
-            )
-        )
         if opportunity.status == "discovered":
-            if prediction_exists is None:
+            if existing_prediction is None:
                 prediction_evidence = {
                     **evidence,
                     "signal_scores": {
                         "news": candidate["news_score"],
                         "indicator": indicator_score,
+                        "market_flow": flow_score,
                         "combined": combined_score,
                     },
                     "cost_model": {
@@ -2434,10 +3172,12 @@ def _scan_opportunities(
         "unmapped_symbols": unmapped_symbols[:50],
         "settled_predictions": settlement,
         "path_metrics_backfill": path_backfill,
+        "opportunity_cleanup": cleanup,
+        "risk_plan_backfill": risk_plan_backfill,
         "monitor_symbols": monitor_symbols,
         "monitor_scope": "selected" if monitor_symbols else "all",
         "indicator_keys": indicator_keys,
-        "match_policy": "all",
+        "match_policy": INDICATOR_MATCH_POLICY,
         "indicator_scoring": "continuous_directional_v2",
         "minimum_indicator_score": minimum_indicator_score,
         "minimum_combined_score": minimum_combined_score,
@@ -2578,7 +3318,7 @@ def _worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
                 _run_due_user(factory, engine, master_key, symbols_config, user_id)
         except Exception as exc:
             print(f"[ai-monitor] scheduler error: {type(exc).__name__}")
-        time.sleep(20)
+        time.sleep(PREDICTION_SETTLEMENT_POLL_SECONDS)
 
 
 def _ingest_worker_loop(engine: Engine, master_key: str) -> None:

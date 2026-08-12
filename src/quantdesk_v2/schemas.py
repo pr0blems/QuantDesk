@@ -709,6 +709,28 @@ class AiMonitorRunRequest(BaseModel):
     run_type: Literal["news", "opportunity"]
 
 
+class AiMonitorReplayRequest(BaseModel):
+    """Create an isolated point-in-time historical replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    days: int = Field(default=365, ge=30, le=730)
+    timeframe: Literal["15m", "1h", "4h"] = "1h"
+    symbols: list[str] = Field(default_factory=list, max_length=150)
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize_symbols(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_symbol in value:
+            symbol = raw_symbol.strip().upper()
+            if not re.fullmatch(r"[A-Z0-9][A-Z0-9._:/-]{1,31}", symbol):
+                raise ValueError("replay symbol is invalid")
+            if symbol not in normalized:
+                normalized.append(symbol)
+        return normalized
+
+
 class AiMonitorNewsAnalyzeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

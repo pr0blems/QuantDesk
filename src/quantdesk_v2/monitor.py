@@ -4,6 +4,7 @@ import json
 import math
 import threading
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1101,6 +1102,23 @@ class MonitorRepository:
     def news(self, limit: int) -> list[dict[str, Any]]:
         return self._query("SELECT * FROM news ORDER BY ts DESC LIMIT ?", (limit,))
 
+    def latest_tickers(
+        self, symbols: Sequence[str] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Return lightweight live quote snapshots for read-only position views."""
+
+        requested = {
+            str(symbol).strip().upper() for symbol in (symbols or self.symbols) if symbol
+        }
+        rows = self._query(
+            "SELECT symbol,price,pct_24h,quote_volume,ts FROM ticker"
+        )
+        return {
+            str(row["symbol"]).upper(): row
+            for row in rows
+            if str(row.get("symbol") or "").upper() in requested
+        }
+
     def klines(self, symbol: str, timeframe: str, limit: int) -> list[dict[str, Any]]:
         normalized = self._validate_symbol(symbol)
         rows = self._query(
@@ -1134,12 +1152,34 @@ class MonitorRepository:
         )
 
     def strategy_indicators(self, symbol: str, timeframe: str) -> dict[str, Any]:
+        from . import indicators
         from .prediction_feature_indicators import evaluate_prediction_feature_indicators
         from .strategy_indicators import evaluate_directional_strategy_indicators
 
         normalized = self._validate_symbol(symbol)
         candles = self.klines(normalized, timeframe, 120)
         result = evaluate_directional_strategy_indicators(candles, timeframe)
+        if candles:
+            highs = [float(item["high"]) for item in candles]
+            lows = [float(item["low"]) for item in candles]
+            closes = [float(item["close"]) for item in candles]
+            atr14 = indicators.atr(highs, lows, closes, 14)
+            close = closes[-1]
+            result["risk_metrics"] = {
+                "atr14": round(float(atr14), 12) if atr14 is not None else None,
+                "atr_pct": (
+                    round(float(atr14) / close * 100, 8)
+                    if atr14 is not None and close > 0
+                    else None
+                ),
+                "close": close,
+            }
+        else:
+            result["risk_metrics"] = {
+                "atr14": None,
+                "atr_pct": None,
+                "close": None,
+            }
         snapshot: dict[str, Any] | None = None
         try:
             rows = self._query(
