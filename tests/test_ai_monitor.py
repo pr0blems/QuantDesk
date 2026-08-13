@@ -2176,7 +2176,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260812-34"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260813-37"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2186,7 +2186,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260812-34"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260813-37"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -2392,6 +2392,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".ai-market-flow-grid" in stylesheet
     assert ".news-logic-trigger" in stylesheet
     assert 'id="open-news-system-prompt"' in component
+    assert 'id="open-historical-judgment"' in component
+    assert 'id="historical-judgment-modal"' in component
+    assert "historical_analysis_memory" in component
     assert 'id="news-system-prompt-modal"' in component
     assert 'data-conclusion-view="memory"' in component
     assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/news-analysis-records`)' in component
@@ -2399,6 +2402,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'this.api("/news-system-prompt"' in component
     assert ".news-system-prompt-trigger" in stylesheet
     assert ".news-system-prompt-dialog" in stylesheet
+    assert ".historical-judgment-trigger" in stylesheet
+    assert ".historical-judgment-dialog" in stylesheet
     assert ".ai-memory-timeline" in stylesheet
     assert ".news-logic-dialog" in stylesheet
     assert ".news-model-call-tabs" in stylesheet
@@ -2427,17 +2432,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".history-result.pending" in stylesheet
     assert 'const data = await this.api("/opportunities?limit=300&include_expired=true")' in component
     assert 'this.api("/opportunity-analytics?limit=300")' not in component
-    assert "historicalReplayActive()" in component
-    assert 'if (this.historicalReplayActive()) return;' in component
-    assert 'items.some((item) => ["pending", "running"].includes(item.status))' in component
-    assert 'const replay = await this.api("/replays"' in component
-    assert "items: [replay, ...previousItems.filter" in component
-    assert "this.syncHistoricalReplayButton();" in component
-    assert "button.disabled = false" not in component[
-        component.index("async startHistoricalReplay(event)") : component.index(
-            "renderHistoricalReplay()"
-        )
-    ]
+    assert 'id="historical-replay"' not in component
+    assert 'id="replay-form"' not in component
+    assert 'this.api("/replays?limit=5")' not in component
     assert 'id="prediction-filter-form"' in component
     assert 'id="prediction-news-score-min"' in component
     assert 'id="prediction-indicator-score-min"' in component

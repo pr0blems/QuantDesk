@@ -20,6 +20,8 @@ from .ai_providers import AiProviderPreset
 from .models import (
     AiModelConfig,
     AiMonitorConfig,
+    AiMonitorOpportunity,
+    AiMonitorPrediction,
     News,
     NewsAiAnalysisRecord,
     NewsAiBatch,
@@ -51,8 +53,9 @@ MAX_REASON_CHARS = 240
 MAX_RELATED_STOCKS = 8
 MAX_RELATED_INDUSTRIES = 6
 NEWS_MEMORY_LOOKBACK_DAYS = 7
-NEWS_MEMORY_MAX_CONTEXT_RECORDS = 80
-NEWS_MEMORY_MAX_RECORDS_PER_SYMBOL = 4
+NEWS_MEMORY_MAX_CONTEXT_RECORDS = 32
+NEWS_MEMORY_MAX_RECORDS_PER_SYMBOL = 6
+NEWS_OPEN_POSITION_MAX_RECORDS = 40
 MAX_TRACE_RESPONSE_CHARS = 2_000_000
 AI_SENTIMENTS = frozenset({"bull", "neutral", "bear"})
 IMPACT_STRENGTHS = frozenset({"low", "medium", "high"})
@@ -74,6 +77,9 @@ DEFAULT_NEWS_ANALYSIS_SYSTEM_PROMPT = (
     "market. Use bull, neutral, or bear. Reasons must be concise Chinese."
 )
 MEMORY_EFFECTS = frozenset({"initial", "maintain", "strengthen", "weaken", "reverse"})
+POSITION_EFFECTS = frozenset(
+    {"hold", "strengthen", "caution", "exit", "reverse"}
+)
 
 
 def effective_news_analysis_system_prompt(value: str | None) -> str:
@@ -108,6 +114,7 @@ def analyze_news_chunk(
     attempt_depth: int = 0,
     system_prompt: str | None = None,
     memory_context: Sequence[Mapping[str, Any]] | None = None,
+    position_context: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze one bounded chunk and return validated per-news decisions."""
 
@@ -119,6 +126,8 @@ def analyze_news_chunk(
         key=lambda item: (int(item["published_at"]), str(item["id"])),
     )
     normalized_memory = _normalize_memory_context(memory_context or [])
+    normalized_positions = _normalize_position_context(position_context or [])
+    historical_news = _historical_news_context(normalized_memory)
     expected_ids = {item["id"] for item in normalized_items}
     if len(expected_ids) != len(normalized_items):
         raise NewsAiError("invalid_output")
@@ -136,13 +145,21 @@ def analyze_news_chunk(
                         "items": normalized_items,
                         "memory_window_days": NEWS_MEMORY_LOOKBACK_DAYS,
                         "historical_analysis_memory": normalized_memory,
+                        "historical_related_news": historical_news,
+                        "open_research_positions": normalized_positions,
                         "memory_instructions": (
-                            "Use the historical memory only as prior analysis, not as new facts. "
+                            "This is a continuous judgment, not an isolated news classification. "
+                            "Use historical_related_news as older evidence and "
+                            "historical_analysis_memory as prior judgments, never as new facts. "
                             "Process supplied items from oldest to newest. Within this request, treat "
                             "each earlier item's analysis as transient memory when judging later items. "
                             "For every related stock, compare the new evidence with the most recent "
                             "memory for that ticker and report whether the prior judgment is maintained, "
-                            "strengthened, weakened, or reversed. Use initial when no prior exists."
+                            "strengthened, weakened, or reversed. Use initial when no prior exists. "
+                            "Also compare genuinely related new evidence with open_research_positions. "
+                            "A position is context, never proof of direction: avoid confirmation bias. "
+                            "State whether the new evidence supports holding, strengthening, caution, "
+                            "exit, or reversal. Do not change an unrelated position."
                         ),
                         "output_schema": {
                             "analyses": [
@@ -161,6 +178,12 @@ def analyze_news_chunk(
                                             ),
                                             "prior_record_id": (
                                                 "matching historical record id or null"
+                                            ),
+                                            "position_effect": (
+                                                "hold|strengthen|caution|exit|reverse; only when an open position exists"
+                                            ),
+                                            "position_reason": (
+                                                "Chinese explanation of how this news affects the open research position"
                                             ),
                                         }
                                     ],
@@ -217,6 +240,7 @@ def analyze_news_chunk(
             model_output,
             expected_ids,
             memory_context=normalized_memory,
+            position_context=normalized_positions,
         )
         trace["status"] = "completed"
         return analyses
@@ -346,6 +370,7 @@ def run_news_ai_batch(
     api_key = ""
     system_prompt = DEFAULT_NEWS_ANALYSIS_SYSTEM_PROMPT
     memory_context: list[dict[str, Any]] = []
+    position_context: list[dict[str, Any]] = []
     deadline = time.monotonic() + MONITOR_BATCH_DEADLINE_SECONDS
 
     def persist_trace(trace: Mapping[str, Any]) -> None:
@@ -401,6 +426,10 @@ def run_news_ai_batch(
                 user_id=int(batch.started_by or 0),
                 news_items=news_items,
             )
+            position_context = _load_open_research_positions(
+                db,
+                user_id=int(batch.started_by or 0),
+            )
             batch.selected_count = min(
                 batch.requested_count,
                 processed_before + len(selected_items),
@@ -442,6 +471,7 @@ def run_news_ai_batch(
                 model_name=model_name,
                 system_prompt=system_prompt,
                 memory_context=memory_context,
+                position_context=position_context,
                 deadline=deadline,
                 trace_sink=persist_trace,
             ):
@@ -577,6 +607,7 @@ def _analyze_with_recovery(
     model_name: str,
     system_prompt: str | None = None,
     memory_context: Sequence[Mapping[str, Any]] | None = None,
+    position_context: Sequence[Mapping[str, Any]] | None = None,
     _depth: int = 0,
     deadline: float | None = None,
     trace_sink: Callable[[Mapping[str, Any]], None] | None = None,
@@ -597,6 +628,7 @@ def _analyze_with_recovery(
                 attempt_depth=_depth,
                 system_prompt=system_prompt,
                 memory_context=memory_context,
+                position_context=position_context,
             ),
             0,
             None,
@@ -612,6 +644,7 @@ def _analyze_with_recovery(
             model_name=model_name,
             system_prompt=system_prompt,
             memory_context=memory_context,
+            position_context=position_context,
             _depth=_depth + 1,
             deadline=deadline,
             trace_sink=trace_sink,
@@ -623,6 +656,7 @@ def _analyze_with_recovery(
             model_name=model_name,
             system_prompt=system_prompt,
             memory_context=memory_context,
+            position_context=position_context,
             _depth=_depth + 1,
             deadline=deadline,
             trace_sink=trace_sink,
@@ -642,6 +676,7 @@ def _analyze_chunk_bounded(
     model_name: str,
     system_prompt: str | None = None,
     memory_context: Sequence[Mapping[str, Any]] | None = None,
+    position_context: Sequence[Mapping[str, Any]] | None = None,
     deadline: float,
     trace_sink: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], int, NewsAiError | None]:
@@ -666,6 +701,7 @@ def _analyze_chunk_bounded(
                         model_name=model_name,
                         system_prompt=system_prompt,
                         memory_context=memory_context,
+                        position_context=position_context,
                         deadline=deadline,
                         trace_sink=trace_sink,
                     ),
@@ -698,6 +734,7 @@ def _analyze_chunks_concurrently(
     model_name: str,
     system_prompt: str | None = None,
     memory_context: Sequence[Mapping[str, Any]] | None = None,
+    position_context: Sequence[Mapping[str, Any]] | None = None,
     deadline: float,
     trace_sink: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> Iterator[
@@ -724,6 +761,7 @@ def _analyze_chunks_concurrently(
                 model_name=model_name,
                 system_prompt=system_prompt,
                 memory_context=memory_context,
+                position_context=position_context,
                 deadline=deadline,
                 trace_sink=trace_sink,
             ): chunk
@@ -850,7 +888,13 @@ def _load_news_memory_context(
     user_id: int,
     news_items: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Load a bounded seven-day memory, keeping every ticker's latest judgment."""
+    """Load only the seven-day judgments relevant to the incoming news.
+
+    Older versions filled unused capacity with the latest judgment for unrelated
+    tickers.  That made the model look well informed while actually introducing
+    confirmation noise.  A record now needs an explicit ticker match or a material
+    title/summary overlap with the incoming batch.
+    """
 
     if user_id <= 0 or not news_items:
         return []
@@ -858,7 +902,7 @@ def _load_news_memory_context(
         days=NEWS_MEMORY_LOOKBACK_DAYS
     )
     rows = db.execute(
-        select(NewsAiAnalysisRecord, News.title, News.title_zh)
+        select(NewsAiAnalysisRecord, News)
         .join(News, News.id == NewsAiAnalysisRecord.news_id)
         .where(
             NewsAiAnalysisRecord.user_id == user_id,
@@ -870,35 +914,79 @@ def _load_news_memory_context(
         )
         .limit(2500)
     ).all()
-    searchable_text = " ".join(
-        str(item.get("title_zh") or item.get("title") or "").upper()
+    active_symbols = {
+        str(symbol or "").upper()
+        for symbol in db.scalars(
+            select(AiMonitorPrediction.symbol).where(
+                AiMonitorPrediction.user_id == user_id,
+                AiMonitorPrediction.status == "pending",
+            )
+        ).all()
+        if str(symbol or "").strip()
+    }
+    incoming_texts = [
+        " ".join(
+            str(value or "")
+            for value in (
+                item.get("title_zh"),
+                item.get("title"),
+                item.get("summary"),
+            )
+        ).strip()
         for item in news_items
-    )
-    selected: list[tuple[NewsAiAnalysisRecord, str | None, str | None]] = []
+    ]
+    searchable_text = " ".join(incoming_texts).upper()
+    incoming_terms = _news_context_terms(" ".join(incoming_texts))
+    selected: list[tuple[NewsAiAnalysisRecord, News]] = []
     selected_ids: set[int] = set()
     symbol_counts: Counter[str] = Counter()
 
-    # Explicit ticker mentions get a deeper chain; all other tickers retain their latest state.
-    for record, title, title_zh in rows:
-        if record.symbol not in searchable_text:
+    # Directly related news gets the deeper chronological memory chain first.
+    for record, news in rows:
+        symbol = str(record.symbol or "").upper()
+        explicit_symbol = bool(
+            re.search(rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])", searchable_text)
+        )
+        old_text = " ".join(
+            str(value or "")
+            for value in (news.title_zh, news.title, news.summary)
+        )
+        common_terms = incoming_terms & _news_context_terms(old_text)
+        semantic_match = bool(
+            len(common_terms) >= 2
+            or any(len(term) >= 8 for term in common_terms)
+        )
+        if not explicit_symbol and not semantic_match:
             continue
-        if symbol_counts[record.symbol] >= NEWS_MEMORY_MAX_RECORDS_PER_SYMBOL:
+        if symbol_counts[symbol] >= NEWS_MEMORY_MAX_RECORDS_PER_SYMBOL:
             continue
-        selected.append((record, title, title_zh))
-        selected_ids.add(int(record.id))
-        symbol_counts[record.symbol] += 1
-    for record, title, title_zh in rows:
         if len(selected) >= NEWS_MEMORY_MAX_CONTEXT_RECORDS:
             break
-        if int(record.id) in selected_ids or symbol_counts[record.symbol] >= 1:
-            continue
-        selected.append((record, title, title_zh))
+        selected.append((record, news))
         selected_ids.add(int(record.id))
-        symbol_counts[record.symbol] += 1
+        symbol_counts[symbol] += 1
+    # Keep one latest judgment for each currently open research position.  Unlike
+    # the old implementation, this never fills the request with arbitrary tickers.
+    for record, news in rows:
+        if len(selected) >= NEWS_MEMORY_MAX_CONTEXT_RECORDS:
+            break
+        symbol = str(record.symbol or "").upper()
+        if (
+            symbol not in active_symbols
+            or symbol_counts[symbol] >= 1
+            or int(record.id) in selected_ids
+        ):
+            continue
+        selected.append((record, news))
+        selected_ids.add(int(record.id))
+        symbol_counts[symbol] += 1
     selected.sort(key=lambda item: (item[0].analyzed_at, item[0].id))
-    return [
-        {
+    result: list[dict[str, Any]] = []
+    for record, news in selected[:NEWS_MEMORY_MAX_CONTEXT_RECORDS]:
+        stock_snapshot = _stock_snapshot(news.related_us_stocks, record.symbol)
+        result.append({
             "id": int(record.id),
+            "news_id": str(news.id),
             "symbol": record.symbol,
             "direction": record.direction,
             "confidence": float(record.confidence),
@@ -908,12 +996,125 @@ def _load_news_memory_context(
             "analysis_reason": record.analysis_reason,
             "memory_effect": record.memory_effect,
             "memory_reason": record.memory_reason,
-            "news_title": title_zh or title or "",
+            "position_effect": stock_snapshot.get("position_effect"),
+            "position_reason": stock_snapshot.get("position_reason"),
+            "news_source": news.source,
+            "news_title": news.title_zh or news.title or "",
+            "news_summary": news.summary or "",
             "news_published_at": int(record.news_published_at),
             "analyzed_at": record.analyzed_at.isoformat(),
+        })
+    return result
+
+
+def _news_context_terms(value: str) -> set[str]:
+    stop_words = {
+        "ABOUT", "AFTER", "BEFORE", "COMPANY", "FROM", "MARKET", "NEWS",
+        "REPORT", "SHARES", "STOCK", "THAT", "THEIR", "THESE", "THIS", "WITH",
+    }
+    text = str(value or "").upper()
+    terms = {
+        token
+        for token in re.findall(r"[A-Z0-9][A-Z0-9.-]{3,}", text)
+        if token not in stop_words
+    }
+    for segment in re.findall(r"[\u4e00-\u9fff]{4,}", text):
+        terms.update(segment[index : index + 4] for index in range(len(segment) - 3))
+    return terms
+
+
+def _stock_snapshot(value: Any, symbol: str) -> Mapping[str, Any]:
+    if not isinstance(value, list):
+        return {}
+    normalized_symbol = _normalize_symbol(symbol)
+    for item in value:
+        if isinstance(item, Mapping) and _normalize_symbol(item.get("symbol")) == normalized_symbol:
+            return item
+    return {}
+
+
+def _load_open_research_positions(
+    db: Any,
+    *,
+    user_id: int,
+) -> list[dict[str, Any]]:
+    """Freeze the user's unsettled research positions into the model request."""
+
+    if user_id <= 0:
+        return []
+    rows = db.execute(
+        select(AiMonitorPrediction, AiMonitorOpportunity)
+        .join(
+            AiMonitorOpportunity,
+            AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
+        )
+        .where(
+            AiMonitorPrediction.user_id == user_id,
+            AiMonitorOpportunity.user_id == user_id,
+            AiMonitorPrediction.status == "pending",
+        )
+        .order_by(
+            AiMonitorPrediction.predicted_at.desc(),
+            AiMonitorPrediction.id.desc(),
+        )
+        .limit(NEWS_OPEN_POSITION_MAX_RECORDS)
+    ).all()
+    ticker_by_symbol: dict[str, Mapping[str, Any]] = {}
+    try:
+        from . import market_store
+
+        ticker_by_symbol = {
+            str(item.get("symbol") or "").upper(): item
+            for item in market_store.query(
+                "SELECT symbol,price,ts FROM ticker WHERE price IS NOT NULL"
+            )
         }
-        for record, title, title_zh in selected[:NEWS_MEMORY_MAX_CONTEXT_RECORDS]
-    ]
+    except Exception:
+        # Position context still remains useful with its frozen entry snapshot.
+        ticker_by_symbol = {}
+
+    positions: list[dict[str, Any]] = []
+    for prediction, opportunity in rows:
+        evidence = dict(prediction.evidence_json or {})
+        opportunity_evidence = dict(opportunity.evidence_json or {})
+        risk_plan = evidence.get("risk_plan")
+        risk_plan = dict(risk_plan) if isinstance(risk_plan, Mapping) else {}
+        contract_symbol = str(prediction.contract_symbol or "").upper()
+        ticker = ticker_by_symbol.get(contract_symbol, {})
+        entry_price = float(prediction.entry_price or 0)
+        current_price = float(ticker.get("price") or 0)
+        unrealized_bps: float | None = None
+        if entry_price > 0 and current_price > 0:
+            raw_bps = (current_price / entry_price - 1.0) * 10_000
+            unrealized_bps = raw_bps if prediction.direction == "long" else -raw_bps
+        score_snapshot = opportunity_evidence.get("score_snapshot")
+        score_snapshot = dict(score_snapshot) if isinstance(score_snapshot, Mapping) else {}
+        positions.append(
+            {
+                "prediction_id": str(prediction.public_id),
+                "symbol": str(prediction.symbol or "").upper(),
+                "contract_symbol": contract_symbol,
+                "direction": prediction.direction,
+                "state": "open_research_position",
+                "entry_price": round(entry_price, 12) if entry_price > 0 else None,
+                "current_price": round(current_price, 12) if current_price > 0 else None,
+                "current_price_time_ms": int(ticker.get("ts") or 0) or None,
+                "unrealized_bps": (
+                    round(unrealized_bps, 4) if unrealized_bps is not None else None
+                ),
+                "entry_combined_score": round(float(prediction.confidence_score), 4),
+                "current_combined_score": round(
+                    float(score_snapshot.get("combined") or opportunity.combined_score), 4
+                ),
+                "news_score": round(float(opportunity.news_score), 4),
+                "indicator_score": round(float(opportunity.indicator_score), 4),
+                "stop_loss_price": _optional_float(risk_plan.get("stop_loss_price")),
+                "take_profit_price": _optional_float(risk_plan.get("take_profit_price")),
+                "opened_at": prediction.predicted_at.isoformat(),
+                "due_at": prediction.due_at.isoformat(),
+            }
+        )
+    return positions
 
 
 def _persist_analysis_memory_records(
@@ -1118,7 +1319,12 @@ def _normalize_memory_context(
                 "analysis_reason": _text(raw.get("analysis_reason"), MAX_REASON_CHARS),
                 "memory_effect": str(raw.get("memory_effect") or "initial"),
                 "memory_reason": _text(raw.get("memory_reason"), MAX_REASON_CHARS),
+                "position_effect": str(raw.get("position_effect") or ""),
+                "position_reason": _text(raw.get("position_reason"), MAX_REASON_CHARS),
+                "news_id": _text(raw.get("news_id"), 255),
+                "news_source": _text(raw.get("news_source"), 80),
                 "news_title": _text(raw.get("news_title"), MAX_TITLE_CHARS),
+                "news_summary": _text(raw.get("news_summary"), MAX_SUMMARY_CHARS),
                 "news_published_at": int(raw.get("news_published_at") or 0),
                 "analyzed_at": str(raw.get("analyzed_at") or ""),
             }
@@ -1126,17 +1332,96 @@ def _normalize_memory_context(
     return normalized
 
 
+def _normalize_position_context(
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in records[:NEWS_OPEN_POSITION_MAX_RECORDS]:
+        prediction_id = _text(raw.get("prediction_id"), 64)
+        symbol = _normalize_symbol(raw.get("symbol"))
+        direction = str(raw.get("direction") or "").strip().lower()
+        if not prediction_id or prediction_id in seen or not _SYMBOL_RE.fullmatch(symbol):
+            continue
+        if direction not in {"long", "short"}:
+            continue
+        seen.add(prediction_id)
+        normalized.append(
+            {
+                "prediction_id": prediction_id,
+                "symbol": symbol,
+                "contract_symbol": _text(raw.get("contract_symbol"), 32),
+                "direction": direction,
+                "state": "open_research_position",
+                "entry_price": _optional_float(raw.get("entry_price")),
+                "current_price": _optional_float(raw.get("current_price")),
+                "current_price_time_ms": int(raw.get("current_price_time_ms") or 0) or None,
+                "unrealized_bps": _optional_float(raw.get("unrealized_bps")),
+                "entry_combined_score": _optional_float(raw.get("entry_combined_score")),
+                "current_combined_score": _optional_float(raw.get("current_combined_score")),
+                "news_score": _optional_float(raw.get("news_score")),
+                "indicator_score": _optional_float(raw.get("indicator_score")),
+                "stop_loss_price": _optional_float(raw.get("stop_loss_price")),
+                "take_profit_price": _optional_float(raw.get("take_profit_price")),
+                "opened_at": str(raw.get("opened_at") or ""),
+                "due_at": str(raw.get("due_at") or ""),
+            }
+        )
+    return normalized
+
+
+def _historical_news_context(
+    memory: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    news: dict[str, dict[str, Any]] = {}
+    for item in memory:
+        key = str(item.get("news_id") or item.get("id") or "")
+        if not key:
+            continue
+        row = news.setdefault(
+            key,
+            {
+                "news_id": item.get("news_id") or key,
+                "published_at": int(item.get("news_published_at") or 0),
+                "source": item.get("news_source") or "",
+                "title": item.get("news_title") or "",
+                "summary": item.get("news_summary") or "",
+                "prior_judgments": [],
+            },
+        )
+        row["prior_judgments"].append(
+            {
+                "record_id": int(item["id"]),
+                "symbol": item.get("symbol"),
+                "direction": item.get("direction"),
+                "confidence": item.get("confidence"),
+                "relevance": item.get("relevance"),
+                "reason": item.get("analysis_reason"),
+                "memory_effect": item.get("memory_effect"),
+                "memory_reason": item.get("memory_reason"),
+                "position_effect": item.get("position_effect"),
+                "position_reason": item.get("position_reason"),
+            }
+        )
+    return sorted(news.values(), key=lambda item: int(item["published_at"] or 0))
+
+
 def _validate_analyses(
     output: dict[str, Any],
     expected_ids: set[str],
     *,
     memory_context: Sequence[Mapping[str, Any]] | None = None,
+    position_context: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     normalized_memory = _normalize_memory_context(memory_context or [])
     memory_by_id = {int(item["id"]): item for item in normalized_memory}
     latest_memory_by_symbol: dict[str, Mapping[str, Any]] = {}
     for item in reversed(normalized_memory):
         latest_memory_by_symbol.setdefault(str(item["symbol"]), item)
+    active_position_symbols = {
+        str(item["symbol"])
+        for item in _normalize_position_context(position_context or [])
+    }
     raw_analyses = next(
         (
             output.get(key)
@@ -1204,6 +1489,24 @@ def _validate_analyses(
                 required=True,
             )
             stock["prior_record_id"] = int(prior["id"]) if prior is not None else None
+            raw_position_effect = str(
+                (raw_stock or {}).get("position_effect")
+                or (raw_stock or {}).get("holding_effect")
+                or ""
+            ).strip().lower()
+            if stock["symbol"] in active_position_symbols:
+                stock["position_effect"] = (
+                    raw_position_effect
+                    if raw_position_effect in POSITION_EFFECTS
+                    else "hold"
+                )
+                stock["position_reason"] = _text(
+                    (raw_stock or {}).get("position_reason")
+                    or (raw_stock or {}).get("holding_reason")
+                    or "模型未给出额外持仓调整理由，维持原研究持仓并继续观察。",
+                    MAX_REASON_CHARS,
+                    required=True,
+                )
         normalized.append(
             {
                 "id": news_id,
@@ -1286,6 +1589,14 @@ def _optional_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return number if number > 0 else None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return round(number, 12) if math.isfinite(number) else None
 
 
 def _infer_memory_effect(

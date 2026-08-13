@@ -3496,6 +3496,10 @@ def aggregate_news_candidates(
                     "relevance": round(relevance, 4),
                     "score": round(score, 4),
                     "direction": direction,
+                    "memory_effect": related.get("memory_effect"),
+                    "memory_reason": related.get("memory_reason"),
+                    "position_effect": related.get("position_effect"),
+                    "position_reason": related.get("position_reason"),
                 }
             )
     result: list[dict[str, Any]] = []

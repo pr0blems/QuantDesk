@@ -194,13 +194,34 @@ def test_analyze_news_chunk_sends_history_and_tracks_judgment_change(monkeypatch
                 "analyzed_at": "2026-08-11T10:00:00",
             }
         ],
+        position_context=[
+            {
+                "prediction_id": "prediction-1",
+                "symbol": "NVDA",
+                "contract_symbol": "NVDAUSDT",
+                "direction": "short",
+                "entry_price": 180.0,
+                "current_price": 176.0,
+                "unrealized_bps": 222.22,
+                "entry_combined_score": 76.0,
+                "current_combined_score": 72.0,
+                "stop_loss_price": 184.0,
+                "take_profit_price": 172.0,
+                "opened_at": "2026-08-11T10:05:00",
+                "due_at": "2026-08-11T11:05:00",
+            }
+        ],
     )
 
     user_payload = json.loads(captured["request"]["messages"][1]["content"])
     assert user_payload["memory_window_days"] == 7
     assert user_payload["historical_analysis_memory"][0]["id"] == 41
+    assert user_payload["historical_related_news"][0]["prior_judgments"][0]["record_id"] == 41
+    assert user_payload["open_research_positions"][0]["symbol"] == "NVDA"
+    assert "continuous judgment" in user_payload["memory_instructions"]
     assert result[0]["related_us_stocks"][0]["memory_effect"] == "reverse"
     assert result[0]["related_us_stocks"][0]["prior_record_id"] == 41
+    assert result[0]["related_us_stocks"][0]["position_effect"] == "hold"
 
 
 def test_analyze_news_chunk_rejects_missing_or_invented_items(monkeypatch) -> None:
@@ -221,6 +242,36 @@ def test_analyze_news_chunk_rejects_missing_or_invented_items(monkeypatch) -> No
         )
 
     assert exc_info.value.category == "invalid_output"
+
+
+def test_context_terms_and_position_context_are_bounded() -> None:
+    terms = news_ai._news_context_terms(
+        "NVIDIA launches Blackwell platform; 英伟达推出新一代人工智能芯片"
+    )
+    assert "NVIDIA" in terms
+    assert "BLACKWELL" in terms
+    assert news_ai._news_context_terms("Market report about shares") == set()
+
+    positions = news_ai._normalize_position_context(
+        [
+            {
+                "prediction_id": "p-1",
+                "symbol": "NVDA",
+                "contract_symbol": "NVDAUSDT",
+                "direction": "long",
+                "entry_price": 180,
+                "current_price": 181,
+                "unrealized_bps": 55.5,
+            },
+            {
+                "prediction_id": "p-2",
+                "symbol": "not a ticker",
+                "direction": "long",
+            },
+        ]
+    )
+    assert [item["prediction_id"] for item in positions] == ["p-1"]
+    assert positions[0]["state"] == "open_research_position"
 
 
 def test_batch_summary_is_structured_and_bounded(monkeypatch) -> None:

@@ -14,7 +14,6 @@ class AiMonitorDashboard extends HTMLElement {
       runs: [],
       opportunities: [],
       opportunityAnalytics: null,
-      historicalReplays: { items: [], readiness: null },
       predictionFilters: { newsScoreMin: 0, indicatorScoreMin: 0, direction: "all" },
       predictionPage: 1,
       predictionPageSize: 20,
@@ -57,6 +56,8 @@ class AiMonitorDashboard extends HTMLElement {
     this.newsSystemPromptDefault = "";
     this.newsSystemPromptIsCustom = false;
     this.newsSystemPromptRequestId = 0;
+    this.historicalJudgmentFocus = null;
+    this.historicalJudgmentRequestId = 0;
     this.scoreTrendFocus = null;
     this.scoreTrendOpportunity = null;
     this.handleVisibilityChange = () => {
@@ -77,7 +78,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260812-19">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260813-21">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -197,15 +198,6 @@ class AiMonitorDashboard extends HTMLElement {
               <div class="view-head"><div><span class="eyebrow">OPPORTUNITY ANALYTICS</span><h2>预测统计分析</h2><p id="prediction-note">按止盈、止损、综合评分退出和最大持有期退出统计预测表现。</p></div></div>
               <section id="strategy-readiness" class="strategy-readiness"><div class="analytics-loading">正在评估实盘准备门槛…</div></section>
               <section id="adaptive-exit-policy" class="adaptive-exit-policy"><div class="analytics-loading">正在读取退出保护策略…</div></section>
-              <section id="historical-replay" class="historical-replay">
-                <header><div><span>POINT-IN-TIME REPLAY</span><h3>独立历史回放与样本外准入</h3><p>从币安官方归档补采 K 线；只使用信号时点之前的新闻和已收盘 K 线，不污染实时预测。</p></div><strong id="replay-status">尚未运行</strong></header>
-                <form id="replay-form">
-                  <label><span>回放跨度</span><select id="replay-days"><option value="180">180 天</option><option value="365" selected>365 天</option><option value="730">730 天</option></select></label>
-                  <label><span>技术周期</span><select id="replay-timeframe"><option value="15m">15 分钟</option><option value="1h" selected>1 小时</option><option value="4h">4 小时</option></select></label>
-                  <div><small>默认覆盖配置中全部可映射的美股合约；准入固定计入保守手续费、滑点和资金成本。</small><button id="replay-start" class="primary" type="submit">启动历史回放</button></div>
-                </form>
-                <div id="replay-result"><div class="analytics-loading">正在读取历史回放状态…</div></div>
-              </section>
               <div class="analytics-control-grid">
                 <form id="prediction-filter-form" class="analytics-filters">
                   <header><div><strong>筛选统计</strong><small>汇总指标和下方明细使用相同条件</small></div><span id="prediction-filter-result">全部历史样本</span></header>
@@ -259,6 +251,7 @@ class AiMonitorDashboard extends HTMLElement {
               <div><span class="eyebrow">AI ANALYSIS CONCLUSION</span><h2 id="ai-conclusion-title">AI 分析结论</h2><p id="ai-conclusion-subtitle">读取生成该机会时保存的新闻研判与技术指标证据。</p></div>
               <div class="ai-conclusion-head-actions">
                 <button id="open-news-system-prompt" class="news-system-prompt-trigger" type="button">系统提示词配置</button>
+                <button id="open-historical-judgment" class="historical-judgment-trigger" type="button">历史研判</button>
                 <button id="open-news-logic" class="news-logic-trigger" type="button">新闻分析逻辑</button>
                 <button id="ai-conclusion-close" class="ai-conclusion-close" type="button" data-conclusion-close aria-label="关闭">×</button>
               </div>
@@ -295,6 +288,17 @@ class AiMonitorDashboard extends HTMLElement {
             </form>
           </section>
         </div>
+        <div id="historical-judgment-modal" class="historical-judgment-modal hidden" aria-hidden="true">
+          <button class="historical-judgment-backdrop" type="button" data-historical-judgment-close aria-label="关闭历史研判"></button>
+          <section class="historical-judgment-dialog" role="dialog" aria-modal="true" aria-labelledby="historical-judgment-title">
+            <header class="historical-judgment-head">
+              <div><span class="eyebrow">CONTINUOUS JUDGMENT INPUT</span><h2 id="historical-judgment-title">历史研判</h2><p id="historical-judgment-subtitle">展示本次新闻分析实际发送的旧新闻、记忆链与当前研究持仓。</p></div>
+              <button id="historical-judgment-close" class="ai-conclusion-close" type="button" data-historical-judgment-close aria-label="关闭历史研判">×</button>
+            </header>
+            <div id="historical-judgment-body" class="historical-judgment-body"></div>
+            <footer class="historical-judgment-foot"><span>旧新闻与持仓只作为上下文，不得当作方向证明</span><strong>内容取自模型调用审计记录</strong></footer>
+          </section>
+        </div>
       </div>`;
   }
 
@@ -328,7 +332,6 @@ class AiMonitorDashboard extends HTMLElement {
       this.setPredictionPage(Number(button.dataset.predictionPage));
     });
     this.q("#prediction-cost-form").addEventListener("submit", (event) => this.savePredictionCostConfig(event));
-    this.q("#replay-form").addEventListener("submit", (event) => this.startHistoricalReplay(event));
     this.qa('#prediction-cost-form input[type="checkbox"]').forEach((input) => input.addEventListener("change", () => this.updatePredictionCostControls()));
     this.qa('#prediction-cost-form input[type="number"]').forEach((input) => input.addEventListener("input", () => this.updatePredictionCostControls()));
     this.qa("[data-opportunity-tab]").forEach((button) => button.addEventListener("click", () => this.setOpportunityTab(button.dataset.opportunityTab)));
@@ -375,8 +378,10 @@ class AiMonitorDashboard extends HTMLElement {
     this.qa("[data-conclusion-view]").forEach((button) => button.addEventListener("click", () => this.showAiConclusionView(button.dataset.conclusionView)));
     this.q("#open-news-logic").addEventListener("click", (event) => this.openNewsAnalysisLogic(event.currentTarget));
     this.q("#open-news-system-prompt").addEventListener("click", (event) => this.openNewsSystemPrompt(event.currentTarget));
+    this.q("#open-historical-judgment").addEventListener("click", (event) => this.openHistoricalJudgment(event.currentTarget));
     this.qa("[data-news-logic-close]").forEach((button) => button.addEventListener("click", () => this.closeNewsAnalysisLogic()));
     this.qa("[data-news-system-prompt-close]").forEach((button) => button.addEventListener("click", () => this.closeNewsSystemPrompt()));
+    this.qa("[data-historical-judgment-close]").forEach((button) => button.addEventListener("click", () => this.closeHistoricalJudgment()));
     this.q("#news-system-prompt-form").addEventListener("submit", (event) => this.saveNewsSystemPrompt(event));
     this.q("#news-system-prompt-input").addEventListener("input", () => this.updateNewsSystemPromptCount());
     this.q("#news-system-prompt-default").addEventListener("click", () => this.restoreDefaultNewsSystemPrompt());
@@ -394,6 +399,8 @@ class AiMonitorDashboard extends HTMLElement {
       if (event.key !== "Escape") return;
       if (!this.q("#score-trend-modal").classList.contains("hidden")) {
         this.closeScoreTrend();
+      } else if (!this.q("#historical-judgment-modal").classList.contains("hidden")) {
+        this.closeHistoricalJudgment();
       } else if (!this.q("#news-system-prompt-modal").classList.contains("hidden")) {
         this.closeNewsSystemPrompt();
       } else if (!this.q("#news-logic-modal").classList.contains("hidden")) {
@@ -1874,6 +1881,98 @@ class AiMonitorDashboard extends HTMLElement {
     if (restoreFocus && focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
   }
 
+  async openHistoricalJudgment(trigger) {
+    if (!this.conclusionOpportunity) return;
+    this.historicalJudgmentFocus = trigger || null;
+    const requestId = ++this.historicalJudgmentRequestId;
+    const item = this.conclusionOpportunity;
+    this.q("#historical-judgment-title").textContent = `${item.symbol} · 历史研判`;
+    this.q("#historical-judgment-subtitle").textContent = `${item.contract_symbol} · 正在读取该机会冻结的模型调用上下文`;
+    this.q("#historical-judgment-body").innerHTML = '<div class="historical-judgment-empty"><strong>正在读取连续研判上下文</strong><span>正在提取旧新闻、记忆链与当前研究持仓快照…</span></div>';
+    const modal = this.q("#historical-judgment-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.q("#historical-judgment-close").focus({ preventScroll: true });
+    try {
+      const data = await this.api(`/opportunities/${encodeURIComponent(item.id)}/model-calls`);
+      if (requestId !== this.historicalJudgmentRequestId || this.conclusionOpportunity?.id !== item.id) return;
+      const calls = Array.isArray(data.items) ? data.items : [];
+      const snapshots = [];
+      calls.forEach((call) => {
+        const request = call?.request_json && typeof call.request_json === "object" ? call.request_json : {};
+        const messages = Array.isArray(request.messages) ? request.messages : [];
+        messages.filter((message) => message?.role === "user").forEach((message) => {
+          try {
+            const input = typeof message.content === "string" ? JSON.parse(message.content) : message.content;
+            const memory = Array.isArray(input?.historical_analysis_memory) ? input.historical_analysis_memory : [];
+            const historicalNews = Array.isArray(input?.historical_related_news) ? input.historical_related_news : [];
+            const positions = Array.isArray(input?.open_research_positions) ? input.open_research_positions : [];
+            snapshots.push({ call, memory, historicalNews, positions, windowDays: Number(input?.memory_window_days || 7) });
+          } catch {
+            snapshots.push({ call, memory: [], historicalNews: [], positions: [], windowDays: 7, unreadable: true });
+          }
+        });
+      });
+      this.q("#historical-judgment-subtitle").textContent = `${item.contract_symbol} · ${calls.length} 次模型调用 · 仅展示当时实际发送的历史上下文`;
+      this.q("#historical-judgment-body").innerHTML = this.renderHistoricalJudgment(snapshots, item, data.note || "");
+    } catch (error) {
+      if (requestId !== this.historicalJudgmentRequestId) return;
+      this.q("#historical-judgment-body").innerHTML = `<div class="historical-judgment-empty error"><strong>历史研判读取失败</strong><span>${this.escape(error.message || "请稍后重试")}</span></div>`;
+    }
+  }
+
+  renderHistoricalJudgment(snapshots, item, note = "") {
+    const effectLabel = (value) => ({ initial: "首次判断", maintain: "维持", strengthen: "增强", weaken: "减弱", reverse: "反转" })[value] || "历史判断";
+    const directionLabel = (value) => ({ bull: "偏多", bear: "偏空", neutral: "中性" })[value] || "中性";
+    const positionEffectLabel = (value) => ({ hold: "维持", strengthen: "增强", caution: "谨慎", exit: "退出", reverse: "反向" })[value] || "未调整";
+    const memoryCount = snapshots.reduce((total, snapshot) => total + snapshot.memory.length, 0);
+    const oldNewsCount = snapshots.reduce((total, snapshot) => total + snapshot.historicalNews.length, 0);
+    const positionCount = snapshots.reduce((total, snapshot) => total + snapshot.positions.length, 0);
+    if (!snapshots.length) return `<div class="historical-judgment-empty"><strong>${this.escape(item.symbol)} 没有可审计的历史研判输入</strong><span>${this.escape(note || "该机会生成时尚未保存模型调用请求，系统不会用当前记录反向补造。")}</span></div>`;
+    const sections = snapshots.map((snapshot, callIndex) => {
+      const positions = snapshot.positions.map((position) => {
+        const pnl = position.unrealized_bps == null ? Number.NaN : Number(position.unrealized_bps);
+        const pnlText = Number.isFinite(pnl) ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} bps` : "行情暂缺";
+        return `<article class="historical-position-card ${pnl < 0 ? "loss" : "gain"}">
+          <header><div><strong>${this.escape(position.symbol || "--")}</strong><span>${position.direction === "short" ? "做空" : "做多"}</span></div><b>${pnlText}</b></header>
+          <div><span>入场价 <b>${position.entry_price == null ? "--" : this.compactNumber(position.entry_price)}</b></span><span>当前价 <b>${position.current_price == null ? "--" : this.compactNumber(position.current_price)}</b></span><span>组合分 <b>${position.current_combined_score == null ? "--" : Number(position.current_combined_score).toFixed(1)}</b></span></div>
+          <footer><span>止损 ${position.stop_loss_price == null ? "--" : this.compactNumber(position.stop_loss_price)}</span><span>止盈 ${position.take_profit_price == null ? "--" : this.compactNumber(position.take_profit_price)}</span><time>到期 ${this.formatDate(position.due_at)}</time></footer>
+        </article>`;
+      }).join("");
+      const oldNews = snapshot.historicalNews.map((news, index) => `<article class="historical-old-news-card">
+        <header><b>#${String(index + 1).padStart(2, "0")}</b><span>${this.escape(news.source || "未知来源")}</span><time>${this.formatUnix(news.published_at)}</time></header>
+        <h3>${this.escape(news.title || "未命名历史新闻")}</h3>
+        <p>${this.escape(news.summary || "无历史摘要")}</p>
+        <footer>${(Array.isArray(news.prior_judgments) ? news.prior_judgments : []).map((judgment) => `<span>${this.escape(judgment.symbol || "--")} · ${directionLabel(judgment.direction)} · ${effectLabel(judgment.memory_effect)}</span>`).join("")}</footer>
+      </article>`).join("");
+      const records = snapshot.memory.map((record, index) => `<article class="historical-judgment-card ${this.escape(record.direction || "neutral")}">
+        <header><div><b>#${String(index + 1).padStart(2, "0")}</b><strong>${this.escape(record.symbol || "--")}</strong><span>${directionLabel(record.direction)}</span></div><em>${effectLabel(record.memory_effect)}</em></header>
+        <h3>${this.escape(record.news_title || "未命名历史新闻")}</h3>
+        <p><strong>历史结论：</strong>${this.escape(record.analysis_reason || "无研判说明")}</p>
+        <p class="memory-impact"><strong>当时的记忆变化：</strong>${this.escape(record.memory_reason || "无变化说明")}</p>
+        ${record.position_effect ? `<p class="position-impact"><strong>当时对持仓影响：</strong>${positionEffectLabel(record.position_effect)} · ${this.escape(record.position_reason || "无持仓变化说明")}</p>` : ""}
+        <footer><span>置信度 ${Math.round(Number(record.confidence || 0) * 100)}%</span><span>关联度 ${Math.round(Number(record.relevance || 0) * 100)}%</span><span>${this.escape(record.impact_strength || "--")}</span><span>${this.escape(record.time_horizon || "--")}</span><time>${this.escape(record.analyzed_at || "--")}</time></footer>
+      </article>`).join("");
+      return `<section class="historical-judgment-snapshot"><header><div><span>MODEL CALL ${callIndex + 1}</span><h3>${this.escape(snapshot.call.model_name || "AI 模型")}</h3></div><strong>${snapshot.memory.length + snapshot.historicalNews.length + snapshot.positions.length}<small>条连续上下文 · ${snapshot.windowDays} 天</small></strong></header>
+        ${positions ? `<section class="historical-context-block"><h4>当前研究持仓快照 <span>${snapshot.positions.length}</span></h4><div class="historical-position-grid">${positions}</div></section>` : ""}
+        ${oldNews ? `<section class="historical-context-block"><h4>相关旧新闻 <span>${snapshot.historicalNews.length}</span></h4>${oldNews}</section>` : ""}
+        ${records ? `<section class="historical-context-block"><h4>一周研判记忆链 <span>${snapshot.memory.length}</span></h4>${records}</section>` : `<div class="historical-judgment-empty compact"><strong>本次没有历史记忆链</strong><span>${snapshot.unreadable ? "User 消息不是可解析的结构化 JSON。" : "没有找到与本批新闻或当前持仓相关的旧记录。"}</span></div>`}
+      </section>`;
+    }).join("");
+    return `<section class="historical-judgment-panel"><div class="historical-judgment-summary"><article><span>模型调用</span><b>${snapshots.length}</b></article><article><span>旧新闻 / 记忆</span><b>${oldNewsCount} / ${memoryCount}</b></article><article><span>持仓快照</span><b>${positionCount}</b></article><article><span>影响路径</span><b>连续研判 → 机会与持仓</b></article></div><p class="historical-judgment-note">模型会同时比较新新闻、相关旧新闻、一周记忆链和当前未结算研究持仓，判断原观点是维持、增强、谨慎、退出还是反向；持仓只作为上下文，不能反过来充当方向证据。</p>${sections}</section>`;
+  }
+
+  closeHistoricalJudgment(restoreFocus = true) {
+    const modal = this.q("#historical-judgment-modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    this.historicalJudgmentRequestId += 1;
+    const focusTarget = this.historicalJudgmentFocus;
+    this.historicalJudgmentFocus = null;
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
+  }
+
   openNewsAnalysisLogic(trigger) {
     if (!this.conclusionOpportunity) return;
     this.newsLogicFocus = trigger || null;
@@ -2111,6 +2210,7 @@ class AiMonitorDashboard extends HTMLElement {
     if (!modal || modal.classList.contains("hidden")) return;
     this.closeNewsAnalysisLogic(false);
     this.closeNewsSystemPrompt(false);
+    this.closeHistoricalJudgment(false);
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
     this.conclusionNewsRequestId += 1;
@@ -2135,14 +2235,10 @@ class AiMonitorDashboard extends HTMLElement {
       });
       const applyButton = this.q("#prediction-filter-apply");
       if (applyButton) applyButton.disabled = true;
-      const [data, replays] = await Promise.all([
-        this.api(`/opportunity-analytics?${params}`),
-        this.api("/replays?limit=5"),
-      ]);
+      const data = await this.api(`/opportunity-analytics?${params}`);
       if (requestId !== this.state.predictionAnalyticsRequestId) return;
       this.state.opportunityAnalytics = data;
       this.state.predictionPage = Number(data.pagination?.page || this.state.predictionPage || 1);
-      this.state.historicalReplays = replays;
       this.renderPredictionAnalytics();
       if (scrollToList) window.requestAnimationFrame(() => this.q("#prediction-list")?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (error) {
@@ -2252,7 +2348,6 @@ class AiMonitorDashboard extends HTMLElement {
     const items = data.items || [];
     const readiness = data.readiness || {};
     const costConfig = data.cost_config || {};
-    this.renderHistoricalReplay();
     const metricBps = (value) => value == null ? "--" : this.formatBps(value);
     const hitRate = summary.hit_rate == null ? "--" : `${Number(summary.hit_rate).toFixed(1)}%`;
     const filters = data.filters || {};
