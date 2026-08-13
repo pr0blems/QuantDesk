@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import market_config as config_loader
@@ -205,38 +207,54 @@ def _sync_news_sources(db: Session) -> None:
     db.flush()
 
 
-def initialize_admin_runtime(engine: Engine) -> None:
-    """Seed file-defined news sources before production workers start."""
+def _initialize_admin_runtime_job(engine: Engine) -> None:
+    """Recover stale tasks without making API availability depend on a bulk update."""
 
-    with Session(engine) as db:
-        now = utcnow()
-        stale_cutoff = now - timedelta(minutes=10)
-        db.execute(
-            update(NewsAiBatch)
-            .where(
-                NewsAiBatch.status.in_(("pending", "running")),
-                NewsAiBatch.updated_at < stale_cutoff,
+    try:
+        with Session(engine) as db:
+            now = utcnow()
+            stale_cutoff = now - timedelta(minutes=10)
+            db.execute(
+                update(NewsAiBatch)
+                .where(
+                    NewsAiBatch.status.in_(("pending", "running")),
+                    NewsAiBatch.updated_at < stale_cutoff,
+                )
+                .values(
+                    status="failed",
+                    error_message="服务重启导致任务中断，请重新发起分析",
+                    completed_at=now,
+                )
             )
-            .values(
-                status="failed",
-                error_message="服务重启导致任务中断，请重新发起分析",
-                completed_at=now,
+            db.execute(
+                update(AiMonitorRun)
+                .where(
+                    AiMonitorRun.status.in_(("pending", "running")),
+                    AiMonitorRun.updated_at < stale_cutoff,
+                )
+                .values(
+                    status="failed",
+                    error_message="服务重启或任务超时，请重新发起",
+                    completed_at=now,
+                )
             )
-        )
-        db.execute(
-            update(AiMonitorRun)
-            .where(
-                AiMonitorRun.status.in_(("pending", "running")),
-                AiMonitorRun.updated_at < stale_cutoff,
-            )
-            .values(
-                status="failed",
-                error_message="服务重启或任务超时，请重新发起",
-                completed_at=now,
-            )
-        )
-        _sync_news_sources(db)
-        db.commit()
+            _sync_news_sources(db)
+            db.commit()
+    except SQLAlchemyError as exc:
+        # A degraded remote database must not keep the health endpoint offline.
+        # Periodic workers have their own stale-run recovery and will retry later.
+        print(f"[admin] deferred startup recovery failed: {type(exc).__name__}")
+
+
+def initialize_admin_runtime(engine: Engine) -> None:
+    """Run non-critical startup recovery asynchronously."""
+
+    threading.Thread(
+        target=_initialize_admin_runtime_job,
+        args=(engine,),
+        name="quantdesk-admin-startup-recovery",
+        daemon=True,
+    ).start()
 
 
 def _collector_out(row: CollectorStatus, now: int, paused: bool) -> dict[str, Any]:

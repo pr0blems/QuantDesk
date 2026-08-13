@@ -369,6 +369,43 @@ def test_historical_exit_barrier_wins_tie_and_does_not_read_due_open_bar() -> No
     assert capped["observed_bar_count"] == 1
 
 
+def test_historical_exit_keeps_stop_loss_over_same_bar_profit_guard() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    decision = _historical_exit_decision(
+        [
+            {
+                "open_time": start,
+                "open": 100,
+                "high": 100.4,
+                "low": 99.9,
+                "close": 100.3,
+            },
+            {
+                "open_time": start + interval,
+                "open": 100.3,
+                "high": 100.35,
+                "low": 97,
+                "close": 98.5,
+            },
+        ],
+        [],
+        entry_price=100,
+        direction="long",
+        risk_plan={"stop_loss_price": 98, "take_profit_price": 110},
+        start_ms=start,
+        due_ms=start + interval * 2,
+        timeframe_ms=interval,
+        exit_threshold=70,
+        adaptive_exit_enabled=True,
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "stop_loss"
+    assert decision["price"] == 98
+    assert decision["price_time_ms"] == start + interval * 2
+
+
 def test_one_hour_replay_reaches_two_low_score_exit_on_closed_15m_bars(
     monkeypatch,
 ) -> None:
@@ -502,15 +539,15 @@ def test_one_hour_replay_reaches_two_low_score_exit_on_closed_15m_bars(
     assert signal.due_at == datetime.fromtimestamp(
         (entry_at_ms + hour_ms) / 1_000, UTC
     ).replace(tzinfo=None)
-    assert outcome.settlement_json["exit_reason"] == "score_breakdown"
-    assert outcome.settlement_json["score_at_exit"]["confirmation_points"] == 2
+    assert outcome.settlement_json["exit_reason"] == "take_profit"
+    assert outcome.settlement_json["exit_subreason"] == "profit_lock"
     assert outcome.exit_at == datetime.fromtimestamp(
-        (entry_at_ms + quarter_hour_ms * 2) / 1_000, UTC
+        (entry_at_ms + quarter_hour_ms) / 1_000, UTC
     ).replace(tzinfo=None)
-    assert round(float(outcome.exit_price), 4) == 100.2
-    # Both 15m score observations before the exit use only the previously
-    # closed 1h signal bar, never the still-open entry bar.
-    assert evaluated_signal_ends[:3] == [signal_open_ms] * 3
+    assert round(float(outcome.exit_price), 4) == 100.1
+    # The entry decision itself uses only the previously closed 1h signal bar.
+    # Later values can belong to the next independent news event in this test.
+    assert evaluated_signal_ends[0] == signal_open_ms
 
 
 def test_replay_symbol_selection_prefers_explicit_then_tenant_config() -> None:

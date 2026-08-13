@@ -559,9 +559,9 @@
             "type": "integer"
           },
           "minimum_combined_score": {
-            "default": 70,
+            "default": 75,
             "maximum": 100.0,
-            "minimum": 0.0,
+            "minimum": 75.0,
             "title": "Minimum Combined Score",
             "type": "number"
           },
@@ -616,7 +616,7 @@
             "type": "integer"
           },
           "news_lookback_hours": {
-            "default": 24,
+            "default": 168,
             "maximum": 168.0,
             "minimum": 1.0,
             "title": "News Lookback Hours",

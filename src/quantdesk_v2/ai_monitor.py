@@ -58,7 +58,13 @@ PREDICTION_SETTLEMENT_POLL_SECONDS = 20
 PREDICTION_FEE_BPS_PER_SIDE = 5.0
 PREDICTION_SLIPPAGE_BPS_PER_SIDE = 3.0
 PREDICTION_FUNDING_BPS_PER_8H = 1.0
-PREDICTION_SETTLEMENT_VERSION = "barrier_score_cost_v3"
+PREDICTION_SETTLEMENT_VERSION = "adaptive_guard_cost_v4"
+PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS = 20.0
+PREDICTION_PROFIT_PROTECTION_MIN_BPS = 20.0
+PREDICTION_TRAILING_TRIGGER_BPS = 50.0
+PREDICTION_TRAILING_GIVEBACK_BPS = 30.0
+PREDICTION_FOLLOW_THROUGH_BARS = 3
+PREDICTION_FOLLOW_THROUGH_LOSS_BPS = -15.0
 INDICATOR_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
         "key": "trend_confirmation",
@@ -219,14 +225,17 @@ def default_config_data() -> dict[str, Any]:
         "enabled": False,
         "news_interval_minutes": 15,
         "opportunity_interval_minutes": 15,
-        "news_lookback_hours": 24,
+        "news_lookback_hours": 168,
+        "news_trigger_window_hours": 4,
+        "require_new_news_trigger": True,
+        "require_market_quality_for_prediction": True,
         "timeframe": "1h",
         "indicator_keys": list(DEFAULT_INDICATOR_KEYS),
         "monitor_symbols": [],
         "minimum_news_confidence": 0.6,
         "minimum_news_mentions": 1,
         "minimum_indicator_score": 65.0,
-        "minimum_combined_score": 70.0,
+        "minimum_combined_score": 75.0,
         "maximum_market_age_seconds": 120,
         "minimum_feature_quality": 0.7,
         "minimum_market_flow_quality": 0.5,
@@ -262,13 +271,16 @@ def config_data(config: AiMonitorConfig | None) -> dict[str, Any]:
         "news_interval_minutes": int(config.news_interval_minutes),
         "opportunity_interval_minutes": int(config.opportunity_interval_minutes),
         "news_lookback_hours": int(config.news_lookback_hours),
+        "news_trigger_window_hours": 4,
+        "require_new_news_trigger": True,
+        "require_market_quality_for_prediction": True,
         "timeframe": config.timeframe,
         "indicator_keys": indicator_keys,
         "monitor_symbols": list(config.monitor_symbols_json or []),
         "minimum_news_confidence": float(config.minimum_news_confidence),
         "minimum_news_mentions": int(config.minimum_news_mentions),
         "minimum_indicator_score": float(config.minimum_indicator_score),
-        "minimum_combined_score": float(config.minimum_combined_score),
+        "minimum_combined_score": max(75.0, float(config.minimum_combined_score)),
         "maximum_market_age_seconds": int(config.maximum_market_age_seconds),
         "minimum_feature_quality": float(config.minimum_feature_quality),
         "minimum_market_flow_quality": float(config.minimum_market_flow_quality),
@@ -324,14 +336,56 @@ def weighted_opportunity_score(
     technical_score: float,
     market_flow_score: float,
     config: Mapping[str, Any] | None = None,
+    market_flow: Mapping[str, Any] | None = None,
 ) -> float:
-    weights = opportunity_score_weights(config)
+    weights = effective_opportunity_score_weights(config, market_flow)
     return round(
         float(news_score) * weights["news"]
         + float(technical_score) * weights["technical"]
         + float(market_flow_score) * weights["market_flow"],
         4,
     )
+
+
+def effective_opportunity_score_weights(
+    config: Mapping[str, Any] | None = None,
+    market_flow: Mapping[str, Any] | None = None,
+) -> dict[str, float]:
+    """Reduce the flow weight when its directional evidence is missing or weak.
+
+    Calls without a market-flow snapshot retain the configured weights for
+    backwards-compatible calculations and tests.  Live scans pass a snapshot,
+    so an unavailable flow feed can no longer contribute a fabricated neutral 50.
+    """
+
+    configured = opportunity_score_weights(config)
+    if market_flow is None:
+        return configured
+    try:
+        quality = float(market_flow.get("data_quality") or 0)
+    except (TypeError, ValueError, OverflowError):
+        quality = 0.0
+    if not math.isfinite(quality):
+        quality = 0.0
+    if not bool(market_flow.get("directional_data_available")) or not bool(
+        market_flow.get("fresh")
+    ):
+        quality = 0.0
+    quality = max(0.0, min(1.0, quality))
+    flow_weight = configured["market_flow"] * quality
+    non_flow_total = configured["news"] + configured["technical"]
+    if non_flow_total <= 0:
+        return {
+            "news": round((1.0 - flow_weight) / 2, 6),
+            "technical": round((1.0 - flow_weight) / 2, 6),
+            "market_flow": round(flow_weight, 6),
+        }
+    remaining = 1.0 - flow_weight
+    return {
+        "news": round(remaining * configured["news"] / non_flow_total, 6),
+        "technical": round(remaining * configured["technical"] / non_flow_total, 6),
+        "market_flow": round(flow_weight, 6),
+    }
 
 
 def indicator_templates() -> list[dict[str, Any]]:
@@ -647,10 +701,18 @@ def prediction_live_score_snapshot(
     )
     news_score = float(candidate.get("news_score") or 0)
     flow_score = float(flow["score"])
+    effective_weights = effective_opportunity_score_weights(
+        {
+            "news_score_weight": weights["news"] * 100,
+            "technical_score_weight": weights["technical"] * 100,
+            "market_flow_score_weight": weights["market_flow"] * 100,
+        },
+        flow,
+    )
     combined_score = round(
-        news_score * weights["news"]
-        + technical_score * weights["technical"]
-        + flow_score * weights["market_flow"],
+        news_score * effective_weights["news"]
+        + technical_score * effective_weights["technical"]
+        + flow_score * effective_weights["market_flow"],
         4,
     )
     market = dict(
@@ -695,6 +757,9 @@ def prediction_live_score_snapshot(
             "indicator_keys": configured_keys,
             "score_weights": {
                 key: round(value, 8) for key, value in weights.items()
+            },
+            "effective_score_weights": {
+                key: round(value, 8) for key, value in effective_weights.items()
             },
             "minimum_indicator_score": minimum_indicator_score,
             "minimum_combined_score": minimum_combined_score,
@@ -849,11 +914,29 @@ def virtual_entry_gate_snapshot(
     market_flow_hard_conflict: bool,
     entry_price: float,
     checked_at: datetime | str,
+    has_new_trigger_news: bool = True,
+    require_new_trigger_news: bool = False,
+    market_quality_passed: bool = True,
+    require_market_quality: bool = False,
 ) -> dict[str, Any]:
     """Build an explicit, auditable gate for research-only virtual entries."""
 
     checked_at_text = checked_at.isoformat() if isinstance(checked_at, datetime) else str(checked_at)
     checks = [
+        *(
+            [
+                {
+                    "key": "new_news_trigger",
+                    "label": "新事件",
+                    "passed": bool(has_new_trigger_news),
+                    "current": bool(has_new_trigger_news),
+                    "required": True,
+                    "detail": "至少一条触发窗口内、尚未用于预测的新新闻",
+                }
+            ]
+            if require_new_trigger_news
+            else []
+        ),
         {
             "key": "news_candidate",
             "label": "新闻候选",
@@ -897,6 +980,20 @@ def virtual_entry_gate_snapshot(
             "required": False,
             "detail": "候选方向资金评分不得形成强冲突",
         },
+        *(
+            [
+                {
+                    "key": "market_quality",
+                    "label": "行情质量",
+                    "passed": bool(market_quality_passed),
+                    "current": bool(market_quality_passed),
+                    "required": True,
+                    "detail": "实时价格、已收盘 K 线与所需预测因子必须新鲜可用",
+                }
+            ]
+            if require_market_quality
+            else []
+        ),
         {
             "key": "entry_price",
             "label": "入场价格",
@@ -909,7 +1006,7 @@ def virtual_entry_gate_snapshot(
     signal_confirmed = all(bool(item["passed"]) for item in checks[:-1])
     entry_ready = signal_confirmed and bool(checks[-1]["passed"])
     return {
-        "version": "research_virtual_entry_v1",
+        "version": "research_entry_quality_v2",
         "execution_mode": "virtual_prediction_only",
         "real_order_enabled": False,
         "direction": "short" if direction == "short" else "long",
@@ -974,6 +1071,14 @@ def prediction_entry_gate_snapshot(
         market_flow_hard_conflict=bool(market_flow.get("hard_conflict")),
         entry_price=float(prediction.entry_price or 0),
         checked_at=prediction.predicted_at,
+        has_new_trigger_news=bool(
+            (evidence.get("news_trigger") or {}).get("has_new_news", True)
+        ),
+        require_new_trigger_news=bool(
+            (evidence.get("news_trigger") or {}).get("required", False)
+        ),
+        market_quality_passed=bool((evidence.get("market_quality") or {}).get("passed", True)),
+        require_market_quality=bool(evidence.get("require_market_quality_for_prediction", False)),
     )
 
 
@@ -1007,7 +1112,7 @@ def virtual_risk_plan_snapshot(
         stop_loss_price = 0.0
         take_profit_price = 0.0
     return {
-        "version": "atr_risk_reward_v1",
+        "version": "atr_risk_reward_guard_v2",
         "method": "atr14_x_1_5" if volatility_risk > 0 else "timeframe_fallback",
         "timeframe": timeframe,
         "direction": normalized_direction,
@@ -1020,7 +1125,18 @@ def virtual_risk_plan_snapshot(
             round(take_profit_price, 12) if take_profit_price > 0 else None
         ),
         "risk_reward_ratio": 2.0,
-        "execution_policy": "price_barrier_then_score_exit_v2",
+        "profit_protection": {
+            "activation_bps": PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS,
+            "minimum_protected_bps": PREDICTION_PROFIT_PROTECTION_MIN_BPS,
+            "trailing_activation_bps": PREDICTION_TRAILING_TRIGGER_BPS,
+            "maximum_giveback_bps": PREDICTION_TRAILING_GIVEBACK_BPS,
+        },
+        "failed_follow_through": {
+            "closed_bars": PREDICTION_FOLLOW_THROUGH_BARS,
+            "maximum_favorable_bps": PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS,
+            "directional_loss_bps": PREDICTION_FOLLOW_THROUGH_LOSS_BPS,
+        },
+        "execution_policy": "adaptive_guard_then_barrier_score_exit_v4",
     }
 
 
@@ -1541,6 +1657,159 @@ def prediction_price_barrier_exit(
             "gap_execution": False,
         }
     return None
+
+
+def prediction_adaptive_path_exit(
+    candles: Sequence[Mapping[str, Any]],
+    entry_price: float,
+    direction: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    estimated_cost_bps: float = 0.0,
+    timeframe_ms: int = 15 * 60 * 1_000,
+) -> dict[str, Any] | None:
+    """Protect proven profit and cut a failed follow-through without look-ahead.
+
+    A protective level is activated only *after* a candle has fully closed.  A
+    favorable high/low therefore cannot create and hit a trailing stop inside
+    the same candle.  This makes live settlement and point-in-time replay use
+    the same causal information boundary.
+    """
+
+    if entry_price <= 0 or end_ms < start_ms:
+        return None
+    normalized_direction = "short" if direction == "short" else "long"
+    normalized: list[tuple[int, int, float, float, float, float]] = []
+    for candle in candles:
+        try:
+            open_time = int(candle.get("open_time") or 0)
+            if 0 < open_time < 1_000_000_000_000:
+                open_time *= 1_000
+            close_time = open_time + timeframe_ms
+            open_price = float(candle.get("open") or 0)
+            high_price = float(candle.get("high") or 0)
+            low_price = float(candle.get("low") or 0)
+            close_price = float(candle.get("close") or 0)
+        except (TypeError, ValueError):
+            continue
+        if open_time < start_ms or close_time > end_ms:
+            continue
+        if min(open_price, high_price, low_price, close_price) <= 0:
+            continue
+        normalized.append(
+            (open_time, close_time, open_price, high_price, low_price, close_price)
+        )
+
+    peak_favorable_bps = 0.0
+    protected_bps: float | None = None
+    observed_bar_count = 0
+    cost_floor_bps = max(
+        PREDICTION_PROFIT_PROTECTION_MIN_BPS,
+        max(0.0, float(estimated_cost_bps)) + 2.0,
+    )
+    for (
+        open_time,
+        close_time,
+        open_price,
+        high_price,
+        low_price,
+        close_price,
+    ) in sorted(normalized):
+        # This stop was frozen from prior closed bars, so it is executable from
+        # the current open without relying on the current candle's future path.
+        if protected_bps is not None:
+            protected_price = (
+                entry_price * (1 - protected_bps / 10_000.0)
+                if normalized_direction == "short"
+                else entry_price * (1 + protected_bps / 10_000.0)
+            )
+            gap_execution = (
+                open_price >= protected_price
+                if normalized_direction == "short"
+                else open_price <= protected_price
+            )
+            touched = (
+                high_price >= protected_price
+                if normalized_direction == "short"
+                else low_price <= protected_price
+            )
+            if gap_execution or touched:
+                subreason = (
+                    "trailing_profit"
+                    if peak_favorable_bps >= PREDICTION_TRAILING_TRIGGER_BPS
+                    else "profit_lock"
+                )
+                return {
+                    "reason": "take_profit",
+                    "exit_subreason": subreason,
+                    "price": open_price if gap_execution else protected_price,
+                    "price_time_ms": open_time if gap_execution else close_time,
+                    "same_bar_conflict": False,
+                    "gap_execution": gap_execution,
+                    "observed_bar_count": observed_bar_count + 1,
+                    "peak_favorable_bps": round(peak_favorable_bps, 8),
+                    "protected_bps": round(protected_bps, 8),
+                }
+
+        observed_bar_count += 1
+        favorable_price = (
+            low_price if normalized_direction == "short" else high_price
+        )
+        favorable_bps = (
+            (1.0 - favorable_price / entry_price) * 10_000.0
+            if normalized_direction == "short"
+            else (favorable_price / entry_price - 1.0) * 10_000.0
+        )
+        peak_favorable_bps = max(peak_favorable_bps, favorable_bps)
+        close_directional_bps = (
+            (1.0 - close_price / entry_price) * 10_000.0
+            if normalized_direction == "short"
+            else (close_price / entry_price - 1.0) * 10_000.0
+        )
+        if (
+            observed_bar_count >= PREDICTION_FOLLOW_THROUGH_BARS
+            and peak_favorable_bps < PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS
+            and close_directional_bps <= PREDICTION_FOLLOW_THROUGH_LOSS_BPS
+        ):
+            return {
+                "reason": "score_breakdown",
+                "exit_subreason": "failed_follow_through",
+                "price": close_price,
+                "price_time_ms": close_time,
+                "same_bar_conflict": False,
+                "gap_execution": False,
+                "observed_bar_count": observed_bar_count,
+                "peak_favorable_bps": round(peak_favorable_bps, 8),
+                "protected_bps": None,
+                "confirmation_points": PREDICTION_FOLLOW_THROUGH_BARS,
+            }
+        if peak_favorable_bps >= PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS:
+            trailing_floor = (
+                peak_favorable_bps - PREDICTION_TRAILING_GIVEBACK_BPS
+                if peak_favorable_bps >= PREDICTION_TRAILING_TRIGGER_BPS
+                else cost_floor_bps
+            )
+            protected_bps = max(cost_floor_bps, trailing_floor)
+    return None
+
+
+def adaptive_exit_precedes(
+    current: Mapping[str, Any] | None,
+    adaptive: Mapping[str, Any],
+) -> bool:
+    """Return whether an adaptive exit should replace the current decision."""
+
+    adaptive_time_ms = int(adaptive["price_time_ms"])
+    if current is None:
+        return True
+    current_time_ms = int(current["price_time_ms"])
+    if adaptive_time_ms != current_time_ms:
+        return adaptive_time_ms < current_time_ms
+    return bool(
+        adaptive.get("exit_subreason") in {"profit_lock", "trailing_profit"}
+        and current.get("reason") != "stop_loss"
+    )
 
 
 def prediction_score_exit_signal(
@@ -2535,6 +2804,13 @@ def historical_opportunity_analytics(
     rows = db.execute(statement).all()
     outcomes: list[dict[str, Any]] = []
     for prediction, opportunity in rows:
+        prediction_evidence = dict(prediction.evidence_json or {})
+        settlement_evidence = prediction_evidence.get("settlement")
+        settlement_evidence = (
+            dict(settlement_evidence)
+            if isinstance(settlement_evidence, Mapping)
+            else {}
+        )
         gross_return = float(prediction.directional_return_bps or 0)
         actual_exit_at = prediction.exit_at or prediction.due_at
         cost_breakdown = prediction_cost_breakdown(
@@ -2570,6 +2846,16 @@ def historical_opportunity_analytics(
             "exit_price": float(prediction.exit_price),
             "settled_price_at": actual_exit_at,
             "exit_reason": prediction.exit_reason or "legacy_horizon_close",
+            "exit_detail": settlement_evidence.get("exit_subreason"),
+            "exit_protection": {
+                "peak_favorable_bps": settlement_evidence.get(
+                    "peak_favorable_bps_at_decision"
+                ),
+                "protected_bps": settlement_evidence.get("protected_bps"),
+                "observed_bar_count": settlement_evidence.get(
+                    "observed_bar_count"
+                ),
+            },
             "raw_return_bps": float(prediction.raw_return_bps or 0),
             "gross_directional_return_bps": gross_return,
             "estimated_cost_bps": estimated_cost,
@@ -2643,6 +2929,12 @@ def historical_opportunity_analytics(
     )
     status_counts = {str(status): int(count) for status, count in status_rows}
     summary = summarize_historical_opportunities(outcomes)
+    exit_reason_counts: dict[str, int] = {}
+    for outcome in outcomes:
+        exit_key = str(outcome.get("exit_detail") or outcome.get("exit_reason") or "unknown")
+        exit_reason_counts[exit_key] = exit_reason_counts.get(exit_key, 0) + 1
+    summary["exit_reason_counts"] = exit_reason_counts
+    summary["settlement_policy_version"] = PREDICTION_SETTLEMENT_VERSION
     summary["discarded_unavailable_count"] = status_counts.get("unavailable", 0)
     summary["pending_count"] = status_counts.get("pending", 0)
     summary["total_prediction_count"] = sum(status_counts.values())
@@ -2760,6 +3052,8 @@ def settle_due_predictions(
     stop_loss = 0
     score_exit = 0
     max_holding = 0
+    profit_protection = 0
+    failed_follow_through = 0
     for item in items:
         previous_status = item.status
         entry_price = float(item.entry_price or 0)
@@ -2786,6 +3080,35 @@ def settle_due_predictions(
                 timeframe=getattr(item, "timeframe", "15m"),
             )
         )
+        cost_model = evidence.get("cost_model")
+        cost_model = dict(cost_model) if isinstance(cost_model, Mapping) else {}
+        actual_cost_config = {
+            "prediction_fee_enabled": bool(cost_model.get("fee_enabled", True)),
+            "prediction_fee_bps_per_side": float(
+                cost_model.get("fee_bps_per_side", PREDICTION_FEE_BPS_PER_SIDE)
+            ),
+            "prediction_slippage_enabled": bool(
+                cost_model.get("slippage_enabled", True)
+            ),
+            "prediction_slippage_bps_per_side": float(
+                cost_model.get(
+                    "slippage_bps_per_side", PREDICTION_SLIPPAGE_BPS_PER_SIDE
+                )
+            ),
+            "prediction_funding_enabled": bool(
+                cost_model.get("funding_enabled", True)
+            ),
+            "prediction_funding_bps_per_8h": float(
+                cost_model.get(
+                    "funding_bps_per_8h", PREDICTION_FUNDING_BPS_PER_8H
+                )
+            ),
+        }
+        guard_cost_estimate = prediction_estimated_cost_bps(
+            predicted_at,
+            observed_until,
+            actual_cost_config,
+        )
         barrier_exit = prediction_price_barrier_exit(
             candles,
             entry_price,
@@ -2793,6 +3116,14 @@ def settle_due_predictions(
             risk_plan,
             start_ms,
             observed_until_ms,
+        )
+        adaptive_exit = prediction_adaptive_path_exit(
+            candles,
+            entry_price,
+            item.direction,
+            start_ms,
+            observed_until_ms,
+            estimated_cost_bps=guard_cost_estimate,
         )
         score_signal = prediction_score_exit_signal(
             evidence,
@@ -2822,6 +3153,14 @@ def settle_due_predictions(
                 < int(exit_decision["price_time_ms"])
             ):
                 exit_decision = score_decision
+        if adaptive_exit is not None:
+            # A frozen protective stop is an executable price barrier, but OHLC
+            # cannot reveal whether it or the original stop was touched first.
+            # Keep the loss-side barrier on an equal timestamp to avoid
+            # overstating research returns.  Profit protection may still beat
+            # an equal-time target or close-time score decision conservatively.
+            if adaptive_exit_precedes(exit_decision, adaptive_exit):
+                exit_decision = adaptive_exit
         if exit_decision is None and item.due_at <= now:
             settlement = historical_closed_settlement_price(
                 candles,
@@ -2854,26 +3193,6 @@ def settle_due_predictions(
             int(exit_decision["price_time_ms"]) / 1_000,
             UTC,
         ).replace(tzinfo=None)
-        cost_model = evidence.get("cost_model")
-        cost_model = dict(cost_model) if isinstance(cost_model, Mapping) else {}
-        actual_cost_config = {
-            "prediction_fee_enabled": bool(cost_model.get("fee_enabled", True)),
-            "prediction_fee_bps_per_side": float(
-                cost_model.get("fee_bps_per_side", PREDICTION_FEE_BPS_PER_SIDE)
-            ),
-            "prediction_slippage_enabled": bool(
-                cost_model.get("slippage_enabled", True)
-            ),
-            "prediction_slippage_bps_per_side": float(
-                cost_model.get(
-                    "slippage_bps_per_side", PREDICTION_SLIPPAGE_BPS_PER_SIDE
-                )
-            ),
-            "prediction_funding_enabled": bool(cost_model.get("funding_enabled", True)),
-            "prediction_funding_bps_per_8h": float(
-                cost_model.get("funding_bps_per_8h", PREDICTION_FUNDING_BPS_PER_8H)
-            ),
-        }
         estimated_cost = prediction_estimated_cost_bps(
             predicted_at,
             exit_at,
@@ -2916,12 +3235,18 @@ def settle_due_predictions(
         evidence["settlement"] = {
             "version": PREDICTION_SETTLEMENT_VERSION,
             "exit_reason": exit_reason,
+            "exit_subreason": exit_decision.get("exit_subreason"),
             "exit_at": exit_at.replace(tzinfo=UTC).isoformat(),
             "exit_price": exit_price,
             "same_bar_conflict": bool(exit_decision.get("same_bar_conflict")),
             "gap_execution": bool(exit_decision.get("gap_execution")),
             "price_source": exit_decision.get("price_source") or "closed_candle_path",
             "reference_price_time_ms": exit_decision.get("reference_price_time_ms"),
+            "peak_favorable_bps_at_decision": exit_decision.get(
+                "peak_favorable_bps"
+            ),
+            "protected_bps": exit_decision.get("protected_bps"),
+            "observed_bar_count": exit_decision.get("observed_bar_count"),
             "risk_plan": risk_plan,
             "score_signal": (
                 {
@@ -2940,7 +3265,10 @@ def settle_due_predictions(
             "cost_breakdown": prediction_cost_breakdown(
                 predicted_at, exit_at, actual_cost_config
             ),
-            "policy": "first_price_barrier_then_confirmed_score_exit_then_hard_time_cap",
+            "policy": (
+                "frozen_profit_guard_then_price_barrier_then_confirmed_score_exit_"
+                "then_failed_follow_through_then_hard_time_cap"
+            ),
         }
         item.evidence_json = evidence
         item.completed_at = now
@@ -2954,6 +3282,13 @@ def settle_due_predictions(
             score_exit += 1
         else:
             max_holding += 1
+        if exit_decision.get("exit_subreason") in {
+            "profit_lock",
+            "trailing_profit",
+        }:
+            profit_protection += 1
+        elif exit_decision.get("exit_subreason") == "failed_follow_through":
+            failed_follow_through += 1
         if previous_status == "unavailable":
             recovered += 1
     db.flush()
@@ -2966,6 +3301,8 @@ def settle_due_predictions(
         "stop_loss": stop_loss,
         "score_exit": score_exit,
         "max_holding": max_holding,
+        "profit_protection": profit_protection,
+        "failed_follow_through": failed_follow_through,
     }
 
 
@@ -2975,11 +3312,11 @@ def reopen_legacy_prediction_settlements(
     user_id: int | None = None,
     limit: int = 500,
 ) -> int:
-    """Move old horizon-close outcomes back to the auditable exit lifecycle.
+    """Move old outcomes back to the current auditable exit lifecycle.
 
     Legacy completed rows are deliberately removed from statistics first.  The
     regular settlement worker then rebuilds them from historical candle paths
-    using price barriers, score exits and the hard holding-time cap.
+    using profit protection, price barriers, score exits and the hard time cap.
     """
 
     statement = (
@@ -3030,7 +3367,7 @@ def reopen_legacy_prediction_settlements(
         item.max_favorable_bps = None
         item.max_adverse_bps = None
         item.completed_at = None
-        item.settlement_version = "repair_pending_v3"
+        item.settlement_version = "repair_pending_v4"
         item.evidence_json = evidence
         item.updated_at = retry_ready_at
     db.flush()
@@ -3532,19 +3869,26 @@ def _scan_opportunities(
         )
         .order_by(News.ts.desc(), News.id.desc())
     ).all()
-    current_news_cutoff = int(
+    memory_news_cutoff = int(
         (
             now.replace(tzinfo=UTC)
             - timedelta(hours=int(config["news_lookback_hours"]))
         ).timestamp()
     )
-    current_news_rows = [
-        row for row in news_rows if int(row.ts) >= current_news_cutoff
+    memory_news_rows = [
+        row for row in news_rows if int(row.ts) >= memory_news_cutoff
+    ]
+    trigger_window_hours = int(config.get("news_trigger_window_hours", 4))
+    trigger_news_cutoff = int(
+        (now.replace(tzinfo=UTC) - timedelta(hours=trigger_window_hours)).timestamp()
+    )
+    trigger_news_rows = [
+        row for row in memory_news_rows if int(row.ts) >= trigger_news_cutoff
     ]
     model_call_audit = _news_model_call_audit_index(
         db,
         run.user_id,
-        current_news_rows,
+        trigger_news_rows,
     )
     repository = MonitorRepository(engine, symbols_config)
     symbol_map = contract_symbol_map(repository)
@@ -3562,7 +3906,7 @@ def _scan_opportunities(
     settlement = settle_due_predictions(db, repository, user_id=run.user_id)
     path_backfill = backfill_prediction_path_metrics(db, repository, user_id=run.user_id)
     directional_candidates = aggregate_news_candidates(
-        current_news_rows,
+        trigger_news_rows,
         symbol_map,
         minimum_confidence=float(config["minimum_news_confidence"]),
         minimum_mentions=int(config["minimum_news_mentions"]),
@@ -3571,6 +3915,69 @@ def _scan_opportunities(
     unmapped_candidates = [item for item in all_candidates if not item.get("contract_symbol")]
     monitor_symbols = list(config.get("monitor_symbols") or [])
     candidates = filter_monitored_candidates(all_candidates, monitor_symbols)
+    consumed_news_ids: dict[tuple[str, str], set[str]] = {}
+    consumed_rows = db.execute(
+        select(
+            AiMonitorOpportunity.symbol,
+            AiMonitorOpportunity.direction,
+            AiMonitorOpportunity.news_ids_json,
+        )
+        .join(
+            AiMonitorPrediction,
+            AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id,
+        )
+        .where(
+            AiMonitorOpportunity.user_id == run.user_id,
+            AiMonitorPrediction.predicted_at
+            >= now - timedelta(hours=int(config["news_lookback_hours"])),
+        )
+    ).all()
+    for symbol, direction, row_news_ids in consumed_rows:
+        consumed_news_ids.setdefault((str(symbol), str(direction)), set()).update(
+            str(news_id) for news_id in (row_news_ids or []) if str(news_id)
+        )
+    active_candidate_keys = {
+        (str(symbol), str(direction))
+        for symbol, direction in db.execute(
+            select(AiMonitorOpportunity.symbol, AiMonitorOpportunity.direction).where(
+                AiMonitorOpportunity.user_id == run.user_id,
+                AiMonitorOpportunity.status.in_(("candidate", "discovered")),
+                AiMonitorOpportunity.expires_at > now,
+            )
+        ).all()
+    }
+    require_new_news = bool(config.get("require_new_news_trigger", True))
+    eligible_candidates: list[dict[str, Any]] = []
+    reused_news_skipped = 0
+    for candidate in candidates:
+        candidate_news_ids = {
+            str(item.get("id") or "") for item in candidate.get("news", [])
+        } - {""}
+        key = (str(candidate["symbol"]), str(candidate["direction"]))
+        new_news_ids = sorted(candidate_news_ids - consumed_news_ids.get(key, set()))
+        newest_news_ts = max(
+            (int(item.get("ts") or 0) for item in candidate.get("news", [])),
+            default=0,
+        )
+        candidate["news_trigger"] = {
+            "version": "fresh_unconsumed_news_v1",
+            "required": require_new_news,
+            "memory_window_hours": int(config["news_lookback_hours"]),
+            "trigger_window_hours": trigger_window_hours,
+            "has_new_news": bool(new_news_ids),
+            "new_news_ids": new_news_ids,
+            "reused_news_count": len(candidate_news_ids) - len(new_news_ids),
+            "newest_news_age_minutes": (
+                round((int(now.replace(tzinfo=UTC).timestamp()) - newest_news_ts) / 60, 2)
+                if newest_news_ts
+                else None
+            ),
+        }
+        if require_new_news and not new_news_ids and key not in active_candidate_keys:
+            reused_news_skipped += 1
+            continue
+        eligible_candidates.append(candidate)
+    candidates = eligible_candidates
     run.input_count = len(candidates)
     stored = 0
     confirmed = 0
@@ -3727,8 +4134,22 @@ def _scan_opportunities(
         )
         flow_score = float(market_flow["score"])
         score_weights = opportunity_score_weights(config)
+        effective_score_weights = effective_opportunity_score_weights(config, market_flow)
         combined_score = weighted_opportunity_score(
-            candidate["news_score"], indicator_score, flow_score, config
+            candidate["news_score"], indicator_score, flow_score, config, market_flow
+        )
+        market_quality = signal_market_quality(
+            scan,
+            market,
+            timeframe,
+            now,
+            maximum_market_age_seconds=int(config["maximum_market_age_seconds"]),
+            minimum_feature_quality=float(config["minimum_feature_quality"]),
+            requires_prediction_features=requires_prediction_features,
+        )
+        news_trigger = dict(candidate.get("news_trigger") or {})
+        require_market_quality = bool(
+            config.get("require_market_quality_for_prediction", True)
         )
         technical_confirmed = bool(
             policy_matched and indicator_score >= minimum_indicator_score
@@ -3737,6 +4158,12 @@ def _scan_opportunities(
             technical_confirmed
             and combined_score >= minimum_combined_score
             and not bool(market_flow["hard_conflict"])
+            and (
+                not require_new_news
+                or bool(news_trigger.get("has_new_news"))
+                or existing_prediction is not None
+            )
+            and (not require_market_quality or bool(market_quality["passed"]))
         )
         virtual_entry_gate = virtual_entry_gate_snapshot(
             direction=str(candidate["direction"]),
@@ -3752,20 +4179,15 @@ def _scan_opportunities(
             market_flow_hard_conflict=bool(market_flow["hard_conflict"]),
             entry_price=entry_price,
             checked_at=now,
+            has_new_trigger_news=bool(news_trigger.get("has_new_news")),
+            require_new_trigger_news=require_new_news,
+            market_quality_passed=bool(market_quality["passed"]),
+            require_market_quality=require_market_quality,
         )
         expires_at = now + timedelta(seconds=_TIMEFRAME_SECONDS[timeframe] * 2)
         due_at = now + timedelta(seconds=_TIMEFRAME_SECONDS[timeframe])
         cost_breakdown = prediction_cost_breakdown(now, due_at, config)
         estimated_cost = float(cost_breakdown["total_cost_bps"])
-        market_quality = signal_market_quality(
-            scan,
-            market,
-            timeframe,
-            now,
-            maximum_market_age_seconds=int(config["maximum_market_age_seconds"]),
-            minimum_feature_quality=float(config["minimum_feature_quality"]),
-            requires_prediction_features=requires_prediction_features,
-        )
         readiness = signal_readiness_snapshot(
             matched=technical_confirmed and not bool(market_flow["hard_conflict"]),
             indicator_score=indicator_score,
@@ -3871,12 +4293,16 @@ def _scan_opportunities(
             "risk_metrics": risk_metrics,
             "risk_plan": risk_plan,
             "score_weights": score_weights,
+            "effective_score_weights": effective_score_weights,
+            "news_trigger": news_trigger,
             "score_snapshot": score_snapshot,
             "score_history": score_history,
             "virtual_entry_gate": virtual_entry_gate,
             "minimum_news_score": float(config["minimum_news_confidence"]) * 100,
             "minimum_news_mentions": int(config["minimum_news_mentions"]),
             "news_lookback_hours": int(config["news_lookback_hours"]),
+            "news_trigger_window_hours": trigger_window_hours,
+            "require_market_quality_for_prediction": require_market_quality,
             "market_quality": market_quality,
             "live_readiness": readiness,
             "model_audit": {
@@ -4021,6 +4447,7 @@ def _scan_opportunities(
         "opportunity_cleanup": cleanup,
         "risk_plan_backfill": risk_plan_backfill,
         "rescored_pending_predictions": rescored_pending_predictions,
+        "reused_news_skipped_count": reused_news_skipped,
         "monitor_symbols": monitor_symbols,
         "monitor_scope": "selected" if monitor_symbols else "all",
         "indicator_keys": indicator_keys,
@@ -4030,6 +4457,11 @@ def _scan_opportunities(
         "minimum_combined_score": minimum_combined_score,
         "timeframe": timeframe,
         "news_lookback_hours": int(config["news_lookback_hours"]),
+        "news_trigger_window_hours": trigger_window_hours,
+        "require_new_news_trigger": require_new_news,
+        "require_market_quality_for_prediction": bool(
+            config.get("require_market_quality_for_prediction", True)
+        ),
     }
 
 

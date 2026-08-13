@@ -585,6 +585,7 @@ def update_config(
             "enabled": payload.enabled,
             "news_interval_minutes": payload.news_interval_minutes,
             "opportunity_interval_minutes": payload.opportunity_interval_minutes,
+            "news_lookback_hours": payload.news_lookback_hours,
             "indicator_count": len(payload.indicator_keys),
             "monitor_symbol_count": len(payload.monitor_symbols),
             "monitor_scope": "selected" if payload.monitor_symbols else "all",

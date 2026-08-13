@@ -2058,7 +2058,7 @@ export interface components {
             minimum_calibration_samples: number;
             /**
              * Minimum Combined Score
-             * @default 70
+             * @default 75
              */
             minimum_combined_score: number;
             /**
@@ -2095,7 +2095,7 @@ export interface components {
             news_interval_minutes: number;
             /**
              * News Lookback Hours
-             * @default 24
+             * @default 168
              */
             news_lookback_hours: number;
             /**

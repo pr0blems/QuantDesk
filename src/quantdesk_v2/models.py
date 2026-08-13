@@ -696,7 +696,7 @@ class AiMonitorConfig(Base):
         Integer, default=15, nullable=False, comment="新闻与指标组合扫描间隔分钟数"
     )
     news_lookback_hours: Mapped[int] = mapped_column(
-        Integer, default=24, nullable=False, comment="机会扫描采用的新闻回看小时数"
+        Integer, default=168, nullable=False, comment="AI 新闻记忆采用的回看小时数"
     )
     timeframe: Mapped[str] = mapped_column(
         String(8), default="1h", nullable=False, comment="技术指标扫描周期"
@@ -717,7 +717,7 @@ class AiMonitorConfig(Base):
         Numeric(5, 2), default=Decimal("65.00"), nullable=False, comment="影子准入最低技术强度"
     )
     minimum_combined_score: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2), default=Decimal("70.00"), nullable=False, comment="影子准入最低组合评分"
+        Numeric(5, 2), default=Decimal("75.00"), nullable=False, comment="影子准入最低组合评分"
     )
     maximum_market_age_seconds: Mapped[int] = mapped_column(
         Integer, default=120, nullable=False, comment="影子准入允许的最大行情延迟秒数"

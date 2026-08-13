@@ -110,8 +110,8 @@ def create_replay_run(
                 "remain on the configured timeframe"
             ),
             "exit_policy": (
-                "each closed bar: first stop/target touch; then confirmed score exit; "
-                "hard time cap last"
+                "each closed bar: frozen profit guard; then stop/target touch; "
+                "confirmed score or failed-follow-through exit; hard time cap last"
             ),
             "sample_policy": "60% train + two-bar embargo + remaining OOS",
             "realtime_tables_untouched": True,
@@ -685,14 +685,16 @@ def _historical_exit_decision(
     due_ms: int,
     timeframe_ms: int,
     exit_threshold: float,
+    estimated_cost_bps: float = 0.0,
+    adaptive_exit_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """Replay the live exit policy using only information known at each bar close.
 
-    Price barriers are evaluated before the score observed at that bar's close.
-    Score reversals exit immediately, while weakening in the original direction
-    needs two consecutive observations below the frozen entry threshold.  The
-    hard cap is considered last, so equal-time decisions have the same
-    conservative priority as the live settlement path.
+    A profit guard frozen from prior closed bars is executable first. Price
+    barriers are then evaluated before the score observed at the current bar's
+    close. Score reversals exit immediately, while weakening in the original
+    direction needs two consecutive observations below the frozen entry
+    threshold. The hard cap is considered last.
     """
 
     score_iterator = iter(score_observations)
@@ -702,6 +704,19 @@ def _historical_exit_decision(
     consecutive_low_scores = 0
     latest_score: dict[str, Any] | None = None
     observed_bar_count = 0
+    adaptive_exit = (
+        ai_monitor.prediction_adaptive_path_exit(
+            candles,
+            entry_price,
+            normalized_direction,
+            start_ms,
+            due_ms,
+            estimated_cost_bps=estimated_cost_bps,
+            timeframe_ms=timeframe_ms,
+        )
+        if adaptive_exit_enabled
+        else None
+    )
     for candle in candles:
         try:
             open_ms = int(candle.get("open_time") or 0)
@@ -718,6 +733,17 @@ def _historical_exit_decision(
         if close_price <= 0:
             continue
         observed_bar_count += 1
+        adaptive_time_ms = (
+            int(adaptive_exit["price_time_ms"])
+            if adaptive_exit is not None
+            else None
+        )
+        adaptive_profit_ready = bool(
+            adaptive_time_ms is not None
+            and adaptive_time_ms <= close_ms
+            and adaptive_exit.get("exit_subreason")
+            in {"profit_lock", "trailing_profit"}
+        )
         barrier = ai_monitor.prediction_price_barrier_exit(
             [candle],
             entry_price,
@@ -727,6 +753,14 @@ def _historical_exit_decision(
             close_ms,
             timeframe_ms=timeframe_ms,
         )
+        if adaptive_profit_ready and ai_monitor.adaptive_exit_precedes(
+            barrier, adaptive_exit
+        ):
+            return {
+                **adaptive_exit,
+                "observed_bar_count": observed_bar_count,
+                "score_at_exit": latest_score,
+            }
         if barrier is not None:
             return {
                 **barrier,
@@ -791,6 +825,13 @@ def _historical_exit_decision(
                         "observed_bar_count": observed_bar_count,
                         "score_at_exit": latest_score,
                     }
+
+        if adaptive_time_ms is not None and adaptive_time_ms <= close_ms:
+            return {
+                **adaptive_exit,
+                "observed_bar_count": observed_bar_count,
+                "score_at_exit": latest_score,
+            }
 
         if close_ms >= due_ms:
             return {
@@ -1016,6 +1057,11 @@ def _replay_symbol(
                 )
 
         exit_threshold = max(0.0, min_combined - 5.0)
+        guard_cost_estimate = ai_monitor.prediction_estimated_cost_bps(
+            entry_at,
+            due_at,
+            CONSERVATIVE_COST_MODEL,
+        )
         exit_decision = _historical_exit_decision(
             path,
             score_observation_stream(),
@@ -1026,6 +1072,8 @@ def _replay_symbol(
             due_ms=due_at_ms,
             timeframe_ms=exit_interval_ms,
             exit_threshold=exit_threshold,
+            estimated_cost_bps=guard_cost_estimate,
+            adaptive_exit_enabled=True,
         )
         if exit_decision is None:
             continue
@@ -1080,7 +1128,8 @@ def _replay_symbol(
                 "score_exit_threshold": exit_threshold,
                 "exit_candle_timeframe": "15m",
                 "exit_policy": (
-                    "first_price_barrier_then_confirmed_score_exit_then_hard_time_cap"
+                    "frozen_profit_guard_then_price_barrier_then_confirmed_score_exit_"
+                    "then_failed_follow_through_then_hard_time_cap"
                 ),
             },
         )
@@ -1121,12 +1170,18 @@ def _replay_symbol(
                 max_adverse_bps=Decimal(str(round(adverse, 8))),
                 result=result,
                 settlement_json={
-                    "version": "historical_replay_barrier_score_v3",
+                    "version": "historical_replay_adaptive_guard_v4",
                     "entry_policy": "next_bar_open",
                     "exit_policy": (
-                        "first_price_barrier_then_confirmed_score_exit_then_hard_time_cap"
+                        "frozen_profit_guard_then_price_barrier_then_confirmed_score_exit_"
+                        "then_failed_follow_through_then_hard_time_cap"
                     ),
                     "exit_reason": exit_reason,
+                    "exit_subreason": exit_decision.get("exit_subreason"),
+                    "peak_favorable_bps_at_decision": exit_decision.get(
+                        "peak_favorable_bps"
+                    ),
+                    "protected_bps": exit_decision.get("protected_bps"),
                     "risk_plan": risk_plan,
                     "score_at_exit": {
                         "direction": exit_score.get("direction"),

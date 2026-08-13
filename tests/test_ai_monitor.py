@@ -14,10 +14,12 @@ from quantdesk_v2.ai_monitor import (
     RUN_STALE_SECONDS,
     _news_model_call_audit_index,
     _take_ingested_news,
+    adaptive_exit_precedes,
     aggregate_news_candidates,
     append_score_history,
     configured_indicator_policy,
     edge_calibration_summary,
+    effective_opportunity_score_weights,
     enqueue_news_analysis,
     filter_monitored_candidates,
     historical_closed_settlement_price,
@@ -29,6 +31,7 @@ from quantdesk_v2.ai_monitor import (
     match_configured_indicators,
     merged_opportunity_expiration,
     opportunity_score_weights,
+    prediction_adaptive_path_exit,
     prediction_cost_breakdown,
     prediction_estimated_cost_bps,
     prediction_live_score_snapshot,
@@ -161,7 +164,7 @@ def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None
     assert item.result is None
     assert item.exit_price is None
     assert item.exit_reason is None
-    assert item.settlement_version == "repair_pending_v3"
+    assert item.settlement_version == "repair_pending_v4"
     assert item.evidence_json["settlement_repair"]["status"] == "pending_recalculation"
     assert database.flushed is True
     assert "FOR UPDATE SKIP LOCKED" in mysql_sql
@@ -643,6 +646,7 @@ def test_pending_prediction_rescore_uses_its_frozen_timeframe_and_weights() -> N
         "timeframe": "4h",
         "indicator_keys": ["moving_average_bull", "trend_breakout"],
         "score_weights": {"news": 1.0, "technical": 0.0, "market_flow": 0.0},
+        "effective_score_weights": {"news": 1.0, "technical": 0.0, "market_flow": 0.0},
         "minimum_indicator_score": 65.0,
         "minimum_combined_score": 88.0,
     }
@@ -932,6 +936,31 @@ def test_virtual_entry_gate_requires_every_signal_condition_and_a_real_price() -
     assert unavailable["status"] == "price_unavailable"
     assert unavailable["checks"][-1]["passed"] is False
 
+    quality_blocked = virtual_entry_gate_snapshot(
+        direction="long",
+        news_score=80,
+        news_mention_count=1,
+        minimum_news_score=60,
+        minimum_news_mentions=1,
+        indicator_policy_passed=True,
+        indicator_score=80,
+        minimum_indicator_score=65,
+        combined_score=80,
+        minimum_combined_score=75,
+        market_flow_hard_conflict=False,
+        entry_price=100,
+        checked_at="2026-08-12T12:00:00+00:00",
+        has_new_trigger_news=False,
+        require_new_trigger_news=True,
+        market_quality_passed=False,
+        require_market_quality=True,
+    )
+    assert quality_blocked["signal_confirmed"] is False
+    assert quality_blocked["entry_ready"] is False
+    assert {
+        item["key"] for item in quality_blocked["checks"] if not item["passed"]
+    } == {"new_news_trigger", "market_quality"}
+
 
 def test_configured_indicators_match_the_requested_short_direction() -> None:
     scan = {
@@ -1110,6 +1139,85 @@ def test_prediction_exit_ignores_a_candle_that_has_not_closed_at_boundary() -> N
     )
 
     assert result is None
+
+
+def test_adaptive_exit_activates_profit_lock_only_on_the_next_closed_bar() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    result = prediction_adaptive_path_exit(
+        [
+            {
+                "open_time": start,
+                "open": 100,
+                "high": 100.4,
+                "low": 99.9,
+                "close": 100.3,
+            },
+            {
+                "open_time": start + interval,
+                "open": 100.3,
+                "high": 100.35,
+                "low": 100.15,
+                "close": 100.2,
+            },
+        ],
+        100,
+        "long",
+        start,
+        start + interval * 2,
+        estimated_cost_bps=16,
+    )
+
+    assert result is not None
+    assert result["reason"] == "take_profit"
+    assert result["exit_subreason"] == "profit_lock"
+    assert result["price"] == pytest.approx(100.2)
+    assert result["price_time_ms"] == start + interval * 2
+
+
+def test_adaptive_exit_cuts_failed_follow_through_after_three_closed_bars() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    result = prediction_adaptive_path_exit(
+        [
+            {
+                "open_time": start + index * interval,
+                "open": 100 - index * 0.05,
+                "high": 100.1,
+                "low": 99.7 - index * 0.1,
+                "close": 99.9 - index * 0.1,
+            }
+            for index in range(3)
+        ],
+        100,
+        "long",
+        start,
+        start + interval * 3,
+    )
+
+    assert result is not None
+    assert result["reason"] == "score_breakdown"
+    assert result["exit_subreason"] == "failed_follow_through"
+    assert result["observed_bar_count"] == 3
+    assert result["price_time_ms"] == start + interval * 3
+
+
+def test_settlement_keeps_stop_loss_when_profit_guard_ties_on_same_bar() -> None:
+    adaptive = {
+        "reason": "take_profit",
+        "exit_subreason": "profit_lock",
+        "price": 100.2,
+        "price_time_ms": 1_800_001_800_000,
+    }
+    barrier = {
+        "reason": "stop_loss",
+        "price": 98.0,
+        "price_time_ms": 1_800_001_800_000,
+    }
+
+    assert adaptive_exit_precedes(barrier, adaptive) is False
+    assert adaptive_exit_precedes({**barrier, "reason": "take_profit"}, adaptive) is True
+    assert adaptive_exit_precedes(None, adaptive) is True
 
 
 def test_score_exit_price_is_never_before_the_score_signal() -> None:
@@ -1424,6 +1532,8 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
         "stop_loss": 0,
         "score_exit": 0,
         "max_holding": 2,
+        "profit_protection": 0,
+        "failed_follow_through": 0,
     }
     assert settled.status == "completed"
     assert settled.exit_price == Decimal("102.0")
@@ -1432,7 +1542,7 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
     assert float(settled.net_directional_return_bps) == pytest.approx(183.96875)
     assert settled.max_favorable_bps == Decimal("200.0")
     assert settled.max_adverse_bps == Decimal("0.0")
-    assert settled.settlement_version == "barrier_score_cost_v3"
+    assert settled.settlement_version == "adaptive_guard_cost_v4"
     assert settled.exit_reason == "max_holding_time"
     assert settled.exit_at.timestamp() == pytest.approx(due_at.timestamp(), abs=0.001)
     assert missing.status == "pending"
@@ -1460,7 +1570,8 @@ def test_ai_monitor_config_normalizes_symbol_allowlist() -> None:
 
     assert config.monitor_symbols == ["NVDAUSDT", "AAPLUSDT"]
     assert config.minimum_indicator_score == 65
-    assert config.minimum_combined_score == 70
+    assert config.minimum_combined_score == 75
+    assert config.news_lookback_hours == 168
     assert config.minimum_calibration_samples == 1000
     assert config.news_score_weight == 45
     assert config.technical_score_weight == 35
@@ -1491,6 +1602,20 @@ def test_ai_monitor_score_weights_are_validated_and_applied() -> None:
         "market_flow": 0.5,
     }
     assert weighted_opportunity_score(80, 60, 40, config.model_dump()) == 54
+
+    missing_flow = {
+        "directional_data_available": False,
+        "fresh": False,
+        "data_quality": 0,
+    }
+    assert effective_opportunity_score_weights(config.model_dump(), missing_flow) == {
+        "news": 0.4,
+        "technical": 0.6,
+        "market_flow": 0.0,
+    }
+    assert weighted_opportunity_score(
+        80, 60, 50, config.model_dump(), missing_flow
+    ) == 68
 
     with pytest.raises(ValueError, match="权重合计必须为 100%"):
         AiMonitorConfigUpdate(

@@ -626,7 +626,7 @@ class AiMonitorConfigUpdate(BaseModel):
     enabled: bool = False
     news_interval_minutes: int = Field(default=15, ge=5, le=1440)
     opportunity_interval_minutes: int = Field(default=15, ge=5, le=1440)
-    news_lookback_hours: int = Field(default=24, ge=1, le=168)
+    news_lookback_hours: int = Field(default=168, ge=1, le=168)
     timeframe: Literal["15m", "1h", "4h"] = "1h"
     indicator_keys: list[str] = Field(
         default_factory=lambda: ["moving_average_bull"], min_length=1, max_length=20
@@ -635,7 +635,7 @@ class AiMonitorConfigUpdate(BaseModel):
     minimum_news_confidence: float = Field(default=0.6, ge=0, le=1)
     minimum_news_mentions: int = Field(default=1, ge=1, le=20)
     minimum_indicator_score: float = Field(default=65, ge=0, le=100)
-    minimum_combined_score: float = Field(default=70, ge=0, le=100)
+    minimum_combined_score: float = Field(default=75, ge=75, le=100)
     maximum_market_age_seconds: int = Field(default=120, ge=5, le=3600)
     minimum_feature_quality: float = Field(default=0.7, ge=0, le=1)
     minimum_market_flow_quality: float = Field(default=0.5, ge=0, le=1)
