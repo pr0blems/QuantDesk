@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import re
 import time
 import urllib.error
@@ -51,6 +52,300 @@ CONSERVATIVE_COST_MODEL: dict[str, Any] = {
 
 class HistoricalReplayError(RuntimeError):
     """A safe replay failure suitable for the task status."""
+
+
+_FROZEN_REPLAY_DOMAINS = {
+    "news",
+    "technical",
+    "market_context",
+    "options_flow",
+    "gex",
+    "institutional_flow",
+}
+_FROZEN_REPLAY_GATE_CHECKS = {
+    "price_available",
+    "reference_quote_available",
+    "quote_fresh",
+    "spread_acceptable",
+    "quote_sane",
+    "not_halted",
+    "event_window_clear",
+}
+
+
+def _replay_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif value is not None:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    else:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
+
+
+def _replay_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def replay_frozen_market_signal(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Reproduce one signal from its immutable, point-in-time UW evidence.
+
+    This deliberately has no live-market or latest-row fallback.  It only
+    accepts the exact feature row referenced by the opportunity snapshot plus
+    the gate decision recorded no later than the signal.  A caller may use the
+    result for causal *signal-time* ablation, but not to invent outcomes for
+    candidates that never generated a prediction.
+    """
+
+    context = item.get("point_in_time_replay")
+    context = dict(context) if isinstance(context, Mapping) else {}
+    feature = context.get("feature_snapshot")
+    feature = dict(feature) if isinstance(feature, Mapping) else {}
+    gate_decision = context.get("gate_decision")
+    gate_decision = dict(gate_decision) if isinstance(gate_decision, Mapping) else {}
+    score_components = item.get("score_components")
+    score_components = (
+        dict(score_components) if isinstance(score_components, Mapping) else {}
+    )
+    gate_snapshot = item.get("gate_summary")
+    gate_snapshot = dict(gate_snapshot) if isinstance(gate_snapshot, Mapping) else {}
+    flow = item.get("flow")
+    flow = dict(flow) if isinstance(flow, Mapping) else {}
+    quote = item.get("quote")
+    quote = dict(quote) if isinstance(quote, Mapping) else {}
+    data_quality = item.get("data_quality")
+    data_quality = dict(data_quality) if isinstance(data_quality, Mapping) else {}
+    versions = item.get("version")
+    versions = dict(versions) if isinstance(versions, Mapping) else {}
+
+    reasons: set[str] = set()
+    if item.get("market_snapshot_source") != "opportunity_market_snapshot":
+        reasons.add("IMMUTABLE_OPPORTUNITY_SNAPSHOT_MISSING")
+    signal_at = _replay_time(item.get("signal_time"))
+    snapshot_at = _replay_time(context.get("snapshot_captured_at"))
+    feature_at = _replay_time(
+        feature.get("captured_at") or feature.get("bucket_at")
+    )
+    decision_at = _replay_time(gate_decision.get("decision_at"))
+    for value, code in (
+        (signal_at, "SIGNAL_TIME_MISSING"),
+        (snapshot_at, "SNAPSHOT_TIME_MISSING"),
+        (feature_at, "FEATURE_TIME_MISSING"),
+        (decision_at, "GATE_DECISION_TIME_MISSING"),
+    ):
+        if value is None:
+            reasons.add(code)
+    if signal_at is not None:
+        if snapshot_at is not None and snapshot_at > signal_at:
+            reasons.add("SNAPSHOT_AFTER_SIGNAL")
+        if feature_at is not None and feature_at > signal_at:
+            reasons.add("FEATURE_AFTER_SIGNAL")
+        if decision_at is not None and decision_at > signal_at:
+            reasons.add("GATE_DECISION_AFTER_SIGNAL")
+    if feature_at is not None and snapshot_at is not None and feature_at > snapshot_at:
+        reasons.add("FEATURE_AFTER_SNAPSHOT")
+
+    snapshot_feature_id = context.get("market_feature_snapshot_id")
+    feature_id = feature.get("id")
+    gate_feature_id = gate_decision.get("market_feature_snapshot_id")
+    if snapshot_feature_id is None or feature_id is None:
+        reasons.add("FEATURE_REFERENCE_MISSING")
+    elif str(snapshot_feature_id) != str(feature_id):
+        reasons.add("FEATURE_REFERENCE_MISMATCH")
+    if gate_feature_id is None or feature_id is None:
+        reasons.add("GATE_FEATURE_REFERENCE_MISSING")
+    elif str(gate_feature_id) != str(feature_id):
+        reasons.add("GATE_FEATURE_REFERENCE_MISMATCH")
+
+    expected_versions = {
+        "feature": str(versions.get("feature") or "").strip(),
+        "weights": str(versions.get("weights") or "").strip(),
+        "decision": str(versions.get("decision") or "").strip(),
+    }
+    observed_versions = {
+        "feature": str(feature.get("feature_version") or "").strip(),
+        "gate_feature": str(gate_decision.get("feature_version") or "").strip(),
+        "weights": str(gate_decision.get("weights_version") or "").strip(),
+        "decision": str(gate_decision.get("decision_version") or "").strip(),
+    }
+    for key in ("feature", "weights", "decision"):
+        if not expected_versions[key] or expected_versions[key].lower() == "legacy":
+            reasons.add(f"{key.upper()}_VERSION_MISSING")
+    if expected_versions["feature"] and (
+        observed_versions["feature"] != expected_versions["feature"]
+        or observed_versions["gate_feature"] != expected_versions["feature"]
+    ):
+        reasons.add("FEATURE_VERSION_MISMATCH")
+    if (
+        expected_versions["weights"]
+        and observed_versions["weights"] != expected_versions["weights"]
+    ):
+        reasons.add("WEIGHTS_VERSION_MISMATCH")
+    if (
+        expected_versions["decision"]
+        and observed_versions["decision"] != expected_versions["decision"]
+    ):
+        reasons.add("DECISION_VERSION_MISMATCH")
+
+    bid = _replay_number(quote.get("bid"))
+    ask = _replay_number(quote.get("ask"))
+    quote_age = _replay_number(quote.get("quote_age_ms"))
+    if bid is None or ask is None or quote_age is None or bid <= 0 or ask < bid:
+        reasons.add("COMPLETE_FROZEN_NBBO_MISSING")
+    checks = gate_snapshot.get("checks")
+    checks = dict(checks) if isinstance(checks, Mapping) else {}
+    missing_checks = _FROZEN_REPLAY_GATE_CHECKS - set(checks)
+    if missing_checks:
+        reasons.add("COMPLETE_GATE_CHECKS_MISSING")
+
+    enhanced_domains = score_components.get("enhanced_domains")
+    enhanced_domains = (
+        dict(enhanced_domains) if isinstance(enhanced_domains, Mapping) else {}
+    )
+    configured_weights = score_components.get("enhanced_configured_weights")
+    configured_weights = (
+        dict(configured_weights) if isinstance(configured_weights, Mapping) else {}
+    )
+    if _FROZEN_REPLAY_DOMAINS - set(enhanced_domains):
+        reasons.add("COMPLETE_SCORE_DOMAINS_MISSING")
+    for domain_key in _FROZEN_REPLAY_DOMAINS:
+        domain = enhanced_domains.get(domain_key)
+        domain = dict(domain) if isinstance(domain, Mapping) else {}
+        if (
+            not bool(domain.get("available"))
+            or not bool(domain.get("fresh"))
+            or _replay_number(domain.get("score")) is None
+        ):
+            reasons.add(f"DOMAIN_{domain_key.upper()}_UNAVAILABLE")
+    if _FROZEN_REPLAY_DOMAINS - set(configured_weights):
+        reasons.add("COMPLETE_SCORE_WEIGHTS_MISSING")
+    weight_values = [
+        _replay_number(configured_weights.get(key))
+        for key in _FROZEN_REPLAY_DOMAINS
+    ]
+    if any(value is None or value < 0 for value in weight_values):
+        reasons.add("SCORE_WEIGHTS_INVALID")
+    elif not math.isclose(sum(float(value) for value in weight_values), 1.0, abs_tol=1e-6):
+        reasons.add("SCORE_WEIGHTS_NOT_NORMALIZED")
+
+    if reasons:
+        return {
+            "status": "unavailable",
+            "causal": False,
+            "reasons": sorted(reasons),
+            "scope": "generated_predictions_only",
+        }
+
+    context_domain = dict(enhanced_domains["market_context"])
+    context_score = float(context_domain["score"])
+    policy_mode = str(
+        score_components.get("policy_mode")
+        or gate_snapshot.get("policy_mode")
+        or "record"
+    ).lower()
+    recomputed_score = ai_monitor.enhanced_opportunity_domain_score(
+        news_score=float(dict(enhanced_domains["news"])["score"]),
+        technical_score=float(dict(enhanced_domains["technical"])["score"]),
+        market_environment={
+            "available": True,
+            "adjustment": (context_score - 50.0) / 2.5,
+        },
+        market_flow=flow,
+        policy={
+            "mode": policy_mode,
+            "weights": configured_weights,
+            "weights_version": expected_versions["weights"],
+        },
+    )
+    recorded_score = _replay_number(
+        score_components.get("enhanced_score", score_components.get("combined"))
+    )
+    if (
+        recorded_score is None
+        or recomputed_score.get("score") is None
+        or not math.isclose(
+            float(recomputed_score["score"]), recorded_score, abs_tol=0.05
+        )
+    ):
+        reasons.add("SCORE_REPLAY_MISMATCH")
+
+    feature_quality = feature.get("quality")
+    feature_quality = (
+        dict(feature_quality) if isinstance(feature_quality, Mapping) else {}
+    )
+    replayed_gate = ai_monitor.stable_gate_summary(
+        {
+            "checks": checks,
+            "quote_available": bool(data_quality.get("quote_available")),
+            "halt_status": feature.get("halt_status"),
+            "halt_cooldown_active": bool(feature_quality.get("halt_cooldown_active")),
+            "data_status": data_quality.get("status"),
+            "data_coverage": feature.get("data_coverage"),
+            "stale_fields": feature.get("stale_fields") or [],
+        },
+        flow,
+        evaluated_at=decision_at,  # type: ignore[arg-type]
+        policy_mode=policy_mode,
+    )
+    recorded_reasons = {
+        str(value).strip().upper()
+        for value in gate_snapshot.get("blocking_reasons", [])
+        if str(value).strip()
+    }
+    replayed_reasons = {
+        str(value).strip().upper()
+        for value in replayed_gate.get("blocking_reasons", [])
+        if str(value).strip()
+    }
+    decision_gate = gate_decision.get("risk_gate_snapshot")
+    decision_gate = dict(decision_gate) if isinstance(decision_gate, Mapping) else {}
+    if (
+        bool(replayed_gate.get("passed")) != bool(gate_snapshot.get("passed"))
+        or replayed_reasons != recorded_reasons
+        or bool(decision_gate.get("passed")) != bool(gate_snapshot.get("passed"))
+    ):
+        reasons.add("GATE_REPLAY_MISMATCH")
+    if not bool(gate_decision.get("selected")):
+        reasons.add("GENERATED_SIGNAL_DECISION_NOT_SELECTED")
+
+    if reasons:
+        return {
+            "status": "unavailable",
+            "causal": False,
+            "reasons": sorted(reasons),
+            "scope": "generated_predictions_only",
+            "recomputed_score": recomputed_score.get("score"),
+            "recorded_score": recorded_score,
+        }
+
+    replay_item = dict(item)
+    replay_item["gate_summary"] = replayed_gate
+    return {
+        "status": "available",
+        "causal": True,
+        "reasons": [],
+        "scope": "generated_predictions_only",
+        "recomputed_score": recomputed_score.get("score"),
+        "recorded_score": recorded_score,
+        "replayed_gate": replayed_gate,
+        "variant_states": ai_monitor._ablation_signal_state(replay_item),
+        "timestamps": {
+            "feature_captured_at": feature_at,
+            "snapshot_captured_at": snapshot_at,
+            "gate_decision_at": decision_at,
+            "signal_at": signal_at,
+        },
+        "versions": expected_versions,
+    }
 
 
 def create_replay_run(

@@ -4,16 +4,17 @@ const API_ROOT = "/api/v2/admin";
 const VIEWS = {
   overview: ["OPERATIONS / 01", "运行总览"],
   collectors: ["OPERATIONS / 02", "采集器"],
-  "stock-library": ["US EQUITIES / 03", "美股资料库"],
-  alerts: ["SIGNALS / 04", "提醒事件"],
-  rules: ["SIGNALS / 05", "信号规则"],
-  sources: ["INTELLIGENCE / 06", "舆情来源"],
-  news: ["INTELLIGENCE / 07", "采集新闻"],
-  symbols: ["MARKET DATA / 08", "合约数据"],
-  "ai-model": ["GOVERNANCE / 09", "全局 AI 模型"],
-  users: ["GOVERNANCE / 10", "用户权限"],
-  storage: ["GOVERNANCE / 11", "存储维护"],
-  audit: ["GOVERNANCE / 12", "审计日志"],
+  "market-data": ["OPERATIONS / 03", "市场数据与信号门控"],
+  "stock-library": ["US EQUITIES / 04", "美股资料库"],
+  alerts: ["SIGNALS / 05", "提醒事件"],
+  rules: ["SIGNALS / 06", "信号规则"],
+  sources: ["INTELLIGENCE / 07", "舆情来源"],
+  news: ["INTELLIGENCE / 08", "采集新闻"],
+  symbols: ["MARKET DATA / 09", "合约数据"],
+  "ai-model": ["GOVERNANCE / 10", "全局 AI 模型"],
+  users: ["GOVERNANCE / 11", "用户权限"],
+  storage: ["GOVERNANCE / 12", "存储维护"],
+  audit: ["GOVERNANCE / 13", "审计日志"],
 };
 
 let accessToken = "";
@@ -269,6 +270,7 @@ async function loadView(view = activeView) {
     const loaders = {
       overview: loadOverview,
       collectors: loadCollectors,
+      "market-data": loadUwMarketData,
       "stock-library": loadStockLibrary,
       alerts: loadAlerts,
       rules: loadRules,
@@ -354,6 +356,135 @@ async function loadCollectors() {
     const details = Object.entries(item.details || {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
     return `<tr><td><strong>${escapeHtml(item.name)}</strong><small>${item.paused ? "管理员已暂停" : "自动运行"}</small></td><td><span class="pill ${escapeHtml(item.health)}">${escapeHtml(item.health)}</span></td><td>${item.heartbeat_at ? `${item.lag_seconds}s` : "--"}<small>${formatTime(item.heartbeat_at)}</small></td><td>${compactNumber(item.cycles)}</td><td>${compactNumber(item.items)}</td><td class="truncate" title="${escapeHtml(details)}">${escapeHtml(details || "--")}</td><td class="truncate" title="${escapeHtml(item.last_error || "")}">${escapeHtml(item.last_error || "--")}</td><td><div class="button-group"><button data-collector="${escapeHtml(item.name)}" data-action="${item.paused ? "resume" : "pause"}">${item.paused ? "恢复" : "暂停"}</button></div></td></tr>`;
   }).join("") : '<tr><td class="empty" colspan="8">暂无采集器状态</td></tr>';
+}
+
+const UW_WEIGHT_FIELDS = ["news", "technical", "market_context", "options_flow", "gex", "institutional_flow"];
+let uwRetentionConfig = null;
+
+function uwStreamStatusView(health) {
+  if (health?.connected) return { label: "实时连接", className: "ok" };
+  if (["connecting", "reconnecting"].includes(health?.status)) return { label: "正在重连", className: "warning" };
+  if (health?.status === "disabled") return { label: "未启动", className: "" };
+  return { label: "连接中断", className: "error" };
+}
+
+async function loadUwMarketData() {
+  const data = await api("/market-data/unusual-whales");
+  const config = data.config || {};
+  uwRetentionConfig = config.retention && typeof config.retention === "object" ? { ...config.retention } : null;
+  const health = data.health || {};
+  const stream = health.websocket || {};
+  const streamView = uwStreamStatusView(stream);
+  const state = $("#uw-market-state");
+  state.textContent = !data.configured ? "凭据未配置" : config.websocket_enabled ? streamView.label : "WebSocket 已关闭";
+  state.className = `health-badge ${!data.configured ? "error" : streamView.className}`;
+
+  const subscriptions = Array.isArray(stream.subscriptions) ? stream.subscriptions.length : 0;
+  const lastEvent = stream.last_event_at_ms ? formatTime(stream.last_event_at_ms, true) : "尚无事件";
+  const metrics = [
+    ["API 凭据", data.configured ? "已配置" : "缺失", data.api_key_fingerprint || "未保存"],
+    ["运行模式", { record: "只记录", score: "参与评分", gate: "硬门控" }[config.mode] || config.mode, `配置版本 ${data.version || 0}`],
+    ["WebSocket", streamView.label, `${subscriptions} 个订阅`],
+    ["最后事件", lastEvent, `接收 ${compactNumber(stream.received || 0)} · 去重 ${compactNumber(stream.duplicates || 0)}`],
+    ["数据版本", data.feature_version || "--", data.decision_version || "--"],
+    ["错误状态", stream.last_error ? "需处理" : "正常", stream.last_error || "未发现连接错误"],
+  ];
+  const leadership = health.leadership || {};
+  const retention = health.retention || {};
+  metrics.push(
+    ["采集主实例", leadership.is_leader ? "当前主实例" : "热备待命", `${leadership.mode || "--"} · 接管 ≤ ${leadership.standby_takeover_seconds ?? "--"}s`],
+    ["分级保留", retention.status || "pending", `原始 ${retention.raw_event_days ?? "--"} 天 · 特征 ${retention.feature_snapshot_days ?? "--"} 天 · 待清理 ${compactNumber((retention.event_backlog || 0) + (retention.feature_backlog || 0))}`],
+  );
+  $("#uw-health-grid").innerHTML = metrics.map(([label, value, hint]) => `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "--")}</strong><small title="${escapeHtml(hint)}">${escapeHtml(hint)}</small></article>`).join("");
+
+  const form = $("#uw-market-data-form");
+  form.elements.namedItem("api_key").value = "";
+  form.elements.namedItem("mode").value = config.mode || "record";
+  form.elements.namedItem("rest_enabled").checked = Boolean(config.rest_enabled);
+  form.elements.namedItem("websocket_enabled").checked = Boolean(config.websocket_enabled);
+  form.querySelectorAll("[data-uw-channel]").forEach((input) => {
+    input.checked = Boolean(config.channels?.[input.dataset.uwChannel]);
+  });
+  Object.entries(config.thresholds || {}).forEach(([key, value]) => {
+    const input = form.elements.namedItem(key);
+    if (input) input.value = value;
+  });
+  UW_WEIGHT_FIELDS.forEach((key) => {
+    const input = form.elements.namedItem(`weight_${key}`);
+    if (input) input.value = Math.round(Number(config.weights?.[key] || 0) * 1000) / 10;
+  });
+  $("#uw-market-message").textContent = `${data.weights_version || "--"} · ${data.credential_source === "database" ? "数据库加密凭据" : "环境变量兼容凭据"}`;
+
+  const channelState = health.channels || {};
+  const channelNames = Object.keys(config.channels || {});
+  const activeCount = channelNames.filter((name) => config.channels[name]).length;
+  $("#uw-channel-summary").textContent = `${activeCount} / ${channelNames.length} 个频道启用`;
+  $("#uw-channel-health").innerHTML = channelNames.map((name) => {
+    const item = channelState[name] || {};
+    const enabled = Boolean(config.channels[name]);
+    const fresh = item.status === "live" || item.fresh === true;
+    const status = !enabled ? "已关闭" : fresh ? "实时" : stream.connected ? "等待首条数据" : "连接不可用";
+    const statusClass = !enabled ? "" : fresh ? "ok" : "warning";
+    const eventTime = item.last_event_at_ms || item.last_event_time_ms;
+    const lag = item.lag_ms == null ? "--" : `${Math.round(Number(item.lag_ms))} ms`;
+    return `<div><strong>${escapeHtml(name)}</strong><span class="pill ${statusClass}">${escapeHtml(status)}</span><small>最后事件 ${eventTime ? formatTime(eventTime, true) : "--"}</small><small>延迟 ${escapeHtml(lag)}</small><small>${compactNumber(item.received || 0)} 条</small></div>`;
+  }).join("") || '<p class="empty">尚未配置实时频道</p>';
+}
+
+function unusualWhalesFormPayload(form) {
+  const weights = Object.fromEntries(UW_WEIGHT_FIELDS.map((key) => [key, Number(form.elements.namedItem(`weight_${key}`).value) / 100]));
+  const weightTotal = Object.values(weights).reduce((sum, value) => sum + value, 0);
+  if (Math.abs(weightTotal - 1) > 0.000001) throw new Error(`评分域权重当前合计 ${(weightTotal * 100).toFixed(1)}%，必须为 100%`);
+  const thresholds = {};
+  ["quote_age_regular_ms", "quote_age_extended_ms", "spread_hard_max_bps", "source_divergence_max_bps", "min_data_coverage", "event_block_before_minutes", "event_block_after_minutes", "halt_cooldown_minutes"].forEach((key) => {
+    thresholds[key] = Number(form.elements.namedItem(key).value);
+  });
+  const payload = {
+    mode: form.elements.namedItem("mode").value,
+    rest_enabled: form.elements.namedItem("rest_enabled").checked,
+    websocket_enabled: form.elements.namedItem("websocket_enabled").checked,
+    channels: Object.fromEntries([...form.querySelectorAll("[data-uw-channel]")].map((input) => [input.dataset.uwChannel, input.checked])),
+    thresholds,
+    weights,
+    ...(uwRetentionConfig ? { retention: { ...uwRetentionConfig } } : {}),
+  };
+  const apiKey = String(form.elements.namedItem("api_key").value || "").trim();
+  if (apiKey) payload.api_key = apiKey;
+  return payload;
+}
+
+async function saveUwMarketData(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (!form.reportValidity()) return;
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  try {
+    const payload = unusualWhalesFormPayload(form);
+    await api("/market-data/unusual-whales", { method: "PUT", body: JSON.stringify(payload) });
+    form.elements.namedItem("api_key").value = "";
+    toast("市场数据与信号门控配置已发布");
+    await loadUwMarketData();
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function testUwMarketData() {
+  const button = $("#uw-market-test");
+  button.disabled = true;
+  try {
+    const result = await api("/market-data/unusual-whales/test", { method: "POST", body: "{}" });
+    toast(result.message || "Unusual Whales REST 连接正常");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function fallbackUwToRecordOnly() {
+  const form = $("#uw-market-data-form");
+  form.elements.namedItem("mode").value = "record";
+  form.requestSubmit();
 }
 
 function formQuery(form) {
@@ -739,6 +870,9 @@ function bindEvents() {
     toast("信号规则已发布");
   });
   $("#collectors-table").addEventListener("click", (event) => { const button = event.target.closest("[data-collector]"); if (button) updateCollector(button).catch((error) => toast(error.message, "error")); });
+  $("#uw-market-data-form").addEventListener("submit", (event) => saveUwMarketData(event).catch((error) => toast(error.message, "error")));
+  $("#uw-market-test").addEventListener("click", () => testUwMarketData().catch((error) => toast(error.message, "error")));
+  $("#uw-record-only").addEventListener("click", () => fallbackUwToRecordOnly().catch((error) => toast(error.message, "error")));
   $("#sources-table").addEventListener("click", (event) => { const button = event.target.closest("[data-source-action]"); if (button) updateSource(button).catch((error) => toast(error.message, "error")); });
   $("#source-create").addEventListener("click", () => openSourceEditor());
   $("#source-form").addEventListener("submit", saveSource);

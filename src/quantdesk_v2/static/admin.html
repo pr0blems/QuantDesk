@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>QuantDesk 管理中心</title>
-  <link rel="stylesheet" href="/assets/admin.css?v=20260805-5">
+  <link rel="stylesheet" href="/assets/admin.css?v=20260816-3">
 </head>
 <body>
   <main id="admin-boot" class="boot-screen" aria-live="polite">
@@ -51,18 +51,19 @@
         <p>运行控制</p>
         <button class="nav-item active" data-view-target="overview"><span>01</span>运行总览</button>
         <button class="nav-item" data-view-target="collectors"><span>02</span>采集器</button>
+        <button class="nav-item" data-view-target="market-data"><span>03</span>市场数据与门控</button>
         <p>内容与信号</p>
-        <button class="nav-item" data-view-target="stock-library"><span>03</span>美股资料库</button>
-        <button class="nav-item" data-view-target="alerts"><span>04</span>提醒事件</button>
-        <button class="nav-item" data-view-target="rules"><span>05</span>信号规则</button>
-        <button class="nav-item" data-view-target="sources"><span>06</span>舆情来源</button>
-        <button class="nav-item" data-view-target="news"><span>07</span>采集新闻</button>
-        <button class="nav-item" data-view-target="symbols"><span>08</span>合约数据</button>
+        <button class="nav-item" data-view-target="stock-library"><span>04</span>美股资料库</button>
+        <button class="nav-item" data-view-target="alerts"><span>05</span>提醒事件</button>
+        <button class="nav-item" data-view-target="rules"><span>06</span>信号规则</button>
+        <button class="nav-item" data-view-target="sources"><span>07</span>舆情来源</button>
+        <button class="nav-item" data-view-target="news"><span>08</span>采集新闻</button>
+        <button class="nav-item" data-view-target="symbols"><span>09</span>合约数据</button>
         <p>平台治理</p>
-        <button class="nav-item" data-view-target="ai-model"><span>09</span>全局 AI 模型</button>
-        <button class="nav-item" data-view-target="users"><span>10</span>用户权限</button>
-        <button class="nav-item" data-view-target="storage"><span>11</span>存储维护</button>
-        <button class="nav-item" data-view-target="audit"><span>12</span>审计日志</button>
+        <button class="nav-item" data-view-target="ai-model"><span>10</span>全局 AI 模型</button>
+        <button class="nav-item" data-view-target="users"><span>11</span>用户权限</button>
+        <button class="nav-item" data-view-target="storage"><span>12</span>存储维护</button>
+        <button class="nav-item" data-view-target="audit"><span>13</span>审计日志</button>
       </nav>
       <div class="sidebar-foot">
         <span class="live-dot"></span><span>控制面在线</span>
@@ -103,6 +104,72 @@
         <section class="view hidden" data-view="collectors">
           <div class="section-intro"><div><p class="eyebrow">INGESTION CONTROL</p><h2>采集器管理</h2><p>查看心跳、累计处理量、运行上下文与最近错误，并可逐项暂停或恢复。</p></div></div>
           <article class="panel"><div class="table-wrap"><table><thead><tr><th>采集器</th><th>运行状态</th><th>心跳</th><th>累计周期</th><th>累计条目</th><th>运行详情</th><th>最近错误</th><th>操作</th></tr></thead><tbody id="collectors-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view hidden" data-view="market-data">
+          <div class="section-intro">
+            <div>
+              <p class="eyebrow">MARKET DATA & ADMISSION GATE</p>
+              <h2>市场数据与信号门控</h2>
+              <p>集中管理 Unusual Whales 凭据、实时频道、行情安全阈值、评分权重与灰度运行模式。</p>
+            </div>
+            <span id="uw-market-state" class="health-badge">读取中</span>
+          </div>
+          <div id="uw-health-grid" class="market-health-grid"></div>
+          <form id="uw-market-data-form" class="panel form-panel market-data-form">
+            <div class="form-section">
+              <div><span>01</span><h3>连接与运行模式</h3><p>密钥留空表示保留。默认“只记录”，完成影子验证后再逐步参与评分和硬门控。</p></div>
+              <div class="toggle-stack">
+                <div class="field-grid">
+                  <label>Unusual Whales API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="留空保留已加密密钥"></label>
+                  <label>运行模式<select name="mode"><option value="record">只记录</option><option value="score">参与评分</option><option value="gate">硬门控</option></select></label>
+                </div>
+                <label class="switch-row"><span><strong>启用 REST 补偿</strong><small>启动快照、断线恢复、GEX Levels 与事件日历</small></span><input name="rest_enabled" type="checkbox"></label>
+                <label class="switch-row"><span><strong>启用 WebSocket 实时流</strong><small>价格、停牌、期权流、GEX 与机构成交增量更新</small></span><input name="websocket_enabled" type="checkbox"></label>
+              </div>
+            </div>
+            <div class="form-section">
+              <div><span>02</span><h3>实时频道</h3><p>关闭的频道不订阅；数据不可用时不会自动视为通过。</p></div>
+              <div class="channel-switch-grid">
+                <label><input data-uw-channel="price" type="checkbox"><span>Price<small>实时价格</small></span></label>
+                <label><input data-uw-channel="trading_halts" type="checkbox"><span>Trading Halts<small>停牌与复牌</small></span></label>
+                <label><input data-uw-channel="interval_flow" type="checkbox"><span>Interval Flow<small>区间期权流</small></span></label>
+                <label><input data-uw-channel="net_flow" type="checkbox"><span>Net Flow<small>个股净流</small></span></label>
+                <label><input data-uw-channel="market_tide" type="checkbox"><span>Market Tide<small>全市场风险偏好</small></span></label>
+                <label><input data-uw-channel="gex" type="checkbox"><span>GEX<small>Gamma 暴露</small></span></label>
+                <label><input data-uw-channel="lit_trades" type="checkbox"><span>Lit Trades<small>场内成交</small></span></label>
+                <label><input data-uw-channel="off_lit_trades" type="checkbox"><span>Off-lit Trades<small>场外成交</small></span></label>
+                <label><input data-uw-channel="flow_alerts" type="checkbox"><span>Flow Alerts<small>异常期权流</small></span></label>
+                <label><input data-uw-channel="option_trades" type="checkbox"><span>Option Trades<small>期权成交明细</small></span></label>
+              </div>
+            </div>
+            <div class="form-section">
+              <div><span>03</span><h3>行情质量与事件阈值</h3><p>超过阈值时给出明确阻断原因，不允许使用陈旧或不可交易行情触发信号。</p></div>
+              <div class="field-grid threshold-grid">
+                <label>盘中 Quote 最大时效 (ms)<input name="quote_age_regular_ms" type="number" min="250" max="60000"></label>
+                <label>盘前/盘后最大时效 (ms)<input name="quote_age_extended_ms" type="number" min="1000" max="120000"></label>
+                <label>价差硬上限 (bps)<input name="spread_hard_max_bps" type="number" min="1" max="1000" step="0.1"></label>
+                <label>行情源偏差上限 (bps)<input name="source_divergence_max_bps" type="number" min="1" max="1000" step="0.1"></label>
+                <label>最低数据覆盖率<input name="min_data_coverage" type="number" min="0" max="1" step="0.01"></label>
+                <label>事件前阻断 (分钟)<input name="event_block_before_minutes" type="number" min="0" max="1440"></label>
+                <label>事件后观察 (分钟)<input name="event_block_after_minutes" type="number" min="0" max="1440"></label>
+                <label>复牌冷静期 (分钟)<input name="halt_cooldown_minutes" type="number" min="0" max="1440"></label>
+              </div>
+            </div>
+            <div class="form-section">
+              <div><span>04</span><h3>评分域权重</h3><p>六个评分域合计必须为 100%，每次发布都会冻结权重版本。</p></div>
+              <div class="field-grid weight-grid">
+                <label>新闻<input name="weight_news" type="number" min="0" max="100" step="1"></label>
+                <label>技术指标<input name="weight_technical" type="number" min="0" max="100" step="1"></label>
+                <label>大盘环境<input name="weight_market_context" type="number" min="0" max="100" step="1"></label>
+                <label>期权资金流<input name="weight_options_flow" type="number" min="0" max="100" step="1"></label>
+                <label>GEX<input name="weight_gex" type="number" min="0" max="100" step="1"></label>
+                <label>机构成交<input name="weight_institutional_flow" type="number" min="0" max="100" step="1"></label>
+              </div>
+            </div>
+            <div class="form-actions"><span id="uw-market-message">配置尚未读取</span><button id="uw-market-test" type="button">测试 REST</button><button id="uw-record-only" type="button">一键退回只记录</button><button class="primary" type="submit">发布配置</button></div>
+          </form>
+          <article class="panel"><div class="panel-head"><div><span>CHANNEL TELEMETRY</span><h3>频道健康与延迟</h3></div><span id="uw-channel-summary">等待连接</span></div><div id="uw-channel-health" class="channel-health-list"></div></article>
         </section>
 
         <section class="view hidden" data-view="stock-library">
@@ -268,6 +335,6 @@
     </form>
   </dialog>
   <dialog id="confirm-dialog"><form method="dialog"><span class="dialog-mark">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p><div><button value="cancel">取消</button><button id="confirm-accept" class="danger" value="confirm">确认执行</button></div></form></dialog>
-  <script src="/assets/admin.js?v=20260805-9" defer></script>
+  <script src="/assets/admin.js?v=20260816-3" defer></script>
 </body>
 </html>

@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import asyncio
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as datetime_time
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
+from starlette.responses import StreamingResponse
 
 from ... import ai_monitor, historical_replay, news_ai
 from ...ai_model_config import global_ai_model_configured
 from ...database import get_db
-from ...dependencies import get_current_user
+from ...dependencies import bearer, get_current_user, require_admin_write
 from ...models import (
+    AdminSetting,
     AiMonitorConfig,
     AiMonitorOpportunity,
     AiMonitorPrediction,
@@ -27,23 +36,33 @@ from ...models import (
     NewsAiAnalysisRecord,
     NewsAiBatch,
     NewsAiModelCall,
+    OpportunityMarketSnapshot,
+    RealtimeMarketFeatureSnapshot,
     Security,
     SecurityFinancialSnapshot,
     SecurityFundamentalAnalysis,
     User,
+    UserSession,
     utcnow,
 )
 from ...monitor import MonitorRepository, MonitorUnavailable
 from ...schemas import (
+    AdminUnusualWhalesConfigUpdate,
     AiMonitorConfigUpdate,
     AiMonitorCostConfigUpdate,
     AiMonitorNewsAnalyzeRequest,
     AiMonitorNewsSystemPromptUpdate,
     AiMonitorReplayRequest,
     AiMonitorRunRequest,
+    AiMonitorScorePolicyUpdate,
 )
+from ...security import SecurityError, decode_access_token
 
 router = APIRouter(prefix="/ai-monitor")
+
+_STREAM_POLL_SECONDS = 2.0
+_STREAM_HEARTBEAT_SECONDS = 15.0
+_STREAM_RETRY_MILLISECONDS = 3000
 
 
 def _utc_out(value: datetime | None) -> datetime | None:
@@ -66,6 +85,232 @@ def _require_expected_user(request: Request, user: User) -> None:
             status_code=409,
             detail="authenticated user changed; sign in again before updating AI monitor",
         )
+
+
+def _get_stream_user_id(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+) -> int:
+    """Authenticate an SSE connection without retaining a dependency session.
+
+    FastAPI keeps generator dependencies alive for the lifetime of a streaming
+    response.  Opening the authentication session explicitly here lets it close
+    before the stream starts and prevents a long-lived database transaction.
+    """
+
+    unauthorized = HTTPException(
+        status_code=401,
+        detail="invalid or expired credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise unauthorized
+    try:
+        claims = decode_access_token(
+            credentials.credentials,
+            request.app.state.settings.jwt_secret.get_secret_value(),
+        )
+        user_id = int(claims["sub"])
+        session_id = str(claims["sid"])
+    except (SecurityError, TypeError, ValueError):
+        raise unauthorized from None
+
+    with Session(request.app.state.database_engine) as db:
+        authenticated_session = db.scalar(
+            select(UserSession.id).where(
+                UserSession.id == session_id,
+                UserSession.user_id == user_id,
+                UserSession.revoked_at.is_(None),
+                UserSession.expires_at > utcnow(),
+            )
+        )
+        if authenticated_session is None:
+            raise unauthorized
+        is_active = db.scalar(
+            select(User.is_active).where(User.id == user_id)
+        )
+        if not is_active:
+            raise unauthorized
+    return user_id
+
+
+def _revision_value(value: Any) -> str | int | None:
+    if isinstance(value, datetime):
+        return _utc_out(value).isoformat() if _utc_out(value) is not None else None
+    if isinstance(value, Decimal):
+        return str(value)
+    if value is None or isinstance(value, (str, int)):
+        return value
+    return str(value)
+
+
+def _ai_monitor_revisions(db: Session, user_id: int) -> dict[str, dict[str, Any]]:
+    """Read lightweight revision cursors; callers own a short-lived session."""
+
+    opportunity_row = db.execute(
+        select(
+            func.max(AiMonitorOpportunity.updated_at),
+            func.max(AiMonitorOpportunity.id),
+        ).where(AiMonitorOpportunity.user_id == user_id)
+    ).one()
+    run_row = db.execute(
+        select(func.max(AiMonitorRun.updated_at), func.max(AiMonitorRun.id)).where(
+            AiMonitorRun.user_id == user_id
+        )
+    ).one()
+    news_row = db.execute(
+        select(func.max(News.ts), func.max(News.ai_analyzed_at))
+    ).one()
+    market_row = db.execute(
+        select(
+            func.max(RealtimeMarketFeatureSnapshot.captured_at),
+            func.max(RealtimeMarketFeatureSnapshot.id),
+        )
+    ).one()
+    return {
+        "opportunities": {
+            "updated_at": _revision_value(opportunity_row[0]),
+            "cursor": _revision_value(opportunity_row[1]),
+        },
+        "runs": {
+            "updated_at": _revision_value(run_row[0]),
+            "cursor": _revision_value(run_row[1]),
+        },
+        "news": {
+            "latest_ts": _revision_value(news_row[0]),
+            "analyzed_at": _revision_value(news_row[1]),
+        },
+        "market": {
+            "captured_at": _revision_value(market_row[0]),
+            "cursor": _revision_value(market_row[1]),
+        },
+    }
+
+
+def _read_ai_monitor_revisions(database_engine: Any, user_id: int) -> dict[str, dict[str, Any]]:
+    with Session(database_engine) as db:
+        return _ai_monitor_revisions(db, user_id)
+
+
+def _revision_event_id(revisions: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        revisions,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+
+
+def _changed_revision_scopes(
+    previous: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+) -> list[str]:
+    if previous is None:
+        return list(current)
+    return [scope for scope, revision in current.items() if previous.get(scope) != revision]
+
+
+def _sse_message(
+    *,
+    event: str,
+    event_id: str,
+    data: Mapping[str, Any],
+    retry_milliseconds: int = _STREAM_RETRY_MILLISECONDS,
+) -> str:
+    payload = json.dumps(
+        data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return (
+        f"id: {event_id}\n"
+        f"event: {event}\n"
+        f"retry: {retry_milliseconds}\n"
+        f"data: {payload}\n\n"
+    )
+
+
+def _epoch_ms_out(value: Any) -> str | None:
+    try:
+        timestamp_ms = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if timestamp_ms <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp_ms / 1_000, UTC).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _safe_market_data_health(request: Request) -> dict[str, Any]:
+    """Expose operational state without credentials or provider payloads."""
+
+    runtime = getattr(request.app.state, "unusual_whales_runtime", None)
+    try:
+        snapshot = runtime.health_snapshot() if runtime is not None else {}
+    except (RuntimeError, ValueError):
+        snapshot = {}
+    if not isinstance(snapshot, Mapping):
+        snapshot = {}
+    try:
+        channel_health = (
+            runtime.channel_health_snapshot() if runtime is not None else {}
+        )
+    except (RuntimeError, ValueError):
+        channel_health = {}
+    if not isinstance(channel_health, Mapping):
+        channel_health = {}
+    websocket_connected = bool(snapshot.get("connected"))
+    rest = dict(snapshot.get("rest") or {})
+    writer = dict(snapshot.get("writer") or {})
+    leadership = dict(snapshot.get("leadership") or {})
+    retention = dict(snapshot.get("retention") or {})
+    price_health = dict(channel_health.get("price") or {})
+    return {
+        "websocket_connected": websocket_connected,
+        "stream_connected": websocket_connected,
+        "rest_healthy": str(rest.get("status") or "disabled")
+        in {"ready", "degraded"},
+        "last_event_at": _epoch_ms_out(snapshot.get("last_event_at_ms")),
+        "quote": {
+            "age_ms": price_health.get("age_ms"),
+            "status": price_health.get("status") or "unavailable",
+        },
+        "sources": {
+            "websocket": {
+                "connected": websocket_connected,
+                "status": snapshot.get("status") or "disabled",
+                "last_message_at": _epoch_ms_out(snapshot.get("last_event_at_ms")),
+            },
+            "rest": {
+                "healthy": str(rest.get("status") or "disabled")
+                in {"ready", "degraded"},
+                "status": rest.get("status") or "disabled",
+                "last_poll_at": _epoch_ms_out(rest.get("last_poll_at_ms")),
+            },
+        },
+        "leadership": {
+            "status": leadership.get("status") or "unknown",
+            "is_leader": bool(leadership.get("is_leader")),
+        },
+        "writer": {
+            "queue_utilization": writer.get("queue_utilization"),
+            "events_per_minute": writer.get("events_per_minute"),
+            "write_latency_ms": dict(writer.get("write_latency_ms") or {}),
+        },
+        "retention": {
+            "status": retention.get("status") or "unknown",
+            "last_run_at": _epoch_ms_out(retention.get("last_run_at_ms")),
+        },
+        "versions": {
+            "feature": ai_monitor.MARKET_FEATURE_VERSION,
+            "weights": ai_monitor.OPPORTUNITY_WEIGHTS_VERSION,
+            "decision": ai_monitor.OPPORTUNITY_DECISION_VERSION,
+        },
+    }
 
 
 def _audit(
@@ -93,6 +338,36 @@ def _config_out(config: AiMonitorConfig | None) -> dict[str, Any]:
     for key in ("last_news_run_at", "last_opportunity_run_at", "updated_at"):
         data[key] = _utc_out(data.get(key))
     return data
+
+
+def _score_policy_out(db: Session, *, can_edit: bool) -> dict[str, Any]:
+    policy = ai_monitor.unusual_whales_signal_policy(db)
+    setting = db.get(AdminSetting, ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY)
+    weights = {
+        key: round(float(value), 8)
+        for key, value in dict(policy["weights"]).items()
+    }
+    return {
+        "scope": "platform",
+        "mode": str(policy["mode"]),
+        "weights": weights,
+        "weight_unit": "fraction",
+        "weight_total": round(sum(weights.values()), 8),
+        "published_version": int(policy["published_version"]),
+        "policy_version": str(policy["policy_version"]),
+        "weights_version": str(policy["weights_version"]),
+        "decision_version": str(policy["decision_version"]),
+        "score_enabled": bool(policy["score_enabled"]),
+        "hard_gate_enabled": bool(policy["hard_gate_enabled"]),
+        "can_edit": can_edit,
+        "updated_at": _utc_out(setting.updated_at) if setting is not None else None,
+        "effective_usage": {
+            "scoring": "六域可用证据按数据质量降权后重新归一化",
+            "missing_data": "缺失域不计中性分，也不占有效权重",
+            "hard_gate": "仅平台 mode=gate 时参与硬门控；当前保存操作启用评分但不启用硬门控",
+            "history": "历史机会继续使用生成时冻结的权重版本，不追溯改写",
+        },
+    }
 
 
 def _run_out(run: AiMonitorRun, batch: NewsAiBatch | None = None) -> dict[str, Any]:
@@ -191,12 +466,212 @@ def _prediction_settlement_out(item: AiMonitorPrediction | None) -> dict[str, An
     }
 
 
+def _stable_gate_checks(value: Any) -> dict[str, bool]:
+    """Normalize current and legacy gate check payloads to the stable API shape."""
+    if isinstance(value, Mapping):
+        return {str(key): bool(passed) for key, passed in value.items()}
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        checks: dict[str, bool] = {}
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            key = str(item.get("key") or "").strip()
+            if key:
+                checks[key] = bool(item.get("passed"))
+        return checks
+    return {}
+
+
+def _stable_quote_available(quote: Mapping[str, Any]) -> bool:
+    """Return whether a historical/current payload contains a sane NBBO."""
+    try:
+        bid = Decimal(str(quote.get("bid")))
+        ask = Decimal(str(quote.get("ask")))
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+    return bool(
+        bid.is_finite()
+        and ask.is_finite()
+        and bid > 0
+        and ask > 0
+        and ask >= bid
+    )
+
+
+def _stable_opportunity_contract(
+    evidence: dict[str, Any],
+    snapshot: OpportunityMarketSnapshot | None,
+) -> dict[str, Any]:
+    market_flow = dict(evidence.get("market_flow") or {})
+    if snapshot is not None:
+        quote = dict(snapshot.quote_snapshot_json or {})
+        option_flow = dict(snapshot.option_flow_snapshot_json or {})
+        gex = dict(snapshot.gex_snapshot_json or {})
+        institutional_flow = dict(snapshot.institutional_flow_snapshot_json or {})
+        gate_summary = dict(snapshot.risk_gate_snapshot_json or {})
+        score_components = dict(snapshot.score_components_json or {})
+        data_quality = dict(snapshot.data_quality_json or {})
+        version = {
+            "api": ai_monitor.OPPORTUNITY_API_VERSION,
+            "feature": snapshot.feature_version,
+            "weights": snapshot.weights_version,
+            "decision": snapshot.decision_version,
+        }
+    else:
+        quote = dict(evidence.get("quote") or {})
+        option_flow = dict(
+            evidence.get("option_flow") or market_flow.get("option_flow") or {}
+        )
+        gex = dict(evidence.get("gex") or market_flow.get("gex") or {})
+        institutional_flow = dict(
+            evidence.get("institutional_flow")
+            or market_flow.get("institutional_flow")
+            or {}
+        )
+        gate_summary = dict(evidence.get("gate_summary") or {})
+        score_components = dict(evidence.get("score_components") or {})
+        data_quality = dict(evidence.get("data_quality") or {})
+        version = dict(evidence.get("version") or {})
+        version.setdefault("api", ai_monitor.OPPORTUNITY_API_VERSION)
+        version.setdefault("feature", ai_monitor.MARKET_FEATURE_VERSION)
+        version.setdefault("weights", ai_monitor.OPPORTUNITY_WEIGHTS_VERSION)
+        version.setdefault("decision", ai_monitor.OPPORTUNITY_DECISION_VERSION)
+
+    if not gate_summary:
+        market_quality = dict(evidence.get("market_quality") or {})
+        virtual_gate = dict(evidence.get("virtual_entry_gate") or {})
+        passed = bool(
+            virtual_gate.get(
+                "entry_ready",
+                virtual_gate.get("passed", market_quality.get("passed", False)),
+            )
+        )
+        gate_summary = {
+            "status": "passed" if passed else "not_evaluated",
+            "passed": passed,
+            "checks": _stable_gate_checks(
+                virtual_gate.get("checks") or market_quality.get("checks") or {}
+            ),
+            "blocking_reasons": [],
+            "warnings": ["LEGACY_GATE_SNAPSHOT"],
+            "coverage": None,
+            "evaluated_at": virtual_gate.get("checked_at"),
+            "decision_version": "legacy",
+        }
+    gate_summary.setdefault(
+        "status", "passed" if gate_summary.get("passed") else "blocked"
+    )
+    gate_summary.setdefault("blocking_reasons", [])
+    gate_summary.setdefault("warnings", [])
+    gate_summary["checks"] = _stable_gate_checks(gate_summary.get("checks"))
+    quote_available = _stable_quote_available(quote)
+    data_quality.setdefault("quote_available", quote_available)
+    blocking_reasons = [
+        str(item)
+        for item in gate_summary.get("blocking_reasons") or []
+        if str(item).strip()
+    ]
+    quote_rejection = next(
+        (
+            reason
+            for reason in blocking_reasons
+            if reason.startswith("REFERENCE_")
+            or reason == "SYMBOL_HALTED_OR_COOLDOWN"
+        ),
+        None,
+    )
+    if quote_rejection:
+        data_quality.setdefault("quote_status", "rejected")
+        data_quality.setdefault("reject_reason", quote_rejection)
+    elif not quote_available:
+        # Historical records predate the execution-quote gate.  Keep their
+        # original lifecycle result, but never present their missing NBBO as a
+        # valid reference for a new decision.
+        data_quality.setdefault("quote_status", "unavailable")
+        data_quality.setdefault("reject_reason", "REFERENCE_QUOTE_UNAVAILABLE")
+        warnings = [str(item) for item in gate_summary.get("warnings") or []]
+        if "REFERENCE_QUOTE_UNAVAILABLE" not in warnings:
+            warnings.append("REFERENCE_QUOTE_UNAVAILABLE")
+        gate_summary["warnings"] = warnings
+    else:
+        data_quality.setdefault("quote_status", "available")
+
+    if not score_components:
+        score_snapshot = dict(evidence.get("score_snapshot") or {})
+        signal_scores = dict(evidence.get("signal_scores") or {})
+        score_components = {
+            "news": signal_scores.get("news", score_snapshot.get("news")),
+            "technical": signal_scores.get(
+                "indicator", score_snapshot.get("technical")
+            ),
+            "market_flow": signal_scores.get(
+                "market_flow", score_snapshot.get("market_flow")
+            ),
+            "option_flow": None,
+            "gex": None,
+            "institutional_flow": None,
+            "base_combined": signal_scores.get(
+                "base_combined", score_snapshot.get("base_combined")
+            ),
+            "macro_adjustment": signal_scores.get(
+                "macro_adjustment", score_snapshot.get("macro_adjustment")
+            ),
+            "combined": signal_scores.get("combined", score_snapshot.get("combined")),
+            "configured_weights": dict(evidence.get("score_weights") or {}),
+            "effective_weights": dict(evidence.get("effective_score_weights") or {}),
+            "weights_version": version["weights"],
+        }
+    flow = {
+        **market_flow,
+        "option_flow": option_flow,
+        "institutional_flow": institutional_flow,
+    }
+    return {
+        "api_version": ai_monitor.OPPORTUNITY_API_VERSION,
+        "gate_summary": gate_summary,
+        "score_components": score_components,
+        "quote": quote,
+        "flow": flow,
+        "gex": gex,
+        "data_quality": data_quality,
+        "version": version,
+        "signal_snapshot": (
+            {
+                "id": snapshot.id,
+                "captured_at": _utc_out(snapshot.captured_at),
+                "immutable": True,
+            }
+            if snapshot is not None
+            else None
+        ),
+    }
+
+
 def _opportunity_out(
     item: AiMonitorOpportunity,
     prediction: AiMonitorPrediction | None = None,
     live_market: dict[str, Any] | None = None,
+    market_snapshot: OpportunityMarketSnapshot | None = None,
+    *,
+    use_frozen: bool = False,
 ) -> dict[str, Any]:
     prediction_evidence = dict(prediction.evidence_json or {}) if prediction else {}
+    current_evidence = dict(item.evidence_json or {})
+    contract_evidence = (
+        prediction_evidence if use_frozen and prediction_evidence else current_evidence
+    )
+    stable_contract = _stable_opportunity_contract(
+        contract_evidence,
+        market_snapshot if use_frozen else None,
+    )
+    if market_snapshot is not None and not use_frozen:
+        stable_contract["signal_snapshot"] = {
+            "id": market_snapshot.id,
+            "captured_at": _utc_out(market_snapshot.captured_at),
+            "immutable": True,
+        }
     prediction_signal_scores = prediction_evidence.get("signal_scores")
     prediction_signal_scores = (
         dict(prediction_signal_scores)
@@ -219,19 +694,43 @@ def _opportunity_out(
         "market_flow",
         prediction_score_snapshot.get("market_flow", prediction_market_flow.get("score")),
     )
+    frozen_scores = dict(stable_contract["score_components"])
+    news_score = (
+        float(frozen_scores["news"])
+        if use_frozen and frozen_scores.get("news") is not None
+        else float(item.news_score)
+    )
+    indicator_score = (
+        float(frozen_scores["technical"])
+        if use_frozen and frozen_scores.get("technical") is not None
+        else float(item.indicator_score)
+    )
+    combined_score = (
+        float(frozen_scores["combined"])
+        if use_frozen and frozen_scores.get("combined") is not None
+        else float(item.combined_score)
+    )
+    lifecycle_status = {
+        "candidate": "candidate",
+        "discovered": "confirmed",
+        "expired": "expired",
+        "dismissed": "dismissed",
+    }.get(item.status, "candidate")
     return {
+        **stable_contract,
         "id": item.public_id,
         "symbol": item.symbol,
         "contract_symbol": item.contract_symbol,
         "direction": item.direction,
         "status": item.status,
+        "lifecycle_status": lifecycle_status,
         "timeframe": item.timeframe,
-        "news_score": float(item.news_score),
-        "indicator_score": float(item.indicator_score),
-        "combined_score": float(item.combined_score),
+        "news_score": news_score,
+        "indicator_score": indicator_score,
+        "combined_score": combined_score,
         "matched_indicator_keys": list(item.matched_indicator_keys_json or []),
         "news_ids": list(item.news_ids_json or []),
-        "evidence": dict(item.evidence_json or {}),
+        "evidence": contract_evidence,
         "prediction_status": prediction.status if prediction is not None else None,
         "prediction_settlement": _prediction_settlement_out(prediction),
         "prediction_result": prediction.result if prediction is not None else None,
@@ -281,7 +780,12 @@ def _opportunity_out(
 
 
 def _prediction_out(item: AiMonitorPrediction) -> dict[str, Any]:
+    stable_contract = _stable_opportunity_contract(
+        dict(item.evidence_json or {}),
+        None,
+    )
     return {
+        **stable_contract,
         "id": item.public_id,
         "opportunity_id": item.opportunity_id,
         "symbol": item.symbol,
@@ -346,6 +850,7 @@ def _next_run(last_run: datetime | None, interval_minutes: int, enabled: bool) -
 
 @router.get("/overview")
 def overview(
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, Any]:
@@ -441,9 +946,90 @@ def overview(
             "completed": int(prediction_stats["completed"] or 0),
         },
         "model_configured": model_configured,
+        "data_health": _safe_market_data_health(request),
         "latest_run": _run_out(latest_run) if latest_run is not None else None,
         "updated_at": _utc_out(now),
     }
+
+
+@router.get("/events")
+def ai_monitor_events(
+    request: Request,
+    user_id: Annotated[int, Depends(_get_stream_user_id)],
+) -> StreamingResponse:
+    """Stream tenant-scoped revision changes for incremental UI refreshes."""
+
+    database_engine = request.app.state.database_engine
+    resume_event_id = request.headers.get("Last-Event-ID", "").strip()[:128]
+
+    async def event_stream():
+        previous: dict[str, dict[str, Any]] | None = None
+        current_event_id = "unavailable"
+        heartbeat_at = asyncio.get_running_loop().time()
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                revisions = await run_in_threadpool(
+                    _read_ai_monitor_revisions,
+                    database_engine,
+                    user_id,
+                )
+                next_event_id = _revision_event_id(revisions)
+                if previous is None:
+                    scopes = (
+                        []
+                        if resume_event_id and resume_event_id == next_event_id
+                        else list(revisions)
+                    )
+                    yield _sse_message(
+                        event="ready",
+                        event_id=next_event_id,
+                        data={
+                            "scopes": scopes,
+                            "revisions": revisions,
+                            "resumed": bool(resume_event_id),
+                        },
+                    )
+                else:
+                    scopes = _changed_revision_scopes(previous, revisions)
+                    if scopes:
+                        yield _sse_message(
+                            event="update",
+                            event_id=next_event_id,
+                            data={
+                                "scopes": scopes,
+                                "revisions": {
+                                    scope: revisions[scope] for scope in scopes
+                                },
+                            },
+                        )
+                previous = revisions
+                current_event_id = next_event_id
+            except SQLAlchemyError:
+                # Keep database or driver details out of the stream.  The retry
+                # field instructs clients to reconnect if the transport closes.
+                yield _sse_message(
+                    event="degraded",
+                    event_id=current_event_id,
+                    data={"code": "REVISION_CHECK_FAILED", "scopes": []},
+                )
+
+            now = asyncio.get_running_loop().time()
+            if now - heartbeat_at >= _STREAM_HEARTBEAT_SECONDS:
+                yield f": heartbeat {datetime.now(UTC).isoformat()}\n\n"
+                heartbeat_at = now
+            await asyncio.sleep(_STREAM_POLL_SECONDS)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, no-transform",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/market-context")
@@ -466,6 +1052,93 @@ def get_config(
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, Any]:
     return _config_out(db.get(AiMonitorConfig, user.id))
+
+
+@router.get("/score-policy")
+def get_score_policy(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Expose the platform six-domain score policy without market-data secrets."""
+
+    return _score_policy_out(db, can_edit=bool(user.is_admin))
+
+
+@router.put("/score-policy")
+def update_score_policy(
+    payload: AiMonitorScorePolicyUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin_write)],
+) -> dict[str, Any]:
+    """Update only six-domain weights while preserving the complete feed config."""
+
+    _require_expected_user(request, admin)
+    setting = db.scalar(
+        select(AdminSetting)
+        .where(AdminSetting.key == ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY)
+        .with_for_update()
+    )
+    if setting is None:
+        complete_config = AdminUnusualWhalesConfigUpdate().model_dump(
+            exclude={"api_key"}
+        )
+        setting = AdminSetting(
+            key=ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY,
+            value_json=complete_config,
+            version=1,
+            updated_by=admin.id,
+        )
+        db.add(setting)
+    else:
+        raw = setting.value_json
+        if not isinstance(raw, Mapping):
+            raise HTTPException(
+                status_code=409,
+                detail="当前 Unusual Whales 平台配置损坏，请先在管理后台修复",
+            )
+        try:
+            complete_config = AdminUnusualWhalesConfigUpdate.model_validate(
+                dict(raw)
+            ).model_dump(exclude={"api_key"})
+        except ValueError:
+            raise HTTPException(
+                status_code=409,
+                detail="当前 Unusual Whales 平台配置不兼容，请先在管理后台修复",
+            ) from None
+        setting.version = max(0, int(setting.version or 0)) + 1
+        setting.updated_by = admin.id
+        setting.updated_at = utcnow()
+
+    previous_mode = str(complete_config.get("mode") or "record")
+    previous_weights = dict(complete_config.get("weights") or {})
+    complete_config["weights"] = payload.weights.model_dump()
+    complete_config["mode"] = "score"
+    setting.value_json = complete_config
+    _audit(
+        db,
+        request,
+        admin.id,
+        "ai_monitor.score_policy.update",
+        ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY,
+        {
+            "previous_mode": previous_mode,
+            "mode": "score",
+            "previous_weights": previous_weights,
+            "weights": dict(complete_config["weights"]),
+            "weights_version": f"uw_weights_v{int(setting.version)}",
+            "preserved_sections": [
+                "channels",
+                "thresholds",
+                "retention",
+                "rest_enabled",
+                "websocket_enabled",
+            ],
+        },
+    )
+    db.commit()
+    db.refresh(setting)
+    return _score_policy_out(db, can_edit=True)
 
 
 @router.get("/news-system-prompt")
@@ -769,6 +1442,21 @@ def opportunities(
         if items
         else {}
     )
+    snapshot_by_opportunity_id = (
+        {
+            snapshot.opportunity_id: snapshot
+            for snapshot in db.scalars(
+                select(OpportunityMarketSnapshot).where(
+                    OpportunityMarketSnapshot.user_id == user.id,
+                    OpportunityMarketSnapshot.opportunity_id.in_(
+                        [item.id for item in items]
+                    ),
+                )
+            ).all()
+        }
+        if items
+        else {}
+    )
     live_tickers: dict[str, dict[str, Any]] = {}
     if items:
         try:
@@ -787,6 +1475,8 @@ def opportunities(
                 item,
                 prediction_by_opportunity_id.get(item.id),
                 live_tickers.get((item.contract_symbol or "").upper()),
+                snapshot_by_opportunity_id.get(item.id),
+                use_frozen=include_expired,
             )
             for item in items
         ]
@@ -1321,9 +2011,26 @@ def opportunity_analytics(
     user: Annotated[User, Depends(get_current_user)],
     limit: int = Query(default=500, ge=1, le=500),
     page: int = Query(default=1, ge=1),
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
+    symbol: str = Query(default="", max_length=32),
     news_score_min: float = Query(default=0, ge=0, le=100),
     indicator_score_min: float = Query(default=0, ge=0, le=100),
+    combined_score_min: float = Query(default=0, ge=0, le=100),
+    option_flow_score_min: float = Query(default=0, ge=0, le=100),
+    gex_score_min: float = Query(default=0, ge=0, le=100),
+    min_data_coverage: float = Query(default=0, ge=0, le=100),
+    feature_version: str = Query(default="", max_length=32),
+    decision_version: str = Query(default="", max_length=32),
     direction: Literal["all", "long", "short"] = Query(default="all"),
+    market_session: Literal[
+        "all", "premarket", "regular", "postmarket", "closed", "unknown"
+    ] = Query(default="all"),
+    quote_quality: Literal["all", "passed", "blocked", "missing"] = Query(
+        default="all"
+    ),
+    event_risk: Literal["all", "clear", "warning", "blocked"] = Query(default="all"),
+    exit_reason: str = Query(default="all", max_length=64),
 ) -> dict[str, Any]:
     repository = MonitorRepository(
         request.app.state.database_engine,
@@ -1335,9 +2042,28 @@ def opportunity_analytics(
         user.id,
         limit=limit,
         page=page,
+        date_from=(
+            datetime.combine(date_from, datetime_time.min) if date_from else None
+        ),
+        date_to=(
+            datetime.combine(date_to + timedelta(days=1), datetime_time.min)
+            if date_to
+            else None
+        ),
+        symbol=symbol,
         news_score_min=news_score_min,
         indicator_score_min=indicator_score_min,
+        combined_score_min=combined_score_min,
+        option_flow_score_min=option_flow_score_min,
+        gex_score_min=gex_score_min,
+        min_data_coverage=min_data_coverage,
+        feature_version=feature_version,
+        decision_version=decision_version,
         direction=direction,
+        market_session=market_session,
+        quote_quality=quote_quality,
+        event_risk=event_risk,
+        exit_reason=exit_reason,
     )
     result["historical_replay_readiness"] = historical_replay.replay_readiness_report(
         db, user.id

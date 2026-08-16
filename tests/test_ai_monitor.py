@@ -53,7 +53,16 @@ from quantdesk_v2.ai_monitor import (
     virtual_risk_plan_snapshot,
     weighted_opportunity_score,
 )
-from quantdesk_v2.interfaces.api.ai_monitor import _prediction_settlement_out, _utc_out
+from quantdesk_v2.interfaces.api.ai_monitor import (
+    _ai_monitor_revisions,
+    _changed_revision_scopes,
+    _prediction_settlement_out,
+    _revision_event_id,
+    _safe_market_data_health,
+    _sse_message,
+    _stable_opportunity_contract,
+    _utc_out,
+)
 from quantdesk_v2.models import (
     AiMonitorOpportunity,
     AiMonitorPrediction,
@@ -81,6 +90,139 @@ def test_ai_monitor_api_serializes_naive_database_datetimes_as_utc() -> None:
     assert serialized.tzinfo is UTC
     assert serialized.isoformat() == "2026-08-10T07:14:27+00:00"
     assert _utc_out(None) is None
+
+
+def test_ai_monitor_revision_snapshot_scopes_private_rows_to_user() -> None:
+    statements = []
+    values = iter(
+        (
+            (datetime(2026, 8, 16, 10, 0), 41),
+            (datetime(2026, 8, 16, 10, 1), 42),
+            (1_777_000_000, datetime(2026, 8, 16, 10, 2)),
+            (datetime(2026, 8, 16, 10, 3), 43),
+        )
+    )
+
+    class Result:
+        def __init__(self, value) -> None:
+            self.value = value
+
+        def one(self):
+            return self.value
+
+    class Database:
+        def execute(self, statement):
+            statements.append(statement)
+            return Result(next(values))
+
+    revisions = _ai_monitor_revisions(Database(), 73)  # type: ignore[arg-type]
+
+    opportunity_sql = str(
+        statements[0].compile(
+            dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    run_sql = str(
+        statements[1].compile(
+            dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    assert "ai_monitor_opportunities.user_id = 73" in opportunity_sql
+    assert "ai_monitor_runs.user_id = 73" in run_sql
+    assert revisions["opportunities"]["cursor"] == 41
+    assert revisions["news"]["latest_ts"] == 1_777_000_000
+    assert revisions["market"]["captured_at"] == "2026-08-16T10:03:00+00:00"
+
+
+def test_ai_monitor_sse_revision_protocol_is_resumable_and_scope_incremental() -> None:
+    initial = {
+        "opportunities": {"cursor": 4},
+        "runs": {"cursor": 3},
+        "news": {"latest_ts": 2},
+        "market": {"cursor": 1},
+    }
+    changed = {
+        **initial,
+        "opportunities": {"cursor": 5},
+        "market": {"cursor": 2},
+    }
+
+    event_id = _revision_event_id(initial)
+    assert event_id == _revision_event_id(dict(reversed(list(initial.items()))))
+    assert _changed_revision_scopes(initial, changed) == ["opportunities", "market"]
+
+    message = _sse_message(
+        event="update",
+        event_id=event_id,
+        data={"scopes": ["opportunities", "market"]},
+    )
+    assert f"id: {event_id}\n" in message
+    assert "event: update\n" in message
+    assert "retry: 3000\n" in message
+    assert 'data: {"scopes":["opportunities","market"]}\n\n' in message
+    assert "token" not in message.lower()
+
+
+def test_ai_monitor_market_data_health_is_operational_and_secret_free() -> None:
+    runtime = SimpleNamespace(
+        health_snapshot=lambda: {
+            "status": "connected",
+            "connected": True,
+            "last_event_at_ms": 1_776_336_000_000,
+            "rest": {"status": "ready", "last_poll_at_ms": 1_776_336_000_100},
+            "leadership": {"status": "leader", "is_leader": True},
+            "writer": {
+                "queue_utilization": 0.05,
+                "events_per_minute": 120,
+                "write_latency_ms": {"p50": 8.0, "p95": 20.0, "p99": 30.0},
+            },
+            "retention": {"status": "ready", "last_run_at_ms": 1_776_336_000_200},
+            "api_key": "must-not-leak",
+        },
+        channel_health_snapshot=lambda: {
+            "price": {"age_ms": 420, "status": "live"}
+        },
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(unusual_whales_runtime=runtime)
+        )
+    )
+
+    health = _safe_market_data_health(request)  # type: ignore[arg-type]
+
+    assert health["websocket_connected"] is True
+    assert health["rest_healthy"] is True
+    assert health["quote"] == {"age_ms": 420, "status": "live"}
+    assert health["leadership"] == {"status": "leader", "is_leader": True}
+    assert "must-not-leak" not in str(health)
+
+
+def test_stable_opportunity_contract_normalizes_legacy_gate_check_list() -> None:
+    contract = _stable_opportunity_contract(
+        {
+            "virtual_entry_gate": {
+                "entry_ready": False,
+                "checks": [
+                    {"key": "news_score", "passed": True},
+                    {"key": "entry_price", "passed": False},
+                ],
+            }
+        },
+        None,
+    )
+
+    assert contract["gate_summary"]["passed"] is False
+    assert contract["gate_summary"]["checks"] == {
+        "news_score": True,
+        "entry_price": False,
+    }
+    assert "REFERENCE_QUOTE_UNAVAILABLE" in contract["gate_summary"]["warnings"]
+    assert contract["data_quality"] == {
+        "quote_available": False,
+        "quote_status": "unavailable",
+        "reject_reason": "REFERENCE_QUOTE_UNAVAILABLE",
+    }
 
 
 def test_prediction_settlement_metadata_explains_pending_market_retry() -> None:
@@ -2238,7 +2380,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260816-46"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260816-51"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2248,7 +2390,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260816-46"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260816-51"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -2516,7 +2658,28 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'this.api("/cost-config"' in component
     assert 'news_score_min: String(filters.newsScoreMin)' in component
     assert 'indicator_score_min: String(filters.indicatorScoreMin)' in component
+    assert 'combined_score_min: String(filters.combinedScoreMin)' in component
+    assert 'option_flow_score_min: String(filters.optionFlowScoreMin)' in component
+    assert 'gex_score_min: String(filters.gexScoreMin)' in component
     assert 'direction: filters.direction' in component
+    assert 'market_session: filters.marketSession' in component
+    assert 'quote_quality: filters.quoteQuality' in component
+    assert 'event_risk: filters.eventRisk' in component
+    assert 'exit_reason: filters.exitReason' in component
+    assert 'item?.lifecycle_status' in component
+    assert 'item?.gate_summary' in component
+    assert 'item?.score_components' in component
+    assert 'item?.flow && typeof item.flow === "object"' in component
+    assert 'stableFlow.option_flow' in component
+    assert 'stableFlow.institutional_flow' in component
+    assert 'item?.data_quality' in component
+    assert 'item?.api_version' in component
+    assert 'item?.version?.api' in component
+    assert 'item?.signal_snapshot' in component
+    assert '无数据：尚未完成行情与风险门控评估' in component
+    assert '无数据 · 未参与门控' in component
+    assert 'flow.score ?? 50' not in component
+    assert '.virtual-entry-check.missing' in stylesheet
     assert "筛选样本" in component
     assert "多 / 空方向" in component
     assert 'this.api("/prediction-records?limit=200")' not in component
@@ -2539,7 +2702,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".strategy-readiness" in stylesheet
     assert "不会执行任何交易" in (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
     analytics_source = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
-    assert "select(AiMonitorPrediction, AiMonitorOpportunity)" in analytics_source
+    assert "OpportunityMarketSnapshot," in analytics_source
+    assert ".outerjoin(\n            OpportunityMarketSnapshot," in analytics_source
     assert "AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id" in analytics_source
     assert 'AiMonitorPrediction.status == "completed"' in analytics_source
     assert "直接统计已经完成结算的预测" in analytics_source

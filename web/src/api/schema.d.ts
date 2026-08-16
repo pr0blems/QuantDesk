@@ -168,6 +168,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/admin/market-data/unusual-whales": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unusual Whales Market Data Config
+         * @description Return the platform market-data policy without exposing its credential.
+         */
+        get: operations["unusual_whales_market_data_config_api_v2_admin_market_data_unusual_whales_get"];
+        /**
+         * Update Unusual Whales Market Data Config
+         * @description Publish channel switches, safety limits, domain weights and an optional key.
+         */
+        put: operations["update_unusual_whales_market_data_config_api_v2_admin_market_data_unusual_whales_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/admin/market-data/unusual-whales/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Unusual Whales Market Data
+         * @description Perform a bounded authenticated REST probe without returning vendor payloads.
+         */
+        post: operations["test_unusual_whales_market_data_api_v2_admin_market_data_unusual_whales_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/admin/news": {
         parameters: {
             query?: never;
@@ -498,6 +542,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ai Monitor Events
+         * @description Stream tenant-scoped revision changes for incremental UI refreshes.
+         */
+        get: operations["ai_monitor_events_api_v2_ai_monitor_events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/indicators": {
         parameters: {
             query?: never;
@@ -782,6 +846,30 @@ export interface paths {
         put?: never;
         /** Create Run */
         post: operations["create_run_api_v2_ai_monitor_runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/ai-monitor/score-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Score Policy
+         * @description Expose the platform six-domain score policy without market-data secrets.
+         */
+        get: operations["get_score_policy_api_v2_ai_monitor_score_policy_get"];
+        /**
+         * Update Score Policy
+         * @description Update only six-domain weights while preserving the complete feed config.
+         */
+        put: operations["update_score_policy_api_v2_ai_monitor_score_policy_put"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2021,6 +2109,203 @@ export interface components {
             /** Weight */
             weight?: number | null;
         };
+        /**
+         * AdminUnusualWhalesChannels
+         * @description Administrator-controlled Unusual Whales channel switches.
+         */
+        AdminUnusualWhalesChannels: {
+            /**
+             * Flow Alerts
+             * @default true
+             */
+            flow_alerts: boolean;
+            /**
+             * Gex
+             * @default true
+             */
+            gex: boolean;
+            /**
+             * Interval Flow
+             * @default true
+             */
+            interval_flow: boolean;
+            /**
+             * Lit Trades
+             * @default true
+             */
+            lit_trades: boolean;
+            /**
+             * Market Tide
+             * @default true
+             */
+            market_tide: boolean;
+            /**
+             * Net Flow
+             * @default true
+             */
+            net_flow: boolean;
+            /**
+             * Off Lit Trades
+             * @default true
+             */
+            off_lit_trades: boolean;
+            /**
+             * Option Trades
+             * @default false
+             */
+            option_trades: boolean;
+            /**
+             * Price
+             * @default true
+             */
+            price: boolean;
+            /**
+             * Trading Halts
+             * @default true
+             */
+            trading_halts: boolean;
+        };
+        /**
+         * AdminUnusualWhalesConfigUpdate
+         * @description Platform-wide market-data and signal-gate configuration.
+         */
+        AdminUnusualWhalesConfigUpdate: {
+            /** Api Key */
+            api_key?: string | null;
+            channels?: components["schemas"]["AdminUnusualWhalesChannels"];
+            /**
+             * Mode
+             * @default record
+             * @enum {string}
+             */
+            mode: "record" | "score" | "gate";
+            /**
+             * Rest Enabled
+             * @default true
+             */
+            rest_enabled: boolean;
+            retention?: components["schemas"]["AdminUnusualWhalesRetention"];
+            thresholds?: components["schemas"]["AdminUnusualWhalesThresholds"];
+            /**
+             * Websocket Enabled
+             * @default true
+             */
+            websocket_enabled: boolean;
+            weights?: components["schemas"]["AdminUnusualWhalesWeights"];
+        };
+        /**
+         * AdminUnusualWhalesRetention
+         * @description Bounded retention for high-volume, reproducible market-data tiers.
+         */
+        AdminUnusualWhalesRetention: {
+            /**
+             * Cleanup Batch Size
+             * @default 2000
+             */
+            cleanup_batch_size: number;
+            /**
+             * Cleanup Interval Minutes
+             * @default 60
+             */
+            cleanup_interval_minutes: number;
+            /**
+             * Cleanup Max Batches
+             * @default 10
+             */
+            cleanup_max_batches: number;
+            /**
+             * Feature Snapshot Days
+             * @default 90
+             */
+            feature_snapshot_days: number;
+            /**
+             * Raw Event Days
+             * @default 14
+             */
+            raw_event_days: number;
+        };
+        /**
+         * AdminUnusualWhalesThresholds
+         * @description Safety limits used by the real-time opportunity admission gate.
+         */
+        AdminUnusualWhalesThresholds: {
+            /**
+             * Event Block After Minutes
+             * @default 15
+             */
+            event_block_after_minutes: number;
+            /**
+             * Event Block Before Minutes
+             * @default 30
+             */
+            event_block_before_minutes: number;
+            /**
+             * Halt Cooldown Minutes
+             * @default 15
+             */
+            halt_cooldown_minutes: number;
+            /**
+             * Min Data Coverage
+             * @default 0.8
+             */
+            min_data_coverage: number;
+            /**
+             * Quote Age Extended Ms
+             * @default 10000
+             */
+            quote_age_extended_ms: number;
+            /**
+             * Quote Age Regular Ms
+             * @default 2000
+             */
+            quote_age_regular_ms: number;
+            /**
+             * Source Divergence Max Bps
+             * @default 35
+             */
+            source_divergence_max_bps: number;
+            /**
+             * Spread Hard Max Bps
+             * @default 80
+             */
+            spread_hard_max_bps: number;
+        };
+        /**
+         * AdminUnusualWhalesWeights
+         * @description Published scoring-domain weights; the sum must remain exactly one.
+         */
+        AdminUnusualWhalesWeights: {
+            /**
+             * Gex
+             * @default 0.1
+             */
+            gex: number;
+            /**
+             * Institutional Flow
+             * @default 0.1
+             */
+            institutional_flow: number;
+            /**
+             * Market Context
+             * @default 0.1
+             */
+            market_context: number;
+            /**
+             * News
+             * @default 0.2
+             */
+            news: number;
+            /**
+             * Options Flow
+             * @default 0.2
+             */
+            options_flow: number;
+            /**
+             * Technical
+             * @default 0.3
+             */
+            technical: number;
+        };
         /** AdminUserUpdate */
         AdminUserUpdate: {
             /** Is Active */
@@ -2273,6 +2558,13 @@ export interface components {
              * @enum {string}
              */
             run_type: "news" | "opportunity";
+        };
+        /**
+         * AiMonitorScorePolicyUpdate
+         * @description Only the six-domain scoring weights exposed by the AI monitor UI.
+         */
+        AiMonitorScorePolicyUpdate: {
+            weights: components["schemas"]["AdminUnusualWhalesWeights"];
         };
         /** AiProviderOut */
         AiProviderOut: {
@@ -3706,6 +3998,83 @@ export interface operations {
             };
         };
     };
+    unusual_whales_market_data_config_api_v2_admin_market_data_unusual_whales_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    update_unusual_whales_market_data_config_api_v2_admin_market_data_unusual_whales_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminUnusualWhalesConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_unusual_whales_market_data_api_v2_admin_market_data_unusual_whales_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageOut"];
+                };
+            };
+        };
+    };
     admin_news_api_v2_admin_news_get: {
         parameters: {
             query?: {
@@ -4430,6 +4799,26 @@ export interface operations {
             };
         };
     };
+    ai_monitor_events_api_v2_ai_monitor_events_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     indicators_api_v2_ai_monitor_indicators_get: {
         parameters: {
             query?: {
@@ -4781,9 +5170,22 @@ export interface operations {
             query?: {
                 limit?: number;
                 page?: number;
+                date_from?: string | null;
+                date_to?: string | null;
+                symbol?: string;
                 news_score_min?: number;
                 indicator_score_min?: number;
+                combined_score_min?: number;
+                option_flow_score_min?: number;
+                gex_score_min?: number;
+                min_data_coverage?: number;
+                feature_version?: string;
+                decision_version?: string;
                 direction?: "all" | "long" | "short";
+                market_session?: "all" | "premarket" | "regular" | "postmarket" | "closed" | "unknown";
+                quote_quality?: "all" | "passed" | "blocked" | "missing";
+                event_risk?: "all" | "clear" | "warning" | "blocked";
+                exit_reason?: string;
             };
             header?: never;
             path?: never;
@@ -5017,6 +5419,63 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_score_policy_api_v2_ai_monitor_score_policy_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    update_score_policy_api_v2_ai_monitor_score_policy_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorScorePolicyUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

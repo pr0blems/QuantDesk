@@ -1,8 +1,9 @@
-import type { ApiRequestOptions } from "./api/client";
+import type { ApiRequestOptions, ApiStreamOptions } from "./api/client";
 
 declare global {
   interface Window {
     quantdeskApi: (path: string, options?: ApiRequestOptions) => Promise<unknown>;
+    quantdeskApiStream: (path: string, options?: ApiStreamOptions) => Promise<Response>;
   }
 
   namespace JSX {

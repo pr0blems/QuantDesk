@@ -4,11 +4,14 @@ from pydantic import SecretStr
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
+from quantdesk_v2 import admin as admin_api
 from quantdesk_v2 import battle, prediction_ai_optimizer
+from quantdesk_v2 import news as market_news
 from quantdesk_v2.config import Settings
 from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
 from quantdesk_v2.models import AdminSetting, AuditLog, NewsSourceSetting, User
+from quantdesk_v2.security import CredentialCipher, api_key_fingerprint
 from quantdesk_v2.strategy_ai import StrategyAiError
 
 
@@ -268,6 +271,332 @@ def test_admin_frontend_assets_and_route(mysql_test_engine: Engine) -> None:
     assert login_page.status_code == 308
     assert login_page.headers["location"] == "http://127.0.0.1:5173/next/admin/#overview"
     assert user_page.status_code == 200
+
+
+def test_unusual_whales_market_data_configuration_is_admin_only_and_secret_safe(
+    mysql_test_engine: Engine,
+) -> None:
+    client, test_session = build_admin_client(mysql_test_engine)
+    with client:
+        admin_id, _ = register_and_login(client, "unusual-whales-admin")
+        regular_id, regular_token = register_and_login(
+            client, "unusual-whales-regular"
+        )
+        with test_session() as db:
+            db.get(User, admin_id).is_admin = True
+            db.commit()
+
+        admin_login = client.post(
+            "/api/v2/auth/login",
+            json={
+                "username": "unusual-whales-admin",
+                "password": "correct horse battery staple",
+                "client_type": "web",
+            },
+        )
+        admin_token = admin_login.json()["access_token"]
+        admin_headers = {
+            "Authorization": f"Bearer {admin_token}",
+            "X-QuantDesk-User-ID": str(admin_id),
+        }
+        regular_headers = {
+            "Authorization": f"Bearer {regular_token}",
+            "X-QuantDesk-User-ID": str(regular_id),
+        }
+
+        assert client.get("/api/v2/admin/market-data/unusual-whales").status_code == 401
+        assert (
+            client.put(
+                "/api/v2/admin/market-data/unusual-whales",
+                json={},
+            ).status_code
+            == 401
+        )
+        assert (
+            client.get(
+                "/api/v2/admin/market-data/unusual-whales",
+                headers=regular_headers,
+            ).status_code
+            == 403
+        )
+
+        initial = client.get(
+            "/api/v2/admin/market-data/unusual-whales",
+            headers=admin_headers,
+        )
+        assert initial.status_code == 200
+        assert isinstance(initial.json()["configured"], bool)
+        assert "api_key" not in initial.json()["config"]
+        assert "api_key_encrypted" not in initial.text
+        assert initial.json()["health"]["leadership"]["is_leader"] is False
+        assert initial.json()["health"]["retention"]["status"] == "pending"
+
+        api_key = "uw-test-secret-abcdef123456"
+        payload = {
+            "api_key": api_key,
+            "mode": "gate",
+            "rest_enabled": True,
+            "websocket_enabled": True,
+            "channels": {
+                "price": True,
+                "trading_halts": True,
+                "interval_flow": True,
+                "net_flow": True,
+                "market_tide": True,
+                "gex": True,
+                "lit_trades": True,
+                "off_lit_trades": True,
+                "flow_alerts": True,
+                "option_trades": False,
+            },
+            "thresholds": {
+                "quote_age_regular_ms": 1_500,
+                "quote_age_extended_ms": 8_000,
+                "spread_hard_max_bps": 65.0,
+                "source_divergence_max_bps": 30.0,
+                "min_data_coverage": 0.85,
+                "event_block_before_minutes": 45,
+                "event_block_after_minutes": 20,
+                "halt_cooldown_minutes": 20,
+            },
+            "weights": {
+                "news": 0.25,
+                "technical": 0.25,
+                "market_context": 0.15,
+                "options_flow": 0.15,
+                "gex": 0.10,
+                "institutional_flow": 0.10,
+            },
+            "retention": {
+                "raw_event_days": 21,
+                "feature_snapshot_days": 120,
+                "cleanup_interval_minutes": 30,
+                "cleanup_batch_size": 3_000,
+                "cleanup_max_batches": 12,
+            },
+        }
+        forbidden_update = client.put(
+            "/api/v2/admin/market-data/unusual-whales",
+            headers=regular_headers,
+            json=payload,
+        )
+        assert forbidden_update.status_code == 403
+
+        saved = client.put(
+            "/api/v2/admin/market-data/unusual-whales",
+            headers=admin_headers,
+            json=payload,
+        )
+        assert saved.status_code == 200
+        body = saved.json()
+        assert body["configured"] is True
+        assert body["credential_source"] == "database"
+        assert body["api_key_fingerprint"] == api_key_fingerprint(api_key)
+        assert body["version"] == 1
+        assert body["config"]["mode"] == "gate"
+        assert body["config"]["thresholds"] == payload["thresholds"]
+        assert body["config"]["weights"] == payload["weights"]
+        assert body["config"]["retention"] == payload["retention"]
+        assert "api_key" not in body["config"]
+        assert api_key not in saved.text
+        assert "api_key_encrypted" not in saved.text
+
+        fetched = client.get(
+            "/api/v2/admin/market-data/unusual-whales",
+            headers=admin_headers,
+        )
+        assert fetched.status_code == 200
+        assert fetched.json()["config"] == body["config"]
+        assert fetched.json()["api_key_fingerprint"] == api_key_fingerprint(api_key)
+        assert api_key not in fetched.text
+        assert "api_key_encrypted" not in fetched.text
+
+        invalid_weights = {
+            **payload,
+            "api_key": "",
+            "weights": {
+                **payload["weights"],
+                "institutional_flow": 0.20,
+            },
+        }
+        rejected = client.put(
+            "/api/v2/admin/market-data/unusual-whales",
+            headers=admin_headers,
+            json=invalid_weights,
+        )
+        assert rejected.status_code == 422
+
+        with test_session() as db:
+            policy = db.get(AdminSetting, admin_api.UNUSUAL_WHALES_MARKET_DATA_KEY)
+            credential = db.get(
+                AdminSetting,
+                market_news.UNUSUAL_WHALES_CREDENTIAL_KEY,
+            )
+            assert policy is not None
+            assert policy.version == 1
+            assert policy.value_json == body["config"]
+            assert "api_key" not in policy.value_json
+            assert credential is not None
+            assert credential.version == 1
+            assert credential.value_json["api_key_fingerprint"] == api_key_fingerprint(
+                api_key
+            )
+            ciphertext = credential.value_json["api_key_encrypted"]
+            assert api_key not in ciphertext
+            cipher = CredentialCipher(
+                client.app.state.settings.credential_master_key.get_secret_value()
+            )
+            assert cipher.decrypt(ciphertext) == api_key
+            audit = (
+                db.query(AuditLog)
+                .filter(
+                    AuditLog.action
+                    == "admin.market_data.unusual_whales.update"
+                )
+                .one()
+            )
+            assert audit.metadata_json["credential_replaced"] is True
+            assert api_key not in str(audit.metadata_json)
+
+
+def test_ai_monitor_score_policy_updates_only_six_domain_weights(
+    mysql_test_engine: Engine,
+) -> None:
+    client, test_session = build_admin_client(mysql_test_engine)
+    with client:
+        admin_id, _ = register_and_login(client, "score-policy-admin")
+        regular_id, regular_token = register_and_login(client, "score-policy-reader")
+        original = {
+            "mode": "gate",
+            "rest_enabled": False,
+            "websocket_enabled": True,
+            "channels": {
+                "price": True,
+                "trading_halts": False,
+                "interval_flow": True,
+                "net_flow": False,
+                "market_tide": True,
+                "gex": True,
+                "lit_trades": False,
+                "off_lit_trades": True,
+                "flow_alerts": True,
+                "option_trades": False,
+            },
+            "thresholds": {
+                "quote_age_regular_ms": 1_700,
+                "quote_age_extended_ms": 9_000,
+                "spread_hard_max_bps": 70.0,
+                "source_divergence_max_bps": 32.0,
+                "min_data_coverage": 0.82,
+                "event_block_before_minutes": 40,
+                "event_block_after_minutes": 18,
+                "halt_cooldown_minutes": 17,
+            },
+            "weights": {
+                "news": 0.30,
+                "technical": 0.25,
+                "market_context": 0.15,
+                "options_flow": 0.12,
+                "gex": 0.08,
+                "institutional_flow": 0.10,
+            },
+            "retention": {
+                "raw_event_days": 20,
+                "feature_snapshot_days": 110,
+                "cleanup_interval_minutes": 45,
+                "cleanup_batch_size": 2_500,
+                "cleanup_max_batches": 11,
+            },
+        }
+        with test_session() as db:
+            db.get(User, admin_id).is_admin = True
+            db.add(
+                AdminSetting(
+                    key=admin_api.UNUSUAL_WHALES_MARKET_DATA_KEY,
+                    value_json=original,
+                    version=7,
+                    updated_by=admin_id,
+                )
+            )
+            db.commit()
+
+        admin_login = client.post(
+            "/api/v2/auth/login",
+            json={
+                "username": "score-policy-admin",
+                "password": "correct horse battery staple",
+                "client_type": "web",
+            },
+        )
+        admin_headers = {
+            "Authorization": f"Bearer {admin_login.json()['access_token']}",
+            "X-QuantDesk-User-ID": str(admin_id),
+        }
+        regular_headers = {
+            "Authorization": f"Bearer {regular_token}",
+            "X-QuantDesk-User-ID": str(regular_id),
+        }
+        recommended = {
+            "news": 0.20,
+            "technical": 0.30,
+            "market_context": 0.10,
+            "options_flow": 0.20,
+            "gex": 0.10,
+            "institutional_flow": 0.10,
+        }
+
+        readable = client.get(
+            "/api/v2/ai-monitor/score-policy", headers=regular_headers
+        )
+        assert readable.status_code == 200
+        assert readable.json()["can_edit"] is False
+        assert readable.json()["weights"] == original["weights"]
+        assert readable.json()["weights_version"] == "uw_weights_v7"
+        assert readable.json()["weight_unit"] == "fraction"
+
+        forbidden = client.put(
+            "/api/v2/ai-monitor/score-policy",
+            headers=regular_headers,
+            json={"weights": recommended},
+        )
+        assert forbidden.status_code == 403
+        invalid = client.put(
+            "/api/v2/ai-monitor/score-policy",
+            headers=admin_headers,
+            json={"weights": {**recommended, "gex": 0.20}},
+        )
+        assert invalid.status_code == 422
+
+        saved = client.put(
+            "/api/v2/ai-monitor/score-policy",
+            headers=admin_headers,
+            json={"weights": recommended},
+        )
+        assert saved.status_code == 200
+        body = saved.json()
+        assert body["mode"] == "score"
+        assert body["score_enabled"] is True
+        assert body["hard_gate_enabled"] is False
+        assert body["weights"] == recommended
+        assert body["weights_version"] == "uw_weights_v8"
+        assert body["weight_total"] == 1.0
+
+        with test_session() as db:
+            setting = db.get(
+                AdminSetting, admin_api.UNUSUAL_WHALES_MARKET_DATA_KEY
+            )
+            assert setting is not None
+            assert setting.version == 8
+            assert setting.value_json["mode"] == "score"
+            assert setting.value_json["weights"] == recommended
+            for preserved in (
+                "rest_enabled",
+                "websocket_enabled",
+                "channels",
+                "thresholds",
+                "retention",
+            ):
+                assert setting.value_json[preserved] == original[preserved]
 
 
 def test_deepseek_algorithm_optimization_saves_a_new_version(

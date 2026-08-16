@@ -298,6 +298,275 @@
         "title": "AdminNewsSourceUpdate",
         "type": "object"
       },
+      "AdminUnusualWhalesChannels": {
+        "additionalProperties": false,
+        "description": "Administrator-controlled Unusual Whales channel switches.",
+        "properties": {
+          "flow_alerts": {
+            "default": true,
+            "title": "Flow Alerts",
+            "type": "boolean"
+          },
+          "gex": {
+            "default": true,
+            "title": "Gex",
+            "type": "boolean"
+          },
+          "interval_flow": {
+            "default": true,
+            "title": "Interval Flow",
+            "type": "boolean"
+          },
+          "lit_trades": {
+            "default": true,
+            "title": "Lit Trades",
+            "type": "boolean"
+          },
+          "market_tide": {
+            "default": true,
+            "title": "Market Tide",
+            "type": "boolean"
+          },
+          "net_flow": {
+            "default": true,
+            "title": "Net Flow",
+            "type": "boolean"
+          },
+          "off_lit_trades": {
+            "default": true,
+            "title": "Off Lit Trades",
+            "type": "boolean"
+          },
+          "option_trades": {
+            "default": false,
+            "title": "Option Trades",
+            "type": "boolean"
+          },
+          "price": {
+            "default": true,
+            "title": "Price",
+            "type": "boolean"
+          },
+          "trading_halts": {
+            "default": true,
+            "title": "Trading Halts",
+            "type": "boolean"
+          }
+        },
+        "title": "AdminUnusualWhalesChannels",
+        "type": "object"
+      },
+      "AdminUnusualWhalesConfigUpdate": {
+        "additionalProperties": false,
+        "description": "Platform-wide market-data and signal-gate configuration.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 2048,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "channels": {
+            "$ref": "#/components/schemas/AdminUnusualWhalesChannels"
+          },
+          "mode": {
+            "default": "record",
+            "enum": [
+              "record",
+              "score",
+              "gate"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "rest_enabled": {
+            "default": true,
+            "title": "Rest Enabled",
+            "type": "boolean"
+          },
+          "retention": {
+            "$ref": "#/components/schemas/AdminUnusualWhalesRetention"
+          },
+          "thresholds": {
+            "$ref": "#/components/schemas/AdminUnusualWhalesThresholds"
+          },
+          "websocket_enabled": {
+            "default": true,
+            "title": "Websocket Enabled",
+            "type": "boolean"
+          },
+          "weights": {
+            "$ref": "#/components/schemas/AdminUnusualWhalesWeights"
+          }
+        },
+        "title": "AdminUnusualWhalesConfigUpdate",
+        "type": "object"
+      },
+      "AdminUnusualWhalesRetention": {
+        "additionalProperties": false,
+        "description": "Bounded retention for high-volume, reproducible market-data tiers.",
+        "properties": {
+          "cleanup_batch_size": {
+            "default": 2000,
+            "maximum": 20000.0,
+            "minimum": 100.0,
+            "title": "Cleanup Batch Size",
+            "type": "integer"
+          },
+          "cleanup_interval_minutes": {
+            "default": 60,
+            "maximum": 1440.0,
+            "minimum": 1.0,
+            "title": "Cleanup Interval Minutes",
+            "type": "integer"
+          },
+          "cleanup_max_batches": {
+            "default": 10,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Cleanup Max Batches",
+            "type": "integer"
+          },
+          "feature_snapshot_days": {
+            "default": 90,
+            "maximum": 730.0,
+            "minimum": 7.0,
+            "title": "Feature Snapshot Days",
+            "type": "integer"
+          },
+          "raw_event_days": {
+            "default": 14,
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Raw Event Days",
+            "type": "integer"
+          }
+        },
+        "title": "AdminUnusualWhalesRetention",
+        "type": "object"
+      },
+      "AdminUnusualWhalesThresholds": {
+        "additionalProperties": false,
+        "description": "Safety limits used by the real-time opportunity admission gate.",
+        "properties": {
+          "event_block_after_minutes": {
+            "default": 15,
+            "maximum": 1440.0,
+            "minimum": 0.0,
+            "title": "Event Block After Minutes",
+            "type": "integer"
+          },
+          "event_block_before_minutes": {
+            "default": 30,
+            "maximum": 1440.0,
+            "minimum": 0.0,
+            "title": "Event Block Before Minutes",
+            "type": "integer"
+          },
+          "halt_cooldown_minutes": {
+            "default": 15,
+            "maximum": 1440.0,
+            "minimum": 0.0,
+            "title": "Halt Cooldown Minutes",
+            "type": "integer"
+          },
+          "min_data_coverage": {
+            "default": 0.8,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Data Coverage",
+            "type": "number"
+          },
+          "quote_age_extended_ms": {
+            "default": 10000,
+            "maximum": 120000.0,
+            "minimum": 1000.0,
+            "title": "Quote Age Extended Ms",
+            "type": "integer"
+          },
+          "quote_age_regular_ms": {
+            "default": 2000,
+            "maximum": 60000.0,
+            "minimum": 250.0,
+            "title": "Quote Age Regular Ms",
+            "type": "integer"
+          },
+          "source_divergence_max_bps": {
+            "default": 35.0,
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Source Divergence Max Bps",
+            "type": "number"
+          },
+          "spread_hard_max_bps": {
+            "default": 80.0,
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Spread Hard Max Bps",
+            "type": "number"
+          }
+        },
+        "title": "AdminUnusualWhalesThresholds",
+        "type": "object"
+      },
+      "AdminUnusualWhalesWeights": {
+        "additionalProperties": false,
+        "description": "Published scoring-domain weights; the sum must remain exactly one.",
+        "properties": {
+          "gex": {
+            "default": 0.1,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Gex",
+            "type": "number"
+          },
+          "institutional_flow": {
+            "default": 0.1,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Institutional Flow",
+            "type": "number"
+          },
+          "market_context": {
+            "default": 0.1,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Market Context",
+            "type": "number"
+          },
+          "news": {
+            "default": 0.2,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "News",
+            "type": "number"
+          },
+          "options_flow": {
+            "default": 0.2,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Options Flow",
+            "type": "number"
+          },
+          "technical": {
+            "default": 0.3,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Technical",
+            "type": "number"
+          }
+        },
+        "title": "AdminUnusualWhalesWeights",
+        "type": "object"
+      },
       "AdminUserUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -828,6 +1097,20 @@
           "run_type"
         ],
         "title": "AiMonitorRunRequest",
+        "type": "object"
+      },
+      "AiMonitorScorePolicyUpdate": {
+        "additionalProperties": false,
+        "description": "Only the six-domain scoring weights exposed by the AI monitor UI.",
+        "properties": {
+          "weights": {
+            "$ref": "#/components/schemas/AdminUnusualWhalesWeights"
+          }
+        },
+        "required": [
+          "weights"
+        ],
+        "title": "AiMonitorScorePolicyUpdate",
         "type": "object"
       },
       "AiProviderOut": {
@@ -4663,6 +4946,109 @@
         ]
       }
     },
+    "/api/v2/admin/market-data/unusual-whales": {
+      "get": {
+        "description": "Return the platform market-data policy without exposing its credential.",
+        "operationId": "unusual_whales_market_data_config_api_v2_admin_market_data_unusual_whales_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Unusual Whales Market Data Config Api V2 Admin Market Data Unusual Whales Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Unusual Whales Market Data Config",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "description": "Publish channel switches, safety limits, domain weights and an optional key.",
+        "operationId": "update_unusual_whales_market_data_config_api_v2_admin_market_data_unusual_whales_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminUnusualWhalesConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Unusual Whales Market Data Config Api V2 Admin Market Data Unusual Whales Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Unusual Whales Market Data Config",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v2/admin/market-data/unusual-whales/test": {
+      "post": {
+        "description": "Perform a bounded authenticated REST probe without returning vendor payloads.",
+        "operationId": "test_unusual_whales_market_data_api_v2_admin_market_data_unusual_whales_test_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Test Unusual Whales Market Data",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v2/admin/news": {
       "get": {
         "operationId": "admin_news_api_v2_admin_news_get",
@@ -5840,6 +6226,28 @@
         "summary": "Update Cost Config"
       }
     },
+    "/api/v2/ai-monitor/events": {
+      "get": {
+        "description": "Stream tenant-scoped revision changes for incremental UI refreshes.",
+        "operationId": "ai_monitor_events_api_v2_ai_monitor_events_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ai Monitor Events"
+      }
+    },
     "/api/v2/ai-monitor/indicators": {
       "get": {
         "operationId": "indicators_api_v2_ai_monitor_indicators_get",
@@ -6352,6 +6760,51 @@
           },
           {
             "in": "query",
+            "name": "date_from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 32,
+              "title": "Symbol",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "news_score_min",
             "required": false,
             "schema": {
@@ -6376,6 +6829,76 @@
           },
           {
             "in": "query",
+            "name": "combined_score_min",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 100,
+              "minimum": 0,
+              "title": "Combined Score Min",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "option_flow_score_min",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 100,
+              "minimum": 0,
+              "title": "Option Flow Score Min",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "gex_score_min",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 100,
+              "minimum": 0,
+              "title": "Gex Score Min",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_data_coverage",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 100,
+              "minimum": 0,
+              "title": "Min Data Coverage",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "feature_version",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 32,
+              "title": "Feature Version",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "decision_version",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 32,
+              "title": "Decision Version",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "direction",
             "required": false,
             "schema": {
@@ -6386,6 +6909,67 @@
                 "short"
               ],
               "title": "Direction",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "market_session",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "premarket",
+                "regular",
+                "postmarket",
+                "closed",
+                "unknown"
+              ],
+              "title": "Market Session",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "quote_quality",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "passed",
+                "blocked",
+                "missing"
+              ],
+              "title": "Quote Quality",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event_risk",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "clear",
+                "warning",
+                "blocked"
+              ],
+              "title": "Event Risk",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exit_reason",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "maxLength": 64,
+              "title": "Exit Reason",
               "type": "string"
             }
           }
@@ -6724,6 +7308,76 @@
           }
         ],
         "summary": "Create Run"
+      }
+    },
+    "/api/v2/ai-monitor/score-policy": {
+      "get": {
+        "description": "Expose the platform six-domain score policy without market-data secrets.",
+        "operationId": "get_score_policy_api_v2_ai_monitor_score_policy_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Score Policy Api V2 Ai Monitor Score Policy Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Score Policy"
+      },
+      "put": {
+        "description": "Update only six-domain weights while preserving the complete feed config.",
+        "operationId": "update_score_policy_api_v2_ai_monitor_score_policy_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorScorePolicyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Score Policy Api V2 Ai Monitor Score Policy Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Score Policy"
       }
     },
     "/api/v2/ai-monitor/symbols": {

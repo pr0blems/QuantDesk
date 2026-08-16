@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 
-import { apiRequest } from "./api/client";
+import { apiRequest, apiStream } from "./api/client";
 import { App } from "./App";
 import "./styles.css";
 
@@ -15,9 +15,14 @@ window.quantdeskApi = (path, options = {}) => {
   return apiRequest(normalized as `/${string}`, options);
 };
 
+window.quantdeskApiStream = (path, options = {}) => {
+  const normalized = path.replace(/^\/api\/v2/, "") || "/";
+  return apiStream(normalized as `/${string}`, options);
+};
+
 for (const source of [
   "/assets/monitor.js?v=20260810-forecast-2",
-  "/assets/ai-monitor.js?v=20260816-46",
+  "/assets/ai-monitor.js?v=20260816-51",
   "/assets/paper.js?v=20260809-paper-combo-1",
   "/assets/live.js?v=20260809-font1_6x-1",
   "/assets/backtest.js?v=20260809-font1_6x-1",

@@ -1176,6 +1176,288 @@ class AiMonitorPrediction(Base):
     )
 
 
+class MarketStreamEvent(Base):
+    """Deduplicated provider events retained for replay and source auditing."""
+
+    __tablename__ = "market_stream_events"
+    __table_args__ = (
+        CheckConstraint(
+            "quality_status IN ('valid', 'delayed', 'stale', 'duplicate', 'invalid')",
+            name="valid_quality_status",
+        ),
+        UniqueConstraint(
+            "provider",
+            "channel",
+            "dedup_key",
+            name="uq_market_stream_event_identity",
+        ),
+        Index("ix_market_stream_events_symbol_time", "symbol", "event_time"),
+        Index("ix_market_stream_events_channel_time", "channel", "event_time"),
+        {
+            "comment": "Normalized market-data events used for deterministic replay",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    channel: Mapped[str] = mapped_column(String(48), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32))
+    event_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    sequence_key: Mapped[str | None] = mapped_column(String(96))
+    dedup_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    schema_version: Mapped[str] = mapped_column(
+        String(32), default="uw_stream_v1", nullable=False
+    )
+    quality_status: Mapped[str] = mapped_column(
+        String(16), default="valid", nullable=False
+    )
+
+
+class RealtimeMarketFeatureSnapshot(Base):
+    """Minute-bucket quote, flow, GEX and venue features for AI opportunities."""
+
+    __tablename__ = "realtime_market_feature_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "market_session IN ('premarket', 'regular', 'postmarket', 'closed', 'unknown')",
+            name="valid_market_session",
+        ),
+        CheckConstraint(
+            "halt_status IN ('clear', 'halted', 'cooldown', 'unknown')",
+            name="valid_halt_status",
+        ),
+        CheckConstraint(
+            "data_coverage BETWEEN 0 AND 1",
+            name="valid_data_coverage",
+        ),
+        UniqueConstraint(
+            "symbol",
+            "bucket_at",
+            "feature_version",
+            name="uq_realtime_market_feature_identity",
+        ),
+        Index(
+            "ix_realtime_market_features_symbol_time",
+            "symbol",
+            "bucket_at",
+        ),
+        {
+            "comment": "Normalized real-time market features for AI signal gating",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    bucket_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    market_session: Mapped[str] = mapped_column(
+        String(16), default="unknown", nullable=False
+    )
+    last_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    bid: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    ask: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    spread_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    quote_age_ms: Mapped[int | None] = mapped_column(BigInteger)
+    size_imbalance: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    quote_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    option_flow_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    gex_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    institutional_flow_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    halt_status: Mapped[str] = mapped_column(
+        String(16), default="unknown", nullable=False
+    )
+    data_coverage: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), default=Decimal("0.0000"), nullable=False
+    )
+    stale_fields_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    quality_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    feature_version: Mapped[str] = mapped_column(
+        String(32), default="uw_features_v2", nullable=False
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+
+class MarketRiskEvent(Base):
+    """Scheduled or live risk events that may block a new virtual entry."""
+
+    __tablename__ = "market_risk_events"
+    __table_args__ = (
+        CheckConstraint(
+            "risk_level IN ('normal', 'medium', 'high', 'critical')",
+            name="valid_risk_level",
+        ),
+        CheckConstraint(
+            "status IN ('scheduled', 'active', 'completed', 'cancelled')",
+            name="valid_event_status",
+        ),
+        UniqueConstraint(
+            "provider", "dedup_key", name="uq_market_risk_event_identity"
+        ),
+        Index("ix_market_risk_events_schedule", "status", "scheduled_at"),
+        Index("ix_market_risk_events_symbol_schedule", "symbol", "scheduled_at"),
+        {
+            "comment": "Macro, earnings and halt risk windows for AI entry gating",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, unique=True
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_event_id: Mapped[str | None] = mapped_column(String(96))
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_name: Mapped[str] = mapped_column(String(191), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32))
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    actual_at: Mapped[datetime | None] = mapped_column(DateTime)
+    risk_level: Mapped[str] = mapped_column(
+        String(16), default="medium", nullable=False
+    )
+    blocking_before_seconds: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    blocking_after_seconds: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="scheduled", nullable=False
+    )
+    dedup_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    source_payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+
+class OpportunityMarketSnapshot(Base):
+    """Immutable market and decision inputs captured for one AI opportunity."""
+
+    __tablename__ = "opportunity_market_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "opportunity_id", name="uq_opportunity_market_snapshot_opportunity"
+        ),
+        ForeignKeyConstraint(
+            ["opportunity_id", "user_id"],
+            ["ai_monitor_opportunities.id", "ai_monitor_opportunities.user_id"],
+            name="fk_opportunity_market_snapshot_user",
+            ondelete="CASCADE",
+        ),
+        Index("ix_opportunity_market_snapshots_user_time", "user_id", "captured_at"),
+        {
+            "comment": "Immutable signal-time evidence for opportunity history and replay",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    market_feature_snapshot_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("realtime_market_feature_snapshots.id", ondelete="SET NULL"),
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    quote_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    option_flow_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    gex_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    institutional_flow_snapshot_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False
+    )
+    macro_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    risk_gate_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    score_components_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    data_quality_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    weights_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    feature_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class OpportunityGateDecision(Base):
+    """Immutable gate decision for every opportunity scan candidate."""
+
+    __tablename__ = "opportunity_gate_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "gate_status IN ('passed', 'blocked', 'degraded', 'unavailable')",
+            name="valid_gate_status",
+        ),
+        CheckConstraint("direction IN ('long', 'short')", name="valid_direction"),
+        UniqueConstraint("public_id", name="uq_opportunity_gate_decisions_public_id"),
+        UniqueConstraint("dedup_key", name="uq_opportunity_gate_decisions_dedup_key"),
+        ForeignKeyConstraint(
+            ["opportunity_id", "user_id"],
+            ["ai_monitor_opportunities.id", "ai_monitor_opportunities.user_id"],
+            name="fk_opportunity_gate_decisions_opportunity_user",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_opportunity_gate_decisions_user_time",
+            "user_id",
+            "decision_at",
+        ),
+        Index(
+            "ix_opportunity_gate_decisions_opportunity_time",
+            "opportunity_id",
+            "decision_at",
+        ),
+        {
+            "comment": "Immutable pass/reject evidence for every AI opportunity gate evaluation",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    opportunity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    analysis_run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    market_feature_snapshot_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("realtime_market_feature_snapshots.id", ondelete="SET NULL"),
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    gate_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    decision_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    feature_captured_at: Mapped[datetime | None] = mapped_column(DateTime)
+    blocking_reasons_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    warnings_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    risk_gate_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    quote_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    market_flow_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    score_components_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    data_quality_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    feature_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    weights_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    dedup_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+
 class AiMonitorReplayRun(Base):
     """An isolated, point-in-time historical replay execution."""
 

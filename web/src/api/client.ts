@@ -124,6 +124,8 @@ export interface ApiRequestOptions extends RequestInit {
   useAuthentication?: boolean;
 }
 
+export type ApiStreamOptions = ApiRequestOptions;
+
 export async function apiRequest<T>(
   path: `/${string}`,
   options: ApiRequestOptions = {},
@@ -168,6 +170,47 @@ export async function apiRequest<T>(
     throw new ApiError(detailMessage(detail), response.status, detail);
   }
   return payload as T;
+}
+
+export async function apiStream(
+  path: `/${string}`,
+  options: ApiStreamOptions = {},
+): Promise<Response> {
+  const {
+    retryAuthentication = true,
+    useAuthentication = true,
+    ...requestOptions
+  } = options;
+  const headers = new Headers(requestOptions.headers);
+  headers.set("Accept", "text/event-stream");
+  if (useAuthentication && accessToken) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
+    if (authenticatedUserId) headers.set("X-QuantDesk-User-ID", authenticatedUserId);
+  }
+  const response = await fetch(`${apiRoot}${path}`, {
+    ...requestOptions,
+    headers,
+    credentials: "include",
+  });
+  if (
+    response.status === 401
+    && retryAuthentication
+    && useAuthentication
+    && !path.startsWith("/auth/")
+  ) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) {
+      return apiStream(path, { ...options, retryAuthentication: false });
+    }
+    loseAuthentication();
+  }
+  if (!response.ok) {
+    const payload = await responsePayload(response);
+    const errorPayload = (payload ?? {}) as ErrorPayload;
+    const detail = errorPayload.detail ?? errorPayload.message ?? null;
+    throw new ApiError(detailMessage(detail), response.status, detail);
+  }
+  return response;
 }
 
 export function setAccessToken(token: string): void {

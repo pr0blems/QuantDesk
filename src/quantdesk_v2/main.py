@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -9,11 +11,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
-from .admin import initialize_admin_runtime
+from .admin import UNUSUAL_WHALES_MARKET_DATA_KEY, initialize_admin_runtime
 from .admin import router as admin_router
 from .api import router
 from .binance_client import BinanceAccountClient
@@ -24,7 +28,11 @@ from .database import build_engine, engine
 from .finnhub import FinnhubClient, FinnhubMarketStatusService, FinnhubWebhookReceiver
 from .finnhub_quotes import FinnhubUsQuoteService
 from .macro_market import MacroMarketService, configure_default_service
+from .models import AdminSetting
+from .news import _unusual_whales_api_key
 from .strategy_routes import router as strategy_router
+from .unusual_whales import UnusualWhalesMarketClient
+from .unusual_whales_runtime import DEFAULT_CHANNEL_FLAGS, UnusualWhalesRuntime
 
 FRONTEND_ROUTES = (
     "/login",
@@ -53,6 +61,49 @@ _SENSITIVE_VALIDATION_MARKERS = (
     "cookie",
     "credential",
 )
+
+
+def _monitor_symbols(path: Path) -> tuple[str, ...]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ()
+    return tuple(
+        str(item.get("symbol") or "").strip().upper()
+        for item in payload.get("symbols", [])
+        if isinstance(item, dict) and str(item.get("symbol") or "").strip()
+    )
+
+
+def _unusual_whales_runtime_config(database_engine) -> dict[str, Any]:
+    default = {
+        "rest_enabled": True,
+        "websocket_enabled": True,
+        "channels": dict(DEFAULT_CHANNEL_FLAGS),
+        "thresholds": {},
+        "retention": {},
+    }
+    try:
+        with Session(database_engine) as db:
+            setting = db.get(AdminSetting, UNUSUAL_WHALES_MARKET_DATA_KEY)
+            value = setting.value_json if setting is not None else None
+    except SQLAlchemyError:
+        return default
+    if not isinstance(value, dict):
+        return default
+    channels = value.get("channels")
+    thresholds = value.get("thresholds")
+    retention = value.get("retention")
+    return {
+        "rest_enabled": bool(value.get("rest_enabled", True)),
+        "websocket_enabled": bool(value.get("websocket_enabled", True)),
+        "channels": {
+            **DEFAULT_CHANNEL_FLAGS,
+            **(channels if isinstance(channels, dict) else {}),
+        },
+        "thresholds": thresholds if isinstance(thresholds, dict) else {},
+        "retention": retention if isinstance(retention, dict) else {},
+    }
 
 
 def _is_sensitive_validation_field(value: object) -> bool:
@@ -146,6 +197,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             market_store.configure_engine(database_engine)
             initialize_admin_runtime(database_engine)
+            uw_runtime_config = _unusual_whales_runtime_config(database_engine)
+            app.state.unusual_whales_runtime.apply_config(
+                uw_runtime_config["channels"],
+                websocket_enabled=uw_runtime_config["websocket_enabled"],
+                rest_enabled=uw_runtime_config["rest_enabled"],
+                thresholds=uw_runtime_config["thresholds"],
+                retention=uw_runtime_config["retention"],
+            )
+            app.state.unusual_whales_runtime.start()
             market_engine.start()
             ai_monitor.start(
                 database_engine,
@@ -165,6 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             if settings is None:
+                app.state.unusual_whales_runtime.stop()
                 app.state.finnhub_us_quote_service.stop()
                 underlying_quotes.stop()
 
@@ -208,10 +269,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stale_seconds=runtime_settings.finnhub_quote_stale_seconds,
         websocket_enabled=runtime_settings.finnhub_websocket_enabled,
     )
+    app.state.unusual_whales_market_client = UnusualWhalesMarketClient(
+        _unusual_whales_api_key,
+        timeout_seconds=runtime_settings.finnhub_timeout_seconds,
+    )
+    app.state.unusual_whales_runtime = UnusualWhalesRuntime(
+        database_engine,
+        _unusual_whales_api_key,
+        _monitor_symbols(runtime_settings.monitor_symbols_config),
+        channel_flags=DEFAULT_CHANNEL_FLAGS,
+        rest_client=app.state.unusual_whales_market_client,
+    )
+    app.state.unusual_whales_stream = app.state.unusual_whales_runtime
+    app.state.unusual_whales_stream_client = app.state.unusual_whales_runtime.stream
+    app.state.unusual_whales_channel_health = (
+        app.state.unusual_whales_runtime.channel_health_snapshot
+    )
+
+    def apply_unusual_whales_runtime_config(config: dict[str, Any]) -> None:
+        app.state.unusual_whales_runtime.apply_config(
+            config.get("channels") or DEFAULT_CHANNEL_FLAGS,
+            websocket_enabled=bool(config.get("websocket_enabled", True)),
+            rest_enabled=bool(config.get("rest_enabled", True)),
+            thresholds=(
+                config.get("thresholds")
+                if isinstance(config.get("thresholds"), dict)
+                else {}
+            ),
+            retention=(
+                config.get("retention")
+                if isinstance(config.get("retention"), dict)
+                else {}
+            ),
+        )
+
+    app.state.apply_unusual_whales_runtime_config = apply_unusual_whales_runtime_config
     app.state.macro_market_service = MacroMarketService(
         finnhub_client,
         app.state.finnhub_us_quote_service,
-        cache_seconds=60,
+        app.state.unusual_whales_market_client,
+        cache_seconds=5,
         stale_seconds=runtime_settings.finnhub_market_status_stale_seconds,
     )
     configure_default_service(app.state.macro_market_service)

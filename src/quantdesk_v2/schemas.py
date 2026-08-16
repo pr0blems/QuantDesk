@@ -282,6 +282,108 @@ class AdminAiModelConfigUpdate(BaseModel):
         return _validate_ai_api_key(value) if value is not None else None
 
 
+class AdminUnusualWhalesChannels(BaseModel):
+    """Administrator-controlled Unusual Whales channel switches."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    price: bool = True
+    trading_halts: bool = True
+    interval_flow: bool = True
+    net_flow: bool = True
+    market_tide: bool = True
+    gex: bool = True
+    lit_trades: bool = True
+    off_lit_trades: bool = True
+    flow_alerts: bool = True
+    option_trades: bool = False
+
+
+class AdminUnusualWhalesThresholds(BaseModel):
+    """Safety limits used by the real-time opportunity admission gate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quote_age_regular_ms: int = Field(default=2_000, ge=250, le=60_000)
+    quote_age_extended_ms: int = Field(default=10_000, ge=1_000, le=120_000)
+    spread_hard_max_bps: float = Field(default=80.0, ge=1.0, le=1_000.0)
+    source_divergence_max_bps: float = Field(default=35.0, ge=1.0, le=1_000.0)
+    min_data_coverage: float = Field(default=0.8, ge=0.0, le=1.0)
+    event_block_before_minutes: int = Field(default=30, ge=0, le=1_440)
+    event_block_after_minutes: int = Field(default=15, ge=0, le=1_440)
+    halt_cooldown_minutes: int = Field(default=15, ge=0, le=1_440)
+
+
+class AdminUnusualWhalesWeights(BaseModel):
+    """Published scoring-domain weights; the sum must remain exactly one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    news: float = Field(default=0.20, ge=0.0, le=1.0)
+    technical: float = Field(default=0.30, ge=0.0, le=1.0)
+    market_context: float = Field(default=0.10, ge=0.0, le=1.0)
+    options_flow: float = Field(default=0.20, ge=0.0, le=1.0)
+    gex: float = Field(default=0.10, ge=0.0, le=1.0)
+    institutional_flow: float = Field(default=0.10, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_total(self) -> Self:
+        if not math.isclose(sum(self.model_dump().values()), 1.0, abs_tol=1e-6):
+            raise ValueError("scoring-domain weights must add up to 1.0")
+        return self
+
+
+class AiMonitorScorePolicyUpdate(BaseModel):
+    """Only the six-domain scoring weights exposed by the AI monitor UI."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    weights: AdminUnusualWhalesWeights
+
+
+class AdminUnusualWhalesRetention(BaseModel):
+    """Bounded retention for high-volume, reproducible market-data tiers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    raw_event_days: int = Field(default=14, ge=1, le=365)
+    feature_snapshot_days: int = Field(default=90, ge=7, le=730)
+    cleanup_interval_minutes: int = Field(default=60, ge=1, le=1_440)
+    cleanup_batch_size: int = Field(default=2_000, ge=100, le=20_000)
+    cleanup_max_batches: int = Field(default=10, ge=1, le=100)
+
+
+class AdminUnusualWhalesConfigUpdate(BaseModel):
+    """Platform-wide market-data and signal-gate configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: SecretStr | None = Field(default=None, max_length=2048)
+    mode: Literal["record", "score", "gate"] = "record"
+    rest_enabled: bool = True
+    websocket_enabled: bool = True
+    channels: AdminUnusualWhalesChannels = Field(default_factory=AdminUnusualWhalesChannels)
+    thresholds: AdminUnusualWhalesThresholds = Field(
+        default_factory=AdminUnusualWhalesThresholds
+    )
+    weights: AdminUnusualWhalesWeights = Field(default_factory=AdminUnusualWhalesWeights)
+    retention: AdminUnusualWhalesRetention = Field(
+        default_factory=AdminUnusualWhalesRetention
+    )
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def empty_api_key_preserves_existing(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        return _validate_ai_api_key(value) if value is not None else None
+
+
 class AdminCleanupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -49,6 +49,7 @@ from .schemas import (
     AdminNewsAiBatchCreate,
     AdminNewsSourceCreate,
     AdminNewsSourceUpdate,
+    AdminUnusualWhalesConfigUpdate,
     AdminUserUpdate,
     MessageOut,
 )
@@ -64,6 +65,7 @@ SPECIAL_NEWS_SOURCE_SEEDS = {
     "taoz_flash": FLASH_SOURCE_SEED_KEY,
     "unusual_whales": UNUSUAL_WHALES_SOURCE_SEED_KEY,
 }
+UNUSUAL_WHALES_MARKET_DATA_KEY = "market_data:unusual_whales:v1"
 COLLECTOR_STALE_SECONDS = {
     "price": 20,
     "ticker": 150,
@@ -204,6 +206,101 @@ def _setting_payload(db: Session, key: str, default: dict[str, Any]) -> tuple[di
         return default, 0
     value = setting.value_json if isinstance(setting.value_json, dict) else {}
     return {**default, **value}, setting.version
+
+
+def _default_unusual_whales_config() -> dict[str, Any]:
+    return AdminUnusualWhalesConfigUpdate().model_dump(exclude={"api_key"})
+
+
+def _unusual_whales_config_out(
+    db: Session,
+    request: Request,
+) -> dict[str, Any]:
+    raw, version = _setting_payload(
+        db,
+        UNUSUAL_WHALES_MARKET_DATA_KEY,
+        _default_unusual_whales_config(),
+    )
+    try:
+        config = AdminUnusualWhalesConfigUpdate.model_validate(raw).model_dump(
+            exclude={"api_key"}
+        )
+    except ValueError:
+        config = _default_unusual_whales_config()
+
+    credential = db.get(AdminSetting, market_news.UNUSUAL_WHALES_CREDENTIAL_KEY)
+    credential_value = (
+        credential.value_json
+        if credential is not None and isinstance(credential.value_json, dict)
+        else {}
+    )
+    fingerprint = credential_value.get("api_key_fingerprint")
+    configured = bool(credential_value.get("api_key_encrypted"))
+    if not configured:
+        legacy_key = request.app.state.settings.unusual_whales_api_key.get_secret_value().strip()
+        configured = bool(legacy_key)
+        fingerprint = api_key_fingerprint(legacy_key) if legacy_key else None
+
+    stream = getattr(request.app.state, "unusual_whales_stream", None)
+    stream_health: dict[str, Any]
+    if stream is not None and hasattr(stream, "health_snapshot"):
+        try:
+            snapshot = stream.health_snapshot()
+            stream_health = snapshot if isinstance(snapshot, dict) else {}
+        except Exception:
+            stream_health = {"status": "error", "connected": False}
+    else:
+        stream_health = {"status": "disabled", "connected": False}
+
+    channel_health = getattr(request.app.state, "unusual_whales_channel_health", {})
+    if callable(channel_health):
+        try:
+            channel_health = channel_health()
+        except (RuntimeError, ValueError):
+            channel_health = {}
+    if not isinstance(channel_health, dict):
+        channel_health = {}
+    runtime_rest_health = stream_health.get("rest")
+    runtime_rest_health = (
+        dict(runtime_rest_health) if isinstance(runtime_rest_health, dict) else {}
+    )
+    return {
+        "scope": "platform",
+        "configured": configured,
+        "api_key_fingerprint": fingerprint,
+        "credential_source": "database" if credential is not None else "environment",
+        "version": version,
+        "updated_at": credential.updated_at if credential is not None else None,
+        "feature_version": "uw_features_v2",
+        "weights_version": f"uw_weights_v{max(0, version)}",
+        "decision_version": "hard_gate_v3_nbbo",
+        "config": config,
+        "health": {
+            "rest": {
+                **runtime_rest_health,
+                "status": (
+                    str(runtime_rest_health.get("status"))
+                    if runtime_rest_health
+                    else "ready"
+                    if configured and config["rest_enabled"]
+                    else "disabled"
+                ),
+                "configured": configured,
+            },
+            "websocket": stream_health,
+            "channels": channel_health,
+            "leadership": (
+                dict(stream_health.get("leadership") or {})
+                if isinstance(stream_health.get("leadership"), dict)
+                else {"status": "unknown", "is_leader": False}
+            ),
+            "retention": (
+                dict(stream_health.get("retention") or {})
+                if isinstance(stream_health.get("retention"), dict)
+                else {"status": "unknown"}
+            ),
+        },
+    }
 
 
 def _sync_news_sources(db: Session) -> None:
@@ -505,6 +602,126 @@ def test_global_ai_model(
     if not 200 <= status_code < 300:
         raise HTTPException(status_code=502, detail=f"DeepSeek 返回错误（HTTP {status_code}）")
     return MessageOut(message="全局 DeepSeek API 测试成功")
+
+
+@router.get("/market-data/unusual-whales")
+def unusual_whales_market_data_config(
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return the platform market-data policy without exposing its credential."""
+
+    return _unusual_whales_config_out(db, request)
+
+
+@router.put("/market-data/unusual-whales")
+def update_unusual_whales_market_data_config(
+    payload: AdminUnusualWhalesConfigUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_write),
+) -> dict[str, Any]:
+    """Publish channel switches, safety limits, domain weights and an optional key."""
+
+    values = payload.model_dump(exclude={"api_key"})
+    setting = db.get(AdminSetting, UNUSUAL_WHALES_MARKET_DATA_KEY)
+    if setting is None:
+        setting = AdminSetting(
+            key=UNUSUAL_WHALES_MARKET_DATA_KEY,
+            value_json=values,
+            version=1,
+            updated_by=admin.id,
+        )
+        db.add(setting)
+    else:
+        setting.value_json = values
+        setting.version += 1
+        setting.updated_by = admin.id
+        setting.updated_at = utcnow()
+
+    raw_api_key = payload.api_key.get_secret_value().strip() if payload.api_key else None
+    credential_replaced = raw_api_key is not None
+    if raw_api_key is not None:
+        cipher = CredentialCipher(
+            request.app.state.settings.credential_master_key.get_secret_value()
+        )
+        credential = db.get(AdminSetting, market_news.UNUSUAL_WHALES_CREDENTIAL_KEY)
+        credential_version = int(
+            (credential.value_json or {}).get("api_key_version", 0)
+        ) if credential is not None and isinstance(credential.value_json, dict) else 0
+        credential_payload = {
+            "api_key_encrypted": cipher.encrypt(raw_api_key),
+            "api_key_fingerprint": api_key_fingerprint(raw_api_key),
+            "api_key_version": credential_version + 1,
+        }
+        if credential is None:
+            credential = AdminSetting(
+                key=market_news.UNUSUAL_WHALES_CREDENTIAL_KEY,
+                value_json=credential_payload,
+                version=1,
+                updated_by=admin.id,
+            )
+            db.add(credential)
+        else:
+            credential.value_json = credential_payload
+            credential.version += 1
+            credential.updated_by = admin.id
+            credential.updated_at = utcnow()
+
+    _audit(
+        db,
+        request,
+        admin.id,
+        "admin.market_data.unusual_whales.update",
+        "admin_setting",
+        UNUSUAL_WHALES_MARKET_DATA_KEY,
+        {
+            **values,
+            "credential_replaced": credential_replaced,
+            "published_version": setting.version,
+        },
+    )
+    db.commit()
+
+    subscription_errors: list[str] = []
+    apply_runtime_config = getattr(
+        request.app.state,
+        "apply_unusual_whales_runtime_config",
+        None,
+    )
+    if callable(apply_runtime_config):
+        try:
+            apply_runtime_config(values)
+        except (RuntimeError, ValueError) as exc:
+            # The saved configuration remains authoritative. A reconnect will
+            # restore subscriptions even if this process is currently degraded.
+            subscription_errors.append(type(exc).__name__)
+    result = _unusual_whales_config_out(db, request)
+    if subscription_errors:
+        result["subscription_errors"] = subscription_errors
+    return result
+
+
+@router.post("/market-data/unusual-whales/test", response_model=MessageOut)
+def test_unusual_whales_market_data(
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin_write),
+) -> MessageOut:
+    """Perform a bounded authenticated REST probe without returning vendor payloads."""
+
+    client = getattr(request.app.state, "unusual_whales_market_client", None)
+    if client is None:
+        raise HTTPException(status_code=503, detail="Unusual Whales 客户端尚未初始化")
+    db.rollback()
+    try:
+        snapshot = client.market_tide()
+    except (OSError, RuntimeError, TimeoutError, ValueError):
+        raise HTTPException(status_code=502, detail="Unusual Whales 连接测试失败") from None
+    if not isinstance(snapshot, dict) or not snapshot:
+        raise HTTPException(status_code=502, detail="Unusual Whales 未返回有效市场数据")
+    return MessageOut(message="Unusual Whales REST 连接正常")
 
 
 @router.get("/overview")
