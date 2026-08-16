@@ -20,6 +20,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from . import macro_market
 from .ai_model_config import global_ai_model_configured
 from .models import (
     AiMonitorConfig,
@@ -709,6 +710,7 @@ def prediction_live_score_snapshot(
     repository: MonitorRepository,
     market_flow_inputs: Mapping[str, Mapping[str, Any]],
     now: datetime,
+    macro_market_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Rescore a pending prediction using only its frozen strategy identity."""
 
@@ -787,11 +789,25 @@ def prediction_live_score_snapshot(
         },
         flow,
     )
-    combined_score = round(
+    base_combined_score = round(
         news_score * effective_weights["news"]
         + technical_score * effective_weights["technical"]
         + flow_score * effective_weights["market_flow"],
         4,
+    )
+    company_profile = dict(
+        market_flow_inputs.get("profile", {}).get(prediction.symbol.upper(), {})
+    )
+    market_environment = macro_market.opportunity_market_context(
+        macro_market_snapshot,
+        direction=direction,
+        symbol=prediction.symbol,
+        sector=company_profile.get("sector"),
+        industry=company_profile.get("industry"),
+    )
+    combined_score = macro_market.apply_market_adjustment(
+        base_combined_score,
+        market_environment,
     )
     market = dict(
         market_flow_inputs.get("ticker", {}).get(prediction.contract_symbol.upper(), {})
@@ -822,6 +838,9 @@ def prediction_live_score_snapshot(
         "news": news_score,
         "technical": technical_score,
         "market_flow": flow_score,
+        "base_combined": base_combined_score,
+        "macro_adjustment": float(market_environment.get("adjustment") or 0),
+        "macro_market": market_environment,
         "combined": combined_score,
         "direction": direction,
         "calculated_at": now.isoformat(),
@@ -854,6 +873,7 @@ def refresh_pending_prediction_scores(
     repository: MonitorRepository,
     market_flow_inputs: Mapping[str, Mapping[str, Any]],
     now: datetime,
+    macro_market_snapshot: Mapping[str, Any] | None = None,
 ) -> int:
     """Refresh pending ledgers from raw news using each prediction's frozen policy."""
 
@@ -925,6 +945,7 @@ def refresh_pending_prediction_scores(
             repository,
             market_flow_inputs,
             now,
+            macro_market_snapshot,
         )
         opposite_snapshot = (
             prediction_live_score_snapshot(
@@ -933,6 +954,7 @@ def refresh_pending_prediction_scores(
                 repository,
                 market_flow_inputs,
                 now,
+                macro_market_snapshot,
             )
             if opposite_candidate is not None
             else None
@@ -2285,6 +2307,8 @@ def _market_flow_input_maps(
             CompanyProfile.market_cap,
             CompanyProfile.shares_outstanding,
             CompanyProfile.source,
+            CompanyProfile.sector,
+            CompanyProfile.industry,
         ).outerjoin(CompanyProfile, CompanyProfile.security_id == Security.id)
     ).all()
     return {
@@ -2302,8 +2326,10 @@ def _market_flow_input_maps(
                 "market_cap": market_cap,
                 "shares_outstanding": shares_outstanding,
                 "source": source,
+                "sector": sector,
+                "industry": industry,
             }
-            for symbol, market_cap, shares_outstanding, source in profile_rows
+            for symbol, market_cap, shares_outstanding, source, sector, industry in profile_rows
         },
     }
 
@@ -3499,7 +3525,6 @@ def reopen_legacy_prediction_settlements(
     db.flush()
     return len(items)
 
-
 def backfill_prediction_path_metrics(
     db: Session,
     repository: MonitorRepository,
@@ -4131,6 +4156,7 @@ def _scan_opportunities(
         key.startswith("prediction_") for key in indicator_keys
     )
     market_flow_inputs = _market_flow_input_maps(db, repository)
+    macro_snapshot = macro_market.default_snapshot(repository, now=now)
     rescored_pending_predictions = refresh_pending_prediction_scores(
         db,
         user_id=run.user_id,
@@ -4139,6 +4165,7 @@ def _scan_opportunities(
         repository=repository,
         market_flow_inputs=market_flow_inputs,
         now=now,
+        macro_market_snapshot=macro_snapshot,
     )
     for candidate in candidates:
         contract_symbol = str(candidate.get("contract_symbol") or "")
@@ -4257,8 +4284,22 @@ def _scan_opportunities(
         flow_score = float(market_flow["score"])
         score_weights = opportunity_score_weights(config)
         effective_score_weights = effective_opportunity_score_weights(config, market_flow)
-        combined_score = weighted_opportunity_score(
+        base_combined_score = weighted_opportunity_score(
             candidate["news_score"], indicator_score, flow_score, config, market_flow
+        )
+        company_profile = dict(
+            market_flow_inputs.get("profile", {}).get(str(candidate["symbol"]).upper(), {})
+        )
+        market_environment = macro_market.opportunity_market_context(
+            macro_snapshot,
+            direction=str(candidate["direction"]),
+            symbol=str(candidate["symbol"]),
+            sector=company_profile.get("sector"),
+            industry=company_profile.get("industry"),
+        )
+        combined_score = macro_market.apply_market_adjustment(
+            base_combined_score,
+            market_environment,
         )
         market_quality = signal_market_quality(
             scan,
@@ -4343,6 +4384,9 @@ def _scan_opportunities(
             "news": float(candidate["news_score"]),
             "technical": indicator_score,
             "market_flow": flow_score,
+            "base_combined": base_combined_score,
+            "macro_adjustment": float(market_environment.get("adjustment") or 0),
+            "macro_market": market_environment,
             "combined": combined_score,
             "direction": str(candidate["direction"]),
             "calculated_at": now.isoformat(),
@@ -4418,6 +4462,8 @@ def _scan_opportunities(
             "evaluated_bar_time": evaluated_at,
             "market": market,
             "market_flow": market_flow,
+            "macro_market_snapshot": macro_snapshot,
+            "market_environment": market_environment,
             "risk_metrics": risk_metrics,
             "risk_plan": risk_plan,
             "max_holding": {
@@ -4508,6 +4554,10 @@ def _scan_opportunities(
                         "news": candidate["news_score"],
                         "indicator": indicator_score,
                         "market_flow": flow_score,
+                        "base_combined": base_combined_score,
+                        "macro_adjustment": float(
+                            market_environment.get("adjustment") or 0
+                        ),
                         "combined": combined_score,
                     },
                     "cost_model": {
@@ -4582,6 +4632,12 @@ def _scan_opportunities(
         "opportunity_cleanup": cleanup,
         "risk_plan_backfill": risk_plan_backfill,
         "rescored_pending_predictions": rescored_pending_predictions,
+        "macro_market": {
+            "available": bool(macro_snapshot.get("available")),
+            "captured_at": macro_snapshot.get("captured_at"),
+            "sentiment": macro_snapshot.get("sentiment"),
+            "event_risk": (macro_snapshot.get("events") or {}).get("risk_level"),
+        },
         "reused_news_skipped_count": reused_news_skipped,
         "monitor_symbols": monitor_symbols,
         "monitor_scope": "selected" if monitor_symbols else "all",

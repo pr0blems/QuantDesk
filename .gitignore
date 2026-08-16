@@ -37,9 +37,13 @@ build/
 /src/data/
 reports/
 /backups/
+/.run/
 *.log
 *.tmp
 /config/api_keys.json
+
+# Local design verification notes
+/design-qa.md
 
 # Machine-specific launchers and editor/OS metadata
 /autostart.vbs

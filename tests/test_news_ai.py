@@ -353,6 +353,29 @@ def test_stock_relation_filter_removes_memory_induced_mstr_output() -> None:
     assert [item["symbol"] for item in filtered[0]["related_us_stocks"]] == ["COIN"]
 
 
+def test_stock_relation_with_security_alias_rejects_unrelated_old_record() -> None:
+    unrelated = SimpleNamespace(
+        title="Mubadala exits holdings in Broadcom and Merck",
+        title_zh="穆巴达拉清仓博通和默克股份",
+        original_title="",
+        summary="",
+    )
+    direct_company = SimpleNamespace(
+        title="Palantir wins a new defense contract",
+        title_zh=None,
+        original_title="",
+        summary="",
+    )
+    aliases = ("PLTR", "PALANTIR")
+
+    assert not news_ai.news_stock_relation_supported(
+        unrelated, "PLTR", 1.0, aliases=aliases
+    )
+    assert news_ai.news_stock_relation_supported(
+        direct_company, "PLTR", 0.2, aliases=aliases
+    )
+
+
 def test_memory_loader_does_not_chain_mstr_from_generic_crypto_overlap() -> None:
     record = SimpleNamespace(
         id=41,
@@ -402,6 +425,133 @@ def test_memory_loader_does_not_chain_mstr_from_generic_crypto_overlap() -> None
     )
 
     assert context == []
+
+
+def _memory_record(record_id: int, symbol: str, analyzed_at: datetime) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=record_id,
+        symbol=symbol,
+        direction="bull",
+        confidence=0.8,
+        relevance=0.9,
+        impact_strength="high",
+        time_horizon="short_term",
+        analysis_reason=f"{symbol} historical judgment",
+        memory_effect="initial",
+        memory_reason="Initial judgment.",
+        position_effect=None,
+        position_reason=None,
+        judgment_basis_json={},
+        news_published_at=1_785_000_000 + record_id,
+        analyzed_at=analyzed_at,
+    )
+
+
+def _memory_news(news_id: str, title: str, symbol: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=news_id,
+        title=title,
+        title_zh=None,
+        summary="",
+        source="source",
+        related_us_stocks=[{"symbol": symbol, "relevance": 0.9}],
+    )
+
+
+def test_memory_loader_reserves_context_for_older_explicit_ticker_history() -> None:
+    rows: list[tuple[SimpleNamespace, SimpleNamespace]] = []
+    for index in range(40):
+        symbol = f"T{index:02d}"
+        rows.append(
+            (
+                _memory_record(index + 100, symbol, datetime(2026, 8, 16, 12, index)),
+                _memory_news(
+                    f"noise-{index}",
+                    f"{symbol} enterprise market common event update",
+                    symbol,
+                ),
+            )
+        )
+    rows.append(
+        (
+            _memory_record(41, "PLTR", datetime(2026, 8, 15, 10, 0, 0)),
+            _memory_news("old-pltr", "PLTR reports strong government demand", "PLTR"),
+        )
+    )
+
+    class Result:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Db:
+        calls = 0
+
+        def execute(self, _statement):
+            self.calls += 1
+            return Result(rows if self.calls == 1 else [])
+
+    context = news_ai._load_news_memory_context(
+        Db(),
+        user_id=1,
+        news_items=[
+            {"id": "new-pltr", "title": "PLTR wins a new defense contract"},
+            {"id": "batch-2", "title": "Enterprise market common event update"},
+            {"id": "batch-3", "title": "Enterprise market common event analysis"},
+            {"id": "batch-4", "title": "Enterprise market common event outlook"},
+            {"id": "batch-5", "title": "Enterprise market common event briefing"},
+        ],
+    )
+
+    assert len(context) == news_ai.NEWS_MEMORY_MAX_CONTEXT_RECORDS
+    assert any(item["id"] == 41 and item["symbol"] == "PLTR" for item in context)
+
+
+def test_memory_loader_matches_security_company_alias_to_ticker_history() -> None:
+    record = _memory_record(41, "PLTR", datetime(2026, 8, 15, 10, 0, 0))
+    old_news = _memory_news(
+        "old-pltr",
+        "PLTR government business expands",
+        "PLTR",
+    )
+    security_row = SimpleNamespace(
+        _mapping={
+            "symbol": "PLTR",
+            "company_name": "Palantir Technologies Inc. - Class A Common Stock",
+            "company_name_zh": "Palantir Technologies Inc. - A 类普通股",
+        }
+    )
+
+    class Result:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Db:
+        calls = 0
+
+        def execute(self, _statement):
+            self.calls += 1
+            return Result([(record, old_news)] if self.calls == 1 else [security_row])
+
+    context = news_ai._load_news_memory_context(
+        Db(),
+        user_id=1,
+        news_items=[
+            {
+                "id": "new-palantir",
+                "title": "Palantir wins a large artificial intelligence contract",
+                "title_zh": None,
+                "summary": "",
+            }
+        ],
+    )
+
+    assert [item["id"] for item in context] == [41]
 
 
 def test_batch_summary_is_structured_and_bounded(monkeypatch) -> None:

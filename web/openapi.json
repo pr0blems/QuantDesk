@@ -5888,6 +5888,32 @@
         "summary": "Indicators"
       }
     },
+    "/api/v2/ai-monitor/market-context": {
+      "get": {
+        "description": "Return the cached US macro regime used by opportunity scoring.",
+        "operationId": "market_context_api_v2_ai_monitor_market_context_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Market Context Api V2 Ai Monitor Market Context Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Market Context"
+      }
+    },
     "/api/v2/ai-monitor/news": {
       "get": {
         "operationId": "news_api_v2_ai_monitor_news_get",

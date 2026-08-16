@@ -446,6 +446,20 @@ def overview(
     }
 
 
+@router.get("/market-context")
+def market_context(
+    request: Request,
+    _: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Return the cached US macro regime used by opportunity scoring."""
+
+    repository = MonitorRepository(
+        request.app.state.database_engine,
+        request.app.state.settings.monitor_symbols_config,
+    )
+    return request.app.state.macro_market_service.snapshot(repository)
+
+
 @router.get("/config")
 def get_config(
     db: Annotated[Session, Depends(get_db)],
@@ -821,6 +835,7 @@ def opportunity_news_analysis_records(
     if opportunity is None:
         raise HTTPException(status_code=404, detail="opportunity not found")
     symbol = str(opportunity.symbol or "").strip().upper()
+    symbol_aliases = news_ai._load_security_memory_aliases(db).get(symbol)
     cutoff = utcnow() - timedelta(days=7)
     opportunity_news_ids = {
         str(item) for item in (opportunity.news_ids_json or []) if str(item)
@@ -846,11 +861,55 @@ def opportunity_news_analysis_records(
             news,
             record.symbol,
             float(record.relevance),
+            aliases=symbol_aliases,
         )
     ]
     rows = eligible_rows[:200]
-    items = [
+    context_ids = {
+        int(context_id)
+        for record, _news in rows
+        for context_id in (record.context_record_ids_json or [])
+        if str(context_id).isdigit() and int(context_id) > 0
+    }
+    context_symbols = (
         {
+            int(record_id): str(context_symbol or "").strip().upper()
+            for record_id, context_symbol in db.execute(
+                select(NewsAiAnalysisRecord.id, NewsAiAnalysisRecord.symbol).where(
+                    NewsAiAnalysisRecord.id.in_(context_ids)
+                )
+            ).all()
+        }
+        if context_ids
+        else {}
+    )
+    items: list[dict[str, Any]] = []
+    for index, (record, news) in enumerate(rows):
+        record_context_ids = [
+            int(context_id)
+            for context_id in (record.context_record_ids_json or [])
+            if str(context_id).isdigit() and int(context_id) > 0
+        ]
+        symbol_context_ids = [
+            context_id
+            for context_id in record_context_ids
+            if context_symbols.get(context_id) == symbol
+        ]
+        has_earlier_symbol_record = any(
+            older_record.analyzed_at < record.analyzed_at
+            or (
+                older_record.analyzed_at == record.analyzed_at
+                and int(older_record.id) < int(record.id)
+            )
+            for older_record, _older_news in rows[index + 1 :]
+        )
+        if record.prior_record_id:
+            memory_link_status = "linked"
+        elif has_earlier_symbol_record:
+            memory_link_status = "context_missing"
+        else:
+            memory_link_status = "initial"
+        items.append({
             "id": int(record.id),
             "symbol": record.symbol,
             "news_id": record.news_id,
@@ -879,13 +938,15 @@ def opportunity_news_analysis_records(
                 else None
             ),
             "prior_record_id": record.prior_record_id,
-            "context_record_ids": list(record.context_record_ids_json or []),
+            "context_record_ids": record_context_ids,
+            "symbol_context_record_ids": symbol_context_ids,
+            "symbol_context_count": len(symbol_context_ids),
+            "shared_context_count": len(record_context_ids) - len(symbol_context_ids),
+            "memory_link_status": memory_link_status,
             "model_name": record.model_name,
             "analyzed_at": _utc_out(record.analyzed_at),
             "belongs_to_opportunity": record.news_id in opportunity_news_ids,
-        }
-        for record, news in rows
-    ]
+        })
     current_opportunity_total = sum(
         1 for item in items if item["belongs_to_opportunity"]
     )

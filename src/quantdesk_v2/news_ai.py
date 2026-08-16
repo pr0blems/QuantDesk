@@ -27,6 +27,7 @@ from .models import (
     NewsAiBatch,
     NewsAiModelCall,
     NewsAiModelCallItem,
+    Security,
 )
 from .security import CredentialCipher, SecurityError
 from .strategy_ai import (
@@ -958,6 +959,90 @@ def _select_news_items(
     return [*recent, *backfill]
 
 
+_SECURITY_ALIAS_STOP_WORDS = frozenset(
+    {
+        "A",
+        "ADR",
+        "AMERICAN",
+        "CLASS",
+        "COMMON",
+        "COMPANY",
+        "CORP",
+        "CORPORATION",
+        "GROUP",
+        "HOLDING",
+        "HOLDINGS",
+        "INC",
+        "INCORPORATED",
+        "LIMITED",
+        "LTD",
+        "PLC",
+        "SHARE",
+        "SHARES",
+        "STOCK",
+        "TECHNOLOGIES",
+        "TECHNOLOGY",
+        "THE",
+    }
+)
+
+
+def _security_memory_aliases(company_name: Any, company_name_zh: Any) -> tuple[str, ...]:
+    """Return conservative company aliases used only to retrieve old memory.
+
+    These aliases never authorize the model to add a stock to a new article; the
+    deterministic post-analysis relationship filter remains the final authority.
+    """
+
+    aliases: list[str] = []
+    for raw in (company_name, company_name_zh):
+        value = str(raw or "").strip().upper()
+        if not value:
+            continue
+        aliases.append(value)
+        latin_tokens = re.findall(r"[A-Z0-9][A-Z0-9.&'-]*", value)
+        distinctive = [
+            token.strip(".&'-")
+            for token in latin_tokens
+            if len(token.strip(".&'-")) >= 4
+            and token.strip(".&'-") not in _SECURITY_ALIAS_STOP_WORDS
+        ]
+        if distinctive:
+            aliases.append(distinctive[0])
+        chinese_name = re.sub(
+            r"(?:公司|集团|控股|普通股|存托股份|科技|技术)$",
+            "",
+            value,
+        ).strip()
+        if chinese_name and chinese_name != value and len(chinese_name) >= 2:
+            aliases.append(chinese_name)
+    return tuple(dict.fromkeys(alias for alias in aliases if alias))
+
+
+def _load_security_memory_aliases(db: Any) -> dict[str, tuple[str, ...]]:
+    aliases: dict[str, tuple[str, ...]] = {}
+    try:
+        rows = db.execute(
+            select(Security.symbol, Security.company_name, Security.company_name_zh)
+            .where(Security.is_active.is_(True))
+        ).all()
+    except Exception:
+        return aliases
+    for row in rows:
+        mapping = getattr(row, "_mapping", None)
+        if mapping is None:
+            continue
+        symbol = _normalize_symbol(mapping.get("symbol"))
+        if not _SYMBOL_RE.fullmatch(symbol):
+            continue
+        company_aliases = _security_memory_aliases(
+            mapping.get("company_name"),
+            mapping.get("company_name_zh"),
+        )
+        aliases[symbol] = tuple(dict.fromkeys((symbol, *company_aliases)))
+    return aliases
+
+
 def _load_news_memory_context(
     db: Any,
     *,
@@ -1001,36 +1086,107 @@ def _load_news_memory_context(
         ).strip()
         for item in news_items
     ]
-    searchable_text = " ".join(incoming_texts).upper()
-    incoming_terms = _news_context_terms(" ".join(incoming_texts))
-    selected: list[tuple[NewsAiAnalysisRecord, News]] = []
-    symbol_counts: Counter[str] = Counter()
+    incoming_terms = [_news_context_terms(item) for item in incoming_texts]
+    security_aliases = _load_security_memory_aliases(db)
+    candidates_by_news: list[
+        list[tuple[int, int, NewsAiAnalysisRecord, News]]
+    ] = [[] for _item in incoming_texts]
 
-    # Directly related news gets the deeper chronological memory chain first.
+    # Score every old judgment against each incoming article independently.
+    # The old implementation searched the concatenated five-news batch and stopped
+    # at 32 rows while walking newest-first.  A busy unrelated article could
+    # therefore consume the entire context before an older same-ticker judgment
+    # was reached.  Per-article candidate buckets reserve memory capacity for every
+    # news item and make direct ticker/company matches outrank semantic overlap.
     for record, news in rows:
         symbol = str(record.symbol or "").upper()
-        if not news_stock_relation_supported(news, symbol, float(record.relevance)):
+        if not news_stock_relation_supported(
+            news,
+            symbol,
+            float(record.relevance),
+            aliases=security_aliases.get(symbol),
+        ):
             continue
-        explicit_symbol = bool(
-            re.search(rf"(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])", searchable_text)
-        )
         old_text = " ".join(
             str(value or "")
             for value in (news.title_zh, news.title, news.summary)
         )
-        common_terms = incoming_terms & _news_context_terms(old_text)
-        semantic_match = bool(
-            len(common_terms) >= 2
-            or any(len(term) >= 8 for term in common_terms)
-        )
-        if not explicit_symbol and not semantic_match:
-            continue
+        old_terms = _news_context_terms(old_text)
+        aliases = security_aliases.get(symbol, (symbol,))
+        for index, incoming_text in enumerate(incoming_texts):
+            direct_match = any(
+                _contains_relation_term(incoming_text.upper(), alias)
+                for alias in aliases
+            )
+            common_terms = incoming_terms[index] & old_terms
+            semantic_match = bool(
+                len(common_terms) >= 2
+                or any(len(term) >= 8 for term in common_terms)
+            )
+            if not direct_match and not semantic_match:
+                continue
+            semantic_strength = sum(
+                min(len(term), 16) + 4 for term in common_terms
+            )
+            candidates_by_news[index].append(
+                (1 if direct_match else 0, semantic_strength, record, news)
+            )
+
+    def candidate_key(
+        item: tuple[int, int, NewsAiAnalysisRecord, News],
+    ) -> tuple[int, int, datetime, int]:
+        return (item[0], item[1], item[2].analyzed_at, int(item[2].id))
+
+    for candidates in candidates_by_news:
+        candidates.sort(key=candidate_key, reverse=True)
+
+    selected_by_id: dict[int, tuple[NewsAiAnalysisRecord, News]] = {}
+    symbol_counts: Counter[str] = Counter()
+
+    def select_candidate(
+        item: tuple[int, int, NewsAiAnalysisRecord, News],
+    ) -> bool:
+        record, news = item[2], item[3]
+        record_id = int(record.id)
+        symbol = str(record.symbol or "").upper()
+        if record_id in selected_by_id:
+            return False
         if symbol_counts[symbol] >= NEWS_MEMORY_MAX_RECORDS_PER_SYMBOL:
-            continue
-        if len(selected) >= NEWS_MEMORY_MAX_CONTEXT_RECORDS:
-            break
-        selected.append((record, news))
+            return False
+        if len(selected_by_id) >= NEWS_MEMORY_MAX_CONTEXT_RECORDS:
+            return False
+        selected_by_id[record_id] = (record, news)
         symbol_counts[symbol] += 1
+        return True
+
+    per_news_quota = max(
+        1,
+        min(
+            NEWS_MEMORY_MAX_RECORDS_PER_SYMBOL,
+            NEWS_MEMORY_MAX_CONTEXT_RECORDS // max(1, len(candidates_by_news)),
+        ),
+    )
+    for candidates in candidates_by_news:
+        added = 0
+        for candidate in candidates:
+            if select_candidate(candidate):
+                added += 1
+            if added >= per_news_quota or len(selected_by_id) >= NEWS_MEMORY_MAX_CONTEXT_RECORDS:
+                break
+
+    # Use any remaining capacity for the strongest matches across the whole batch.
+    if len(selected_by_id) < NEWS_MEMORY_MAX_CONTEXT_RECORDS:
+        remaining = sorted(
+            (candidate for candidates in candidates_by_news for candidate in candidates),
+            key=candidate_key,
+            reverse=True,
+        )
+        for candidate in remaining:
+            select_candidate(candidate)
+            if len(selected_by_id) >= NEWS_MEMORY_MAX_CONTEXT_RECORDS:
+                break
+
+    selected = list(selected_by_id.values())
     selected.sort(key=lambda item: (item[0].analyzed_at, item[0].id))
     result: list[dict[str, Any]] = []
     for record, news in selected[:NEWS_MEMORY_MAX_CONTEXT_RECORDS]:
@@ -1097,6 +1253,7 @@ def news_stock_relation_supported(
     news: Any,
     symbol: str,
     relevance: float,
+    aliases: Sequence[str] | None = None,
 ) -> bool:
     """Validate a model ticker against current-news facts, never memory salience."""
 
@@ -1112,6 +1269,15 @@ def news_stock_relation_supported(
     text = _news_relation_text(news)
     if _contains_relation_term(text, normalized_symbol):
         return normalized_relevance >= NEWS_STOCK_DIRECT_MIN_RELEVANCE
+    normalized_aliases = tuple(
+        dict.fromkeys(
+            str(alias or "").strip().upper()
+            for alias in (aliases or ())
+            if str(alias or "").strip()
+        )
+    )
+    if any(_contains_relation_term(text, alias) for alias in normalized_aliases):
+        return normalized_relevance >= NEWS_STOCK_DIRECT_MIN_RELEVANCE
     strict = _STRICT_STOCK_RELATION_TERMS.get(normalized_symbol)
     if strict is not None:
         if any(_contains_relation_term(text, term) for term in strict["direct"]):
@@ -1119,6 +1285,12 @@ def news_stock_relation_supported(
         return normalized_relevance >= NEWS_STOCK_PROXY_MIN_RELEVANCE and any(
             _contains_relation_term(text, term) for term in strict["proxy"]
         )
+    # When the security master provides auditable company aliases, do not retain
+    # an old model association that mentions neither the ticker nor the company.
+    # This is deliberately stricter for memory/audit reads than the initial model
+    # output parser, and prevents an unrelated old article becoming future memory.
+    if normalized_aliases:
+        return False
     return normalized_relevance >= NEWS_STOCK_MIN_RELEVANCE
 
 

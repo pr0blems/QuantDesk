@@ -5,6 +5,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.state = {
       view: "opportunities",
       overview: null,
+      macroMarket: null,
       config: null,
       indicators: [],
       indicatorTemplates: [],
@@ -78,7 +79,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260816-22">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260816-27">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -98,11 +99,8 @@ class AiMonitorDashboard extends HTMLElement {
           </div>
         </header>
         <div id="ai-banner" class="ai-banner hidden" role="status"></div>
-        <section class="ai-stats" aria-label="发现机会摘要">
-          <article><span>当前新闻</span><strong id="stat-news">--</strong><small id="stat-news-note">正在读取</small></article>
-          <article><span>24h 已分析</span><strong id="stat-analyzed">--</strong><small id="stat-pending">等待数据</small></article>
-          <article><span>发现机会</span><strong id="stat-opportunities">--</strong><small id="stat-opportunity-note">新闻 + 指标</small></article>
-          <article><span>任务状态</span><strong id="stat-runs">--</strong><small id="stat-run-note">等待调度</small></article>
+        <section id="macro-market-panel" class="macro-market-panel" aria-label="美股宏观大盘环境">
+          <div class="macro-market-loading"><span>US MARKET REGIME</span><strong>正在读取美股大盘环境…</strong></div>
         </section>
         <div class="ai-layout">
           <nav class="ai-module-nav" aria-label="发现机会菜单">
@@ -452,11 +450,12 @@ class AiMonitorDashboard extends HTMLElement {
     this.state.fullLoadLoading = true;
     this.q("#ai-refresh").disabled = true;
     try {
-      const [overview, news, indicators, symbols] = await Promise.all([
+      const [overview, news, indicators, symbols, macroMarket] = await Promise.all([
         this.api("/overview"),
         this.api("/news?limit=160"),
         this.api("/indicators?timeframe=1h"),
         this.api("/symbols"),
+        this.api("/market-context").catch(() => this.state.macroMarket || { available: false }),
       ]);
       this.state.overview = overview;
       this.state.config = overview.config;
@@ -465,7 +464,9 @@ class AiMonitorDashboard extends HTMLElement {
       this.state.indicatorTemplates = indicators.templates || [];
       this.state.indicatorConflictPairs = indicators.conflict_pairs || [];
       this.state.symbols = symbols.items || [];
+      this.state.macroMarket = macroMarket;
       this.renderOverview();
+      this.renderMacroMarket();
       this.renderNews();
       this.renderConfig();
       await this.loadView(this.state.view);
@@ -482,11 +483,17 @@ class AiMonitorDashboard extends HTMLElement {
     if (!this.state.running || this.state.busyRun || this.state.fullLoadLoading || this.state.liveStateLoading || document.visibilityState === "hidden") return;
     this.state.liveStateLoading = true;
     try {
-      const [overview, news] = await Promise.all([this.api("/overview"), this.api("/news?limit=160")]);
+      const [overview, news, macroMarket] = await Promise.all([
+        this.api("/overview"),
+        this.api("/news?limit=160"),
+        this.api("/market-context").catch(() => this.state.macroMarket || { available: false }),
+      ]);
       this.state.overview = overview;
       this.state.config = overview.config;
       this.state.news = news.items || [];
+      this.state.macroMarket = macroMarket;
       this.renderOverview();
+      this.renderMacroMarket();
       this.renderNews();
       if (this.state.view === "runs") await this.loadRuns();
       if (this.state.view === "opportunities") await this.loadOpportunities();
@@ -530,21 +537,56 @@ class AiMonitorDashboard extends HTMLElement {
   renderOverview() {
     const data = this.state.overview || {};
     const config = data.config || {};
-    const scheduler = data.scheduler || {};
-    const news = data.news || {};
-    const opportunities = data.opportunities || {};
-    this.q("#stat-news").textContent = this.number(news.total);
-    this.q("#stat-news-note").textContent = news.latest_ts ? `最新 ${this.formatUnix(news.latest_ts)}` : "等待新闻采集";
-    this.q("#stat-analyzed").textContent = this.number(news.analyzed_24h);
-    this.q("#stat-pending").textContent = `待分析 ${this.number(news.pending)} 条`;
-    this.q("#stat-opportunities").textContent = this.number(opportunities.active);
-    this.q("#stat-opportunity-note").textContent = `${config.timeframe || "1h"} · 策略组确认 · 至少 2 项核心同向`;
-    this.q("#stat-runs").textContent = scheduler.active_runs ? `${scheduler.active_runs} 运行中` : "空闲";
-    this.q("#stat-run-note").textContent = data.latest_run ? `${this.runTypeLabel(data.latest_run.run_type)} · ${this.statusLabel(data.latest_run.status)}` : "暂无执行记录";
     const state = this.q("#scheduler-state");
     state.textContent = config.enabled ? "自动监控中" : "自动监控已暂停";
     state.className = `status-badge ${config.enabled ? "running" : "idle"}`;
     this.q("#model-warning").classList.toggle("hidden", Boolean(data.model_configured));
+  }
+
+  renderMacroMarket() {
+    const target = this.q("#macro-market-panel");
+    if (!target) return;
+    const data = this.state.macroMarket || {};
+    const numberOrDash = (value, digits = 2) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
+    const percent = (value) => Number.isFinite(Number(value)) ? `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%` : "--";
+    const tone = (value) => Number(value) > 0 ? "positive" : Number(value) < 0 ? "negative" : "flat";
+    const sentiment = data.sentiment || {};
+    const indices = Array.isArray(data.indices) ? data.indices : [];
+    const sectors = Array.isArray(data.sectors) ? data.sectors : [];
+    const assets = Array.isArray(data.macro_assets) ? data.macro_assets : [];
+    const breadth = data.breadth || {};
+    const vix = data.vix || {};
+    const eventState = data.events || {};
+    const nextEvent = eventState.next_event || null;
+    const indexCards = indices.map((item) => `<article class="macro-index-card ${item.available ? "" : "unavailable"}">
+      <header><strong>${this.escape(item.label || item.key)}</strong><small>${this.escape(item.provider_symbol || "--")} ${item.proxy ? "代理" : "指数"}</small></header>
+      <b>${numberOrDash(item.price)}</b>
+      <span class="${tone(item.change_percent)}">${percent(item.change_percent)}</span>
+      <footer><span>日内 ${percent(item.intraday_change_percent)}</span><span>振幅 ${percent(item.amplitude_percent)}</span>${item.rsi_14_1h == null ? "" : `<span>RSI ${numberOrDash(item.rsi_14_1h, 1)}</span>`}</footer>
+    </article>`).join("");
+    const sectorPills = sectors.map((item) => `<span class="macro-sector ${tone(item.change_percent)}"><em>${this.escape(item.label || item.key)}</em><b>${percent(item.change_percent)}</b><small>${this.escape(item.provider_symbol || "--")} 代理</small></span>`).join("");
+    const assetPills = assets.map((item) => `<span class="macro-asset ${tone(item.change_percent)}"><em>${this.escape(item.label || item.key)}</em><b>${numberOrDash(item.price)}</b><small>${percent(item.change_percent)} · ${this.escape(item.provider_symbol || "--")}</small></span>`).join("");
+    const breadthRatio = Number.isFinite(Number(breadth.advance_decline_ratio)) ? Number(breadth.advance_decline_ratio).toFixed(2) : "--";
+    const vixTone = Number(vix.value) >= 30 ? "danger" : Number(vix.value) >= 25 ? "warning" : "normal";
+    const eventTone = eventState.risk_level === "critical" || eventState.risk_level === "high" ? "danger" : eventState.risk_level === "medium" ? "warning" : "normal";
+    const eventCountdown = nextEvent && Number.isFinite(Number(nextEvent.hours_until))
+      ? Number(nextEvent.hours_until) <= 24
+        ? `${Math.max(0, Number(nextEvent.hours_until)).toFixed(1)} 小时后`
+        : `${Math.ceil(Number(nextEvent.hours_until) / 24)} 天后`
+      : "暂无临近事件";
+    target.innerHTML = `<header class="macro-market-heading">
+      <div><span>US MARKET REGIME</span><strong>宏观大盘环境</strong><small>${this.escape(data.source_note || "指数、波动率、市场宽度和事件风险")}</small></div>
+      <div class="macro-regime ${this.escape(sentiment.key || "neutral")}"><span>环境结论</span><b>${this.escape(sentiment.label || "数据不足")}</b><small>${Number.isFinite(Number(sentiment.score)) ? `情绪 ${Number(sentiment.score).toFixed(0)} / 100` : "等待行情"}${data.stale ? " · 缓存数据" : ""}</small></div>
+    </header>
+    <div class="macro-market-body">
+      <div class="macro-index-grid">${indexCards || '<div class="macro-empty">大盘实时行情暂不可用，个股评分不会应用宏观调整。</div>'}</div>
+      <aside class="macro-risk-stack">
+        <div class="macro-vix ${vixTone}"><span>VIX 恐慌指数</span><b>${numberOrDash(vix.value, 2)}</b><small>${vix.available ? `${percent(vix.change_percent)} · 真实指数` : "暂不可用"}</small></div>
+        <div class="macro-breadth ${breadth.available ? "available" : "unavailable"}"><span>市场涨跌家数</span><b>${this.number(breadth.advancers)} <i>/</i> ${this.number(breadth.decliners)}</b><small>上涨 / 下跌 · A/D ${breadthRatio}${breadth.available ? "" : " · 样本不足"}</small></div>
+        <div class="macro-event ${eventTone}"><span>宏观事件风险</span><b>${nextEvent ? this.escape(nextEvent.event_type) : "正常"}</b><small>${nextEvent ? `${eventCountdown} · ${this.escape(nextEvent.title)}` : "未来 24 小时无已登记重大事件"}</small></div>
+      </aside>
+    </div>
+    <footer class="macro-market-footer"><div><span>板块热度</span>${sectorPills || "<small>暂无板块行情</small>"}</div><div><span>利率 / 美元代理</span>${assetPills || "<small>暂无宏观资产行情</small>"}</div></footer>`;
   }
 
   renderNews() {
@@ -1421,6 +1463,21 @@ class AiMonitorDashboard extends HTMLElement {
       const indicatorRemainder = indicatorItems.length > 6 ? `<span class="evidence-chip remainder">另有 ${indicatorItems.length - 6} 项</span>` : "";
       const news = (evidence.news || []).slice(0, 2).map((entry) => `<li><time>${this.formatUnix(entry.ts)}</time><span>${this.escape(entry.title)}</span><b>${Math.round(Number(entry.score || 0) * 100)}%</b></li>`).join("");
       const market = evidence.market || {};
+      const marketEnvironment = evidence.market_environment || evidence.score_snapshot?.macro_market || {};
+      const macroSnapshot = evidence.macro_market_snapshot || {};
+      const macroIndices = Object.fromEntries((macroSnapshot.indices || []).map((entry) => [entry.key, entry]));
+      const macroSectors = Object.fromEntries((macroSnapshot.sectors || []).map((entry) => [entry.key, entry]));
+      const macroNdx = macroIndices.NDX || {};
+      const macroSector = macroSectors[marketEnvironment.sector_key] || {};
+      const macroAdjustment = Number(marketEnvironment.adjustment || 0);
+      const macroResonance = marketEnvironment.resonance || "unknown";
+      const macroFactors = (marketEnvironment.factors || []).slice(0, 3).map((factor) => `${factor.label} ${Number(factor.points) >= 0 ? "+" : ""}${Number(factor.points).toFixed(0)}`).join(" · ");
+      const macroReference = marketEnvironment.available ? `<section class="opportunity-macro ${this.escape(macroResonance)}" aria-label="大盘环境参考">
+        <span class="macro-resonance"><i>${macroResonance === "resonant" ? "✓" : macroResonance === "divergent" ? "⚠" : "•"}</i><b>${this.escape(marketEnvironment.resonance_label || "大盘中性")}</b><small>大盘环境参考</small></span>
+        <span><em>纳指 100</em><b class="${Number(macroNdx.change_percent) >= 0 ? "positive" : "negative"}">${Number.isFinite(Number(macroNdx.change_percent)) ? `${Number(macroNdx.change_percent) >= 0 ? "+" : ""}${Number(macroNdx.change_percent).toFixed(2)}%` : "--"}</b><small>RSI ${marketEnvironment.market_rsi == null ? "--" : Number(marketEnvironment.market_rsi).toFixed(1)} · ${this.escape(macroNdx.provider_symbol || "QQQ")} ${macroNdx.proxy ? "代理" : "指数"}</small></span>
+        <span><em>VIX / 板块</em><b>VIX ${marketEnvironment.vix == null ? "--" : Number(marketEnvironment.vix).toFixed(1)}</b><small>${this.escape(marketEnvironment.sector_label || "大盘")} ${Number.isFinite(Number(macroSector.change_percent)) ? `${Number(macroSector.change_percent) >= 0 ? "+" : ""}${Number(macroSector.change_percent).toFixed(2)}%` : "--"}</small></span>
+        <span class="macro-adjustment ${macroAdjustment > 0 ? "positive" : macroAdjustment < 0 ? "negative" : "flat"}"><em>评分调整</em><b>${macroAdjustment > 0 ? "+" : ""}${macroAdjustment.toFixed(1)} 分</b><small>${this.escape(macroFactors || "当前无宏观加减分")}</small></span>
+      </section>` : `<section class="opportunity-macro unavailable" aria-label="大盘环境参考"><span class="macro-resonance"><i>--</i><b>大盘数据不足</b><small>该条信号未应用宏观调整</small></span></section>`;
       const confirmed = item.status === "discovered" || evidence.confirmed === true;
       const readiness = evidence.live_readiness || {};
       const shadowReady = readiness.status === "shadow_ready";
@@ -1557,6 +1614,7 @@ class AiMonitorDashboard extends HTMLElement {
       return `<article class="opportunity-item ${this.escape(item.status)} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}">
         <header><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span>${readinessBadge}${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${conclusionControl}</div><button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b>${Number(item.combined_score).toFixed(1)}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
         ${virtualEntryPanel}
+        ${macroReference}
         <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}"><span><em>新闻评分</em><b>${Number(item.news_score).toFixed(1)}</b><small>${newsTrigger.version ? `${Number(newsTrigger.new_news_ids?.length || 0)} 条新事件 · 记忆 ${Number(newsTrigger.memory_window_hours || 168)}h` : "旧版记录"}</small></span><span><em>指标强度</em><b>${Number(item.indicator_score).toFixed(1)}</b><small>${matchedCount} 项同向 · ${availableCount}/${requiredCount} 可用</small></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b><small>${marketQuality.passed === true ? "行情质量通过" : "行情质量未通过"}</small></span><span><em>信号状态</em><b>${historicalTab ? historyState : shadowReady ? "可影子观察" : confirmed ? "仅研究" : "等待确认"}</b></span>${outcomeMetric}</div>
         ${positionPanel || signalSummaryPanel}
         ${settlementPanel}
@@ -1776,10 +1834,12 @@ class AiMonitorDashboard extends HTMLElement {
     const chain = records.map((record, index) => {
       const direction = ["bull", "bear", "neutral"].includes(record.direction) ? record.direction : "neutral";
       const effect = ["initial", "maintain", "strengthen", "weaken", "reverse"].includes(record.memory_effect) ? record.memory_effect : "maintain";
+      const memoryLinkStatus = ["initial", "linked", "context_missing"].includes(record.memory_link_status) ? record.memory_link_status : (record.prior_record_id ? "linked" : "initial");
+      const effectText = memoryLinkStatus === "context_missing" ? "前序记忆遗漏" : effectLabel(effect);
       const title = record.news_title || record.news_original_title || "未命名新闻";
       const link = this.safeUrl(record.news_link);
       const titleMarkup = link ? `<a href="${this.escape(link)}" target="_blank" rel="noopener noreferrer">${this.escape(title)}</a>` : `<h4>${this.escape(title)}</h4>`;
-      const prior = record.prior_record_id ? `承接 #${this.escape(record.prior_record_id)}` : "无前序判断";
+      const prior = record.prior_record_id ? `承接 #${this.escape(record.prior_record_id)}` : (memoryLinkStatus === "context_missing" ? "旧记录：前序记忆未进入模型" : "无前序判断");
       const basis = record.judgment_basis && typeof record.judgment_basis === "object" ? record.judgment_basis : {};
       const modelFacts = textItems(basis.key_facts);
       const facts = modelFacts.length ? modelFacts : textItems([title, record.news_summary]);
@@ -1788,7 +1848,7 @@ class AiMonitorDashboard extends HTMLElement {
       const uncertainties = textItems(basis.uncertainties);
       const previousConfidence = record.previous_confidence == null ? null : Math.round(Number(record.previous_confidence || 0) * 100);
       const currentConfidence = Math.round(Number(record.confidence || 0) * 100);
-      const confidenceDelta = previousConfidence == null ? "首次判断" : `${currentConfidence - previousConfidence >= 0 ? "+" : ""}${currentConfidence - previousConfidence} pct`;
+      const confidenceDelta = previousConfidence == null ? (memoryLinkStatus === "context_missing" ? "无法比较" : "首次判断") : `${currentConfidence - previousConfidence >= 0 ? "+" : ""}${currentConfidence - previousConfidence} pct`;
       const historicalComparison = record.memory_reason || "当时未保存历史对照说明";
       const impactMechanism = basis.impact_mechanism || record.analysis_reason || "当时未保存影响传导说明";
       const decisionSummary = basis.decision_summary || `形成${directionLabel(direction)}判断，置信度 ${currentConfidence}%。`;
@@ -1798,10 +1858,12 @@ class AiMonitorDashboard extends HTMLElement {
         <section class="counter"><header>反向证据 <b>${counter.length}</b></header>${evidenceList(counter, "未识别到明确反向证据")}</section>
         <section class="uncertainty"><header>不确定性 <b>${uncertainties.length}</b></header>${evidenceList(uncertainties, "未单独记录不确定性")}</section>
       </div>` : '<p class="ai-memory-legacy-note">旧记录未保存结构化支持因素、反向证据和不确定性；系统不会根据当前信息反向补造。</p>';
-      return `<article class="ai-memory-record ${direction} effect-${effect}">
+      const symbolContextCount = Math.max(0, Number(record.symbol_context_count || 0));
+      const sharedContextCount = Math.max(0, Number(record.shared_context_count || 0));
+      return `<article class="ai-memory-record ${direction} effect-${effect} memory-${memoryLinkStatus}">
         <div class="ai-memory-line"><i></i><span>${String(records.length - index).padStart(2, "0")}</span></div>
         <div class="ai-memory-card">
-          <header><div><span>${this.escape(record.news_source || "未知来源")}</span><time>${this.formatUnix(record.news_published_at)}</time>${record.belongs_to_opportunity ? '<em>本机会关联</em>' : ""}</div><strong class="${effect}">${effectLabel(effect)}</strong></header>
+          <header><div><span>${this.escape(record.news_source || "未知来源")}</span><time>${this.formatUnix(record.news_published_at)}</time>${record.belongs_to_opportunity ? '<em>本机会关联</em>' : ""}</div><strong class="${memoryLinkStatus === "context_missing" ? "context-missing" : effect}">${effectText}</strong></header>
           ${titleMarkup}
           <section class="ai-memory-verdict"><b class="${direction}">${directionLabel(direction)}</b><span>置信度 ${Math.round(Number(record.confidence || 0) * 100)}%</span><span>关联度 ${Math.round(Number(record.relevance || 0) * 100)}%</span><span>${this.impactLabel(record.impact_strength)}</span><span>${this.horizonLabel(record.time_horizon)}</span></section>
           <section class="ai-memory-reasoning">
@@ -1809,12 +1871,12 @@ class AiMonitorDashboard extends HTMLElement {
             <div class="ai-memory-reasoning-steps">
               <article><b>01</b><div><strong>${modelFacts.length ? "事实输入" : "原始新闻输入"}</strong>${evidenceList(facts, "旧记录未保存逐项事实依据")}</div></article>
               <article><b>02</b><div><strong>影响传导</strong><p>${this.escape(impactMechanism)}</p></div></article>
-              <article><b>03</b><div><strong>历史对照</strong><p>${this.escape(historicalComparison)}</p><small>${record.previous_direction ? `${directionLabel(record.previous_direction)} ${previousConfidence}% → ${directionLabel(direction)} ${currentConfidence}%` : "无前序判断"} · ${confidenceDelta}</small></div></article>
+              <article><b>03</b><div><strong>历史对照</strong><p>${this.escape(historicalComparison)}</p><small>${record.previous_direction ? `${directionLabel(record.previous_direction)} ${previousConfidence}% → ${directionLabel(direction)} ${currentConfidence}%` : (memoryLinkStatus === "context_missing" ? "前序记忆未进入当时模型上下文" : "无前序判断")} · ${confidenceDelta}</small></div></article>
               <article><b>04</b><div><strong>结论形成</strong><p>${this.escape(decisionSummary)}</p></div></article>
             </div>
             ${evidenceGroups}${positionImpact}
           </section>
-          <footer><span>${prior}</span><span>引用 ${Number(record.context_record_ids?.length || 0)} 条历史记忆</span><span>模型 ${this.escape(record.model_name || "--")}</span><time>分析 ${this.formatDate(record.analyzed_at)}</time></footer>
+          <footer><span>${prior}</span><span>${this.escape(record.symbol || "--")} 前序记忆 ${symbolContextCount} 条</span><span>批次公共记忆 ${sharedContextCount} 条</span><span>模型 ${this.escape(record.model_name || "--")}</span><time>分析 ${this.formatDate(record.analyzed_at)}</time></footer>
         </div>
       </article>`;
     }).join("");

@@ -23,6 +23,7 @@ from .config import Settings, get_settings
 from .database import build_engine, engine
 from .finnhub import FinnhubClient, FinnhubMarketStatusService, FinnhubWebhookReceiver
 from .finnhub_quotes import FinnhubUsQuoteService
+from .macro_market import MacroMarketService, configure_default_service
 from .strategy_routes import router as strategy_router
 
 FRONTEND_ROUTES = (
@@ -207,6 +208,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stale_seconds=runtime_settings.finnhub_quote_stale_seconds,
         websocket_enabled=runtime_settings.finnhub_websocket_enabled,
     )
+    app.state.macro_market_service = MacroMarketService(
+        finnhub_client,
+        app.state.finnhub_us_quote_service,
+        cache_seconds=60,
+        stale_seconds=runtime_settings.finnhub_market_status_stale_seconds,
+    )
+    configure_default_service(app.state.macro_market_service)
     app.state.finnhub_webhook_receiver = FinnhubWebhookReceiver(
         runtime_settings.finnhub_webhook_secret.get_secret_value()
     )
