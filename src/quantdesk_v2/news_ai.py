@@ -16,9 +16,9 @@ from typing import Any
 from sqlalchemy import Engine, or_, select, update
 from sqlalchemy.orm import sessionmaker
 
+from .ai_model_config import get_global_ai_model_config
 from .ai_providers import AiProviderPreset
 from .models import (
-    AiModelConfig,
     AiMonitorConfig,
     AiMonitorOpportunity,
     AiMonitorPrediction,
@@ -40,7 +40,9 @@ from .strategy_ai import (
 
 CHUNK_SIZE = 5
 NEWS_ANALYSIS_MAX_WORKERS = 4
-MONITOR_REALTIME_SHARE = 0.7
+# Automatic batches are a live feed, not an archival backfill job.  Stale
+# pending rows are expired separately, so every slot can serve the newest news.
+MONITOR_REALTIME_SHARE = 1.0
 MONITOR_BATCH_DEADLINE_SECONDS = 180.0
 ANALYSIS_REQUEST_TIMEOUT_SECONDS = 45.0
 SUMMARY_REQUEST_TIMEOUT_SECONDS = 20.0
@@ -383,15 +385,8 @@ def run_news_ai_batch(
                 return
             batch.status = "running"
             batch.started_at = datetime.now(UTC).replace(tzinfo=None)
-            model = db.scalar(
-                select(AiModelConfig)
-                .where(
-                    AiModelConfig.user_id == batch.started_by,
-                    AiModelConfig.is_enabled.is_(True),
-                    AiModelConfig.is_default.is_(True),
-                )
-                .order_by(AiModelConfig.updated_at.desc(), AiModelConfig.id.desc())
-                .limit(1)
+            model = get_global_ai_model_config(
+                db, legacy_fallback_user_id=int(batch.started_by)
             )
             if model is None:
                 raise NewsAiError("not_configured")
@@ -1269,6 +1264,14 @@ def _configure_json_response(payload: dict[str, Any], provider: str, *, max_toke
         payload["reasoning_split"] = True
     else:
         payload["response_format"] = {"type": "json_object"}
+    if provider == "deepseek":
+        # DeepSeek V4 enables thinking by default.  For this high-volume,
+        # schema-bound classification job the reasoning tokens regularly used
+        # the entire output budget before the JSON answer was emitted.  That
+        # produced empty/truncated content, triggered group splitting, and made
+        # fresh news wait behind retries.  Non-thinking mode is both faster and
+        # substantially more reliable for constrained JSON extraction.
+        payload["thinking"] = {"type": "disabled"}
     token_field = (
         "max_completion_tokens"
         if provider in {"openai", "qwen", "kimi", "minimax"}
@@ -1916,7 +1919,7 @@ def _persist_model_call_trace(
 def _error_message(error: NewsAiError | None) -> str:
     category = error.category if error is not None else "upstream"
     return {
-        "not_configured": "默认 AI 模型未配置、已停用或密钥不可用",
+        "not_configured": "全局 DeepSeek 未配置、已停用或密钥不可用",
         "timeout": "AI 模型调用超时",
         "upstream": "AI 模型服务暂时不可用",
         "invalid_output": "AI 模型返回的数据结构不符合要求",

@@ -174,6 +174,8 @@ def test_admin_authorization_rules_and_news_source_management(
         source_map = {item["name"]: item for item in sources.json()}
         assert source_map["金十数据"]["feed_type"] == "taoz_flash"
         assert source_map["东方财富全球"]["feed_type"] == "taoz_flash"
+        assert source_map["Unusual Whales"]["feed_type"] == "unusual_whales"
+        assert source_map["Unusual Whales"]["enabled"] is False
         source_name = sources.json()[0]["name"]
         disabled = client.patch(
             f"/api/v2/admin/news-sources/{source_name}",

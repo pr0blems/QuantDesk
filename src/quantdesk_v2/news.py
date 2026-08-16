@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -13,7 +14,9 @@ from datetime import datetime, timedelta, timezone
 from defusedxml import ElementTree as ET
 
 from . import market_store as store
+from .config import get_settings
 from .market_config import settings
+from .security import CredentialCipher, SecurityError
 
 RSS_ALLOWED_HOSTS = frozenset(
     {
@@ -50,6 +53,8 @@ RSS_ALLOWED_HOSTS = frozenset(
     }
 )
 FLASH_ALLOWED_HOSTS = frozenset({"admin.taoz.chat"})
+UNUSUAL_WHALES_ALLOWED_HOSTS = frozenset({"api.unusualwhales.com"})
+UNUSUAL_WHALES_CREDENTIAL_KEY = "integration_credential:unusual_whales"
 TRANSLATION_ALLOWED_HOSTS = frozenset(
     {
         "api.mymemory.translated.net",
@@ -59,7 +64,16 @@ TRANSLATION_ALLOWED_HOSTS = frozenset(
 )
 MAX_RSS_BYTES = 2 * 1024 * 1024
 MAX_FLASH_BYTES = 2 * 1024 * 1024
+MAX_UNUSUAL_WHALES_BYTES = 2 * 1024 * 1024
 MAX_TRANSLATION_BYTES = 512 * 1024
+NEWS_ANALYZED_RETENTION_SECONDS = 7 * 24 * 60 * 60
+NEWS_PENDING_RETENTION_SECONDS = 24 * 60 * 60
+NEWS_MAINTENANCE_INTERVAL_SECONDS = 5 * 60
+NEWS_MAX_FUTURE_SKEW_SECONDS = 24 * 60 * 60
+MIN_ACTIONABLE_TITLE_CHARS = 4
+_NON_NEWS_TITLE_RE = re.compile(
+    r"(正在直播|交易学院|竞猜赢大奖|数据中心工具|A股温度计)"
+)
 
 
 class NewsUrlRejected(ValueError):
@@ -100,14 +114,16 @@ def _read_https(
     allowed_hosts: Collection[str],
     timeout: float,
     max_bytes: int,
+    headers: dict[str, str] | None = None,
 ) -> bytes:
     """Read a bounded HTTPS response while validating initial and redirect URLs."""
 
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
     validated_url = _validate_https_url(url, allowed_hosts)
+    request_headers = {**UA, **(headers or {})}
     request = urllib.request.Request(  # noqa: S310 - URL is HTTPS allowlist validated.
-        validated_url, headers=UA
+        validated_url, headers=request_headers
     )
     opener = urllib.request.build_opener(_AllowlistRedirectHandler(allowed_hosts))
     # The custom handler validates every redirect before urllib follows it.
@@ -353,6 +369,164 @@ def fetch_flash_json(url: str, timeout: float = 20, retries: int = 3) -> list[di
     return items
 
 
+def _validate_unusual_whales_news_url(url: str) -> str:
+    validated = _validate_https_url(url, UNUSUAL_WHALES_ALLOWED_HOSTS)
+    parsed = urllib.parse.urlsplit(validated)
+    if parsed.path != "/api/news/headlines" or parsed.fragment:
+        raise NewsUrlRejected("Unusual Whales source must use the news headlines endpoint")
+    allowed_query = {"sources", "search_term", "ticker", "major_only", "limit", "page"}
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if set(query) - allowed_query or any(len(values) != 1 for values in query.values()):
+        raise NewsUrlRejected("Unusual Whales source contains unsupported query parameters")
+    return validated
+
+
+def _unusual_whales_api_key() -> str:
+    """Load the encrypted database credential, with the legacy environment fallback."""
+
+    try:
+        rows = store.query(
+            "SELECT value_json FROM admin_settings WHERE `key`=? LIMIT 1",
+            (UNUSUAL_WHALES_CREDENTIAL_KEY,),
+        )
+    except Exception:
+        rows = []
+    if rows:
+        value = rows[0].get("value_json")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Unusual Whales database credential is invalid") from exc
+        encrypted = value.get("api_key_encrypted") if isinstance(value, dict) else None
+        if not isinstance(encrypted, str) or not encrypted:
+            raise RuntimeError("Unusual Whales database credential is invalid")
+        try:
+            master_key = get_settings().credential_master_key.get_secret_value()
+            return CredentialCipher(master_key).decrypt(encrypted).strip()
+        except SecurityError as exc:
+            raise RuntimeError("Unusual Whales database credential cannot be decrypted") from exc
+    return get_settings().unusual_whales_api_key.get_secret_value().strip()
+
+
+def _unusual_whales_item_link(
+    source_url: str, item: dict[str, object], meta: dict[str, object]
+) -> str:
+    for key in ("url", "link", "source_url"):
+        candidate = str(meta.get(key) or item.get(key) or "").strip()
+        try:
+            parsed = urllib.parse.urlsplit(candidate)
+            if (
+                parsed.scheme == "https"
+                and parsed.hostname
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.port in (None, 443)
+                and len(candidate) <= 2048
+            ):
+                return candidate
+        except ValueError:
+            continue
+    fingerprint = hashlib.sha256(
+        "\0".join(
+            (
+                str(item.get("created_at") or ""),
+                str(item.get("headline") or ""),
+                str(item.get("source") or ""),
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"{urllib.parse.urldefrag(source_url).url}#headline-{fingerprint}"
+
+
+def fetch_unusual_whales_news(
+    url: str, timeout: float = 20, retries: int = 3
+) -> list[dict[str, str | None]]:
+    """Fetch and normalize the authenticated Unusual Whales headline feed."""
+
+    if retries < 1:
+        raise ValueError("retries must be positive")
+    validated_url = _validate_unusual_whales_news_url(url)
+    api_key = _unusual_whales_api_key()
+    if not api_key:
+        raise RuntimeError("Unusual Whales API key is not configured")
+    last: Exception | None = None
+    for attempt in range(retries):
+        try:
+            raw = _read_https(
+                validated_url,
+                allowed_hosts=UNUSUAL_WHALES_ALLOWED_HOSTS,
+                timeout=timeout,
+                max_bytes=MAX_UNUSUAL_WHALES_BYTES,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "application/json",
+                },
+            )
+            break
+        except NewsUrlRejected:
+            raise
+        except Exception as exc:
+            last = exc
+            time.sleep(1.5 * (attempt + 1))
+    else:
+        if last is None:
+            raise RuntimeError("Unusual Whales fetch failed without an error")
+        raise last
+
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid Unusual Whales JSON response") from exc
+    raw_items = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(raw_items, list) or len(raw_items) > 100:
+        raise ValueError("invalid Unusual Whales news envelope")
+
+    sentiment_map = {
+        "positive": "bull",
+        "bullish": "bull",
+        "negative": "bear",
+        "bearish": "bear",
+        "neutral": "neutral",
+    }
+    items: list[dict[str, str | None]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        title = str(raw_item.get("headline") or "").strip()
+        published = str(raw_item.get("created_at") or "").strip()
+        if not title or not published:
+            continue
+        raw_meta = raw_item.get("meta")
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
+        tickers = raw_item.get("tickers")
+        tags = raw_item.get("tags")
+        summary_parts = []
+        publisher = str(raw_item.get("source") or "").strip()
+        if publisher:
+            summary_parts.append(f"Publisher: {publisher}")
+        if isinstance(tickers, list):
+            values = [str(value).strip().upper() for value in tickers if str(value).strip()]
+            if values:
+                summary_parts.append(f"Tickers: {', '.join(values[:20])}")
+        if isinstance(tags, list):
+            values = [str(value).strip() for value in tags if str(value).strip()]
+            if values:
+                summary_parts.append(f"Tags: {', '.join(values[:20])}")
+        items.append(
+            {
+                "title": title,
+                "link": _unusual_whales_item_link(validated_url, raw_item, meta),
+                "published": published,
+                "summary": "; ".join(summary_parts) or None,
+                "sentiment": sentiment_map.get(
+                    str(raw_item.get("sentiment") or "").strip().lower()
+                ),
+            }
+        )
+    return items
+
+
 def fetch_source(
     source: dict[str, object], timeout: float = 20, retries: int = 3
 ) -> list[dict[str, str | None]]:
@@ -360,6 +534,8 @@ def fetch_source(
     url = str(source.get("url") or "")
     if feed_type == "taoz_flash":
         return fetch_flash_json(url, timeout=timeout, retries=retries)
+    if feed_type == "unusual_whales":
+        return fetch_unusual_whales_news(url, timeout=timeout, retries=retries)
     if feed_type != "rss":
         raise ValueError("unsupported news source format")
     return [
@@ -447,6 +623,10 @@ def parse_pub(pub):
     except (TypeError, ValueError):
         pass
     try:
+        return int(datetime.fromisoformat(str(pub).replace("Z", "+00:00")).timestamp())
+    except (TypeError, ValueError):
+        pass
+    try:
         return int(parsedate_to_datetime(pub).timestamp())
     except Exception:
         return int(time.time())
@@ -463,6 +643,49 @@ def _news_id(source: str, link: str) -> str:
 
     payload = f"{source}\0{link}".encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _news_quality_rejection(title: str, published_ts: int, *, now_ts: int | None = None) -> str | None:
+    """Return a stable rejection reason for content that should not enter the AI queue."""
+
+    normalized = " ".join(str(title or "").split())
+    current_ts = int(time.time()) if now_ts is None else int(now_ts)
+    if len(normalized) < MIN_ACTIONABLE_TITLE_CHARS:
+        return "short_title"
+    if _NON_NEWS_TITLE_RE.search(normalized):
+        return "promotion"
+    if int(published_ts) < current_ts - NEWS_ANALYZED_RETENTION_SECONDS:
+        return "stale"
+    if int(published_ts) > current_ts + NEWS_MAX_FUTURE_SKEW_SECONDS:
+        return "future_timestamp"
+    return None
+
+
+def cleanup_news_retention(*, now_ts: int | None = None) -> int:
+    """Bound the live-news table to actionable data and the seven-day AI memory window."""
+
+    current_ts = int(time.time()) if now_ts is None else int(now_ts)
+    deleted = store.execute(
+        "DELETE FROM news WHERE ts<? OR "
+        "(ai_analyzed_at IS NULL AND ts<?) OR "
+        "CHAR_LENGTH(TRIM(title))<? OR title REGEXP ?",
+        (
+            current_ts - NEWS_ANALYZED_RETENTION_SECONDS,
+            current_ts - NEWS_PENDING_RETENTION_SECONDS,
+            MIN_ACTIONABLE_TITLE_CHARS,
+            _NON_NEWS_TITLE_RE.pattern,
+        ),
+    )
+    deleted += store.execute(
+        "DELETE n FROM news n JOIN ("
+        "SELECT id FROM ("
+        "SELECT id,ROW_NUMBER() OVER ("
+        "PARTITION BY LOWER(TRIM(COALESCE(NULLIF(title_zh,''),title))) "
+        "ORDER BY ts DESC,id DESC) AS duplicate_rank FROM news"
+        ") ranked WHERE duplicate_rank>1"
+        ") duplicates ON duplicates.id=n.id"
+    )
+    return deleted
 
 
 def _notify_news_ingested(news_ids: list[str]) -> None:
@@ -537,7 +760,9 @@ def news_once(batch=None):
             )
         source_added = 0
         source_news_ids: list[str] = []
-        batch_limit = 50 if src.get("feed_type") == "taoz_flash" else 10
+        batch_limit = (
+            50 if src.get("feed_type") in {"taoz_flash", "unusual_whales"} else 10
+        )
         for item in items[: min(batch_limit, remaining)]:
             title = str(item["title"])
             link = str(item["link"])
@@ -551,12 +776,21 @@ def news_once(batch=None):
             if store.query("SELECT 1 FROM news WHERE source=? AND link=? LIMIT 1", (name, link)):
                 continue
             ts = parse_pub(pub)
+            if _news_quality_rejection(title, ts) is not None:
+                continue
+            if store.query(
+                "SELECT 1 FROM news WHERE title=? AND ts>=? LIMIT 1",
+                (title, int(time.time()) - NEWS_ANALYZED_RETENTION_SECONDS),
+            ):
+                continue
             lang = src.get("lang", "en")
             title_zh = None
             if lang == "en":
                 title_zh = translate_en2zh(title)
                 time.sleep(0.3)  # 翻译接口限速
-            senti = sentiment_of(f"{title} {summary or ''}")
+            senti = str(item.get("sentiment") or "")
+            if senti not in {"bull", "bear", "neutral"}:
+                senti = sentiment_of(f"{title} {summary or ''}")
             inserted = store.execute(
                 "INSERT IGNORE INTO news(id,ts,source,lang,title,title_zh,link,sentiment,"
                 "rule_sentiment,summary) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -592,11 +826,17 @@ def news_loop():
     print(
         f"[news] 高频轮转模式：每 {interval}s 抓 {batch} 个源，全源轮转一遍约 {int(len(settings.get('news_sources', [1])) / batch * interval)}s"
     )
+    next_maintenance_at = 0.0
     while True:
         if store.collector_paused("news"):
             time.sleep(5)
             continue
         try:
+            if time.time() >= next_maintenance_at:
+                deleted = cleanup_news_retention()
+                if deleted:
+                    print(f"[news] retention cleanup removed {deleted} stale/invalid rows")
+                next_maintenance_at = time.time() + NEWS_MAINTENANCE_INTERVAL_SECONDS
             added = news_once(batch=batch)
             store.collector_report("news", success=True, items=added)
         except Exception as e:

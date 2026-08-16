@@ -10,9 +10,10 @@ const VIEWS = {
   sources: ["INTELLIGENCE / 06", "舆情来源"],
   news: ["INTELLIGENCE / 07", "采集新闻"],
   symbols: ["MARKET DATA / 08", "合约数据"],
-  users: ["GOVERNANCE / 09", "用户权限"],
-  storage: ["GOVERNANCE / 10", "存储维护"],
-  audit: ["GOVERNANCE / 11", "审计日志"],
+  "ai-model": ["GOVERNANCE / 09", "全局 AI 模型"],
+  users: ["GOVERNANCE / 10", "用户权限"],
+  storage: ["GOVERNANCE / 11", "存储维护"],
+  audit: ["GOVERNANCE / 12", "审计日志"],
 };
 
 let accessToken = "";
@@ -274,6 +275,7 @@ async function loadView(view = activeView) {
       sources: loadSources,
       news: loadNews,
       symbols: loadSymbols,
+      "ai-model": loadAiModel,
       users: loadUsers,
       storage: loadStorage,
       audit: loadAudit,
@@ -384,7 +386,7 @@ async function loadSources() {
   const sources = await api("/news-sources");
   newsSources = sources;
   $("#sources-total").textContent = `${sources.length} 个来源`;
-  $("#sources-table").innerHTML = sources.length ? sources.map((item) => `<tr><td><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.lang)} · ${item.feed_type === "taoz_flash" ? "快讯 JSON" : "RSS / Atom"}</small><small class="truncate" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</small></td><td><span class="pill ${item.enabled ? "active" : "disabled"}">${item.enabled ? "启用" : "停用"}</span>${item.slow ? '<small>慢速轮询</small>' : ""}</td><td><label>权重<input class="table-input" data-field="weight" type="number" value="${Number(item.weight)}" min="1" max="1000"></label><label>限额<input class="table-input" data-field="hourly_limit" type="number" value="${Number(item.hourly_limit)}" min="1" max="10000"></label></td><td>${compactNumber(item.fetched_items)} / ${compactNumber(item.inserted_items)}</td><td>${formatTime(item.last_success_at)}</td><td class="truncate" title="${escapeHtml(item.last_error || "")}">${escapeHtml(item.last_error || "--")}</td><td><div class="button-group" data-source-row="${escapeHtml(item.name)}"><button data-source-action="edit">编辑</button><button data-source-action="toggle" data-enabled="${item.enabled}">${item.enabled ? "停用" : "启用"}</button><button data-source-action="slow" data-slow="${item.slow}">${item.slow ? "正常频率" : "设为慢速"}</button><button data-source-action="save">保存参数</button><button data-source-action="test">测试</button></div></td></tr>`).join("") : '<tr><td class="empty" colspan="7">暂无舆情来源，请点击“新增来源”创建。</td></tr>';
+  $("#sources-table").innerHTML = sources.length ? sources.map((item) => `<tr><td><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.lang)} · ${item.feed_type === "unusual_whales" ? "Unusual Whales API" : item.feed_type === "taoz_flash" ? "快讯 JSON" : "RSS / Atom"}</small><small class="truncate" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</small></td><td><span class="pill ${item.enabled ? "active" : "disabled"}">${item.enabled ? "启用" : "停用"}</span>${item.slow ? '<small>慢速轮询</small>' : ""}</td><td><label>权重<input class="table-input" data-field="weight" type="number" value="${Number(item.weight)}" min="1" max="1000"></label><label>限额<input class="table-input" data-field="hourly_limit" type="number" value="${Number(item.hourly_limit)}" min="1" max="10000"></label></td><td>${compactNumber(item.fetched_items)} / ${compactNumber(item.inserted_items)}</td><td>${formatTime(item.last_success_at)}</td><td class="truncate" title="${escapeHtml(item.last_error || "")}">${escapeHtml(item.last_error || "--")}</td><td><div class="button-group" data-source-row="${escapeHtml(item.name)}"><button data-source-action="edit">编辑</button><button data-source-action="toggle" data-enabled="${item.enabled}">${item.enabled ? "停用" : "启用"}</button><button data-source-action="slow" data-slow="${item.slow}">${item.slow ? "正常频率" : "设为慢速"}</button><button data-source-action="save">保存参数</button><button data-source-action="test">测试</button><button class="danger" data-source-action="delete">删除</button></div></td></tr>`).join("") : '<tr><td class="empty" colspan="7">暂无舆情来源，请点击“新增来源”创建。</td></tr>';
 }
 
 async function loadNews() {
@@ -419,7 +421,7 @@ async function loadNews() {
 async function startNewsAiBatch(count) {
   if (!(await confirmAction(
     `分析最近 ${count} 条新闻`,
-    `系统将调用当前默认 AI 模型，按每组 5 条分析并生成美股整体结论。该操作会消耗模型额度，确认开始？`,
+    `系统将调用 y0ur 的全局 DeepSeek，按每组 5 条分析并生成美股整体结论。该操作会消耗模型额度，确认开始？`,
   ))) return;
   const result = await api("/news-ai-batches", {
     method: "POST",
@@ -427,6 +429,63 @@ async function startNewsAiBatch(count) {
   });
   toast(`AI 新闻分析批次已创建：${result.requested_count} 条`);
   await loadNews();
+}
+
+async function loadAiModel() {
+  const data = await api("/ai-model");
+  const configured = Boolean(data.configured);
+  const enabled = Boolean(data.is_enabled);
+  const state = $("#ai-model-state");
+  state.textContent = !data.owner_exists ? "y0ur 不存在" : !configured ? "未配置" : enabled ? "已启用" : "已停用";
+  state.className = `health-badge ${configured && enabled ? "ok" : "warning"}`;
+  $("#ai-model-owner").textContent = data.owner_username || "y0ur";
+  $("#ai-model-base-url").textContent = data.base_url || "--";
+  $("#ai-model-fingerprint").textContent = data.api_key_fingerprint || "尚未配置";
+  $("#ai-model-key-version").textContent = String(data.api_key_version || 0);
+  $("#ai-model-updated-at").textContent = formatTime(data.updated_at);
+  const modelSelect = $("#ai-model-name");
+  const models = Array.isArray(data.models) ? [...data.models] : [];
+  if (data.model_name && !models.includes(data.model_name)) models.unshift(data.model_name);
+  modelSelect.innerHTML = models.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("");
+  modelSelect.value = data.model_name || data.default_model || models[0] || "deepseek-v4-flash";
+  $("#ai-model-enabled").checked = enabled;
+  $("#ai-model-form").elements.namedItem("api_key").value = "";
+  $("#ai-model-message").textContent = configured
+    ? `密钥 ${data.api_key_fingerprint} · 所有用户统一调用`
+    : "首次保存必须填写 DeepSeek API Key";
+  $("#ai-model-test").disabled = !(configured && enabled);
+}
+
+async function saveAiModel(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = form.querySelector('button[type="submit"]');
+  const apiKey = String(form.elements.namedItem("api_key").value || "").trim();
+  const payload = {
+    model_name: form.elements.namedItem("model_name").value,
+    is_enabled: form.elements.namedItem("is_enabled").checked,
+  };
+  if (apiKey) payload.api_key = apiKey;
+  submit.disabled = true;
+  try {
+    await api("/ai-model", { method: "PUT", body: JSON.stringify(payload) });
+    form.elements.namedItem("api_key").value = "";
+    toast("全局 DeepSeek 配置已保存，所有用户立即生效");
+    await loadAiModel();
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function testAiModel() {
+  const button = $("#ai-model-test");
+  button.disabled = true;
+  try {
+    const result = await api("/ai-model/test", { method: "POST", body: "{}" });
+    toast(result.message || "全局 DeepSeek 连接正常");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function retryNewsAiBatch(batchId) {
@@ -496,6 +555,10 @@ async function updateSource(button) {
   const action = button.dataset.sourceAction;
   if (action === "edit") {
     openSourceEditor(newsSources.find((item) => item.name === name));
+    return;
+  }
+  if (action === "delete") {
+    await removeSource(name);
     return;
   }
   if (action === "test") {
@@ -578,15 +641,19 @@ async function saveSource(event) {
   }
 }
 
+async function removeSource(name, closeEditor = false) {
+  if (!(await confirmAction("删除舆情来源", `确认删除 ${name}？历史舆情内容会保留，但该来源将不再参与采集。`))) return;
+  await api(`/news-sources/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (closeEditor) $("#source-dialog").close();
+  toast(`来源 ${name} 已删除`);
+  await loadSources();
+}
+
 async function deleteSource() {
   const form = $("#source-form");
   const name = form.name.value.trim();
   if (!name || form.mode.value !== "edit") return;
-  if (!(await confirmAction("删除舆情来源", `确认删除 ${name}？历史舆情内容会保留，但该来源将不再参与采集。`))) return;
-  await api(`/news-sources/${encodeURIComponent(name)}`, { method: "DELETE" });
-  $("#source-dialog").close();
-  toast(`来源 ${name} 已删除`);
-  await loadSources();
+  await removeSource(name, true);
 }
 
 async function updateUser(button) {
@@ -686,6 +753,8 @@ function bindEvents() {
   $("#news-ai-retry").addEventListener("click", (event) => {
     retryNewsAiBatch(event.currentTarget.dataset.batchId).catch((error) => toast(error.message, "error"));
   });
+  $("#ai-model-form").addEventListener("submit", (event) => saveAiModel(event).catch((error) => toast(error.message, "error")));
+  $("#ai-model-test").addEventListener("click", () => testAiModel().catch((error) => toast(error.message, "error")));
   $("#users-table").addEventListener("click", (event) => { const button = event.target.closest("[data-user-action]"); if (button) updateUser(button).catch((error) => toast(error.message, "error")); });
   $("#cleanup-preview").addEventListener("click", () => previewCleanup().catch((error) => toast(error.message, "error")));
   $("#cleanup-run").addEventListener("click", () => runCleanup().catch((error) => toast(error.message, "error")));

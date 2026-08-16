@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import __version__, battle
+from .ai_model_config import get_global_ai_model_config
 from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
 from .backtest import BacktestRepository, BacktestUnavailable
 from .binance_client import BinanceAccountClientError
@@ -1344,24 +1345,11 @@ def optimize_monitor_prediction_algorithm(
     current_config = battle.normalize_algorithm_config(
         setting.value_json if setting is not None else None
     )
-    deepseek_model = db.scalar(
-        select(AiModelConfig)
-        .where(
-            AiModelConfig.user_id == user_id,
-            AiModelConfig.provider_code == "deepseek",
-            AiModelConfig.is_enabled.is_(True),
-        )
-        .order_by(
-            AiModelConfig.is_default.desc(),
-            AiModelConfig.updated_at.desc(),
-            AiModelConfig.id.desc(),
-        )
-        .limit(1)
-    )
+    deepseek_model = get_global_ai_model_config(db, legacy_fallback_user_id=user_id)
     if deepseek_model is None:
         raise HTTPException(
             status_code=409,
-            detail="请先在系统设置中新增并启用 DeepSeek 模型配置",
+            detail="请先在管理后台配置并启用全局 DeepSeek",
         )
     try:
         api_key = CredentialCipher(

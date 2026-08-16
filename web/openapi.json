@@ -1,6 +1,43 @@
 {
   "components": {
     "schemas": {
+      "AdminAiModelConfigUpdate": {
+        "additionalProperties": false,
+        "description": "Administrator-owned update for the platform-wide DeepSeek credential.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 2048,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "is_enabled": {
+            "default": true,
+            "title": "Is Enabled",
+            "type": "boolean"
+          },
+          "model_name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+            "title": "Model Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_name"
+        ],
+        "title": "AdminAiModelConfigUpdate",
+        "type": "object"
+      },
       "AdminAlertRulesUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -116,7 +153,7 @@
           },
           "feed_type": {
             "default": "rss",
-            "pattern": "^(rss|taoz_flash)$",
+            "pattern": "^(rss|taoz_flash|unusual_whales)$",
             "title": "Feed Type",
             "type": "string"
           },
@@ -184,7 +221,7 @@
           "feed_type": {
             "anyOf": [
               {
-                "pattern": "^(rss|taoz_flash)$",
+                "pattern": "^(rss|taoz_flash|unusual_whales)$",
                 "type": "string"
               },
               {
@@ -634,6 +671,13 @@
             "maximum": 1440.0,
             "minimum": 5.0,
             "title": "Opportunity Interval Minutes",
+            "type": "integer"
+          },
+          "prediction_max_holding_bars": {
+            "default": 4,
+            "maximum": 24.0,
+            "minimum": 1.0,
+            "title": "Prediction Max Holding Bars",
             "type": "integer"
           },
           "technical_score_weight": {
@@ -3979,6 +4023,109 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v2/admin/ai-model": {
+      "get": {
+        "description": "Return the platform-wide DeepSeek setting without exposing its secret.",
+        "operationId": "global_ai_model_api_v2_admin_ai_model_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Global Ai Model Api V2 Admin Ai Model Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Global Ai Model",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "description": "Create or update the DeepSeek credential shared by every user.",
+        "operationId": "update_global_ai_model_api_v2_admin_ai_model_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminAiModelConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Global Ai Model Api V2 Admin Ai Model Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Global Ai Model",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v2/admin/ai-model/test": {
+      "post": {
+        "description": "Test the saved shared credential against the allowlisted DeepSeek origin.",
+        "operationId": "test_global_ai_model_api_v2_admin_ai_model_test_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Test Global Ai Model",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v2/admin/alert-rules": {
       "get": {
         "operationId": "alert_rules_api_v2_admin_alert_rules_get",

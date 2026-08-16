@@ -117,6 +117,7 @@ def test_analyze_news_chunk_returns_validated_us_stock_decisions(monkeypatch) ->
     assert result[1]["sentiment"] == "neutral"
     assert captured["endpoint"].host == "api.deepseek.com"
     assert captured["request"]["response_format"] == {"type": "json_object"}
+    assert captured["request"]["thinking"] == {"type": "disabled"}
     assert "provider-key" not in captured["request"]["messages"][1]["content"]
     assert captured["authorization"].startswith("Bearer provider-key-")
 
@@ -310,6 +311,7 @@ def test_batch_summary_is_structured_and_bounded(monkeypatch) -> None:
     assert traces[0]["news_ids"] == ["news-1", "news-2"]
     assert traces[0]["status"] == "completed"
     assert traces[0]["request_json"]["model"] == "deepseek-v4-flash"
+    assert traces[0]["request_json"]["thinking"] == {"type": "disabled"}
     assert json.loads(traces[0]["response_text"]) == summary
     assert "provider-key" not in json.dumps(traces[0]["request_json"])
 

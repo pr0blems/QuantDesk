@@ -12,11 +12,17 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import market_config as config_loader
 from . import news as market_news
+from .ai_model_config import (
+    GLOBAL_AI_MODEL_OWNER_USERNAME,
+    get_global_ai_model_config,
+    get_global_ai_model_owner,
+)
+from .ai_providers import get_ai_provider
 from .database import get_db
 from .dependencies import require_admin, require_admin_write
 from .models import (
@@ -37,6 +43,7 @@ from .models import (
 )
 from .news_ai import CHUNK_SIZE, run_news_ai_batch
 from .schemas import (
+    AdminAiModelConfigUpdate,
     AdminAlertRulesUpdate,
     AdminCleanupRequest,
     AdminNewsAiBatchCreate,
@@ -45,11 +52,18 @@ from .schemas import (
     AdminUserUpdate,
     MessageOut,
 )
+from .security import CredentialCipher, SecurityError, api_key_fingerprint
 from .stock_library import import_tradfi_equities, security_out, sync_company_profile
+from .strategy_ai import StrategyAiError, _chat_http_transport
 
 router = APIRouter(prefix="/api/v2/admin", tags=["admin"])
 COLLECTOR_NAMES = {"price", "ticker", "depth", "kline", "news", "social", "paper"}
 FLASH_SOURCE_SEED_KEY = "news_source_seed:taoz_flash_v1"
+UNUSUAL_WHALES_SOURCE_SEED_KEY = "news_source_seed:unusual_whales_v1"
+SPECIAL_NEWS_SOURCE_SEEDS = {
+    "taoz_flash": FLASH_SOURCE_SEED_KEY,
+    "unusual_whales": UNUSUAL_WHALES_SOURCE_SEED_KEY,
+}
 COLLECTOR_STALE_SECONDS = {
     "price": 20,
     "ticker": 150,
@@ -72,6 +86,33 @@ _STORAGE_SQL = {
     "ticker": "SELECT COUNT(*) total, MIN(ts) oldest, MAX(ts) newest FROM ticker",
     "audit_logs": "SELECT COUNT(*) total FROM audit_logs",
 }
+
+
+def _global_ai_model_out(db: Session) -> dict[str, Any]:
+    preset = get_ai_provider("deepseek")
+    if preset is None:  # pragma: no cover - fixed server registry invariant
+        raise HTTPException(status_code=500, detail="DeepSeek 服务端配置缺失")
+    owner = get_global_ai_model_owner(db)
+    config = get_global_ai_model_config(db, enabled_only=False)
+    return {
+        "scope": "global",
+        "owner_username": GLOBAL_AI_MODEL_OWNER_USERNAME,
+        "owner_exists": owner is not None,
+        "provider_code": preset.code,
+        "provider_name": preset.label,
+        "base_url": preset.base_url,
+        "models": list(preset.models),
+        "default_model": preset.default_model,
+        "configured": config is not None and bool(config.api_key_encrypted),
+        "id": config.public_id if config is not None else None,
+        "display_name": config.display_name if config is not None else "全局 DeepSeek",
+        "model_name": config.model_name if config is not None else preset.default_model,
+        "api_key_configured": bool(config and config.api_key_encrypted),
+        "api_key_fingerprint": config.api_key_fingerprint if config is not None else None,
+        "api_key_version": config.api_key_version if config is not None else 0,
+        "is_enabled": bool(config and config.is_enabled),
+        "updated_at": config.updated_at if config is not None else None,
+    }
 
 
 def _client_ip(request: Request) -> str | None:
@@ -171,14 +212,17 @@ def _sync_news_sources(db: Session) -> None:
     configured_sources = config_loader.settings.get("news_sources", [])
     if not db.scalar(select(func.count()).select_from(NewsSourceSetting)):
         sources_to_seed = configured_sources
-    elif db.get(AdminSetting, FLASH_SOURCE_SEED_KEY) is None:
+    else:
+        source_types_to_seed = {
+            feed_type
+            for feed_type, seed_key in SPECIAL_NEWS_SOURCE_SEEDS.items()
+            if db.get(AdminSetting, seed_key) is None
+        }
         sources_to_seed = [
             source
             for source in configured_sources
-            if source.get("feed_type") == "taoz_flash"
+            if source.get("feed_type") in source_types_to_seed
         ]
-    else:
-        sources_to_seed = []
     for source in sources_to_seed:
         name = str(source.get("name") or "").strip()
         url = str(source.get("url") or "").strip()
@@ -191,19 +235,21 @@ def _sync_news_sources(db: Session) -> None:
                 feed_type=str(source.get("feed_type") or "rss"),
                 lang=str(source.get("lang") or "en"),
                 slow=bool(source.get("slow")),
-                enabled=True,
+                enabled=bool(source.get("enabled", True)),
                 weight=int(source.get("weight") or 100),
                 hourly_limit=int(source.get("hourly_limit") or 600),
             )
         )
-    if db.get(AdminSetting, FLASH_SOURCE_SEED_KEY) is None:
-        db.add(
-            AdminSetting(
-                key=FLASH_SOURCE_SEED_KEY,
-                value_json={"seeded": True},
-                version=1,
+    configured_feed_types = {source.get("feed_type") for source in configured_sources}
+    for feed_type, seed_key in SPECIAL_NEWS_SOURCE_SEEDS.items():
+        if feed_type in configured_feed_types and db.get(AdminSetting, seed_key) is None:
+            db.add(
+                AdminSetting(
+                    key=seed_key,
+                    value_json={"seeded": True},
+                    version=1,
+                )
             )
-        )
     db.flush()
 
 
@@ -316,6 +362,149 @@ def _collectors(db: Session) -> list[dict[str, Any]]:
         else:
             output.append(_collector_out(row, now, pause_settings.get(name, False)))
     return output
+
+
+@router.get("/ai-model")
+def global_ai_model(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return the platform-wide DeepSeek setting without exposing its secret."""
+
+    return _global_ai_model_out(db)
+
+
+@router.put("/ai-model")
+def update_global_ai_model(
+    payload: AdminAiModelConfigUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_write),
+) -> dict[str, Any]:
+    """Create or update the DeepSeek credential shared by every user."""
+
+    owner = get_global_ai_model_owner(db, for_update=True)
+    if owner is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"全局模型所属账号 {GLOBAL_AI_MODEL_OWNER_USERNAME} 不存在",
+        )
+    config = get_global_ai_model_config(db, enabled_only=False, for_update=True)
+    raw_api_key = payload.api_key.get_secret_value() if payload.api_key is not None else None
+    if config is None and raw_api_key is None:
+        raise HTTPException(status_code=422, detail="首次配置必须填写 DeepSeek API Key")
+
+    cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
+    previous_fingerprint = config.api_key_fingerprint if config is not None else None
+    try:
+        if config is None:
+            config = AiModelConfig(
+                public_id=str(uuid.uuid4()),
+                user_id=owner.id,
+                provider_code="deepseek",
+                display_name="全局 DeepSeek",
+                model_name=payload.model_name,
+                api_key_encrypted=cipher.encrypt(raw_api_key or ""),
+                api_key_fingerprint=api_key_fingerprint(raw_api_key or ""),
+                api_key_version=1,
+                is_enabled=False,
+                is_default=False,
+            )
+            db.add(config)
+            db.flush()
+        else:
+            config.model_name = payload.model_name
+            if raw_api_key is not None:
+                config.api_key_encrypted = cipher.encrypt(raw_api_key)
+                config.api_key_fingerprint = api_key_fingerprint(raw_api_key)
+                config.api_key_version += 1
+
+        # The table enforces one default row per owner through a generated
+        # unique column, so old defaults must be cleared before enabling this one.
+        for item in db.scalars(
+            select(AiModelConfig).where(
+                AiModelConfig.user_id == owner.id,
+                AiModelConfig.is_default.is_(True),
+            )
+        ):
+            item.is_default = False
+        config.is_default = False
+        config.is_enabled = payload.is_enabled
+        db.flush()
+        config.is_default = payload.is_enabled
+        _audit(
+            db,
+            request,
+            admin.id,
+            "admin.ai_model.update",
+            "ai_model_config",
+            config.public_id,
+            {
+                "owner_username": owner.username,
+                "provider_code": "deepseek",
+                "model_name": config.model_name,
+                "enabled": config.is_enabled,
+                "credential_replaced": raw_api_key is not None,
+                "previous_fingerprint": previous_fingerprint,
+                "fingerprint": config.api_key_fingerprint,
+            },
+        )
+        db.commit()
+    except (IntegrityError, SecurityError):
+        db.rollback()
+        raise HTTPException(status_code=409, detail="全局 DeepSeek 配置保存冲突") from None
+    return _global_ai_model_out(db)
+
+
+@router.post("/ai-model/test", response_model=MessageOut)
+def test_global_ai_model(
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin_write),
+) -> MessageOut:
+    """Test the saved shared credential against the allowlisted DeepSeek origin."""
+
+    config = get_global_ai_model_config(db)
+    preset = get_ai_provider("deepseek")
+    if config is None or preset is None:
+        raise HTTPException(status_code=422, detail="请先配置并启用全局 DeepSeek")
+    try:
+        api_key = CredentialCipher(
+            request.app.state.settings.credential_master_key.get_secret_value()
+        ).decrypt(config.api_key_encrypted)
+        body = json.dumps(
+            {
+                "model": config.model_name,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 1,
+                "stream": False,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        db.rollback()
+        status_code, _ = _chat_http_transport(
+            preset,
+            body,
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            15.0,
+        )
+    except SecurityError:
+        raise HTTPException(status_code=503, detail="全局 DeepSeek 密钥无法解密") from None
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="连接 DeepSeek 超时") from None
+    except (StrategyAiError, OSError):
+        raise HTTPException(status_code=502, detail="无法连接 DeepSeek") from None
+    if status_code in {401, 403}:
+        raise HTTPException(status_code=422, detail="DeepSeek API Key 无效或无权访问该模型")
+    if status_code in {408, 504}:
+        raise HTTPException(status_code=504, detail="连接 DeepSeek 超时")
+    if not 200 <= status_code < 300:
+        raise HTTPException(status_code=502, detail=f"DeepSeek 返回错误（HTTP {status_code}）")
+    return MessageOut(message="全局 DeepSeek API 测试成功")
 
 
 @router.get("/overview")
@@ -547,17 +736,8 @@ def create_news_ai_batch(
     )
     if active_batch is not None:
         raise HTTPException(status_code=409, detail="已有 AI 新闻分析批次正在运行")
-    model = db.scalar(
-        select(AiModelConfig.id)
-        .where(
-            AiModelConfig.user_id == admin.id,
-            AiModelConfig.is_enabled.is_(True),
-            AiModelConfig.is_default.is_(True),
-        )
-        .limit(1)
-    )
-    if model is None:
-        raise HTTPException(status_code=422, detail="请先在系统设置中配置并启用默认 AI 模型")
+    if get_global_ai_model_config(db, legacy_fallback_user_id=admin.id) is None:
+        raise HTTPException(status_code=422, detail="请先在管理后台配置并启用全局 DeepSeek")
     batch = NewsAiBatch(
         id=str(uuid.uuid4()),
         started_by=admin.id,
@@ -954,7 +1134,18 @@ def delete_news_source(
     source = db.get(NewsSourceSetting, name)
     if source is None:
         raise HTTPException(status_code=404, detail="news source not found")
-    metadata = {"url": source.url, "lang": source.lang, "enabled": source.enabled}
+    credential_removed = False
+    if source.feed_type == "unusual_whales":
+        credential = db.get(AdminSetting, market_news.UNUSUAL_WHALES_CREDENTIAL_KEY)
+        if credential is not None:
+            db.delete(credential)
+            credential_removed = True
+    metadata = {
+        "url": source.url,
+        "lang": source.lang,
+        "enabled": source.enabled,
+        "credential_removed": credential_removed,
+    }
     db.delete(source)
     _audit(
         db,

@@ -18,6 +18,16 @@
   "spike_alert_pct_5m": 2.0,
   "news_sources": [
     {
+      "name": "Unusual Whales",
+      "lang": "en",
+      "feed_type": "unusual_whales",
+      "url": "https://api.unusualwhales.com/api/news/headlines?major_only=true&limit=100&page=0",
+      "enabled": false,
+      "slow": true,
+      "weight": 310,
+      "hourly_limit": 600
+    },
+    {
       "name": "金十数据",
       "lang": "zh-CN",
       "feed_type": "taoz_flash",

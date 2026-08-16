@@ -240,6 +240,7 @@ def test_ai_monitor_worker_recovers_abandoned_runs_continuously() -> None:
     assert "pending >= NEWS_CATCH_UP_THRESHOLD and catch_up_allowed" in source
     assert 'name="ai-news-immediate"' in source
     assert "def _ingest_worker_loop(" in source
+    assert "def _enqueue_failed_legacy_news(" in source
 
 
 def test_collector_news_queue_is_ordered_and_deduplicated() -> None:
@@ -1256,7 +1257,7 @@ def test_score_exit_price_is_never_before_the_score_signal() -> None:
     assert legacy["price_time_ms"] >= signal_ms
 
 
-def test_hard_cap_uses_only_a_close_observable_at_the_cap() -> None:
+def test_hard_cap_uses_first_executable_open_at_or_after_cap() -> None:
     cap_ms = 1_800_000_900_000
     interval = 900_000
 
@@ -1268,16 +1269,38 @@ def test_hard_cap_uses_only_a_close_observable_at_the_cap() -> None:
                 "close": 101,
             },
             {"open_time": cap_ms, "open": 102, "close": 999},
+            {"open_time": cap_ms + interval, "open": 103, "close": 104},
         ],
         cap_ms,
         timeframe_ms=interval,
+        not_before_ms=cap_ms - interval // 2,
     )
 
     assert result == {
-        "price": 101.0,
+        "price": 102.0,
         "price_time_ms": cap_ms,
-        "price_source": "last_closed_candle_at_cap",
+        "price_source": "first_executable_open_at_or_after_cap",
     }
+
+
+def test_hard_cap_never_reuses_a_pre_entry_candle() -> None:
+    cap_ms = 1_800_000_900_000
+    interval = 900_000
+
+    result = historical_closed_settlement_price(
+        [
+            {
+                "open_time": cap_ms - interval,
+                "open": 100,
+                "close": 101,
+            }
+        ],
+        cap_ms,
+        timeframe_ms=interval,
+        not_before_ms=cap_ms - interval // 2,
+    )
+
+    assert result is None
 
 
 def test_prediction_score_exit_requires_hysteresis_or_direction_reversal() -> None:
@@ -1505,7 +1528,7 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
             if symbol in {"AAPLUSDT", "TSLAUSDT"}:
                 return [
                     {
-                        "open_time": due_ms - 15 * 60 * 1_000,
+                        "open_time": due_ms,
                         "open": 102,
                         "close": 102,
                     }
@@ -1572,10 +1595,14 @@ def test_ai_monitor_config_normalizes_symbol_allowlist() -> None:
     assert config.minimum_indicator_score == 65
     assert config.minimum_combined_score == 75
     assert config.news_lookback_hours == 168
+    assert config.prediction_max_holding_bars == 4
     assert config.minimum_calibration_samples == 1000
     assert config.news_score_weight == 45
     assert config.technical_score_weight == 35
     assert config.market_flow_score_weight == 20
+
+    with pytest.raises(ValueError):
+        AiMonitorConfigUpdate(prediction_max_holding_bars=0)
 
     costs = AiMonitorCostConfigUpdate(
         prediction_fee_enabled=False,
@@ -2176,7 +2203,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260813-37"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260816-38"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2186,7 +2213,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260813-37"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260816-38"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app

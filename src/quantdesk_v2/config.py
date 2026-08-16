@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     finnhub_quote_stale_seconds: int = 600
     finnhub_websocket_enabled: bool = True
 
+    # News-source rows contain the endpoint and polling policy, never this secret.
+    unusual_whales_api_key: SecretStr = SecretStr("")
+
     monitor_symbols_config: Path = Path("config/tradfi_symbols.json")
 
     @property

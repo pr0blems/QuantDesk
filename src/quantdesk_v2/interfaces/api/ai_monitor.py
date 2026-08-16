@@ -12,10 +12,10 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ... import ai_monitor, historical_replay
+from ...ai_model_config import global_ai_model_configured
 from ...database import get_db
 from ...dependencies import get_current_user
 from ...models import (
-    AiModelConfig,
     AiMonitorConfig,
     AiMonitorOpportunity,
     AiMonitorPrediction,
@@ -406,15 +406,7 @@ def overview(
         .order_by(AiMonitorRun.created_at.desc(), AiMonitorRun.id.desc())
         .limit(1)
     )
-    model_configured = bool(
-        db.scalar(
-            select(AiModelConfig.id).where(
-                AiModelConfig.user_id == user.id,
-                AiModelConfig.is_enabled.is_(True),
-                AiModelConfig.is_default.is_(True),
-            )
-        )
-    )
+    model_configured = global_ai_model_configured(db, legacy_fallback_user_id=user.id)
     return {
         "config": settings,
         "scheduler": {
@@ -559,6 +551,7 @@ def update_config(
     config.opportunity_interval_minutes = payload.opportunity_interval_minutes
     config.news_lookback_hours = payload.news_lookback_hours
     config.timeframe = payload.timeframe
+    config.prediction_max_holding_bars = payload.prediction_max_holding_bars
     config.indicator_keys_json = list(payload.indicator_keys)
     config.monitor_symbols_json = list(payload.monitor_symbols)
     config.minimum_news_confidence = Decimal(str(payload.minimum_news_confidence))
@@ -586,6 +579,7 @@ def update_config(
             "news_interval_minutes": payload.news_interval_minutes,
             "opportunity_interval_minutes": payload.opportunity_interval_minutes,
             "news_lookback_hours": payload.news_lookback_hours,
+            "prediction_max_holding_bars": payload.prediction_max_holding_bars,
             "indicator_count": len(payload.indicator_keys),
             "monitor_symbol_count": len(payload.monitor_symbols),
             "monitor_scope": "selected" if payload.monitor_symbols else "all",

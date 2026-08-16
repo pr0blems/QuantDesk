@@ -13,10 +13,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from .ai_model_config import get_global_ai_model_config
 from .database import get_db
 from .dependencies import get_current_user
 from .models import (
-    AiModelConfig,
     AuditLog,
     StrategyDeployment,
     StrategyRevision,
@@ -466,16 +466,7 @@ def preview_indicator_composition(
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     settings = request.app.state.settings
-    user_model = db.scalar(
-        select(AiModelConfig)
-        .where(
-            AiModelConfig.user_id == user.id,
-            AiModelConfig.is_enabled.is_(True),
-            AiModelConfig.is_default.is_(True),
-        )
-        .order_by(AiModelConfig.updated_at.desc(), AiModelConfig.id.desc())
-        .limit(1)
-    )
+    user_model = get_global_ai_model_config(db, legacy_fallback_user_id=user.id)
     user_model_runtime: tuple[str, str, str] | None = None
     if user_model is not None:
         try:
@@ -866,16 +857,7 @@ def preview_ai_strategy_edit(
         raise HTTPException(status_code=404, detail="strategy not found")
     editable = strategy_snapshot(strategy)
     settings = request.app.state.settings
-    user_model = db.scalar(
-        select(AiModelConfig)
-        .where(
-            AiModelConfig.user_id == user.id,
-            AiModelConfig.is_enabled.is_(True),
-            AiModelConfig.is_default.is_(True),
-        )
-        .order_by(AiModelConfig.updated_at.desc(), AiModelConfig.id.desc())
-        .limit(1)
-    )
+    user_model = get_global_ai_model_config(db, legacy_fallback_user_id=user.id)
     user_model_runtime: tuple[str, str, str] | None = None
     if user_model is not None:
         try:

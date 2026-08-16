@@ -609,6 +609,10 @@ class AiMonitorConfig(Base):
         ),
         CheckConstraint("timeframe IN ('15m', '1h', '4h')", name="valid_timeframe"),
         CheckConstraint(
+            "prediction_max_holding_bars BETWEEN 1 AND 24",
+            name="valid_prediction_max_holding_bars",
+        ),
+        CheckConstraint(
             "minimum_news_confidence BETWEEN 0 AND 1",
             name="valid_news_confidence",
         ),
@@ -700,6 +704,12 @@ class AiMonitorConfig(Base):
     )
     timeframe: Mapped[str] = mapped_column(
         String(8), default="1h", nullable=False, comment="技术指标扫描周期"
+    )
+    prediction_max_holding_bars: Mapped[int] = mapped_column(
+        Integer,
+        default=4,
+        nullable=False,
+        comment="预测最大持有的技术周期K线根数",
     )
     indicator_keys_json: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, comment="全部需要满足的技术指标稳定键"

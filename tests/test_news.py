@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from cryptography.fernet import Fernet
 from defusedxml.common import EntitiesForbidden
 from sqlalchemy import Computed
 
@@ -154,6 +155,90 @@ def test_fetch_taoz_flash_json_normalizes_content_and_stable_links(monkeypatch) 
     assert news.parse_pub(items[0]["published"]) == 1785922140
 
 
+def test_fetch_unusual_whales_news_authenticates_and_normalizes(monkeypatch) -> None:
+    payload = json.dumps(
+        {
+            "data": [
+                {
+                    "created_at": "2026-08-16T01:02:03Z",
+                    "headline": "Apple supplier raises its outlook",
+                    "is_major": True,
+                    "meta": {"url": "https://example.com/apple-outlook"},
+                    "sentiment": "positive",
+                    "source": "BusinessWire",
+                    "tags": ["earnings"],
+                    "tickers": ["AAPL"],
+                }
+            ]
+        }
+    ).encode()
+    captured: dict[str, object] = {}
+
+    def fake_read(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return payload
+
+    monkeypatch.setattr(news, "_read_https", fake_read)
+    monkeypatch.setattr(news, "_unusual_whales_api_key", lambda: "server-side-secret")
+
+    items = news.fetch_unusual_whales_news(
+        "https://api.unusualwhales.com/api/news/headlines?major_only=true&limit=100&page=0",
+        retries=1,
+    )
+
+    assert captured["allowed_hosts"] == news.UNUSUAL_WHALES_ALLOWED_HOSTS
+    assert captured["headers"] == {
+        "Authorization": "Bearer server-side-secret",
+        "Accept": "application/json",
+    }
+    assert items == [
+        {
+            "title": "Apple supplier raises its outlook",
+            "link": "https://example.com/apple-outlook",
+            "published": "2026-08-16T01:02:03Z",
+            "summary": "Publisher: BusinessWire; Tickers: AAPL; Tags: earnings",
+            "sentiment": "bull",
+        }
+    ]
+    assert news.parse_pub(items[0]["published"]) == 1786842123
+    assert "server-side-secret" not in repr(items)
+
+
+def test_unusual_whales_news_requires_key_and_exact_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(news, "_unusual_whales_api_key", lambda: "")
+    with pytest.raises(RuntimeError, match="not configured"):
+        news.fetch_unusual_whales_news(
+            "https://api.unusualwhales.com/api/news/headlines", retries=1
+        )
+    with pytest.raises(news.NewsUrlRejected, match="headlines endpoint"):
+        news.fetch_unusual_whales_news(
+            "https://api.unusualwhales.com/api/stock/AAPL/quote", retries=1
+        )
+
+
+def test_unusual_whales_key_prefers_encrypted_database_credential(monkeypatch) -> None:
+    master_key = Fernet.generate_key().decode("ascii")
+    encrypted = news.CredentialCipher(master_key).encrypt("database-secret")
+    monkeypatch.setattr(
+        news.store,
+        "query",
+        lambda sql, params=(): [{"value_json": {"api_key_encrypted": encrypted}}],
+    )
+    monkeypatch.setattr(
+        news,
+        "get_settings",
+        lambda: SimpleNamespace(
+            credential_master_key=SimpleNamespace(get_secret_value=lambda: master_key),
+            unusual_whales_api_key=SimpleNamespace(
+                get_secret_value=lambda: "environment-secret"
+            ),
+        ),
+    )
+
+    assert news._unusual_whales_api_key() == "database-secret"
+
+
 def test_fetch_source_rejects_unknown_format() -> None:
     with pytest.raises(ValueError, match="unsupported"):
         news.fetch_source({"feed_type": "unknown", "url": "https://example.com"})
@@ -190,6 +275,8 @@ def test_sha256_migration_does_not_duplicate_an_existing_source_link(monkeypatch
         if "WHERE source=" in sql:
             assert params == ("CoinDesk", "https://example.com/a")
             return [{"existing": 1}]
+        if "WHERE title=" in sql:
+            return []
         if "title_zh IS NULL" in sql:
             return []
         raise AssertionError(f"unexpected query: {sql!r} {params!r}")
@@ -232,6 +319,40 @@ def test_newly_inserted_news_immediately_notifies_ai_worker(monkeypatch) -> None
     assert notified == [
         [news._news_id("CoinDesk", "https://example.com/immediate")]
     ]
+
+
+def test_news_quality_rejects_stale_short_and_promotional_titles() -> None:
+    now = 1_800_000_000
+
+    assert news._news_quality_rejection("Apple raises guidance", now, now_ts=now) is None
+    assert news._news_quality_rejection("财料", now, now_ts=now) == "short_title"
+    assert news._news_quality_rejection("金十交易学院正在直播中", now, now_ts=now) == "promotion"
+    assert (
+        news._news_quality_rejection(
+            "Old but otherwise valid headline",
+            now - news.NEWS_ANALYZED_RETENTION_SECONDS - 1,
+            now_ts=now,
+        )
+        == "stale"
+    )
+
+
+def test_news_retention_expires_old_pending_before_analyzed_memory(monkeypatch) -> None:
+    captured: list[tuple[str, object]] = []
+
+    def execute(sql, params=()):
+        captured.append((sql, params))
+        return 6
+
+    monkeypatch.setattr(news.store, "execute", execute)
+
+    assert news.cleanup_news_retention(now_ts=1_800_000_000) == 12
+    assert "ai_analyzed_at IS NULL" in captured[0][0]
+    assert captured[0][1][:2] == (
+        1_800_000_000 - news.NEWS_ANALYZED_RETENTION_SECONDS,
+        1_800_000_000 - news.NEWS_PENDING_RETENTION_SECONDS,
+    )
+    assert "ROW_NUMBER() OVER" in captured[1][0]
 
 
 def test_news_model_exposes_generated_unique_dedup_hash() -> None:

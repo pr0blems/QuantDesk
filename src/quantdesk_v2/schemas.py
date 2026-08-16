@@ -187,7 +187,9 @@ class AdminNewsSourceCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=80)
     url: str = Field(min_length=10, max_length=2048)
-    feed_type: str = Field(default="rss", pattern=r"^(rss|taoz_flash)$")
+    feed_type: str = Field(
+        default="rss", pattern=r"^(rss|taoz_flash|unusual_whales)$"
+    )
     lang: str = Field(default="en", min_length=2, max_length=16, pattern=r"^[A-Za-z0-9-]+$")
     enabled: bool = True
     slow: bool = False
@@ -204,7 +206,9 @@ class AdminNewsSourceUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     url: str | None = Field(default=None, min_length=10, max_length=2048)
-    feed_type: str | None = Field(default=None, pattern=r"^(rss|taoz_flash)$")
+    feed_type: str | None = Field(
+        default=None, pattern=r"^(rss|taoz_flash|unusual_whales)$"
+    )
     lang: str | None = Field(default=None, min_length=2, max_length=16, pattern=r"^[A-Za-z0-9-]+$")
     enabled: bool | None = None
     slow: bool | None = None
@@ -245,6 +249,37 @@ class AdminUserUpdate(BaseModel):
         if self.is_active is None and self.is_admin is None:
             raise ValueError("at least one user field is required")
         return self
+
+
+class AdminAiModelConfigUpdate(BaseModel):
+    """Administrator-owned update for the platform-wide DeepSeek credential."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_name: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+    )
+    api_key: SecretStr | None = Field(default=None, max_length=2048)
+    is_enabled: bool = True
+
+    @field_validator("model_name")
+    @classmethod
+    def normalize_model_name(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def empty_api_key_preserves_existing(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        return _validate_ai_api_key(value) if value is not None else None
 
 
 class AdminCleanupRequest(BaseModel):
@@ -628,6 +663,7 @@ class AiMonitorConfigUpdate(BaseModel):
     opportunity_interval_minutes: int = Field(default=15, ge=5, le=1440)
     news_lookback_hours: int = Field(default=168, ge=1, le=168)
     timeframe: Literal["15m", "1h", "4h"] = "1h"
+    prediction_max_holding_bars: int = Field(default=4, ge=1, le=24)
     indicator_keys: list[str] = Field(
         default_factory=lambda: ["moving_average_bull"], min_length=1, max_length=20
     )

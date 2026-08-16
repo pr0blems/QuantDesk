@@ -59,9 +59,10 @@
         <button class="nav-item" data-view-target="news"><span>07</span>采集新闻</button>
         <button class="nav-item" data-view-target="symbols"><span>08</span>合约数据</button>
         <p>平台治理</p>
-        <button class="nav-item" data-view-target="users"><span>09</span>用户权限</button>
-        <button class="nav-item" data-view-target="storage"><span>10</span>存储维护</button>
-        <button class="nav-item" data-view-target="audit"><span>11</span>审计日志</button>
+        <button class="nav-item" data-view-target="ai-model"><span>09</span>全局 AI 模型</button>
+        <button class="nav-item" data-view-target="users"><span>10</span>用户权限</button>
+        <button class="nav-item" data-view-target="storage"><span>11</span>存储维护</button>
+        <button class="nav-item" data-view-target="audit"><span>12</span>审计日志</button>
       </nav>
       <div class="sidebar-foot">
         <span class="live-dot"></span><span>控制面在线</span>
@@ -155,7 +156,7 @@
               <span id="news-total" class="counter">0 条新闻</span>
             </div>
             <article class="panel news-ai-panel">
-              <div class="news-ai-copy"><span>AI MARKET INTELLIGENCE</span><h3>批量美股舆情研判</h3><p>使用当前管理员的默认 AI 模型，每组 5 条识别关联美股、重新判断最终情绪，并生成整批市场结论。</p></div>
+              <div class="news-ai-copy"><span>AI MARKET INTELLIGENCE</span><h3>批量美股舆情研判</h3><p>使用 y0ur 的全局 DeepSeek，每组 5 条识别关联美股、重新判断最终情绪，并生成整批市场结论。</p></div>
               <div id="news-ai-status" class="news-ai-status"><span class="pill">尚未运行</span><small>请选择最近 300 或 500 条新闻开始分析</small></div>
               <div class="news-ai-actions"><button id="news-ai-retry" class="hidden" type="button">继续未完成批次</button><button type="button" data-news-ai-count="300">分析最近 300 条</button><button class="primary" type="button" data-news-ai-count="500">分析最近 500 条</button></div>
               <div id="news-ai-progress" class="news-ai-progress hidden"><i></i></div>
@@ -179,6 +180,44 @@
           <div class="section-intro"><div><p class="eyebrow">MARKET DATA COVERAGE</p><h2>合约数据</h2><p>核对每个合约的行情新鲜度、多周期评分、K 线覆盖与社交数据。</p></div><span id="symbols-total" class="counter">0 个合约</span></div>
           <form id="symbols-filter" class="filter-bar compact"><label>搜索合约<input name="query" placeholder="输入代码"></label><button class="primary" type="submit">搜索</button></form>
           <article class="panel"><div class="table-wrap"><table><thead><tr><th>合约</th><th>类别</th><th>最新价格</th><th>24H</th><th>行情新鲜度</th><th>评分 15m / 1h / 4h</th><th>K 线覆盖</th><th>社交快照</th></tr></thead><tbody id="symbols-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view hidden" data-view="ai-model">
+          <div class="section-intro">
+            <div>
+              <p class="eyebrow">GLOBAL MODEL GOVERNANCE</p>
+              <h2>全局 DeepSeek</h2>
+              <p>统一维护平台模型密钥。新闻分析、机会研判、策略预览和算法调优均使用 y0ur 名下的这一份配置。</p>
+            </div>
+            <span id="ai-model-state" class="health-badge">读取中</span>
+          </div>
+          <div class="ai-model-admin-grid">
+            <article class="panel ai-model-summary">
+              <div class="panel-head"><div><span>SHARED CREDENTIAL</span><h3>平台级模型连接</h3></div></div>
+              <dl>
+                <div><dt>配置归属</dt><dd id="ai-model-owner">y0ur</dd></div>
+                <div><dt>服务商</dt><dd>DeepSeek</dd></div>
+                <div><dt>固定地址</dt><dd id="ai-model-base-url">https://api.deepseek.com</dd></div>
+                <div><dt>密钥指纹</dt><dd id="ai-model-fingerprint">尚未配置</dd></div>
+                <div><dt>密钥版本</dt><dd id="ai-model-key-version">0</dd></div>
+                <div><dt>最后更新</dt><dd id="ai-model-updated-at">--</dd></div>
+              </dl>
+              <p class="ai-model-safety-note">完整 API Key 只在服务端加密保存，不会回显到浏览器，也不会按用户分别下发。</p>
+            </article>
+            <form id="ai-model-form" class="panel form-panel ai-model-form">
+              <div class="form-section">
+                <div><span>01</span><h3>调用配置</h3><p>API Key 留空表示保留当前密钥。模型名称仅可从服务端白名单中选择。</p></div>
+                <div class="toggle-stack">
+                  <div class="field-grid">
+                    <label>模型名称<select id="ai-model-name" name="model_name" required></select></label>
+                    <label>DeepSeek API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="留空保留已加密密钥"></label>
+                  </div>
+                  <label class="switch-row"><span><strong>启用全局模型</strong><small>停用后所有用户的 AI 分析功能都会停止</small></span><input id="ai-model-enabled" name="is_enabled" type="checkbox"></label>
+                </div>
+              </div>
+              <div class="form-actions"><span id="ai-model-message">所有用户共用 y0ur 的全局配置</span><button id="ai-model-test" type="button">测试连接</button><button class="primary" type="submit">保存全局配置</button></div>
+            </form>
+          </div>
         </section>
 
         <section class="view hidden" data-view="users">
@@ -215,7 +254,7 @@
       <div class="editor-fields">
         <label>来源名称<input name="name" maxlength="80" placeholder="例如 ReutersMarkets" required></label>
         <label>语言代码<input name="lang" maxlength="16" pattern="[A-Za-z0-9-]+" value="en" placeholder="en / zh-CN" required></label>
-        <label>来源格式<select name="feed_type" required><option value="rss">RSS / Atom</option><option value="taoz_flash">Taoz 快讯 JSON</option></select></label>
+        <label>来源格式<select name="feed_type" required><option value="rss">RSS / Atom</option><option value="taoz_flash">Taoz 快讯 JSON</option><option value="unusual_whales">Unusual Whales API</option></select></label>
         <label class="full">来源地址<input name="url" type="url" maxlength="2048" placeholder="https://example.com/feed.xml" required></label>
         <label>展示权重<input name="weight" type="number" min="1" max="1000" value="100" required></label>
         <label>每小时入库上限<input name="hourly_limit" type="number" min="1" max="10000" value="600" required></label>

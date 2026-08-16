@@ -20,8 +20,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from .ai_model_config import global_ai_model_configured
 from .models import (
-    AiModelConfig,
     AiMonitorConfig,
     AiMonitorOpportunity,
     AiMonitorPrediction,
@@ -50,6 +50,7 @@ ACTIVE_RUN_STATUSES = ("pending", "running")
 _TIMEFRAME_SECONDS = {"15m": 15 * 60, "1h": 60 * 60, "4h": 4 * 60 * 60}
 NEWS_CATCH_UP_THRESHOLD = NEWS_BATCH_SIZE * 3
 NEWS_CATCH_UP_INTERVAL_SECONDS = 60
+LIVE_NEWS_MAX_AGE_SECONDS = 24 * 60 * 60
 RUN_STALE_SECONDS = 5 * 60
 PREDICTION_SETTLEMENT_RETRY_MINUTES = 5
 PREDICTION_SETTLEMENT_GRACE_HOURS = 6
@@ -168,6 +169,8 @@ _worker_started = False
 _worker_wakeup = threading.Event()
 _ingested_news_lock = threading.Lock()
 _ingested_news_ids: dict[str, None] = {}
+_legacy_rescue_lock = threading.Lock()
+_legacy_rescued_batches: dict[str, datetime] = {}
 
 
 class AiMonitorError(RuntimeError):
@@ -220,6 +223,78 @@ def _requeue_ingested_news(news_ids: Sequence[str]) -> None:
             _ingested_news_ids.setdefault(news_id, None)
 
 
+def _enqueue_failed_legacy_news(db: Session) -> int:
+    """Rescue failed work emitted by another instance still using V4 thinking mode."""
+
+    now = utcnow()
+    cutoff = now - timedelta(minutes=15)
+    rows = db.execute(
+        select(
+            NewsAiBatch.id,
+            NewsAiModelCall.news_ids_json,
+            NewsAiModelCall.request_json,
+        )
+        .join(NewsAiModelCall, NewsAiModelCall.batch_id == NewsAiBatch.id)
+        .where(
+            NewsAiBatch.status.in_(("failed", "partial")),
+            NewsAiBatch.created_at >= cutoff,
+            NewsAiModelCall.call_type == "analysis",
+            NewsAiModelCall.status == "failed",
+        )
+        .order_by(NewsAiBatch.created_at.desc(), NewsAiModelCall.id.desc())
+        .limit(100)
+    ).all()
+    candidates_by_batch: dict[str, list[str]] = {}
+    for batch_id, news_ids, request_json in rows:
+        request = dict(request_json or {})
+        thinking = request.get("thinking")
+        if isinstance(thinking, Mapping) and thinking.get("type") == "disabled":
+            continue
+        candidates_by_batch.setdefault(str(batch_id), []).extend(
+            str(news_id).strip()
+            for news_id in list(news_ids or [])
+            if str(news_id).strip()
+        )
+    if not candidates_by_batch:
+        return 0
+    with _legacy_rescue_lock:
+        expired = [
+            batch_id
+            for batch_id, rescued_at in _legacy_rescued_batches.items()
+            if rescued_at < cutoff
+        ]
+        for batch_id in expired:
+            _legacy_rescued_batches.pop(batch_id, None)
+        fresh_batches = {
+            batch_id: news_ids
+            for batch_id, news_ids in candidates_by_batch.items()
+            if batch_id not in _legacy_rescued_batches
+        }
+        for batch_id in fresh_batches:
+            _legacy_rescued_batches[batch_id] = now
+    candidate_ids = list(
+        dict.fromkeys(
+            news_id
+            for news_ids in fresh_batches.values()
+            for news_id in news_ids
+        )
+    )
+    if not candidate_ids:
+        return 0
+    pending_ids = list(
+        db.scalars(
+            select(News.id)
+            .where(
+                News.id.in_(candidate_ids),
+                News.ai_analyzed_at.is_(None),
+                News.ts >= int(time.time()) - LIVE_NEWS_MAX_AGE_SECONDS,
+            )
+            .order_by(News.ts.desc(), News.id.desc())
+        ).all()
+    )
+    return enqueue_news_analysis(pending_ids)
+
+
 def default_config_data() -> dict[str, Any]:
     return {
         "enabled": False,
@@ -230,6 +305,7 @@ def default_config_data() -> dict[str, Any]:
         "require_new_news_trigger": True,
         "require_market_quality_for_prediction": True,
         "timeframe": "1h",
+        "prediction_max_holding_bars": 4,
         "indicator_keys": list(DEFAULT_INDICATOR_KEYS),
         "monitor_symbols": [],
         "minimum_news_confidence": 0.6,
@@ -275,6 +351,7 @@ def config_data(config: AiMonitorConfig | None) -> dict[str, Any]:
         "require_new_news_trigger": True,
         "require_market_quality_for_prediction": True,
         "timeframe": config.timeframe,
+        "prediction_max_holding_bars": int(config.prediction_max_holding_bars),
         "indicator_keys": indicator_keys,
         "monitor_symbols": list(config.monitor_symbols_json or []),
         "minimum_news_confidence": float(config.minimum_news_confidence),
@@ -2468,8 +2545,16 @@ def historical_closed_settlement_price(
     settles_at_ms: int,
     *,
     timeframe_ms: int = 15 * 60 * 1_000,
+    not_before_ms: int | None = None,
 ) -> dict[str, Any] | None:
-    """Return the last candle close observable at a hard holding-time cap."""
+    """Return the first causally executable candle open at/after a hard cap.
+
+    Using the final closed candle *before* the cap shortened positions by up to
+    one full bar and could even select a price from before very short-lived
+    predictions.  Waiting for the first bar open at or after the cap makes the
+    timestamp executable and guarantees that a hard-cap settlement never
+    predates its signal.
+    """
 
     candidates: list[tuple[int, float]] = []
     for candle in candles:
@@ -2477,21 +2562,23 @@ def historical_closed_settlement_price(
             open_time = int(candle.get("open_time") or 0)
             if 0 < open_time < 1_000_000_000_000:
                 open_time *= 1_000
-            close_price = float(candle.get("close") or 0)
+            open_price = float(candle.get("open") or 0)
         except (TypeError, ValueError):
             continue
-        close_time = open_time + timeframe_ms
-        if open_time > 0 and close_price > 0 and close_time <= settles_at_ms:
-            candidates.append((close_time, close_price))
+        if (
+            open_time >= settles_at_ms
+            and open_price > 0
+            and (not_before_ms is None or open_time >= not_before_ms)
+            and open_time - settles_at_ms <= timeframe_ms
+        ):
+            candidates.append((open_time, open_price))
     if not candidates:
         return None
-    close_time, close_price = max(candidates, key=lambda item: item[0])
-    if settles_at_ms - close_time > timeframe_ms * 3:
-        return None
+    open_time, open_price = min(candidates, key=lambda item: item[0])
     return {
-        "price": close_price,
-        "price_time_ms": close_time,
-        "price_source": "last_closed_candle_at_cap",
+        "price": open_price,
+        "price_time_ms": open_time,
+        "price_source": "first_executable_open_at_or_after_cap",
     }
 
 
@@ -2893,6 +2980,36 @@ def historical_opportunity_analytics(
             "signal_time": prediction.predicted_at,
             "expires_at": prediction.due_at,
             "exit_at": actual_exit_at,
+            "max_holding_minutes": round(
+                max(
+                    0.0,
+                    (prediction.due_at - prediction.predicted_at).total_seconds()
+                    / 60,
+                ),
+                2,
+            ),
+            "actual_holding_minutes": round(
+                max(
+                    0.0,
+                    (actual_exit_at - prediction.predicted_at).total_seconds()
+                    / 60,
+                ),
+                2,
+            ),
+            "max_holding_bars": int(
+                (
+                    prediction_evidence.get("max_holding")
+                    if isinstance(prediction_evidence.get("max_holding"), Mapping)
+                    else {}
+                ).get("bars")
+                or max(
+                    1,
+                    round(
+                        (prediction.due_at - prediction.predicted_at).total_seconds()
+                        / _TIMEFRAME_SECONDS.get(prediction.timeframe, 3600)
+                    ),
+                )
+            ),
             }
         )
     status_rows = db.execute(
@@ -3165,6 +3282,7 @@ def settle_due_predictions(
             settlement = historical_closed_settlement_price(
                 candles,
                 _datetime_ms(item.due_at),
+                not_before_ms=start_ms,
             )
             if settlement is not None:
                 exit_decision = {
@@ -3174,6 +3292,13 @@ def settle_due_predictions(
                     "same_bar_conflict": False,
                     "gap_execution": False,
                 }
+        if (
+            exit_decision is not None
+            and int(exit_decision.get("price_time_ms") or 0) < start_ms
+        ):
+            # Never persist an exit from before the virtual entry.  Leave the
+            # prediction pending so the retry path can obtain causal data.
+            exit_decision = None
         if exit_decision is None and item.due_at > now:
             continue
         exit_price = float(exit_decision["price"]) if exit_decision is not None else 0.0
@@ -3631,15 +3756,8 @@ def create_run(db: Session, user_id: int, run_type: str) -> AiMonitorRun:
     batch_id: str | None = None
     config = db.get(AiMonitorConfig, user_id)
     if run_type == "news":
-        model = db.scalar(
-            select(AiModelConfig.id).where(
-                AiModelConfig.user_id == user_id,
-                AiModelConfig.is_enabled.is_(True),
-                AiModelConfig.is_default.is_(True),
-            )
-        )
-        if model is None:
-            raise AiMonitorError("请先在系统设置中配置并启用默认 AI 模型")
+        if not global_ai_model_configured(db, legacy_fallback_user_id=user_id):
+            raise AiMonitorError("请联系管理员配置并启用全局 DeepSeek")
         lookback_hours = int(config.news_lookback_hours) if config is not None else 24
         minimum_news_ts = int(
             (datetime.now(UTC) - timedelta(hours=lookback_hours)).timestamp()
@@ -3725,15 +3843,8 @@ def create_targeted_news_run(
     )
     if existing_news_count != len(selected_news_ids):
         raise AiMonitorError("新闻不存在或已被删除")
-    model = db.scalar(
-        select(AiModelConfig.id).where(
-            AiModelConfig.user_id == user_id,
-            AiModelConfig.is_enabled.is_(True),
-            AiModelConfig.is_default.is_(True),
-        )
-    )
-    if model is None:
-        raise AiMonitorError("请先在系统设置中配置并启用默认 AI 模型")
+    if not global_ai_model_configured(db, legacy_fallback_user_id=user_id):
+        raise AiMonitorError("请联系管理员配置并启用全局 DeepSeek")
 
     now = utcnow()
     batch = NewsAiBatch(
@@ -3994,6 +4105,10 @@ def _scan_opportunities(
     unmapped_symbols: list[str] = [str(item["symbol"]) for item in unmapped_candidates]
     indicator_keys = list(config["indicator_keys"])
     timeframe = str(config["timeframe"])
+    prediction_max_holding_bars = max(
+        1,
+        min(24, int(config.get("prediction_max_holding_bars", 4))),
+    )
     minimum_indicator_score = float(config["minimum_indicator_score"])
     minimum_combined_score = float(config["minimum_combined_score"])
     minimum_calibration_samples = int(config["minimum_calibration_samples"])
@@ -4188,8 +4303,14 @@ def _scan_opportunities(
             market_quality_passed=bool(market_quality["passed"]),
             require_market_quality=require_market_quality,
         )
-        expires_at = now + timedelta(seconds=_TIMEFRAME_SECONDS[timeframe] * 2)
-        due_at = now + timedelta(seconds=_TIMEFRAME_SECONDS[timeframe])
+        max_holding_seconds = (
+            _TIMEFRAME_SECONDS[timeframe] * prediction_max_holding_bars
+        )
+        due_at = now + timedelta(seconds=max_holding_seconds)
+        # Opportunity visibility and prediction risk now share one explicit
+        # lifetime.  The technical timeframe no longer doubles as a one-bar
+        # forced exit horizon.
+        expires_at = due_at
         cost_breakdown = prediction_cost_breakdown(now, due_at, config)
         estimated_cost = float(cost_breakdown["total_cost_bps"])
         readiness = signal_readiness_snapshot(
@@ -4296,6 +4417,13 @@ def _scan_opportunities(
             "market_flow": market_flow,
             "risk_metrics": risk_metrics,
             "risk_plan": risk_plan,
+            "max_holding": {
+                "version": "timeframe_bars_v1",
+                "bars": prediction_max_holding_bars,
+                "timeframe": timeframe,
+                "seconds": max_holding_seconds,
+                "due_at": due_at.replace(tzinfo=UTC).isoformat(),
+            },
             "score_weights": score_weights,
             "effective_score_weights": effective_score_weights,
             "news_trigger": news_trigger,
@@ -4460,6 +4588,7 @@ def _scan_opportunities(
         "minimum_indicator_score": minimum_indicator_score,
         "minimum_combined_score": minimum_combined_score,
         "timeframe": timeframe,
+        "prediction_max_holding_bars": prediction_max_holding_bars,
         "news_lookback_hours": int(config["news_lookback_hours"]),
         "news_trigger_window_hours": trigger_window_hours,
         "require_new_news_trigger": require_new_news,
@@ -4575,9 +4704,26 @@ def recover_stale_runs(db: Session) -> dict[str, int]:
             .where(News.ai_claim_batch_id.in_(stale_batch_ids))
             .values(ai_claim_batch_id=None, ai_claimed_at=None)
         )
+    stale_claim_result = db.execute(
+        update(News)
+        .where(
+            News.ai_claim_batch_id.is_not(None),
+            or_(
+                News.ai_claimed_at.is_(None),
+                News.ai_claimed_at < stale_cutoff,
+                News.ai_claim_batch_id.not_in(
+                    select(NewsAiBatch.id).where(
+                        NewsAiBatch.status.in_(ACTIVE_RUN_STATUSES)
+                    )
+                ),
+            ),
+        )
+        .values(ai_claim_batch_id=None, ai_claimed_at=None)
+    )
     return {
         "batches": int(batch_result.rowcount or 0),
         "runs": int(run_result.rowcount or 0),
+        "claims": int(stale_claim_result.rowcount or 0),
     }
 
 
@@ -4610,9 +4756,16 @@ def _ingest_worker_loop(engine: Engine, master_key: str) -> None:
 
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     while True:
-        _worker_wakeup.wait()
+        # Poll as well as listening for collector events.  This keeps the fast
+        # lane independent from the heavier prediction settlement scheduler and
+        # lets a new instance rescue failures emitted by an older deployment.
+        _worker_wakeup.wait(timeout=PREDICTION_SETTLEMENT_POLL_SECONDS)
         _worker_wakeup.clear()
         try:
+            with factory() as db:
+                rescued = _enqueue_failed_legacy_news(db)
+            if rescued:
+                print(f"[ai-monitor] queued {rescued} news from legacy failed batches")
             while _run_ingested_news(factory, engine, master_key):
                 pass
         except Exception as exc:
@@ -4629,6 +4782,7 @@ def _run_ingested_news(
     news_ids = _take_ingested_news()
     if not news_ids:
         return False
+    minimum_news_ts = int(time.time()) - LIVE_NEWS_MAX_AGE_SECONDS
     with factory() as db:
         pending_ids = list(
             db.scalars(
@@ -4636,23 +4790,18 @@ def _run_ingested_news(
                 .where(
                     News.id.in_(news_ids),
                     News.ai_analyzed_at.is_(None),
+                    News.ts >= minimum_news_ts,
                 )
-                .order_by(News.ts.asc(), News.id.asc())
+                .order_by(News.ts.desc(), News.id.desc())
             ).all()
         )
         if not pending_ids:
             return False
+        if not global_ai_model_configured(db):
+            return False
         user_id = db.scalar(
             select(AiMonitorConfig.user_id)
-            .join(
-                AiModelConfig,
-                AiModelConfig.user_id == AiMonitorConfig.user_id,
-            )
-            .where(
-                AiMonitorConfig.enabled.is_(True),
-                AiModelConfig.is_enabled.is_(True),
-                AiModelConfig.is_default.is_(True),
-            )
+            .where(AiMonitorConfig.enabled.is_(True))
             .order_by(AiMonitorConfig.user_id)
             .limit(1)
         )
