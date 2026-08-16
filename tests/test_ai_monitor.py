@@ -2203,7 +2203,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260816-38"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260816-39"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2426,6 +2426,11 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'data-conclusion-view="memory"' in component
     assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/news-analysis-records`)' in component
     assert "一周新闻研判追踪" in component
+    assert "判断依据与过程" in component
+    assert "事实输入" in component
+    assert "反向证据" in component
+    assert ".ai-memory-reasoning-steps" in stylesheet
+    assert ".ai-memory-evidence-groups" in stylesheet
     assert 'this.api("/news-system-prompt"' in component
     assert ".news-system-prompt-trigger" in stylesheet
     assert ".news-system-prompt-dialog" in stylesheet

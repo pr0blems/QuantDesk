@@ -310,6 +310,11 @@ class NewsAiAnalysisRecord(Base):
             "memory_effect IN ('initial', 'maintain', 'strengthen', 'weaken', 'reverse')",
             name="valid_memory_effect",
         ),
+        CheckConstraint(
+            "position_effect IS NULL OR position_effect IN "
+            "('hold', 'strengthen', 'caution', 'exit', 'reverse')",
+            name="valid_position_effect",
+        ),
         UniqueConstraint(
             "batch_id",
             "news_id",
@@ -384,6 +389,16 @@ class NewsAiAnalysisRecord(Base):
     )
     memory_reason: Mapped[str] = mapped_column(
         Text, nullable=False, comment="本次新闻如何影响历史判断"
+    )
+    judgment_basis_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        comment="结构化研判依据：事实、影响传导、支持/反向证据及不确定性",
+    )
+    position_effect: Mapped[str | None] = mapped_column(
+        String(16), comment="本次新闻对未结算研究持仓的建议影响"
+    )
+    position_reason: Mapped[str | None] = mapped_column(
+        Text, comment="本次新闻影响研究持仓的判断依据"
     )
     previous_direction: Mapped[str | None] = mapped_column(
         String(16), comment="前序记忆记录的方向"

@@ -846,6 +846,7 @@ def opportunity_news_analysis_records(
             "news_id": record.news_id,
             "news_title": news.title_zh or news.title,
             "news_original_title": news.title,
+            "news_summary": news.summary,
             "news_source": news.source,
             "news_link": news.link,
             "news_published_at": int(record.news_published_at),
@@ -858,6 +859,9 @@ def opportunity_news_analysis_records(
             "analysis_reason": record.analysis_reason,
             "memory_effect": record.memory_effect,
             "memory_reason": record.memory_reason,
+            "judgment_basis": dict(record.judgment_basis_json or {}),
+            "position_effect": record.position_effect,
+            "position_reason": record.position_reason,
             "previous_direction": record.previous_direction,
             "previous_confidence": (
                 float(record.previous_confidence)

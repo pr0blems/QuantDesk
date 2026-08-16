@@ -109,6 +109,14 @@ def test_analyze_news_chunk_returns_validated_us_stock_decisions(monkeypatch) ->
         "memory_effect": "initial",
         "memory_reason": "一周追踪窗口内没有该股票的历史研判，本条作为初始判断。",
         "prior_record_id": None,
+        "judgment_basis": {
+            "key_facts": [],
+            "impact_mechanism": "",
+            "supporting_evidence": [],
+            "counter_evidence": [],
+            "uncertainties": [],
+            "decision_summary": "新品与需求强劲直接改善英伟达增长预期",
+        },
     }
     assert result[0]["sentiment"] == "bull"
     assert result[0]["related_industries"] == [
@@ -165,6 +173,14 @@ def test_analyze_news_chunk_sends_history_and_tracks_judgment_change(monkeypatch
             "memory_effect": "reverse",
             "memory_reason": "新产品进展扭转此前供应受阻的偏空判断。",
             "prior_record_id": 41,
+            "judgment_basis": {
+                "key_facts": ["新品发布", "数据中心需求强劲"],
+                "impact_mechanism": "新品放量提高数据中心收入与增长预期。",
+                "supporting_evidence": ["客户需求强劲"],
+                "counter_evidence": ["此前存在供应限制"],
+                "uncertainties": ["量产节奏尚待验证"],
+                "decision_summary": "新增长证据强于此前供应约束，因此由偏空转为偏多。",
+            },
         }
     )
 
@@ -220,9 +236,18 @@ def test_analyze_news_chunk_sends_history_and_tracks_judgment_change(monkeypatch
     assert user_payload["historical_related_news"][0]["prior_judgments"][0]["record_id"] == 41
     assert user_payload["open_research_positions"][0]["symbol"] == "NVDA"
     assert "continuous judgment" in user_payload["memory_instructions"]
+    assert "judgment_basis" in user_payload["output_schema"]["analyses"][0]["related_us_stocks"][0]
     assert result[0]["related_us_stocks"][0]["memory_effect"] == "reverse"
     assert result[0]["related_us_stocks"][0]["prior_record_id"] == 41
     assert result[0]["related_us_stocks"][0]["position_effect"] == "hold"
+    assert result[0]["related_us_stocks"][0]["judgment_basis"] == {
+        "key_facts": ["新品发布", "数据中心需求强劲"],
+        "impact_mechanism": "新品放量提高数据中心收入与增长预期。",
+        "supporting_evidence": ["客户需求强劲"],
+        "counter_evidence": ["此前存在供应限制"],
+        "uncertainties": ["量产节奏尚待验证"],
+        "decision_summary": "新增长证据强于此前供应约束，因此由偏空转为偏多。",
+    }
 
 
 def test_analyze_news_chunk_rejects_missing_or_invented_items(monkeypatch) -> None:
@@ -472,6 +497,14 @@ def test_analysis_parser_accepts_common_model_aliases() -> None:
         "memory_effect": "initial",
         "memory_reason": "一周追踪窗口内没有该股票的历史研判，本条作为初始判断。",
         "prior_record_id": None,
+        "judgment_basis": {
+            "key_facts": [],
+            "impact_mechanism": "",
+            "supporting_evidence": [],
+            "counter_evidence": [],
+            "uncertainties": [],
+            "decision_summary": "AI 需求提升芯片业务预期",
+        },
     }
     assert result[0]["impact_strength"] == "medium"
     assert result[0]["category"] == "company"

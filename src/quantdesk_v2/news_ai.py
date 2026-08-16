@@ -52,6 +52,8 @@ MAX_REQUEST_BYTES = 192 * 1024
 MAX_TITLE_CHARS = 320
 MAX_SUMMARY_CHARS = 520
 MAX_REASON_CHARS = 240
+MAX_JUDGMENT_BASIS_CHARS = 360
+MAX_JUDGMENT_BASIS_ITEMS = 5
 MAX_RELATED_STOCKS = 8
 MAX_RELATED_INDUSTRIES = 6
 NEWS_MEMORY_LOOKBACK_DAYS = 7
@@ -187,6 +189,26 @@ def analyze_news_chunk(
                                             "position_reason": (
                                                 "Chinese explanation of how this news affects the open research position"
                                             ),
+                                            "judgment_basis": {
+                                                "key_facts": [
+                                                    "Up to five concise facts directly stated by the news"
+                                                ],
+                                                "impact_mechanism": (
+                                                    "Chinese summary of how those facts transmit to revenue, cost, risk, valuation, or price"
+                                                ),
+                                                "supporting_evidence": [
+                                                    "Evidence supporting this stock direction"
+                                                ],
+                                                "counter_evidence": [
+                                                    "Evidence that weakens or contradicts this direction"
+                                                ],
+                                                "uncertainties": [
+                                                    "Unknowns or assumptions that could change the judgment"
+                                                ],
+                                                "decision_summary": (
+                                                    "Concise Chinese evidence-to-impact-to-direction rationale; do not reveal hidden chain-of-thought"
+                                                ),
+                                            },
                                         }
                                     ],
                                     "related_industries": [
@@ -991,8 +1013,16 @@ def _load_news_memory_context(
             "analysis_reason": record.analysis_reason,
             "memory_effect": record.memory_effect,
             "memory_reason": record.memory_reason,
-            "position_effect": stock_snapshot.get("position_effect"),
-            "position_reason": stock_snapshot.get("position_reason"),
+            "position_effect": record.position_effect or stock_snapshot.get("position_effect"),
+            "position_reason": record.position_reason or stock_snapshot.get("position_reason"),
+            "judgment_basis": (
+                dict(record.judgment_basis_json)
+                if isinstance(record.judgment_basis_json, Mapping)
+                else _normalize_judgment_basis(
+                    stock_snapshot.get("judgment_basis"),
+                    fallback_reason=record.analysis_reason,
+                )
+            ),
             "news_source": news.source,
             "news_title": news.title_zh or news.title or "",
             "news_summary": news.summary or "",
@@ -1152,6 +1182,13 @@ def _persist_analysis_memory_records(
                     stock.get("memory_reason")
                     or "本条新闻已纳入一周滚动新闻研判记忆。"
                 ),
+                judgment_basis_json=dict(stock.get("judgment_basis") or {}),
+                position_effect=(
+                    str(stock.get("position_effect"))
+                    if stock.get("position_effect") in POSITION_EFFECTS
+                    else None
+                ),
+                position_reason=(str(stock.get("position_reason") or "") or None),
                 previous_direction=prior.direction if prior is not None else None,
                 previous_confidence=prior.confidence if prior is not None else None,
                 prior_record_id=prior.id if prior is not None else None,
@@ -1324,6 +1361,10 @@ def _normalize_memory_context(
                 "memory_reason": _text(raw.get("memory_reason"), MAX_REASON_CHARS),
                 "position_effect": str(raw.get("position_effect") or ""),
                 "position_reason": _text(raw.get("position_reason"), MAX_REASON_CHARS),
+                "judgment_basis": _normalize_judgment_basis(
+                    raw.get("judgment_basis"),
+                    fallback_reason=str(raw.get("analysis_reason") or ""),
+                ),
                 "news_id": _text(raw.get("news_id"), 255),
                 "news_source": _text(raw.get("news_source"), 80),
                 "news_title": _text(raw.get("news_title"), MAX_TITLE_CHARS),
@@ -1456,6 +1497,17 @@ def _validate_analyses(
             raise NewsAiError("invalid_output")
         seen.add(news_id)
         sentiment = _sentiment(raw.get("sentiment", raw.get("tone", raw.get("market_sentiment"))))
+        analysis_reason = _text(
+            raw.get(
+                "reason",
+                raw.get(
+                    "explanation",
+                    raw.get("rationale", "模型未提供更具体的判断依据"),
+                ),
+            ),
+            MAX_REASON_CHARS,
+            required=True,
+        )
         stocks = raw.get(
             "related_us_stocks",
             raw.get("related_stocks", raw.get("stocks", raw.get("stock_symbols", []))),
@@ -1510,6 +1562,12 @@ def _validate_analyses(
                     MAX_REASON_CHARS,
                     required=True,
                 )
+            stock["judgment_basis"] = _normalize_judgment_basis(
+                (raw_stock or {}).get("judgment_basis")
+                or (raw_stock or {}).get("decision_basis")
+                or (raw_stock or {}).get("reasoning_basis"),
+                fallback_reason=analysis_reason,
+            )
         normalized.append(
             {
                 "id": news_id,
@@ -1549,17 +1607,7 @@ def _validate_analyses(
                         "politics": "policy",
                     },
                 ),
-                "reason": _text(
-                    raw.get(
-                        "reason",
-                        raw.get(
-                            "explanation",
-                            raw.get("rationale", "模型未提供更具体的判断依据"),
-                        ),
-                    ),
-                    MAX_REASON_CHARS,
-                    required=True,
-                ),
+                "reason": analysis_reason,
             }
         )
     if seen != expected_ids:
@@ -1600,6 +1648,51 @@ def _optional_float(value: Any) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return round(number, 12) if math.isfinite(number) else None
+
+
+def _judgment_basis_items(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+        return []
+    items: list[str] = []
+    for raw in value[:MAX_JUDGMENT_BASIS_ITEMS]:
+        item = _text(raw, MAX_JUDGMENT_BASIS_CHARS)
+        if item and item not in items:
+            items.append(item)
+    return items
+
+
+def _normalize_judgment_basis(
+    value: Any,
+    *,
+    fallback_reason: str = "",
+) -> dict[str, Any]:
+    """Normalize a concise auditable rationale, never hidden chain-of-thought."""
+
+    raw = value if isinstance(value, Mapping) else {}
+    return {
+        "key_facts": _judgment_basis_items(
+            raw.get("key_facts", raw.get("facts", raw.get("evidence", [])))
+        ),
+        "impact_mechanism": _text(
+            raw.get("impact_mechanism", raw.get("impact_path", raw.get("mechanism"))),
+            MAX_JUDGMENT_BASIS_CHARS,
+        ),
+        "supporting_evidence": _judgment_basis_items(
+            raw.get("supporting_evidence", raw.get("supporting_factors", []))
+        ),
+        "counter_evidence": _judgment_basis_items(
+            raw.get("counter_evidence", raw.get("opposing_factors", raw.get("risks", [])))
+        ),
+        "uncertainties": _judgment_basis_items(
+            raw.get("uncertainties", raw.get("unknowns", []))
+        ),
+        "decision_summary": _text(
+            raw.get("decision_summary", raw.get("logic_summary")) or fallback_reason,
+            MAX_JUDGMENT_BASIS_CHARS,
+        ),
+    }
 
 
 def _infer_memory_effect(

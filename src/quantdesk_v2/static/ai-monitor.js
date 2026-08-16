@@ -78,7 +78,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260813-21">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260816-22">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -1761,6 +1761,11 @@ class AiMonitorDashboard extends HTMLElement {
     if (!records.length) return `<div class="ai-memory-empty"><strong>${this.escape(opportunity.symbol)} 暂无 AI 新闻分析记录</strong><span>功能启用后，新分析的新闻会按股票写入 ${windowDays} 天滚动记忆；历史新闻不会伪造回溯结论。</span></div>`;
     const directionLabel = (value) => ({ bull: "偏多", bear: "偏空", neutral: "中性" })[value] || "中性";
     const effectLabel = (value) => ({ initial: "首次判断", maintain: "维持判断", strengthen: "增强判断", weaken: "减弱判断", reverse: "判断反转" })[value] || "完成回溯";
+    const positionEffectLabel = (value) => ({ hold: "维持", strengthen: "增强", caution: "谨慎", exit: "退出", reverse: "反向" })[value] || "未调整";
+    const textItems = (value) => (Array.isArray(value) ? value : []).map((item) => String(item || "").trim()).filter(Boolean).slice(0, 5);
+    const evidenceList = (items, emptyText) => items.length
+      ? `<ul>${items.map((item) => `<li>${this.escape(item)}</li>`).join("")}</ul>`
+      : `<p class="empty">${this.escape(emptyText)}</p>`;
     const chain = records.map((record, index) => {
       const direction = ["bull", "bear", "neutral"].includes(record.direction) ? record.direction : "neutral";
       const effect = ["initial", "maintain", "strengthen", "weaken", "reverse"].includes(record.memory_effect) ? record.memory_effect : "maintain";
@@ -1768,14 +1773,40 @@ class AiMonitorDashboard extends HTMLElement {
       const link = this.safeUrl(record.news_link);
       const titleMarkup = link ? `<a href="${this.escape(link)}" target="_blank" rel="noopener noreferrer">${this.escape(title)}</a>` : `<h4>${this.escape(title)}</h4>`;
       const prior = record.prior_record_id ? `承接 #${this.escape(record.prior_record_id)}` : "无前序判断";
+      const basis = record.judgment_basis && typeof record.judgment_basis === "object" ? record.judgment_basis : {};
+      const modelFacts = textItems(basis.key_facts);
+      const facts = modelFacts.length ? modelFacts : textItems([title, record.news_summary]);
+      const supporting = textItems(basis.supporting_evidence);
+      const counter = textItems(basis.counter_evidence);
+      const uncertainties = textItems(basis.uncertainties);
+      const previousConfidence = record.previous_confidence == null ? null : Math.round(Number(record.previous_confidence || 0) * 100);
+      const currentConfidence = Math.round(Number(record.confidence || 0) * 100);
+      const confidenceDelta = previousConfidence == null ? "首次判断" : `${currentConfidence - previousConfidence >= 0 ? "+" : ""}${currentConfidence - previousConfidence} pct`;
+      const historicalComparison = record.memory_reason || "当时未保存历史对照说明";
+      const impactMechanism = basis.impact_mechanism || record.analysis_reason || "当时未保存影响传导说明";
+      const decisionSummary = basis.decision_summary || `形成${directionLabel(direction)}判断，置信度 ${currentConfidence}%。`;
+      const positionImpact = record.position_effect ? `<div class="ai-memory-position-basis"><strong>持仓影响</strong><b>${positionEffectLabel(record.position_effect)}</b><span>${this.escape(record.position_reason || "当时未保存持仓调整说明")}</span></div>` : "";
+      const evidenceGroups = supporting.length || counter.length || uncertainties.length ? `<div class="ai-memory-evidence-groups">
+        <section class="support"><header>支持因素 <b>${supporting.length}</b></header>${evidenceList(supporting, "无额外支持因素")}</section>
+        <section class="counter"><header>反向证据 <b>${counter.length}</b></header>${evidenceList(counter, "未识别到明确反向证据")}</section>
+        <section class="uncertainty"><header>不确定性 <b>${uncertainties.length}</b></header>${evidenceList(uncertainties, "未单独记录不确定性")}</section>
+      </div>` : '<p class="ai-memory-legacy-note">旧记录未保存结构化支持因素、反向证据和不确定性；系统不会根据当前信息反向补造。</p>';
       return `<article class="ai-memory-record ${direction} effect-${effect}">
         <div class="ai-memory-line"><i></i><span>${String(records.length - index).padStart(2, "0")}</span></div>
         <div class="ai-memory-card">
           <header><div><span>${this.escape(record.news_source || "未知来源")}</span><time>${this.formatUnix(record.news_published_at)}</time>${record.belongs_to_opportunity ? '<em>本机会关联</em>' : ""}</div><strong class="${effect}">${effectLabel(effect)}</strong></header>
           ${titleMarkup}
           <section class="ai-memory-verdict"><b class="${direction}">${directionLabel(direction)}</b><span>置信度 ${Math.round(Number(record.confidence || 0) * 100)}%</span><span>关联度 ${Math.round(Number(record.relevance || 0) * 100)}%</span><span>${this.impactLabel(record.impact_strength)}</span><span>${this.horizonLabel(record.time_horizon)}</span></section>
-          <p><strong>本次研判：</strong>${this.escape(record.analysis_reason || "模型未提供判断依据")}</p>
-          <p class="memory-impact"><strong>对历史判断的影响：</strong>${this.escape(record.memory_reason || "已与一周内历史记录完成对比")}</p>
+          <section class="ai-memory-reasoning">
+            <header><strong>判断依据与过程</strong><span>可审计理由摘要，不包含模型隐藏思维链</span></header>
+            <div class="ai-memory-reasoning-steps">
+              <article><b>01</b><div><strong>${modelFacts.length ? "事实输入" : "原始新闻输入"}</strong>${evidenceList(facts, "旧记录未保存逐项事实依据")}</div></article>
+              <article><b>02</b><div><strong>影响传导</strong><p>${this.escape(impactMechanism)}</p></div></article>
+              <article><b>03</b><div><strong>历史对照</strong><p>${this.escape(historicalComparison)}</p><small>${record.previous_direction ? `${directionLabel(record.previous_direction)} ${previousConfidence}% → ${directionLabel(direction)} ${currentConfidence}%` : "无前序判断"} · ${confidenceDelta}</small></div></article>
+              <article><b>04</b><div><strong>结论形成</strong><p>${this.escape(decisionSummary)}</p></div></article>
+            </div>
+            ${evidenceGroups}${positionImpact}
+          </section>
           <footer><span>${prior}</span><span>引用 ${Number(record.context_record_ids?.length || 0)} 条历史记忆</span><span>模型 ${this.escape(record.model_name || "--")}</span><time>分析 ${this.formatDate(record.analyzed_at)}</time></footer>
         </div>
       </article>`;
@@ -1931,6 +1962,16 @@ class AiMonitorDashboard extends HTMLElement {
     const memoryCount = snapshots.reduce((total, snapshot) => total + snapshot.memory.length, 0);
     const oldNewsCount = snapshots.reduce((total, snapshot) => total + snapshot.historicalNews.length, 0);
     const positionCount = snapshots.reduce((total, snapshot) => total + snapshot.positions.length, 0);
+    const historicalBasis = (record) => {
+      const basis = record?.judgment_basis && typeof record.judgment_basis === "object" ? record.judgment_basis : {};
+      const facts = (Array.isArray(basis.key_facts) ? basis.key_facts : []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 5);
+      const supporting = (Array.isArray(basis.supporting_evidence) ? basis.supporting_evidence : []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 5);
+      const counter = (Array.isArray(basis.counter_evidence) ? basis.counter_evidence : []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 5);
+      const uncertainties = (Array.isArray(basis.uncertainties) ? basis.uncertainties : []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 5);
+      const chips = (label, values) => values.length ? `<div><strong>${label}</strong>${values.map((value) => `<span>${this.escape(value)}</span>`).join("")}</div>` : "";
+      if (!facts.length && !supporting.length && !counter.length && !uncertainties.length && !basis.impact_mechanism && !basis.decision_summary) return '<p class="historical-basis-empty">该旧记录未保存结构化判断依据。</p>';
+      return `<section class="historical-judgment-basis"><header>当时的判断依据</header><p><strong>影响传导：</strong>${this.escape(basis.impact_mechanism || record.analysis_reason || "未保存")}</p><p><strong>结论逻辑：</strong>${this.escape(basis.decision_summary || record.analysis_reason || "未保存")}</p><div>${chips("事实", facts)}${chips("支持", supporting)}${chips("反向", counter)}${chips("不确定", uncertainties)}</div></section>`;
+    };
     if (!snapshots.length) return `<div class="historical-judgment-empty"><strong>${this.escape(item.symbol)} 没有可审计的历史研判输入</strong><span>${this.escape(note || "该机会生成时尚未保存模型调用请求，系统不会用当前记录反向补造。")}</span></div>`;
     const sections = snapshots.map((snapshot, callIndex) => {
       const positions = snapshot.positions.map((position) => {
@@ -1953,6 +1994,7 @@ class AiMonitorDashboard extends HTMLElement {
         <h3>${this.escape(record.news_title || "未命名历史新闻")}</h3>
         <p><strong>历史结论：</strong>${this.escape(record.analysis_reason || "无研判说明")}</p>
         <p class="memory-impact"><strong>当时的记忆变化：</strong>${this.escape(record.memory_reason || "无变化说明")}</p>
+        ${historicalBasis(record)}
         ${record.position_effect ? `<p class="position-impact"><strong>当时对持仓影响：</strong>${positionEffectLabel(record.position_effect)} · ${this.escape(record.position_reason || "无持仓变化说明")}</p>` : ""}
         <footer><span>置信度 ${Math.round(Number(record.confidence || 0) * 100)}%</span><span>关联度 ${Math.round(Number(record.relevance || 0) * 100)}%</span><span>${this.escape(record.impact_strength || "--")}</span><span>${this.escape(record.time_horizon || "--")}</span><time>${this.escape(record.analyzed_at || "--")}</time></footer>
       </article>`).join("");

@@ -650,6 +650,18 @@ def test_news_analysis_memory_migration_follows_system_prompt() -> None:
     assert '"memory_effect"' in migration
 
 
+def test_news_judgment_basis_migration_follows_max_holding_config() -> None:
+    migration = (
+        ROOT / "migrations/versions/0055_news_ai_judgment_basis.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "0055_news_ai_judgment_basis"' in migration
+    assert 'down_revision: str | None = "0054_ai_prediction_max_holding"' in migration
+    assert '"judgment_basis_json"' in migration
+    assert '"position_effect"' in migration
+    assert '"position_reason"' in migration
+
+
 def test_readiness_cost_model_cannot_be_disabled() -> None:
     disabled = {
         "prediction_fee_enabled": False,
