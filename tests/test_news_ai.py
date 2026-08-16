@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -277,6 +279,9 @@ def test_context_terms_and_position_context_are_bounded() -> None:
     assert "NVIDIA" in terms
     assert "BLACKWELL" in terms
     assert news_ai._news_context_terms("Market report about shares") == set()
+    assert news_ai._news_context_terms(
+        "Crypto blockchain digital assets 加密货币、数字资产、区块链与比特币"
+    ) == set()
 
     positions = news_ai._normalize_position_context(
         [
@@ -298,6 +303,105 @@ def test_context_terms_and_position_context_are_bounded() -> None:
     )
     assert [item["prediction_id"] for item in positions] == ["p-1"]
     assert positions[0]["state"] == "open_research_position"
+
+
+def test_mstr_relation_policy_rejects_generic_crypto_memory_contamination() -> None:
+    unrelated = {
+        "title": "Ethereum and Solana may become scarcer",
+        "title_zh": "以太坊和 Solana 可能会变得更加稀缺",
+        "summary": "The report discusses altcoin supply only.",
+    }
+    bitcoin = {
+        "title": "Bitcoin falls as institutional demand weakens",
+        "title_zh": "比特币因机构需求减弱而下跌",
+        "summary": "BTC volatility increases.",
+    }
+    direct = {
+        "title": "Strategy's STRC rises while MSTR volatility increases",
+        "title_zh": "Strategy 优先股上涨",
+        "summary": "The report directly discusses the listed company.",
+    }
+
+    assert not news_ai.news_stock_relation_supported(unrelated, "MSTR", 0.9)
+    assert news_ai.news_stock_relation_supported(bitcoin, "MSTR", 0.8)
+    assert not news_ai.news_stock_relation_supported(bitcoin, "MSTR", 0.59)
+    assert news_ai.news_stock_relation_supported(direct, "MSTR", 0.2)
+
+
+def test_stock_relation_filter_removes_memory_induced_mstr_output() -> None:
+    analyses = [
+        {
+            "id": "news-eth",
+            "related_us_stocks": [
+                {"symbol": "MSTR", "relevance": 0.9, "direction": "bull"},
+                {"symbol": "COIN", "relevance": 0.7, "direction": "bull"},
+            ],
+        }
+    ]
+    items = [
+        {
+            "id": "news-eth",
+            "title": "Ethereum and Solana staking update",
+            "title_zh": "以太坊和 Solana 质押更新",
+            "summary": "No listed-company facts are included.",
+        }
+    ]
+
+    filtered, removed = news_ai._filter_unsupported_stock_relations(analyses, items)
+
+    assert removed == 1
+    assert [item["symbol"] for item in filtered[0]["related_us_stocks"]] == ["COIN"]
+
+
+def test_memory_loader_does_not_chain_mstr_from_generic_crypto_overlap() -> None:
+    record = SimpleNamespace(
+        id=41,
+        symbol="MSTR",
+        direction="bear",
+        confidence=0.8,
+        relevance=0.9,
+        impact_strength="high",
+        time_horizon="short_term",
+        analysis_reason="Bitcoin volatility affects the treasury proxy.",
+        memory_effect="initial",
+        memory_reason="Initial judgment.",
+        position_effect=None,
+        position_reason=None,
+        judgment_basis_json={},
+        news_published_at=1_785_000_000,
+        analyzed_at=datetime(2026, 8, 15, 10, 0, 0),
+    )
+    old_news = SimpleNamespace(
+        id="old-bitcoin",
+        title="Bitcoin price volatility increases",
+        title_zh="比特币价格波动加剧",
+        summary="BTC demand weakens.",
+        source="source",
+        related_us_stocks=[{"symbol": "MSTR", "relevance": 0.9}],
+    )
+
+    class Result:
+        def all(self):
+            return [(record, old_news)]
+
+    class Db:
+        def execute(self, _statement):
+            return Result()
+
+    context = news_ai._load_news_memory_context(
+        Db(),
+        user_id=1,
+        news_items=[
+            {
+                "id": "new-eth",
+                "title": "Ethereum and Solana staking update",
+                "title_zh": "以太坊和 Solana 质押更新",
+                "summary": "General cryptocurrency market coverage.",
+            }
+        ],
+    )
+
+    assert context == []
 
 
 def test_batch_summary_is_structured_and_bounded(monkeypatch) -> None:

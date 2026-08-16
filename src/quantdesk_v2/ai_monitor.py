@@ -39,6 +39,7 @@ from .news_ai import (
     CHUNK_SIZE,
     DEFAULT_NEWS_ANALYSIS_SYSTEM_PROMPT,
     effective_news_analysis_system_prompt,
+    news_stock_relation_supported,
     run_news_ai_batch,
 )
 from .prediction_feature_indicators import evaluate_prediction_feature_indicators
@@ -3594,6 +3595,8 @@ def aggregate_news_candidates(
             try:
                 relevance = min(1.0, max(0.0, float(related.get("relevance") or 0)))
             except (TypeError, ValueError):
+                continue
+            if not news_stock_relation_supported(row, normalized, relevance):
                 continue
             score = confidence * relevance
             if score < minimum_confidence:

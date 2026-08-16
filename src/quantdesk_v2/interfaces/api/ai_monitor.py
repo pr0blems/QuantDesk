@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from ... import ai_monitor, historical_replay
+from ... import ai_monitor, historical_replay, news_ai
 from ...ai_model_config import global_ai_model_configured
 from ...database import get_db
 from ...dependencies import get_current_user
@@ -825,7 +825,7 @@ def opportunity_news_analysis_records(
     opportunity_news_ids = {
         str(item) for item in (opportunity.news_ids_json or []) if str(item)
     }
-    rows = db.execute(
+    raw_rows = db.execute(
         select(NewsAiAnalysisRecord, News)
         .join(News, News.id == NewsAiAnalysisRecord.news_id)
         .where(
@@ -837,8 +837,18 @@ def opportunity_news_analysis_records(
             NewsAiAnalysisRecord.analyzed_at.desc(),
             NewsAiAnalysisRecord.id.desc(),
         )
-        .limit(200)
+        .limit(500)
     ).all()
+    eligible_rows = [
+        (record, news)
+        for record, news in raw_rows
+        if news_ai.news_stock_relation_supported(
+            news,
+            record.symbol,
+            float(record.relevance),
+        )
+    ]
+    rows = eligible_rows[:200]
     items = [
         {
             "id": int(record.id),
@@ -876,12 +886,19 @@ def opportunity_news_analysis_records(
         }
         for record, news in rows
     ]
+    current_opportunity_total = sum(
+        1 for item in items if item["belongs_to_opportunity"]
+    )
     return {
         "symbol": symbol,
         "window_days": 7,
         "cutoff_at": _utc_out(cutoff),
         "items": items,
         "total": len(items),
+        "current_opportunity_total": current_opportunity_total,
+        "historical_total": len(items) - current_opportunity_total,
+        "excluded_total": len(raw_rows) - len(eligible_rows),
+        "truncated": len(eligible_rows) > len(rows),
     }
 
 

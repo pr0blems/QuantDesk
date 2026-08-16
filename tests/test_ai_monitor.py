@@ -321,6 +321,41 @@ def test_news_candidates_include_bearish_stocks_as_short_opportunities() -> None
     assert short["news"][0]["direction"] == "short"
 
 
+def test_news_candidates_reject_generic_crypto_mstr_association() -> None:
+    candidates = aggregate_news_candidates(
+        [
+            {
+                "id": "eth-news",
+                "ts": 100,
+                "title": "Ethereum and Solana staking update",
+                "summary": "The report only discusses altcoin supply.",
+                "ai_confidence": 0.9,
+                "related_us_stocks": [
+                    {"symbol": "MSTR", "relevance": 0.9, "direction": "bull"}
+                ],
+            },
+            {
+                "id": "bitcoin-news",
+                "ts": 101,
+                "title": "Bitcoin falls as institutional demand weakens",
+                "summary": "BTC volatility rises.",
+                "ai_confidence": 0.9,
+                "related_us_stocks": [
+                    {"symbol": "MSTR", "relevance": 0.8, "direction": "bear"}
+                ],
+            },
+        ],
+        {"MSTR": "MSTRUSDT"},
+        minimum_confidence=0.6,
+        minimum_mentions=1,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["symbol"] == "MSTR"
+    assert candidates[0]["direction"] == "short"
+    assert [item["id"] for item in candidates[0]["news"]] == ["bitcoin-news"]
+
+
 def test_ai_monitor_keeps_only_the_strongest_direction_per_symbol() -> None:
     candidates = strongest_candidate_per_symbol(
         [
@@ -2203,7 +2238,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260816-39"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260816-40"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2213,7 +2248,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260816-38"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260816-40"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -2426,6 +2461,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'data-conclusion-view="memory"' in component
     assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/news-analysis-records`)' in component
     assert "一周新闻研判追踪" in component
+    assert "7天记忆" in component
+    assert "当前机会关联" in component
+    assert "已过滤历史污染" in component
     assert "判断依据与过程" in component
     assert "事实输入" in component
     assert "反向证据" in component

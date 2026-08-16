@@ -1746,8 +1746,13 @@ class AiMonitorDashboard extends HTMLElement {
       const data = await this.api(`/opportunities/${encodeURIComponent(item.id)}/news-analysis-records`);
       if (requestId !== this.conclusionMemoryRequestId || this.conclusionOpportunity?.id !== item.id) return;
       const records = Array.isArray(data.items) ? data.items : [];
-      this.conclusionPanels.memory = this.renderAiNewsAnalysisRecords(records, item, Number(data.window_days || 7));
-      this.q("#ai-conclusion-memory-count").textContent = `${records.length} 条 · ${Number(data.window_days || 7)} 天`;
+      const memoryMeta = {
+        currentOpportunityTotal: Number(data.current_opportunity_total || 0),
+        excludedTotal: Number(data.excluded_total || 0),
+        truncated: data.truncated === true,
+      };
+      this.conclusionPanels.memory = this.renderAiNewsAnalysisRecords(records, item, Number(data.window_days || 7), memoryMeta);
+      this.q("#ai-conclusion-memory-count").textContent = `7天记忆 ${records.length} 条 · 当前 ${memoryMeta.currentOpportunityTotal} 条`;
       if (this.state.conclusionView === "memory") this.showAiConclusionView("memory");
     } catch {
       if (requestId !== this.conclusionMemoryRequestId || this.conclusionOpportunity?.id !== item.id) return;
@@ -1757,8 +1762,10 @@ class AiMonitorDashboard extends HTMLElement {
     }
   }
 
-  renderAiNewsAnalysisRecords(records, opportunity, windowDays = 7) {
-    if (!records.length) return `<div class="ai-memory-empty"><strong>${this.escape(opportunity.symbol)} 暂无 AI 新闻分析记录</strong><span>功能启用后，新分析的新闻会按股票写入 ${windowDays} 天滚动记忆；历史新闻不会伪造回溯结论。</span></div>`;
+  renderAiNewsAnalysisRecords(records, opportunity, windowDays = 7, meta = {}) {
+    const currentOpportunityTotal = Math.max(0, Number(meta.currentOpportunityTotal || 0));
+    const excludedTotal = Math.max(0, Number(meta.excludedTotal || 0));
+    if (!records.length) return `<div class="ai-memory-empty"><strong>${this.escape(opportunity.symbol)} 暂无可信 AI 新闻分析记录</strong><span>${excludedTotal ? `已隐藏 ${excludedTotal} 条未通过股票关联校验的历史记录。` : `功能启用后，通过关联校验的新分析会写入 ${windowDays} 天滚动记忆。`}</span></div>`;
     const directionLabel = (value) => ({ bull: "偏多", bear: "偏空", neutral: "中性" })[value] || "中性";
     const effectLabel = (value) => ({ initial: "首次判断", maintain: "维持判断", strengthen: "增强判断", weaken: "减弱判断", reverse: "判断反转" })[value] || "完成回溯";
     const positionEffectLabel = (value) => ({ hold: "维持", strengthen: "增强", caution: "谨慎", exit: "退出", reverse: "反向" })[value] || "未调整";
@@ -1811,7 +1818,8 @@ class AiMonitorDashboard extends HTMLElement {
         </div>
       </article>`;
     }).join("");
-    return `<section class="ai-memory-panel"><header><div><span class="eyebrow">AI NEWS MEMORY</span><h3>${this.escape(opportunity.symbol)} · 一周新闻研判追踪</h3><p>新新闻会参考近 ${windowDays} 天历史研判，识别维持、增强、减弱或反转；以下记录均来自实际模型分析。</p></div><strong>${records.length}<small>条记忆</small></strong></header><div class="ai-memory-summary"><span>追踪窗口 <b>${windowDays} 天</b></span><span>最新方向 <b class="${this.escape(records[0].direction || "neutral")}">${directionLabel(records[0].direction)}</b></span><span>最近变化 <b>${effectLabel(records[0].memory_effect)}</b></span><span>数据库持久化 <b>已启用</b></span></div><div class="ai-memory-timeline">${chain}</div></section>`;
+    const filterNote = excludedTotal ? `已隐藏 ${excludedTotal} 条未通过当前股票关联校验的历史记录。` : "所有展示记录均已通过当前股票关联校验。";
+    return `<section class="ai-memory-panel"><header><div><span class="eyebrow">AI NEWS MEMORY</span><h3>${this.escape(opportunity.symbol)} · 一周新闻研判追踪</h3><p>七天记忆与当前机会采用不同口径；当前机会关联 ${currentOpportunityTotal} 条。${filterNote}</p></div><strong>${records.length}<small>条七天记忆</small></strong></header><div class="ai-memory-summary"><span>追踪窗口 <b>${windowDays} 天</b></span><span>当前机会 <b>${currentOpportunityTotal} 条</b></span><span>最新方向 <b class="${this.escape(records[0].direction || "neutral")}">${directionLabel(records[0].direction)}</b></span><span>已过滤历史污染 <b>${excludedTotal} 条</b></span></div><div class="ai-memory-timeline">${chain}</div></section>`;
   }
 
   async openNewsSystemPrompt(trigger) {
