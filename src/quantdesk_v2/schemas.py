@@ -142,10 +142,15 @@ class FinnhubUsQuoteOut(BaseModel):
     live: bool = False
     stale: bool = False
     error_category: str | None = None
+    storage: Literal["database", "memory_pending"] | None = None
 
 
 class FinnhubUsQuotesOut(BaseModel):
     configured: bool
+    enabled: bool = True
+    market_open_only: bool = True
+    market_open: bool = False
+    collection_active: bool = False
     source: Literal["finnhub"] = "finnhub"
     exchange: Literal["US"] = "US"
     total: int
@@ -153,6 +158,9 @@ class FinnhubUsQuotesOut(BaseModel):
     stream_connected: bool
     stream_error: str | None = None
     updated_at: datetime | None = None
+    persisted: int = 0
+    write_errors: int = 0
+    last_persisted_at: datetime | None = None
     quotes: list[FinnhubUsQuoteOut]
 
 
@@ -341,6 +349,22 @@ class AiMonitorScorePolicyUpdate(BaseModel):
     weights: AdminUnusualWhalesWeights
 
 
+class AiMonitorUnusualWhalesUsageUpdate(BaseModel):
+    """Toggle platform-wide Unusual Whales usage without changing its policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class AiMonitorFinnhubUsageUpdate(BaseModel):
+    """Toggle platform-wide Finnhub US cash-equity quote collection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
 class AdminUnusualWhalesRetention(BaseModel):
     """Bounded retention for high-volume, reproducible market-data tiers."""
 
@@ -359,6 +383,7 @@ class AdminUnusualWhalesConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     api_key: SecretStr | None = Field(default=None, max_length=2048)
+    enabled: bool = True
     mode: Literal["record", "score", "gate"] = "record"
     rest_enabled: bool = True
     websocket_enabled: bool = True

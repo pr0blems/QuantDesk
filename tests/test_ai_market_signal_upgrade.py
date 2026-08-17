@@ -5,9 +5,18 @@ from types import SimpleNamespace
 from starlette.requests import Request
 
 from quantdesk_v2 import ai_monitor
-from quantdesk_v2.interfaces.api.ai_monitor import _score_policy_out, update_score_policy
+from quantdesk_v2.interfaces.api.ai_monitor import (
+    _score_policy_out,
+    update_finnhub_usage,
+    update_score_policy,
+    update_unusual_whales_usage,
+)
 from quantdesk_v2.models import AdminSetting, Base, RealtimeMarketFeatureSnapshot
-from quantdesk_v2.schemas import AiMonitorScorePolicyUpdate
+from quantdesk_v2.schemas import (
+    AiMonitorFinnhubUsageUpdate,
+    AiMonitorScorePolicyUpdate,
+    AiMonitorUnusualWhalesUsageUpdate,
+)
 
 
 def _legacy_flow() -> dict:
@@ -356,6 +365,7 @@ def test_unpublished_signal_policy_uses_recommended_weights_and_version_zero() -
 
 def test_score_policy_update_preserves_non_weight_platform_sections() -> None:
     original = {
+        "enabled": True,
         "mode": "gate",
         "rest_enabled": False,
         "websocket_enabled": True,
@@ -459,6 +469,7 @@ def test_score_policy_update_preserves_non_weight_platform_sections() -> None:
     assert setting.value_json["mode"] == "score"
     assert setting.value_json["weights"] == recommended
     for preserved in (
+        "enabled",
         "rest_enabled",
         "websocket_enabled",
         "channels",
@@ -471,6 +482,126 @@ def test_score_policy_update_preserves_non_weight_platform_sections() -> None:
     assert body["weights_version"] == "uw_weights_v8"
     assert body["weights"] == recommended
     assert _score_policy_out(database, can_edit=False)["can_edit"] is False  # type: ignore[arg-type]
+
+
+def test_platform_usage_switch_is_persisted_and_applied_immediately() -> None:
+    setting = AdminSetting(
+        key=ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY,
+        value_json={"enabled": True},
+        version=2,
+        updated_by=1,
+    )
+
+    class FakeSession:
+        def scalar(self, _statement: object) -> object:
+            return setting
+
+        def get(self, model: object, key: str) -> object | None:
+            if model is AdminSetting and key == setting.key:
+                return setting
+            return None
+
+        def add(self, _row: object) -> None:
+            return None
+
+        def commit(self) -> None:
+            return None
+
+        def refresh(self, _row: object) -> None:
+            return None
+
+    applied: list[dict] = []
+    request = Request(
+        {
+            "type": "http",
+            "method": "PUT",
+            "path": "/api/v2/ai-monitor/unusual-whales-enabled",
+            "headers": [(b"x-quantdesk-user-id", b"1")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "scheme": "http",
+            "query_string": b"",
+            "app": SimpleNamespace(
+                state=SimpleNamespace(
+                    apply_unusual_whales_runtime_config=applied.append,
+                )
+            ),
+        }
+    )
+    database = FakeSession()
+
+    result = update_unusual_whales_usage(
+        AiMonitorUnusualWhalesUsageUpdate(enabled=False),
+        request,
+        database,  # type: ignore[arg-type]
+        SimpleNamespace(id=1, is_admin=True),  # type: ignore[arg-type]
+    )
+
+    assert setting.version == 3
+    assert setting.value_json["enabled"] is False
+    assert applied[0]["enabled"] is False
+    assert result["enabled"] is False
+    assert result["effective_mode"] == "disabled"
+    assert result["refresh_interval_seconds"] == 5 * 60
+
+
+def test_finnhub_usage_switch_is_persisted_and_applied_immediately() -> None:
+    from quantdesk_v2.finnhub_quotes import FINNHUB_USAGE_SETTING_KEY
+
+    setting = AdminSetting(
+        key=FINNHUB_USAGE_SETTING_KEY,
+        value_json={"enabled": True, "market_open_only": True},
+        version=2,
+        updated_by=1,
+    )
+
+    class FakeSession:
+        def scalar(self, _statement: object) -> object:
+            return setting
+
+        def get(self, model: object, key: str) -> object | None:
+            if model is AdminSetting and key == setting.key:
+                return setting
+            return None
+
+        def add(self, _row: object) -> None:
+            return None
+
+        def commit(self) -> None:
+            return None
+
+        def refresh(self, _row: object) -> None:
+            return None
+
+    applied: list[dict] = []
+    request = Request(
+        {
+            "type": "http",
+            "method": "PUT",
+            "path": "/api/v2/ai-monitor/finnhub-enabled",
+            "headers": [(b"x-quantdesk-user-id", b"1")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "scheme": "http",
+            "query_string": b"",
+            "app": SimpleNamespace(
+                state=SimpleNamespace(apply_finnhub_runtime_config=applied.append)
+            ),
+        }
+    )
+
+    result = update_finnhub_usage(
+        AiMonitorFinnhubUsageUpdate(enabled=False),
+        request,
+        FakeSession(),  # type: ignore[arg-type]
+        SimpleNamespace(id=1, is_admin=True),  # type: ignore[arg-type]
+    )
+
+    assert setting.version == 3
+    assert setting.value_json == {"enabled": False, "market_open_only": True}
+    assert applied == [{"enabled": False, "market_open_only": True}]
+    assert result["finnhub_enabled"] is False
+    assert result["finnhub"]["storage"] == "finnhub_quote_snapshots"
 
 
 def test_six_domain_score_renormalizes_only_real_quality_weighted_evidence() -> None:
@@ -550,6 +681,39 @@ def test_record_mode_observes_optional_failures_but_blocks_bad_spread() -> None:
         "REFERENCE_SPREAD_TOO_WIDE",
         "HIGH_IMPACT_EVENT_WINDOW",
     }
+
+
+def test_disabled_mode_bypasses_unusual_whales_execution_gates() -> None:
+    now = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    quality = {
+        "checks": {
+            "price_available": True,
+            "ticker_fresh": True,
+            "kline_fresh": True,
+            "feature_quality": True,
+            "reference_quote_available": False,
+            "quote_fresh": False,
+            "spread_acceptable": False,
+            "quote_sane": False,
+            "not_halted": False,
+            "event_window_clear": False,
+        },
+        "quote_available": False,
+        "data_status": "unavailable",
+        "stale_fields": ["quote", "option_flow", "gex"],
+    }
+    result = ai_monitor.stable_gate_summary(
+        quality,
+        {**_legacy_flow(), "hard_conflict": True},
+        evaluated_at=now,
+        policy_mode="disabled",
+    )
+
+    assert result["passed"] is True
+    assert result["blocking_reasons"] == []
+    assert result["decision_checks"]["directional_conflict_clear"] is True
+    assert result["execution_safety_gate_applied"] is False
+    assert result["warnings"] == []
 
 
 def test_record_mode_keeps_legacy_flow_score_while_retaining_raw_domains() -> None:

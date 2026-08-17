@@ -748,17 +748,123 @@ class MacroMarketService:
         unusual_whales_client: UnusualWhalesMarketClient | None = None,
         *,
         cache_seconds: int = 5,
+        finnhub_enabled: bool = True,
+        unusual_whales_enabled: bool = True,
+        unusual_whales_cache_seconds: int = 5 * 60,
         stale_seconds: int = 900,
     ) -> None:
         self.client = client
         self.quote_service = quote_service
         self.unusual_whales_client = unusual_whales_client
         self.cache_seconds = cache_seconds
+        self.finnhub_enabled = bool(finnhub_enabled)
+        self.unusual_whales_enabled = bool(unusual_whales_enabled)
+        self.unusual_whales_cache_seconds = max(
+            5 * 60, int(unusual_whales_cache_seconds)
+        )
         self.stale_seconds = stale_seconds
         self._lock = Lock()
         self._cached: dict[str, Any] | None = None
         self._cached_at = 0.0
         self._market_tide_history: list[dict[str, Any]] = []
+        self._unusual_whales_cached_at = 0.0
+        self._unusual_whales_cached_states: dict[str, dict[str, Any]] = {}
+        self._unusual_whales_cached_tide: dict[str, Any] = {
+            "available": False,
+            "source": "unavailable",
+        }
+
+    def set_unusual_whales_enabled(self, enabled: bool) -> None:
+        """Apply the platform switch and invalidate the combined market snapshot."""
+
+        normalized = bool(enabled)
+        with self._lock:
+            if normalized == self.unusual_whales_enabled:
+                return
+            self.unusual_whales_enabled = normalized
+            self._cached = None
+            self._cached_at = 0.0
+            if not normalized:
+                self._unusual_whales_cached_at = 0.0
+                self._unusual_whales_cached_states = {}
+                self._unusual_whales_cached_tide = {
+                    "available": False,
+                    "source": "disabled",
+                }
+
+    def set_finnhub_enabled(self, enabled: bool) -> None:
+        """Apply the platform cash-quote switch and invalidate market context."""
+
+        normalized = bool(enabled)
+        with self._lock:
+            if normalized == self.finnhub_enabled:
+                return
+            self.finnhub_enabled = normalized
+            self._cached = None
+            self._cached_at = 0.0
+
+    def _unusual_whales_snapshot(
+        self,
+        provider_symbols: Sequence[str],
+        *,
+        allow_refresh: bool = True,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], bool]:
+        """Return one shared REST snapshot, refreshing it at most every five minutes."""
+
+        configured = bool(
+            self.unusual_whales_enabled
+            and self.unusual_whales_client
+            and self.unusual_whales_client.configured()
+        )
+        if not configured or self.unusual_whales_client is None:
+            return (
+                {},
+                {
+                    "available": False,
+                    "source": "disabled" if not self.unusual_whales_enabled else "unavailable",
+                },
+                configured,
+            )
+        if not allow_refresh:
+            return (
+                dict(self._unusual_whales_cached_states),
+                dict(self._unusual_whales_cached_tide),
+                configured,
+            )
+        age = time.monotonic() - self._unusual_whales_cached_at
+        if self._unusual_whales_cached_at and age < self.unusual_whales_cache_seconds:
+            return (
+                dict(self._unusual_whales_cached_states),
+                dict(self._unusual_whales_cached_tide),
+                configured,
+            )
+
+        states = dict(self._unusual_whales_cached_states)
+        tide = dict(self._unusual_whales_cached_tide)
+        state_succeeded = False
+        tide_succeeded = False
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            state_future = executor.submit(
+                self.unusual_whales_client.stock_states,
+                provider_symbols,
+            )
+            tide_future = executor.submit(self.unusual_whales_client.market_tide)
+            try:
+                states = state_future.result()
+                state_succeeded = True
+            except Exception:
+                state_succeeded = False
+            try:
+                tide = tide_future.result()
+                tide_succeeded = True
+            except Exception:
+                tide_succeeded = False
+        if state_succeeded:
+            self._unusual_whales_cached_states = dict(states)
+        if tide_succeeded:
+            self._unusual_whales_cached_tide = dict(tide)
+        self._unusual_whales_cached_at = time.monotonic()
+        return states, tide, configured
 
     def _enhance_market_tide(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result = dict(payload or {})
@@ -808,36 +914,18 @@ class MacroMarketService:
             return dict(snapshot)
 
     def _build(self, repository: MonitorRepository, now: datetime) -> dict[str, Any]:
+        session = us_market_session(now)
+        regular_market_open = session["key"] == "regular"
         provider_symbols = [provider_symbol for provider_symbol, _, _ in TARGET_QUOTES.values()]
-        unusual_whales_configured = bool(
-            self.unusual_whales_client and self.unusual_whales_client.configured()
+        unusual_states, market_tide, unusual_whales_configured = (
+            self._unusual_whales_snapshot(
+                provider_symbols,
+                allow_refresh=regular_market_open,
+            )
         )
-        unusual_states: dict[str, dict[str, Any]] = {}
-        market_tide: dict[str, Any] = {
-            "available": False,
-            "source": "unavailable",
-        }
-        if unusual_whales_configured and self.unusual_whales_client is not None:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                state_future = executor.submit(
-                    self.unusual_whales_client.stock_states,
-                    provider_symbols,
-                )
-                tide_future = executor.submit(self.unusual_whales_client.market_tide)
-                try:
-                    unusual_states = state_future.result()
-                except Exception:
-                    unusual_states = {}
-                try:
-                    market_tide = tide_future.result()
-                except Exception:
-                    market_tide = {
-                        "available": False,
-                        "source": "unusual_whales_market_tide",
-                    }
         market_tide = self._enhance_market_tide(market_tide)
         cached_quotes: dict[str, FinnhubQuote] = {}
-        if self.quote_service is not None:
+        if self.finnhub_enabled and self.quote_service is not None:
             try:
                 for item in self.quote_service.snapshot().get("quotes", []):
                     if item.get("available"):
@@ -860,7 +948,7 @@ class MacroMarketService:
             for provider_symbol, _, _ in TARGET_QUOTES.values()
             if provider_symbol not in cached_quotes and provider_symbol not in unusual_states
         }
-        if missing_provider_symbols:
+        if self.finnhub_enabled and regular_market_open and missing_provider_symbols:
             with ThreadPoolExecutor(max_workers=min(6, len(missing_provider_symbols))) as executor:
                 pending = {
                     executor.submit(self.client.quote, provider_symbol): provider_symbol
@@ -1006,11 +1094,17 @@ class MacroMarketService:
             "events": events,
             "market_tide": market_tide,
             "providers": {
+                "finnhub_enabled": self.finnhub_enabled,
+                "finnhub_configured": self.client.configured,
+                "finnhub_market_open_only": True,
+                "unusual_whales_enabled": self.unusual_whales_enabled,
                 "unusual_whales_configured": unusual_whales_configured,
                 "unusual_whales_quotes": len(unusual_states),
                 "unusual_whales_tide": bool(market_tide.get("available")),
+                "unusual_whales_refresh_seconds": self.unusual_whales_cache_seconds,
+                "collection_market_open": regular_market_open,
             },
-            "source_note": "现金指数保留原指数口径；Unusual Whales 提供盘前/盘中/盘后 ETF 实时代理与 Market Tide，失败时自动回退 Finnhub、Yahoo 和映射合约。",
+            "source_note": "Finnhub 与 Unusual Whales 仅在美股常规交易时段采集；页面读取各股票最新入库快照，现金指数保留原指数口径。",
         }
 
 
@@ -1031,6 +1125,10 @@ def unavailable_snapshot(now: datetime) -> dict[str, Any]:
         "events": macro_event_calendar(now),
         "market_tide": {"available": False, "source": "unavailable"},
         "providers": {
+            "finnhub_enabled": False,
+            "finnhub_configured": False,
+            "finnhub_market_open_only": True,
+            "unusual_whales_enabled": False,
             "unusual_whales_configured": False,
             "unusual_whales_quotes": 0,
             "unusual_whales_tide": False,

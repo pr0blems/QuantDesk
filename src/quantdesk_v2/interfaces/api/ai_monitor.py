@@ -23,6 +23,7 @@ from ... import ai_monitor, historical_replay, news_ai
 from ...ai_model_config import global_ai_model_configured
 from ...database import get_db
 from ...dependencies import bearer, get_current_user, require_admin_write
+from ...finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
 from ...models import (
     AdminSetting,
     AiMonitorConfig,
@@ -50,11 +51,13 @@ from ...schemas import (
     AdminUnusualWhalesConfigUpdate,
     AiMonitorConfigUpdate,
     AiMonitorCostConfigUpdate,
+    AiMonitorFinnhubUsageUpdate,
     AiMonitorNewsAnalyzeRequest,
     AiMonitorNewsSystemPromptUpdate,
     AiMonitorReplayRequest,
     AiMonitorRunRequest,
     AiMonitorScorePolicyUpdate,
+    AiMonitorUnusualWhalesUsageUpdate,
 )
 from ...security import SecurityError, decode_access_token
 
@@ -375,9 +378,20 @@ def _score_policy_out(db: Session, *, can_edit: bool) -> dict[str, Any]:
         key: round(float(value), 8)
         for key, value in dict(policy["weights"]).items()
     }
+    finnhub_setting = db.get(AdminSetting, FINNHUB_USAGE_SETTING_KEY)
+    finnhub_value = (
+        finnhub_setting.value_json
+        if finnhub_setting is not None
+        and isinstance(finnhub_setting.value_json, Mapping)
+        else {}
+    )
+    finnhub_enabled = bool(finnhub_value.get("enabled", True))
     return {
         "scope": "platform",
+        "enabled": bool(policy["enabled"]),
         "mode": str(policy["mode"]),
+        "effective_mode": str(policy["effective_mode"]),
+        "refresh_interval_seconds": 5 * 60,
         "weights": weights,
         "weight_unit": "fraction",
         "weight_total": round(sum(weights.values()), 8),
@@ -388,6 +402,13 @@ def _score_policy_out(db: Session, *, can_edit: bool) -> dict[str, Any]:
         "score_enabled": bool(policy["score_enabled"]),
         "hard_gate_enabled": bool(policy["hard_gate_enabled"]),
         "can_edit": can_edit,
+        "unusual_whales_enabled": bool(policy["enabled"]),
+        "finnhub_enabled": finnhub_enabled,
+        "finnhub": {
+            "enabled": finnhub_enabled,
+            "market_open_only": True,
+            "storage": "finnhub_quote_snapshots",
+        },
         "updated_at": _utc_out(setting.updated_at) if setting is not None else None,
         "effective_usage": {
             "scoring": "六域可用证据按数据质量降权后重新归一化",
@@ -682,6 +703,7 @@ def _opportunity_out(
     prediction: AiMonitorPrediction | None = None,
     live_market: dict[str, Any] | None = None,
     market_snapshot: OpportunityMarketSnapshot | None = None,
+    spot_quote: dict[str, Any] | None = None,
     *,
     use_frozen: bool = False,
 ) -> dict[str, Any]:
@@ -795,6 +817,7 @@ def _opportunity_out(
             if prediction is not None
             else None
         ),
+        "finnhub_spot_quote": dict(spot_quote or {}),
         "prediction_created_at": (
             _utc_out(prediction.predicted_at) if prediction is not None else None
         ),
@@ -1156,6 +1179,7 @@ def update_score_policy(
             "weights": dict(complete_config["weights"]),
             "weights_version": f"uw_weights_v{int(setting.version)}",
             "preserved_sections": [
+                "enabled",
                 "channels",
                 "thresholds",
                 "retention",
@@ -1167,6 +1191,152 @@ def update_score_policy(
     db.commit()
     db.refresh(setting)
     return _score_policy_out(db, can_edit=True)
+
+
+@router.put("/unusual-whales-enabled")
+def update_unusual_whales_usage(
+    payload: AiMonitorUnusualWhalesUsageUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin_write)],
+) -> dict[str, Any]:
+    """Enable or bypass Unusual Whales collection, scoring and hard gates."""
+
+    _require_expected_user(request, admin)
+    setting = db.scalar(
+        select(AdminSetting)
+        .where(AdminSetting.key == ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY)
+        .with_for_update()
+    )
+    if setting is None:
+        complete_config = AdminUnusualWhalesConfigUpdate().model_dump(
+            exclude={"api_key"}
+        )
+        setting = AdminSetting(
+            key=ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY,
+            value_json=complete_config,
+            version=1,
+            updated_by=admin.id,
+        )
+        db.add(setting)
+    else:
+        raw = setting.value_json
+        if not isinstance(raw, Mapping):
+            raise HTTPException(
+                status_code=409,
+                detail="当前 Unusual Whales 平台配置损坏，请先在管理后台修复",
+            )
+        try:
+            complete_config = AdminUnusualWhalesConfigUpdate.model_validate(
+                dict(raw)
+            ).model_dump(exclude={"api_key"})
+        except ValueError:
+            raise HTTPException(
+                status_code=409,
+                detail="当前 Unusual Whales 平台配置不兼容，请先在管理后台修复",
+            ) from None
+        setting.version = max(0, int(setting.version or 0)) + 1
+        setting.updated_by = admin.id
+        setting.updated_at = utcnow()
+
+    previous_enabled = bool(complete_config.get("enabled", True))
+    complete_config["enabled"] = bool(payload.enabled)
+    setting.value_json = complete_config
+    _audit(
+        db,
+        request,
+        admin.id,
+        "ai_monitor.unusual_whales.toggle",
+        ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY,
+        {
+            "previous_enabled": previous_enabled,
+            "enabled": bool(payload.enabled),
+            "refresh_interval_seconds": 5 * 60,
+            "published_version": int(setting.version),
+        },
+    )
+    db.commit()
+    db.refresh(setting)
+
+    runtime_warning = None
+    apply_runtime_config = getattr(
+        request.app.state,
+        "apply_unusual_whales_runtime_config",
+        None,
+    )
+    if callable(apply_runtime_config):
+        try:
+            apply_runtime_config(complete_config)
+        except (RuntimeError, ValueError) as exc:
+            runtime_warning = type(exc).__name__
+    result = _score_policy_out(db, can_edit=True)
+    if runtime_warning:
+        result["runtime_warning"] = runtime_warning
+    return result
+
+
+@router.put("/finnhub-enabled")
+def update_finnhub_usage(
+    payload: AiMonitorFinnhubUsageUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin_write)],
+) -> dict[str, Any]:
+    """Enable or pause platform-wide Finnhub US cash-equity collection."""
+
+    _require_expected_user(request, admin)
+    setting = db.scalar(
+        select(AdminSetting)
+        .where(AdminSetting.key == FINNHUB_USAGE_SETTING_KEY)
+        .with_for_update()
+    )
+    if setting is None:
+        previous_enabled = True
+        setting = AdminSetting(
+            key=FINNHUB_USAGE_SETTING_KEY,
+            value_json={"enabled": bool(payload.enabled), "market_open_only": True},
+            version=1,
+            updated_by=admin.id,
+        )
+        db.add(setting)
+    else:
+        raw = setting.value_json
+        if raw is not None and not isinstance(raw, Mapping):
+            raise HTTPException(status_code=409, detail="当前 Finnhub 平台配置损坏")
+        config = dict(raw or {})
+        previous_enabled = bool(config.get("enabled", True))
+        config.update({"enabled": bool(payload.enabled), "market_open_only": True})
+        setting.value_json = config
+        setting.version = max(0, int(setting.version or 0)) + 1
+        setting.updated_by = admin.id
+        setting.updated_at = utcnow()
+    _audit(
+        db,
+        request,
+        admin.id,
+        "ai_monitor.finnhub.toggle",
+        FINNHUB_USAGE_SETTING_KEY,
+        {
+            "previous_enabled": previous_enabled,
+            "enabled": bool(payload.enabled),
+            "market_open_only": True,
+            "published_version": int(setting.version),
+        },
+    )
+    db.commit()
+    db.refresh(setting)
+
+    runtime_warning = None
+    apply_runtime_config = getattr(request.app.state, "apply_finnhub_runtime_config", None)
+    if callable(apply_runtime_config):
+        try:
+            apply_runtime_config(dict(setting.value_json or {}))
+        except (RuntimeError, ValueError) as exc:
+            runtime_warning = type(exc).__name__
+    result = _score_policy_out(db, can_edit=True)
+    if runtime_warning:
+        result["runtime_warning"] = runtime_warning
+    return result
 
 
 @router.get("/news-system-prompt")
@@ -1486,6 +1656,7 @@ def opportunities(
         else {}
     )
     live_tickers: dict[str, dict[str, Any]] = {}
+    finnhub_spot_quotes: dict[str, dict[str, Any]] = {}
     if items:
         try:
             repository = MonitorRepository(
@@ -1497,6 +1668,9 @@ def opportunities(
             )
         except MonitorUnavailable:
             live_tickers = {}
+        quote_service = getattr(request.app.state, "finnhub_us_quote_service", None)
+        if isinstance(quote_service, FinnhubUsQuoteService) and quote_service.enabled:
+            finnhub_spot_quotes = quote_service.latest_many(item.symbol for item in items)
     return {
         "items": [
             _opportunity_out(
@@ -1504,6 +1678,9 @@ def opportunities(
                 prediction_by_opportunity_id.get(item.id),
                 live_tickers.get((item.contract_symbol or "").upper()),
                 snapshot_by_opportunity_id.get(item.id),
+                finnhub_spot_quotes.get(
+                    FinnhubUsQuoteService.normalize_symbol(item.symbol)
+                ),
                 use_frozen=include_expired,
             )
             for item in items

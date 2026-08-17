@@ -276,7 +276,7 @@ class UnusualWhalesRuntime:
         rest_client: UnusualWhalesMarketClient | None = None,
         rest_enabled: bool = True,
         calendar_poll_seconds: float = 15 * 60,
-        recovery_poll_seconds: float = 60,
+        recovery_poll_seconds: float = 5 * 60,
         channel_contract_poll_seconds: float = 6 * 60 * 60,
         rest_snapshot_symbol_limit: int = 48,
         rest_detail_symbol_limit: int = 8,
@@ -292,6 +292,8 @@ class UnusualWhalesRuntime:
         retention_cleanup_seconds: float = DEFAULT_RETENTION_CLEANUP_SECONDS,
         retention_batch_size: int = DEFAULT_RETENTION_BATCH_SIZE,
         retention_max_batches: int = DEFAULT_RETENTION_MAX_BATCHES,
+        market_open_checker: Callable[[], bool] | None = None,
+        market_open_only: bool = True,
     ) -> None:
         self.engine = engine
         self.symbols = tuple(str(item).strip().upper() for item in symbols if str(item).strip())
@@ -319,6 +321,10 @@ class UnusualWhalesRuntime:
         self.retention_cleanup_seconds = max(60.0, float(retention_cleanup_seconds))
         self.retention_batch_size = max(100, min(20_000, int(retention_batch_size)))
         self.retention_max_batches = max(1, min(100, int(retention_max_batches)))
+        self.market_open_checker = market_open_checker or (lambda: True)
+        self.market_open_only = bool(market_open_only)
+        self._collection_active = False
+        self._collection_last_changed_at_ms: int | None = None
         self._queue: Queue[UnusualWhalesStreamEvent] = Queue(maxsize=max(100, queue_size))
         self._stop = Event()
         self._worker_stop = Event()
@@ -566,7 +572,13 @@ class UnusualWhalesRuntime:
     def _activate_leader(self) -> None:
         # Validate the account's actual websocket contract only on the elected
         # collector. A failed/empty check remains fail-open for availability.
-        if self.websocket_enabled and self.rest_enabled and self.rest_client is not None:
+        collection_allowed = self._collection_allowed()
+        if (
+            collection_allowed
+            and self.websocket_enabled
+            and self.rest_enabled
+            and self.rest_client is not None
+        ):
             self._refresh_channel_contract()
         with self._lock:
             if self._stop.is_set() or not self._leader_acquired:
@@ -595,10 +607,12 @@ class UnusualWhalesRuntime:
                     name="unusual-whales-retention",
                 )
                 self._retention_worker.start()
-        if self.websocket_enabled:
+        self._set_collection_active(collection_allowed)
+        if self.websocket_enabled and collection_allowed:
             self.stream.start()
 
     def _deactivate_leader(self) -> None:
+        self._set_collection_active(False)
         self._worker_stop.set()
         self._poll_wakeup.set()
         self.stream.stop(join_timeout=2.0)
@@ -620,9 +634,52 @@ class UnusualWhalesRuntime:
                 acquired = False
             if not acquired and self._try_acquire_leadership():
                 self._activate_leader()
+                acquired = True
+            if acquired:
+                self._sync_collection_state()
+
+    def _market_open(self) -> bool:
+        if not self.market_open_only:
+            return True
+        try:
+            return bool(self.market_open_checker())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
+
+    def _collection_allowed(self) -> bool:
+        return bool((self.websocket_enabled or self.rest_enabled) and self._market_open())
+
+    def _set_collection_active(self, active: bool) -> None:
+        normalized = bool(active)
+        with self._lock:
+            if normalized == self._collection_active:
+                return
+            self._collection_active = normalized
+            self._collection_last_changed_at_ms = int(time.time() * 1_000)
+
+    def _sync_collection_state(self) -> None:
+        allowed = self._collection_allowed()
+        with self._lock:
+            previous = self._collection_active
+            is_leader = self._leader_acquired
+        self._set_collection_active(allowed and is_leader)
+        if not is_leader or allowed == previous:
+            return
+        if allowed:
+            self._poll_wakeup.set()
+            if self.websocket_enabled:
+                self.stream.start()
+        else:
+            self.stream.stop(join_timeout=2.0)
+            self._poll_wakeup.set()
 
     def on_event(self, event: UnusualWhalesStreamEvent) -> None:
         """Record telemetry and enqueue without opening a database transaction."""
+
+        if not self._collection_allowed():
+            with self._lock:
+                self._filtered += 1
+            return
 
         base_channel = event.channel.partition(":")[0]
         event_symbol_key = _symbol_key(event.symbol)
@@ -770,9 +827,10 @@ class UnusualWhalesRuntime:
         with self._lock:
             is_leader = self._leader_acquired
         if self.websocket_enabled and not was_enabled and is_leader:
-            self.stream.start()
+            self._sync_collection_state()
         elif was_enabled and not self.websocket_enabled and is_leader:
             self.stream.stop()
+            self._sync_collection_state()
 
     def channel_health_snapshot(self) -> dict[str, dict[str, Any]]:
         now_ms = int(time.time() * 1_000)
@@ -863,6 +921,8 @@ class UnusualWhalesRuntime:
                 "status": (
                     "disabled"
                     if not self.rest_enabled
+                    else "market_closed"
+                    if self.market_open_only and not self._market_open()
                     else "unconfigured"
                     if self.rest_client is None
                     else "degraded"
@@ -888,12 +948,19 @@ class UnusualWhalesRuntime:
                 "detail_symbol_limit": self.rest_detail_symbol_limit,
                 "channel_contract": dict(self._channel_contract),
             }
+            collection_health = {
+                "active": self._collection_active,
+                "market_open_only": self.market_open_only,
+                "market_open": self._market_open(),
+                "last_changed_at_ms": self._collection_last_changed_at_ms,
+            }
         return {
             **stream_health,
             "leadership": leadership_health,
             "writer": writer_health,
             "retention": retention_health,
             "rest": rest_health,
+            "collection": collection_health,
         }
 
     def _set_stream_subscriptions(self, desired: Iterable[str]) -> None:
@@ -1294,7 +1361,11 @@ class UnusualWhalesRuntime:
         was_connected = False
         while not self._stop.is_set() and not self._worker_stop.is_set():
             now = time.monotonic()
-            if self.rest_enabled and self.rest_client is not None:
+            if (
+                self.rest_enabled
+                and self.rest_client is not None
+                and self._collection_allowed()
+            ):
                 stream_health = self.stream.health_snapshot()
                 connected = bool(stream_health.get("connected"))
                 stale = bool(stream_health.get("data_stale"))
@@ -1346,7 +1417,7 @@ class UnusualWhalesRuntime:
                 delay = max(0.25, min(30.0, min(deadlines) - time.monotonic()))
             else:
                 startup = False
-                delay = 30.0
+                delay = 5.0 if self.market_open_only else 30.0
             self._poll_wakeup.clear()
             self._poll_wakeup.wait(delay)
 

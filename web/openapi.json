@@ -377,6 +377,11 @@
           "channels": {
             "$ref": "#/components/schemas/AdminUnusualWhalesChannels"
           },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
           "mode": {
             "default": "record",
             "enum": [
@@ -1013,6 +1018,21 @@
         "title": "AiMonitorCostConfigUpdate",
         "type": "object"
       },
+      "AiMonitorFinnhubUsageUpdate": {
+        "additionalProperties": false,
+        "description": "Toggle platform-wide Finnhub US cash-equity quote collection.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "AiMonitorFinnhubUsageUpdate",
+        "type": "object"
+      },
       "AiMonitorNewsAnalyzeRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1111,6 +1131,21 @@
           "weights"
         ],
         "title": "AiMonitorScorePolicyUpdate",
+        "type": "object"
+      },
+      "AiMonitorUnusualWhalesUsageUpdate": {
+        "additionalProperties": false,
+        "description": "Toggle platform-wide Unusual Whales usage without changing its policy.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "AiMonitorUnusualWhalesUsageUpdate",
         "type": "object"
       },
       "AiProviderOut": {
@@ -2409,6 +2444,21 @@
             "title": "Stale",
             "type": "boolean"
           },
+          "storage": {
+            "anyOf": [
+              {
+                "enum": [
+                  "database",
+                  "memory_pending"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage"
+          },
           "symbol": {
             "title": "Symbol",
             "type": "string"
@@ -2438,8 +2488,18 @@
             "title": "Available",
             "type": "integer"
           },
+          "collection_active": {
+            "default": false,
+            "title": "Collection Active",
+            "type": "boolean"
+          },
           "configured": {
             "title": "Configured",
+            "type": "boolean"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
             "type": "boolean"
           },
           "exchange": {
@@ -2447,6 +2507,33 @@
             "default": "US",
             "title": "Exchange",
             "type": "string"
+          },
+          "last_persisted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Persisted At"
+          },
+          "market_open": {
+            "default": false,
+            "title": "Market Open",
+            "type": "boolean"
+          },
+          "market_open_only": {
+            "default": true,
+            "title": "Market Open Only",
+            "type": "boolean"
+          },
+          "persisted": {
+            "default": 0,
+            "title": "Persisted",
+            "type": "integer"
           },
           "quotes": {
             "items": {
@@ -2491,6 +2578,11 @@
               }
             ],
             "title": "Updated At"
+          },
+          "write_errors": {
+            "default": 0,
+            "title": "Write Errors",
+            "type": "integer"
           }
         },
         "required": [
@@ -6248,6 +6340,52 @@
         "summary": "Ai Monitor Events"
       }
     },
+    "/api/v2/ai-monitor/finnhub-enabled": {
+      "put": {
+        "description": "Enable or pause platform-wide Finnhub US cash-equity collection.",
+        "operationId": "update_finnhub_usage_api_v2_ai_monitor_finnhub_enabled_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorFinnhubUsageUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Finnhub Usage Api V2 Ai Monitor Finnhub Enabled Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Finnhub Usage"
+      }
+    },
     "/api/v2/ai-monitor/indicators": {
       "get": {
         "operationId": "indicators_api_v2_ai_monitor_indicators_get",
@@ -7451,6 +7589,52 @@
           }
         ],
         "summary": "Monitor Symbols"
+      }
+    },
+    "/api/v2/ai-monitor/unusual-whales-enabled": {
+      "put": {
+        "description": "Enable or bypass Unusual Whales collection, scoring and hard gates.",
+        "operationId": "update_unusual_whales_usage_api_v2_ai_monitor_unusual_whales_enabled_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorUnusualWhalesUsageUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Unusual Whales Usage Api V2 Ai Monitor Unusual Whales Enabled Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Unusual Whales Usage"
       }
     },
     "/api/v2/auth/login": {

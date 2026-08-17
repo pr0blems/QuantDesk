@@ -54,6 +54,24 @@ def _runtime(**kwargs: Any) -> UnusualWhalesRuntime:
     )
 
 
+def test_rest_recovery_defaults_to_five_minutes() -> None:
+    runtime = _runtime()
+
+    assert runtime.recovery_poll_seconds == 5 * 60
+
+
+def test_market_session_gate_drops_events_while_us_market_is_closed() -> None:
+    runtime = _runtime(market_open_checker=lambda: False)
+
+    runtime.on_event(_event("closed-event"))
+
+    assert runtime._queue.empty()
+    health = runtime.health_snapshot()
+    assert health["collection"]["market_open"] is False
+    assert health["collection"]["active"] is False
+    assert health["rest"]["status"] == "market_closed"
+
+
 def test_stream_subscriptions_maps_flow_alerts_and_ticker_net_flow() -> None:
     flags = {key: False for key in DEFAULT_CHANNEL_FLAGS}
     flags.update({"flow_alerts": True, "net_flow": True})

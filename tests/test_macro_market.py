@@ -1,12 +1,83 @@
 from datetime import UTC, datetime
 
 from quantdesk_v2.macro_market import (
+    MacroMarketService,
     apply_market_adjustment,
     macro_event_calendar,
     opportunity_market_context,
     sector_key,
     us_market_session,
 )
+
+
+class _CountingUnusualWhalesClient:
+    def __init__(self) -> None:
+        self.state_calls = 0
+        self.tide_calls = 0
+
+    def configured(self) -> bool:
+        return True
+
+    def stock_states(self, symbols):
+        self.state_calls += 1
+        return {str(symbol): {"available": True} for symbol in symbols}
+
+    def market_tide(self):
+        self.tide_calls += 1
+        return {"available": True, "source": "unusual_whales_market_tide"}
+
+
+def test_unusual_whales_macro_snapshot_is_cached_for_five_minutes() -> None:
+    client = _CountingUnusualWhalesClient()
+    service = MacroMarketService(
+        object(),  # type: ignore[arg-type]
+        unusual_whales_client=client,  # type: ignore[arg-type]
+        unusual_whales_cache_seconds=5 * 60,
+    )
+
+    first = service._unusual_whales_snapshot(["QQQ", "SPY"])
+    second = service._unusual_whales_snapshot(["QQQ", "SPY"])
+
+    assert first[2] is True
+    assert second[2] is True
+    assert client.state_calls == 1
+    assert client.tide_calls == 1
+
+
+def test_disabling_unusual_whales_stops_macro_api_calls() -> None:
+    client = _CountingUnusualWhalesClient()
+    service = MacroMarketService(
+        object(),  # type: ignore[arg-type]
+        unusual_whales_client=client,  # type: ignore[arg-type]
+    )
+    service.set_unusual_whales_enabled(False)
+
+    states, tide, configured = service._unusual_whales_snapshot(["QQQ"])
+
+    assert configured is False
+    assert states == {}
+    assert tide["source"] == "disabled"
+    assert client.state_calls == 0
+    assert client.tide_calls == 0
+
+
+def test_closed_market_reuses_cache_without_calling_unusual_whales() -> None:
+    client = _CountingUnusualWhalesClient()
+    service = MacroMarketService(
+        object(),  # type: ignore[arg-type]
+        unusual_whales_client=client,  # type: ignore[arg-type]
+    )
+
+    states, tide, configured = service._unusual_whales_snapshot(
+        ["QQQ"],
+        allow_refresh=False,
+    )
+
+    assert configured is True
+    assert states == {}
+    assert tide["available"] is False
+    assert client.state_calls == 0
+    assert client.tide_calls == 0
 
 
 def _market_snapshot() -> dict:

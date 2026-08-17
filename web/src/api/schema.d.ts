@@ -562,6 +562,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/finnhub-enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update Finnhub Usage
+         * @description Enable or pause platform-wide Finnhub US cash-equity collection.
+         */
+        put: operations["update_finnhub_usage_api_v2_ai_monitor_finnhub_enabled_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/indicators": {
         parameters: {
             query?: never;
@@ -906,6 +926,26 @@ export interface paths {
         /** Monitor Symbols */
         get: operations["monitor_symbols_api_v2_ai_monitor_symbols_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/ai-monitor/unusual-whales-enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update Unusual Whales Usage
+         * @description Enable or bypass Unusual Whales collection, scoring and hard gates.
+         */
+        put: operations["update_unusual_whales_usage_api_v2_ai_monitor_unusual_whales_enabled_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2194,6 +2234,11 @@ export interface components {
             api_key?: string | null;
             channels?: components["schemas"]["AdminUnusualWhalesChannels"];
             /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
              * Mode
              * @default record
              * @enum {string}
@@ -2542,6 +2587,14 @@ export interface components {
              */
             prediction_slippage_enabled: boolean;
         };
+        /**
+         * AiMonitorFinnhubUsageUpdate
+         * @description Toggle platform-wide Finnhub US cash-equity quote collection.
+         */
+        AiMonitorFinnhubUsageUpdate: {
+            /** Enabled */
+            enabled: boolean;
+        };
         /** AiMonitorNewsAnalyzeRequest */
         AiMonitorNewsAnalyzeRequest: {
             /** News Id */
@@ -2585,6 +2638,14 @@ export interface components {
          */
         AiMonitorScorePolicyUpdate: {
             weights: components["schemas"]["AdminUnusualWhalesWeights"];
+        };
+        /**
+         * AiMonitorUnusualWhalesUsageUpdate
+         * @description Toggle platform-wide Unusual Whales usage without changing its policy.
+         */
+        AiMonitorUnusualWhalesUsageUpdate: {
+            /** Enabled */
+            enabled: boolean;
         };
         /** AiProviderOut */
         AiProviderOut: {
@@ -3028,6 +3089,8 @@ export interface components {
              * @default false
              */
             stale: boolean;
+            /** Storage */
+            storage?: ("database" | "memory_pending") | null;
             /** Symbol */
             symbol: string;
             /** Volume */
@@ -3037,14 +3100,41 @@ export interface components {
         FinnhubUsQuotesOut: {
             /** Available */
             available: number;
+            /**
+             * Collection Active
+             * @default false
+             */
+            collection_active: boolean;
             /** Configured */
             configured: boolean;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
             /**
              * Exchange
              * @default US
              * @constant
              */
             exchange: "US";
+            /** Last Persisted At */
+            last_persisted_at?: string | null;
+            /**
+             * Market Open
+             * @default false
+             */
+            market_open: boolean;
+            /**
+             * Market Open Only
+             * @default true
+             */
+            market_open_only: boolean;
+            /**
+             * Persisted
+             * @default 0
+             */
+            persisted: number;
             /** Quotes */
             quotes: components["schemas"]["FinnhubUsQuoteOut"][];
             /**
@@ -3061,6 +3151,11 @@ export interface components {
             total: number;
             /** Updated At */
             updated_at?: string | null;
+            /**
+             * Write Errors
+             * @default 0
+             */
+            write_errors: number;
         };
         /** FinnhubWebhookAcceptedOut */
         FinnhubWebhookAcceptedOut: {
@@ -4839,6 +4934,41 @@ export interface operations {
             };
         };
     };
+    update_finnhub_usage_api_v2_ai_monitor_finnhub_enabled_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorFinnhubUsageUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     indicators_api_v2_ai_monitor_indicators_get: {
         parameters: {
             query?: {
@@ -5558,6 +5688,41 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    update_unusual_whales_usage_api_v2_ai_monitor_unusual_whales_enabled_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorUnusualWhalesUsageUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

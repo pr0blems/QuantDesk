@@ -1286,6 +1286,51 @@ class RealtimeMarketFeatureSnapshot(Base):
     )
 
 
+class FinnhubQuoteSnapshot(Base):
+    """Latest minute-bucket US cash-equity quote captured from Finnhub."""
+
+    __tablename__ = "finnhub_quote_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "bucket_at",
+            name="uq_finnhub_quote_snapshots_symbol_bucket",
+        ),
+        Index(
+            "ix_finnhub_quote_snapshots_symbol_source_time",
+            "symbol",
+            "source_timestamp",
+        ),
+        CheckConstraint("price > 0", name="positive_price"),
+        {
+            "comment": "Minute-bucket latest Finnhub US cash-equity quotes",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    bucket_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    price: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    change: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    change_percent: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    day_high: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    day_low: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    day_open: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    previous_close: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    volume: Mapped[Decimal | None] = mapped_column(Numeric(30, 8))
+    source_timestamp: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    live: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 class MarketRiskEvent(Base):
     """Scheduled or live risk events that may block a new virtual entry."""
 

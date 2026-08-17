@@ -227,6 +227,52 @@ def test_rest_quote_does_not_replace_equal_or_newer_stream_trade(monkeypatch) ->
     assert quote["live"] is True
 
 
+def test_us_quote_collection_is_disabled_outside_regular_market(monkeypatch) -> None:
+    monkeypatch.setattr(finnhub_quotes, "_load_us_symbols", lambda _path: ("AAPL",))
+    service = FinnhubUsQuoteService(
+        FinnhubClient("https://finnhub.io", "secret", transport=lambda *_: response(200, {})),
+        Path("unused.json"),
+        websocket_enabled=False,
+        market_open_checker=lambda: False,
+    )
+
+    service._ingest_stream_message(
+        json.dumps(
+            {
+                "type": "trade",
+                "data": [{"s": "AAPL", "p": 262.1, "t": 1_786_000_000_123}],
+            }
+        )
+    )
+    snapshot = service.snapshot()
+
+    assert snapshot["market_open"] is False
+    assert snapshot["collection_active"] is False
+    assert snapshot["available"] == 0
+
+
+def test_us_quote_latest_many_normalizes_contract_symbol(monkeypatch) -> None:
+    monkeypatch.setattr(finnhub_quotes, "_load_us_symbols", lambda _path: ("AAPL",))
+    service = FinnhubUsQuoteService(
+        FinnhubClient("https://finnhub.io", "secret", transport=lambda *_: response(429, {})),
+        Path("unused.json"),
+        websocket_enabled=False,
+    )
+    service._ingest_stream_message(
+        json.dumps(
+            {
+                "type": "trade",
+                "data": [{"s": "AAPL", "p": 262.1, "t": 1_786_000_000_123}],
+            }
+        )
+    )
+
+    latest = service.latest_many(["AAPLUSDT"])
+
+    assert latest["AAPL"]["price"] == 262.1
+    assert latest["AAPL"]["storage"] == "memory_pending"
+
+
 def test_public_us_market_status_route() -> None:
     settings = Settings(
         _env_file=None,

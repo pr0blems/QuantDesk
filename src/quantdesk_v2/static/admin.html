@@ -124,6 +124,7 @@
                   <label>Unusual Whales API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="留空保留已加密密钥"></label>
                   <label>运行模式<select name="mode"><option value="record">只记录</option><option value="score">参与评分</option><option value="gate">硬门控</option></select></label>
                 </div>
+                <label class="switch-row"><span><strong>平台总开关</strong><small>关闭后停止 Unusual Whales 采集，并从机会评分与门控中完全旁路</small></span><input name="enabled" type="checkbox"></label>
                 <label class="switch-row"><span><strong>启用 REST 补偿</strong><small>启动快照、断线恢复、GEX Levels 与事件日历</small></span><input name="rest_enabled" type="checkbox"></label>
                 <label class="switch-row"><span><strong>启用 WebSocket 实时流</strong><small>价格、停牌、期权流、GEX 与机构成交增量更新</small></span><input name="websocket_enabled" type="checkbox"></label>
               </div>

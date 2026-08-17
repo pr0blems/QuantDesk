@@ -514,6 +514,8 @@ def unusual_whales_signal_policy(db: Session) -> dict[str, Any]:
     mode = str(raw.get("mode") or "record").strip().lower()
     if mode not in {"record", "score", "gate"}:
         mode = "record"
+    enabled = bool(raw.get("enabled", True))
+    effective_mode = mode if enabled else "disabled"
 
     raw_thresholds = raw.get("thresholds")
     raw_thresholds = dict(raw_thresholds) if isinstance(raw_thresholds, Mapping) else {}
@@ -544,15 +546,17 @@ def unusual_whales_signal_policy(db: Session) -> dict[str, Any]:
 
     published_version = max(0, int(setting.version or 0)) if setting is not None else 0
     return {
+        "enabled": enabled,
         "mode": mode,
+        "effective_mode": effective_mode,
         "thresholds": thresholds,
         "weights": normalized_weights,
         "published_version": published_version,
         "policy_version": UNUSUAL_WHALES_SIGNAL_POLICY_VERSION,
         "weights_version": f"uw_weights_v{published_version}",
-        "decision_version": f"uw_{mode}_v{published_version}",
-        "score_enabled": mode in {"score", "gate"},
-        "hard_gate_enabled": mode == "gate",
+        "decision_version": f"uw_{effective_mode}_v{published_version}",
+        "score_enabled": enabled and mode in {"score", "gate"},
+        "hard_gate_enabled": enabled and mode == "gate",
     }
 
 
@@ -3827,7 +3831,11 @@ def stable_gate_summary(
         market_quality.get("halt_cooldown_active")
     ):
         checks["not_halted"] = False
-    normalized_mode = policy_mode if policy_mode in {"record", "score", "gate"} else "record"
+    normalized_mode = (
+        policy_mode
+        if policy_mode in {"disabled", "record", "score", "gate"}
+        else "record"
+    )
     checks["directional_conflict_clear"] = not bool(market_flow.get("hard_conflict"))
     failure_codes = {
         "price_available": "QUOTE_PRICE_MISSING",
@@ -3878,27 +3886,35 @@ def stable_gate_summary(
         else {
             key: passed
             for key, passed in checks.items()
-            if key in legacy_quality_keys or key in execution_safety_keys
+            if key in legacy_quality_keys
+            or (normalized_mode != "disabled" and key in execution_safety_keys)
         }
     )
-    decision_checks["directional_conflict_clear"] = not bool(
-        market_flow.get("hard_conflict")
-        if normalized_mode == "gate"
-        else market_flow.get("legacy_hard_conflict", market_flow.get("hard_conflict"))
+    decision_checks["directional_conflict_clear"] = (
+        True
+        if normalized_mode == "disabled"
+        else not bool(
+            market_flow.get("hard_conflict")
+            if normalized_mode == "gate"
+            else market_flow.get(
+                "legacy_hard_conflict", market_flow.get("hard_conflict")
+            )
+        )
     )
     blocking_reasons = failed_codes(decision_checks)
     warnings: list[str] = []
-    if not bool(market_quality.get("quote_available")) and (
+    if normalized_mode != "disabled" and not bool(market_quality.get("quote_available")) and (
         "REFERENCE_QUOTE_UNAVAILABLE" not in blocking_reasons
     ):
         warnings.append("REFERENCE_QUOTE_UNAVAILABLE")
-    for field in market_quality.get("stale_fields") or []:
-        warnings.append(f"STALE_FIELD:{field}")
-    flow_domains = dict(market_flow.get("domains") or {})
-    for key in ("option_flow", "gex", "institutional_flow"):
-        if not bool(dict(flow_domains.get(key) or {}).get("available")):
-            warnings.append(f"{key.upper()}_UNAVAILABLE")
-    if normalized_mode != "gate":
+    if normalized_mode != "disabled":
+        for field in market_quality.get("stale_fields") or []:
+            warnings.append(f"STALE_FIELD:{field}")
+        flow_domains = dict(market_flow.get("domains") or {})
+        for key in ("option_flow", "gex", "institutional_flow"):
+            if not bool(dict(flow_domains.get(key) or {}).get("available")):
+                warnings.append(f"{key.upper()}_UNAVAILABLE")
+    if normalized_mode in {"record", "score"}:
         warnings.extend(
             f"OBSERVED_ONLY:{code}"
             for code in observed_blocking_reasons
@@ -3923,7 +3939,7 @@ def stable_gate_summary(
         ),
         "policy_mode": normalized_mode,
         "hard_gate_applied": normalized_mode == "gate",
-        "execution_safety_gate_applied": True,
+        "execution_safety_gate_applied": normalized_mode != "disabled",
         "evaluated_at": evaluated_at.isoformat(),
         "decision_version": f"uw_{normalized_mode}_decision_v1",
     }
@@ -7155,9 +7171,15 @@ def _scan_opportunities(
             direction=str(candidate["direction"]),
             now=now,
         )
-        realtime_feature = realtime_features.get(str(candidate["symbol"]).upper()) or (
-            realtime_features.get(contract_symbol.upper()) if contract_symbol else None
-        )
+        realtime_feature = None
+        if bool(uw_signal_policy["enabled"]):
+            realtime_feature = realtime_features.get(
+                str(candidate["symbol"]).upper()
+            ) or (
+                realtime_features.get(contract_symbol.upper())
+                if contract_symbol
+                else None
+            )
         market_flow = apply_enhanced_market_domains(
             market_flow,
             realtime_feature,
@@ -7225,10 +7247,16 @@ def _scan_opportunities(
             minimum_feature_quality=float(config["minimum_feature_quality"]),
             requires_prediction_features=requires_prediction_features,
             enhanced_feature=realtime_feature,
-            risk_events=[
-                *risk_events_by_symbol.get("*", []),
-                *risk_events_by_symbol.get(str(candidate["symbol"]).upper(), []),
-            ],
+            risk_events=(
+                [
+                    *risk_events_by_symbol.get("*", []),
+                    *risk_events_by_symbol.get(
+                        str(candidate["symbol"]).upper(), []
+                    ),
+                ]
+                if bool(uw_signal_policy["enabled"])
+                else []
+            ),
             maximum_quote_age_ms=maximum_quote_age_ms,
             maximum_spread_bps=float(uw_thresholds["spread_hard_max_bps"]),
             minimum_data_coverage=float(uw_thresholds["min_data_coverage"]),
@@ -7241,7 +7269,7 @@ def _scan_opportunities(
             market_quality,
             market_flow,
             evaluated_at=now,
-            policy_mode=str(uw_signal_policy["mode"]),
+            policy_mode=str(uw_signal_policy["effective_mode"]),
         )
         score_components = opportunity_score_components(
             news_score=float(candidate["news_score"]),
@@ -7351,7 +7379,7 @@ def _scan_opportunities(
             "enhanced_effective_weights": dict(
                 enhanced_domain_scoring.get("effective_weights") or {}
             ),
-            "signal_policy_mode": str(uw_signal_policy["mode"]),
+            "signal_policy_mode": str(uw_signal_policy["effective_mode"]),
             "weights_version": str(uw_signal_policy["weights_version"]),
             "direction": str(candidate["direction"]),
             "calculated_at": now.isoformat(),
@@ -7448,7 +7476,9 @@ def _scan_opportunities(
             "effective_score_weights": effective_score_weights,
             "enhanced_domain_scoring": enhanced_domain_scoring,
             "unusual_whales_policy": {
+                "enabled": bool(uw_signal_policy["enabled"]),
                 "mode": str(uw_signal_policy["mode"]),
+                "effective_mode": str(uw_signal_policy["effective_mode"]),
                 "thresholds": dict(uw_signal_policy["thresholds"]),
                 "weights": dict(uw_signal_policy["weights"]),
                 "published_version": int(uw_signal_policy["published_version"]),
@@ -7682,7 +7712,9 @@ def _scan_opportunities(
             config.get("require_market_quality_for_prediction", True)
         ),
         "unusual_whales_signal_policy": {
+            "enabled": bool(uw_signal_policy["enabled"]),
             "mode": str(uw_signal_policy["mode"]),
+            "effective_mode": str(uw_signal_policy["effective_mode"]),
             "published_version": int(uw_signal_policy["published_version"]),
             "weights_version": str(uw_signal_policy["weights_version"]),
             "decision_version": str(uw_signal_policy["decision_version"]),

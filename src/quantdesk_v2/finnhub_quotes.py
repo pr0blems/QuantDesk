@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,9 +11,15 @@ from threading import Event, Lock, Thread
 from typing import Any
 from urllib.parse import urlencode
 
+from sqlalchemy import Engine, func, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
 from .finnhub import FinnhubClient, FinnhubClientError, FinnhubQuote
+from .models import FinnhubQuoteSnapshot
 
 FINNHUB_STREAM_ORIGIN = "wss://ws.finnhub.io"
+FINNHUB_USAGE_SETTING_KEY = "market_data:finnhub:v1"
 PRIORITY_SYMBOLS = (
     "AAPL",
     "MSFT",
@@ -67,6 +74,10 @@ class FinnhubUsQuoteService:
         poll_seconds: float = 2.0,
         stale_seconds: int = 600,
         websocket_enabled: bool = True,
+        engine: Engine | None = None,
+        enabled: bool = True,
+        market_open_checker: Callable[[], bool] | None = None,
+        persist_interval_seconds: float = 5.0,
     ) -> None:
         self.client = client
         self.symbols = _load_us_symbols(symbols_config)
@@ -74,10 +85,20 @@ class FinnhubUsQuoteService:
         self.poll_seconds = poll_seconds
         self.stale_seconds = stale_seconds
         self.websocket_enabled = websocket_enabled
+        self.engine = engine
+        self.enabled = bool(enabled)
+        self.market_open_checker = market_open_checker or (lambda: True)
+        self.persist_interval_seconds = max(1.0, float(persist_interval_seconds))
         self._lock = Lock()
         self._stop = Event()
+        self._wakeup = Event()
         self._quotes: dict[str, FinnhubQuote] = {}
         self._errors: dict[str, str] = {}
+        self._dirty_symbols: set[str] = set()
+        self._persisted_symbols: set[str] = set()
+        self._persisted = 0
+        self._write_errors = 0
+        self._last_persisted_at: datetime | None = None
         self._started = False
         self._stream_connected = False
         self._stream_error: str | None = None
@@ -86,6 +107,7 @@ class FinnhubUsQuoteService:
     def start(self) -> None:
         if self._started or not self.client.configured or not self.symbols:
             return
+        self._hydrate_latest()
         self._started = True
         self._stop.clear()
         self._threads = [
@@ -95,19 +117,49 @@ class FinnhubUsQuoteService:
             self._threads.append(
                 Thread(target=self._stream_loop, daemon=True, name="finnhub-trades")
             )
+        if self.engine is not None:
+            self._threads.append(
+                Thread(target=self._persistence_loop, daemon=True, name="finnhub-writer")
+            )
         for thread in self._threads:
             thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wakeup.set()
         for thread in self._threads:
             thread.join(timeout=2)
         self._threads = []
         self._started = False
 
+    def set_enabled(self, enabled: bool) -> None:
+        """Apply the platform switch without discarding the latest DB snapshot."""
+
+        with self._lock:
+            self.enabled = bool(enabled)
+        self._wakeup.set()
+
+    def _market_open(self) -> bool:
+        try:
+            return bool(self.market_open_checker())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
+
+    def _collection_allowed(self) -> bool:
+        with self._lock:
+            enabled = self.enabled
+        return bool(enabled and self.client.configured and self.symbols and self._market_open())
+
+    def _wait(self, seconds: float) -> None:
+        self._wakeup.clear()
+        self._wakeup.wait(seconds)
+
     def _quote_loop(self) -> None:
         index = 0
         while not self._stop.is_set():
+            if not self._collection_allowed():
+                self._wait(5.0)
+                continue
             symbol = self.symbols[index % len(self.symbols)]
             index += 1
             try:
@@ -117,9 +169,9 @@ class FinnhubUsQuoteService:
                 with self._lock:
                     self._errors[symbol] = exc.category
                 if exc.category == "rate_limit":
-                    self._stop.wait(30)
+                    self._wait(30)
                     continue
-            self._stop.wait(self.poll_seconds)
+            self._wait(self.poll_seconds)
 
     def _store_rest_quote(self, quote: FinnhubQuote) -> None:
         """Store a REST snapshot without replacing an equal/newer live trade."""
@@ -130,6 +182,7 @@ class FinnhubUsQuoteService:
                 self._quotes[quote.symbol] = quote
             elif quote.source_timestamp == previous.source_timestamp and not previous.live:
                 self._quotes[quote.symbol] = quote
+            self._dirty_symbols.add(quote.symbol)
             self._errors.pop(quote.symbol, None)
 
     def _stream_loop(self) -> None:
@@ -140,6 +193,10 @@ class FinnhubUsQuoteService:
             return
         backoff = 2.0
         while not self._stop.is_set():
+            if not self._collection_allowed():
+                self._set_stream_state(False, "market_closed" if self.enabled else "disabled")
+                self._wait(5.0)
+                continue
             url = f"{FINNHUB_STREAM_ORIGIN}?{urlencode({'token': self.client.api_key})}"
             try:
                 with connect(
@@ -154,7 +211,7 @@ class FinnhubUsQuoteService:
                             return
                     self._set_stream_state(True, None)
                     backoff = 2.0
-                    while not self._stop.is_set():
+                    while not self._stop.is_set() and self._collection_allowed():
                         try:
                             message = websocket.recv(timeout=5)
                         except TimeoutError:
@@ -162,7 +219,7 @@ class FinnhubUsQuoteService:
                         self._ingest_stream_message(message)
             except Exception:
                 self._set_stream_state(False, "disconnected")
-                self._stop.wait(backoff)
+                self._wait(backoff)
                 backoff = min(backoff * 2, 60)
         self._set_stream_state(False, None)
 
@@ -172,6 +229,8 @@ class FinnhubUsQuoteService:
             self._stream_error = error
 
     def _ingest_stream_message(self, message: str | bytes) -> None:
+        if not self._collection_allowed():
+            return
         try:
             payload = json.loads(message)
         except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
@@ -209,6 +268,9 @@ class FinnhubUsQuoteService:
             now = datetime.now(UTC)
             with self._lock:
                 previous = self._quotes.get(symbol)
+                source_timestamp = timestamp_ms // 1_000
+                if previous is not None and source_timestamp < previous.source_timestamp:
+                    continue
                 if previous is None:
                     quote = FinnhubQuote(
                         symbol=symbol,
@@ -219,7 +281,7 @@ class FinnhubUsQuoteService:
                         day_low=None,
                         day_open=None,
                         previous_close=None,
-                        source_timestamp=timestamp_ms // 1_000,
+                        source_timestamp=source_timestamp,
                         fetched_at=now,
                         volume=normalized_volume,
                         live=True,
@@ -240,13 +302,160 @@ class FinnhubUsQuoteService:
                         price=float(price),
                         change=change,
                         change_percent=change_percent,
-                        source_timestamp=timestamp_ms // 1_000,
+                        source_timestamp=source_timestamp,
                         fetched_at=now,
                         volume=normalized_volume,
                         live=True,
                     )
                 self._quotes[symbol] = quote
+                self._dirty_symbols.add(symbol)
                 self._errors.pop(symbol, None)
+
+    @staticmethod
+    def _snapshot_quote(row: FinnhubQuoteSnapshot) -> FinnhubQuote:
+        fetched_at = row.fetched_at
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=UTC)
+        return FinnhubQuote(
+            symbol=row.symbol,
+            price=float(row.price),
+            change=float(row.change) if row.change is not None else None,
+            change_percent=(
+                float(row.change_percent) if row.change_percent is not None else None
+            ),
+            day_high=float(row.day_high) if row.day_high is not None else None,
+            day_low=float(row.day_low) if row.day_low is not None else None,
+            day_open=float(row.day_open) if row.day_open is not None else None,
+            previous_close=(
+                float(row.previous_close) if row.previous_close is not None else None
+            ),
+            source_timestamp=int(row.source_timestamp),
+            fetched_at=fetched_at,
+            volume=float(row.volume) if row.volume is not None else None,
+            live=bool(row.live),
+        )
+
+    def _hydrate_latest(self) -> None:
+        if self.engine is None:
+            return
+        try:
+            latest_ids = (
+                select(func.max(FinnhubQuoteSnapshot.id).label("id"))
+                .where(FinnhubQuoteSnapshot.symbol.in_(self.symbols))
+                .group_by(FinnhubQuoteSnapshot.symbol)
+            )
+            with Session(self.engine) as db:
+                rows = db.scalars(
+                    select(FinnhubQuoteSnapshot).where(
+                        FinnhubQuoteSnapshot.id.in_(latest_ids)
+                    )
+                ).all()
+        except SQLAlchemyError:
+            with self._lock:
+                self._write_errors += 1
+            return
+        with self._lock:
+            for row in rows:
+                self._quotes[row.symbol] = self._snapshot_quote(row)
+                self._persisted_symbols.add(row.symbol)
+
+    def _persist_quotes(self, quotes: Iterable[FinnhubQuote]) -> None:
+        if self.engine is None:
+            return
+        snapshots = list(quotes)
+        if not snapshots:
+            return
+        now = datetime.now(UTC).replace(tzinfo=None)
+        try:
+            with Session(self.engine, expire_on_commit=False) as db:
+                for quote in snapshots:
+                    fetched_value = quote.fetched_at
+                    fetched_at = (
+                        fetched_value.replace(tzinfo=UTC)
+                        if fetched_value.tzinfo is None
+                        else fetched_value.astimezone(UTC)
+                    ).replace(tzinfo=None)
+                    bucket_at = fetched_at.replace(second=0, microsecond=0)
+                    row = db.scalar(
+                        select(FinnhubQuoteSnapshot).where(
+                            FinnhubQuoteSnapshot.symbol == quote.symbol,
+                            FinnhubQuoteSnapshot.bucket_at == bucket_at,
+                        )
+                    )
+                    if row is None:
+                        row = FinnhubQuoteSnapshot(
+                            symbol=quote.symbol,
+                            bucket_at=bucket_at,
+                            price=quote.price,
+                            source_timestamp=quote.source_timestamp,
+                            fetched_at=fetched_at,
+                            live=quote.live,
+                            captured_at=now,
+                            updated_at=now,
+                        )
+                        db.add(row)
+                    row.price = quote.price
+                    row.change = quote.change
+                    row.change_percent = quote.change_percent
+                    row.day_high = quote.day_high
+                    row.day_low = quote.day_low
+                    row.day_open = quote.day_open
+                    row.previous_close = quote.previous_close
+                    row.volume = quote.volume
+                    row.source_timestamp = quote.source_timestamp
+                    row.fetched_at = fetched_at
+                    row.live = quote.live
+                    row.updated_at = now
+                db.commit()
+        except SQLAlchemyError:
+            with self._lock:
+                self._dirty_symbols.update(quote.symbol for quote in snapshots)
+                self._write_errors += 1
+            return
+        with self._lock:
+            self._persisted += len(snapshots)
+            self._persisted_symbols.update(quote.symbol for quote in snapshots)
+            self._last_persisted_at = now.replace(tzinfo=UTC)
+
+    def _persistence_loop(self) -> None:
+        while not self._stop.is_set():
+            self._wait(self.persist_interval_seconds)
+            with self._lock:
+                symbols = tuple(self._dirty_symbols)
+                self._dirty_symbols.clear()
+                quotes = [self._quotes[symbol] for symbol in symbols if symbol in self._quotes]
+            self._persist_quotes(quotes)
+        with self._lock:
+            symbols = tuple(self._dirty_symbols)
+            self._dirty_symbols.clear()
+            quotes = [self._quotes[symbol] for symbol in symbols if symbol in self._quotes]
+        self._persist_quotes(quotes)
+
+    @staticmethod
+    def normalize_symbol(symbol: str) -> str:
+        normalized = str(symbol or "").strip().upper()
+        if normalized.endswith("USDT") or normalized.endswith("USD1"):
+            normalized = normalized[:-4]
+        return SYMBOL_ALIASES.get(normalized, normalized)
+
+    def latest_many(self, symbols: Iterable[str]) -> dict[str, dict[str, Any]]:
+        requested = {self.normalize_symbol(symbol) for symbol in symbols}
+        now = datetime.now(UTC)
+        with self._lock:
+            quotes = {key: value for key, value in self._quotes.items() if key in requested}
+            persisted = set(self._persisted_symbols)
+        result: dict[str, dict[str, Any]] = {}
+        for symbol, quote in quotes.items():
+            item = asdict(quote)
+            item.update(
+                {
+                    "available": True,
+                    "stale": (now - quote.fetched_at).total_seconds() > self.stale_seconds,
+                    "storage": "database" if symbol in persisted else "memory_pending",
+                }
+            )
+            result[symbol] = item
+        return result
 
     def snapshot(self) -> dict[str, Any]:
         now = datetime.now(UTC)
@@ -255,6 +464,12 @@ class FinnhubUsQuoteService:
             errors = dict(self._errors)
             stream_connected = self._stream_connected
             stream_error = self._stream_error
+            enabled = self.enabled
+            persisted_symbols = set(self._persisted_symbols)
+            persisted = self._persisted
+            write_errors = self._write_errors
+            last_persisted_at = self._last_persisted_at
+        market_open = self._market_open()
         items: list[dict[str, Any]] = []
         updated_at: datetime | None = None
         for symbol in self.symbols:
@@ -275,6 +490,7 @@ class FinnhubUsQuoteService:
                     "available": True,
                     "stale": age > self.stale_seconds,
                     "error_category": errors.get(symbol),
+                    "storage": "database" if symbol in persisted_symbols else "memory_pending",
                 }
             )
             items.append(item)
@@ -282,6 +498,10 @@ class FinnhubUsQuoteService:
                 updated_at = quote.fetched_at
         return {
             "configured": self.client.configured,
+            "enabled": enabled,
+            "market_open_only": True,
+            "market_open": market_open,
+            "collection_active": bool(enabled and market_open and self._started),
             "source": "finnhub",
             "exchange": "US",
             "total": len(self.symbols),
@@ -289,5 +509,8 @@ class FinnhubUsQuoteService:
             "stream_connected": stream_connected,
             "stream_error": stream_error,
             "updated_at": updated_at,
+            "persisted": persisted,
+            "write_errors": write_errors,
+            "last_persisted_at": last_persisted_at,
             "quotes": items,
         }

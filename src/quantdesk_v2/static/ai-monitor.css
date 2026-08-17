@@ -1799,6 +1799,7 @@ td.negative { color: var(--ai-red); }
 
 .opportunity-item:not(.is-expanded) .opportunity-macro,
 .opportunity-item:not(.is-expanded) .opportunity-feature-grid,
+.opportunity-item:not(.is-expanded) .opportunity-feature-disabled,
 .opportunity-item:not(.is-expanded) .settlement-detail,
 .opportunity-item:not(.is-expanded) .evidence-chips,
 .opportunity-item:not(.is-expanded) .opportunity-news,
@@ -1828,4 +1829,125 @@ td.negative { color: var(--ai-red); }
   .opportunity-item:not(.is-expanded) .virtual-entry-gate,
   .opportunity-item:not(.is-expanded) .virtual-entry-gate.position-active { grid-template-columns: minmax(0, 1fr); }
   .opportunity-item:not(.is-expanded) .virtual-entry-checks { grid-template-columns: repeat(2, minmax(70px, 1fr)); }
+}
+
+/* Platform Unusual Whales usage switch */
+.ai-head-actions > .uw-usage-toggle {
+  min-width: 158px;
+  gap: 8px;
+  justify-content: flex-start;
+  padding: 5px 9px;
+  border-color: rgba(91, 214, 170, .34);
+  background: rgba(91, 214, 170, .055);
+}
+.uw-usage-toggle > span:last-child { display: grid; gap: 0; text-align: left; line-height: 1.05; }
+.uw-usage-toggle b { color: var(--ai-text); font-size: 12px; white-space: nowrap; }
+.uw-usage-toggle small { margin-top: 3px; color: var(--ai-green); font-size: 10px; }
+.uw-toggle-track {
+  width: 29px;
+  height: 16px;
+  position: relative;
+  flex: 0 0 auto;
+  border: 1px solid rgba(91, 214, 170, .65);
+  border-radius: 10px;
+  background: rgba(91, 214, 170, .18);
+}
+.uw-toggle-track i {
+  width: 10px;
+  height: 10px;
+  position: absolute;
+  top: 2px;
+  left: 14px;
+  border-radius: 50%;
+  background: var(--ai-green);
+  box-shadow: 0 0 8px rgba(91, 214, 170, .6);
+  transition: left .18s ease, background .18s ease;
+}
+.ai-head-actions > .uw-usage-toggle.disabled {
+  border-color: rgba(255, 120, 136, .4);
+  background: rgba(255, 120, 136, .045);
+}
+.uw-usage-toggle.disabled .uw-toggle-track { border-color: rgba(255, 120, 136, .55); background: rgba(255, 120, 136, .1); }
+.uw-usage-toggle.disabled .uw-toggle-track i { left: 3px; background: var(--ai-red); box-shadow: none; }
+.uw-usage-toggle.disabled small { color: var(--ai-red); }
+.uw-usage-toggle.loading { opacity: .62; }
+.uw-usage-toggle:disabled { cursor: not-allowed; }
+
+/* Finnhub cash-equity collection switch */
+.ai-head-actions > .market-data-toggle {
+  min-width: 158px;
+  gap: 8px;
+  justify-content: flex-start;
+  padding: 5px 9px;
+  border-color: rgba(78, 171, 255, .4);
+  background: rgba(78, 171, 255, .06);
+}
+.market-data-toggle > span:last-child { display: grid; gap: 0; text-align: left; line-height: 1.05; }
+.market-data-toggle b { color: var(--ai-text); font-size: 12px; white-space: nowrap; }
+.market-data-toggle small { margin-top: 3px; color: #69b8ff; font-size: 10px; }
+.market-data-toggle-track {
+  width: 29px;
+  height: 16px;
+  position: relative;
+  flex: 0 0 auto;
+  border: 1px solid rgba(78, 171, 255, .68);
+  border-radius: 10px;
+  background: rgba(78, 171, 255, .16);
+}
+.market-data-toggle-track i {
+  width: 10px;
+  height: 10px;
+  position: absolute;
+  top: 2px;
+  left: 14px;
+  border-radius: 50%;
+  background: #69b8ff;
+  box-shadow: 0 0 8px rgba(78, 171, 255, .55);
+  transition: left .18s ease, background .18s ease;
+}
+.market-data-toggle.standby:not(.disabled) small { color: var(--ai-yellow); }
+.ai-head-actions > .market-data-toggle.disabled {
+  border-color: rgba(255, 120, 136, .4);
+  background: rgba(255, 120, 136, .045);
+}
+.market-data-toggle.disabled .market-data-toggle-track { border-color: rgba(255, 120, 136, .55); background: rgba(255, 120, 136, .1); }
+.market-data-toggle.disabled .market-data-toggle-track i { left: 3px; background: var(--ai-red); box-shadow: none; }
+.market-data-toggle.disabled small { color: var(--ai-red); }
+.market-data-toggle.loading { opacity: .62; }
+.market-data-toggle:disabled { cursor: not-allowed; }
+
+.finnhub-spot-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 1px solid rgba(78, 171, 255, .32);
+  background: rgba(78, 171, 255, .055);
+  color: #8ac8ff;
+  font: 700 11px/1 Consolas, monospace;
+  white-space: nowrap;
+}
+.finnhub-spot-badge i { padding: 2px 3px; background: rgba(78, 171, 255, .14); color: #69b8ff; font-style: normal; font-size: 9px; }
+.finnhub-spot-badge b { color: var(--ai-text); font-size: 12px; }
+.finnhub-spot-badge small { color: var(--ai-dim); font-size: 9px; }
+.finnhub-spot-badge.stale { border-color: rgba(224, 189, 92, .3); color: var(--ai-yellow); }
+
+.opportunity-feature-disabled {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 11px;
+  border-top: 1px solid var(--ai-line);
+  border-bottom: 1px solid var(--ai-line);
+  background: rgba(161, 146, 255, .045);
+  color: var(--ai-muted);
+  font-size: 12px;
+}
+.opportunity-feature-disabled strong { color: var(--ai-brand); white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .ai-head-actions > .uw-usage-toggle { min-width: 146px; }
+  .ai-head-actions > .market-data-toggle { min-width: 146px; }
+  .opportunity-feature-disabled { align-items: flex-start; flex-direction: column; gap: 3px; }
 }

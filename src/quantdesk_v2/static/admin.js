@@ -376,7 +376,7 @@ async function loadUwMarketData() {
   const stream = health.websocket || {};
   const streamView = uwStreamStatusView(stream);
   const state = $("#uw-market-state");
-  state.textContent = !data.configured ? "凭据未配置" : config.websocket_enabled ? streamView.label : "WebSocket 已关闭";
+  state.textContent = !config.enabled ? "平台已关闭" : !data.configured ? "凭据未配置" : config.websocket_enabled ? streamView.label : "WebSocket 已关闭";
   state.className = `health-badge ${!data.configured ? "error" : streamView.className}`;
 
   const subscriptions = Array.isArray(stream.subscriptions) ? stream.subscriptions.length : 0;
@@ -399,6 +399,7 @@ async function loadUwMarketData() {
 
   const form = $("#uw-market-data-form");
   form.elements.namedItem("api_key").value = "";
+  form.elements.namedItem("enabled").checked = config.enabled !== false;
   form.elements.namedItem("mode").value = config.mode || "record";
   form.elements.namedItem("rest_enabled").checked = Boolean(config.rest_enabled);
   form.elements.namedItem("websocket_enabled").checked = Boolean(config.websocket_enabled);
@@ -440,6 +441,7 @@ function unusualWhalesFormPayload(form) {
     thresholds[key] = Number(form.elements.namedItem(key).value);
   });
   const payload = {
+    enabled: form.elements.namedItem("enabled").checked,
     mode: form.elements.namedItem("mode").value,
     rest_enabled: form.elements.namedItem("rest_enabled").checked,
     websocket_enabled: form.elements.namedItem("websocket_enabled").checked,

@@ -8,6 +8,8 @@ class AiMonitorDashboard extends HTMLElement {
       macroMarket: null,
       config: null,
       scorePolicy: null,
+      uwToggleLoading: false,
+      finnhubToggleLoading: false,
       indicators: [],
       indicatorTemplates: [],
       indicatorConflictPairs: [],
@@ -114,7 +116,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260817-35">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260817-37">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -125,6 +127,14 @@ class AiMonitorDashboard extends HTMLElement {
           <div class="ai-head-actions">
             <span id="ai-clock" class="ai-clock"></span>
             <span id="scheduler-state" class="status-badge idle">读取中</span>
+            <button id="uw-usage-toggle" class="uw-usage-toggle loading" type="button" aria-pressed="false" disabled>
+              <span class="uw-toggle-track" aria-hidden="true"><i></i></span>
+              <span><b>Unusual Whales</b><small>读取中</small></span>
+            </button>
+            <button id="finnhub-usage-toggle" class="market-data-toggle finnhub-usage-toggle loading" type="button" aria-pressed="false" disabled>
+              <span class="market-data-toggle-track" aria-hidden="true"><i></i></span>
+              <span><b>Finnhub 美股现货</b><small>读取中</small></span>
+            </button>
             <button id="run-news" type="button">分析新闻</button>
             <button id="run-opportunity" class="primary-action" type="button">发现机会</button>
             <details class="ai-settings-menu">
@@ -372,6 +382,8 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#ai-refresh").addEventListener("click", () => this.loadAll(true));
     this.q("#run-news").addEventListener("click", () => this.createRun("news"));
     this.q("#run-opportunity").addEventListener("click", () => this.createRun("opportunity"));
+    this.q("#uw-usage-toggle").addEventListener("click", () => this.toggleUnusualWhales());
+    this.q("#finnhub-usage-toggle").addEventListener("click", () => this.toggleFinnhub());
     this.q("#open-news-config").addEventListener("click", () => this.openConfig("news"));
     this.q("#open-weight-config").addEventListener("click", () => this.openConfig("weights"));
     this.q("#open-config").addEventListener("click", () => this.openConfig("indicators"));
@@ -697,15 +709,17 @@ class AiMonitorDashboard extends HTMLElement {
     if (!this.state.running || this.state.busyRun || this.state.fullLoadLoading || this.state.liveStateLoading || document.visibilityState === "hidden") return;
     this.state.liveStateLoading = true;
     try {
-      const [overview, news, macroMarket] = await Promise.all([
+      const [overview, news, macroMarket, scorePolicy] = await Promise.all([
         this.api("/overview"),
         this.api("/news?limit=160"),
         this.api("/market-context").catch(() => this.state.macroMarket || { available: false }),
+        this.api("/score-policy").catch(() => this.state.scorePolicy),
       ]);
       this.state.overview = overview;
       this.state.config = overview.config;
       this.state.news = news.items || [];
       this.state.macroMarket = macroMarket;
+      if (scorePolicy) this.state.scorePolicy = scorePolicy;
       this.renderOverview();
       this.renderMacroMarket();
       this.renderNews();
@@ -733,6 +747,8 @@ class AiMonitorDashboard extends HTMLElement {
       if (data?.captured_at === this.state.macroMarket?.captured_at && data?.stale === this.state.macroMarket?.stale) return;
       this.state.macroMarket = data;
       this.renderMacroMarket();
+      this.renderUnusualWhalesToggle();
+      this.renderFinnhubToggle();
       this.renderSignalHealth();
     } catch (_) {
       // Keep the last valid market snapshot; the normal 20-second refresh owns banners.
@@ -777,6 +793,8 @@ class AiMonitorDashboard extends HTMLElement {
   async loadScorePolicy({ quiet = false } = {}) {
     try {
       this.state.scorePolicy = await this.api("/score-policy");
+      this.renderUnusualWhalesToggle();
+      this.renderFinnhubToggle();
       if (!this.state.weightDraftDirty) this.renderScorePolicy(this.state.config || {});
       return this.state.scorePolicy;
     } catch (error) {
@@ -791,8 +809,114 @@ class AiMonitorDashboard extends HTMLElement {
     const state = this.q("#scheduler-state");
     state.textContent = config.enabled ? "自动监控中" : "自动监控已暂停";
     state.className = `status-badge ${config.enabled ? "running" : "idle"}`;
+    this.renderUnusualWhalesToggle();
+    this.renderFinnhubToggle();
     this.q("#model-warning").classList.toggle("hidden", Boolean(data.model_configured));
     this.renderSignalHealth();
+  }
+
+  renderUnusualWhalesToggle() {
+    const button = this.q("#uw-usage-toggle");
+    if (!button) return;
+    const policy = this.state.scorePolicy;
+    const enabled = policy?.enabled !== false;
+    const loading = !policy || this.state.uwToggleLoading;
+    const session = String(this.state.macroMarket?.market_session?.key || "closed");
+    const collecting = enabled && session === "regular";
+    button.className = `uw-usage-toggle ${loading ? "loading" : enabled ? "enabled" : "disabled"}`;
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    button.disabled = loading || policy?.can_edit !== true;
+    button.title = policy?.can_edit === false
+      ? "仅管理员可以调整平台 Unusual Whales 总开关"
+      : enabled
+      ? collecting
+        ? "美股常规交易时段正在采集；REST 最多每 5 分钟刷新一次"
+        : "已启用，休市期间不会连接或调用 Unusual Whales"
+      : "已关闭；采集、评分与门控均不使用 Unusual Whales。点击启用";
+    const status = button.querySelector("small");
+    if (status) status.textContent = loading ? "切换中" : !enabled ? "已关闭" : collecting ? "盘中 5分钟/次" : "休市待机";
+  }
+
+  async toggleUnusualWhales() {
+    const policy = this.state.scorePolicy;
+    if (!policy || policy.can_edit !== true || this.state.uwToggleLoading) return;
+    const enabled = policy.enabled === false;
+    this.state.uwToggleLoading = true;
+    this.renderUnusualWhalesToggle();
+    try {
+      this.state.scorePolicy = await this.api("/unusual-whales-enabled", {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      });
+      this.renderUnusualWhalesToggle();
+      await Promise.all([
+        this.loadMarketContext(),
+        this.state.view === "opportunities" ? this.loadOpportunities() : Promise.resolve(),
+      ]);
+      this.showBanner(
+        enabled
+          ? "Unusual Whales 已启用，REST 数据按 5 分钟频率刷新"
+          : "Unusual Whales 已关闭，采集、评分与门控已完全旁路",
+        "success",
+      );
+    } catch (error) {
+      this.showBanner(error.message || "Unusual Whales 开关保存失败", "error");
+    } finally {
+      this.state.uwToggleLoading = false;
+      this.renderUnusualWhalesToggle();
+    }
+  }
+
+  renderFinnhubToggle() {
+    const button = this.q("#finnhub-usage-toggle");
+    if (!button) return;
+    const policy = this.state.scorePolicy;
+    const enabled = policy?.finnhub_enabled !== false;
+    const loading = !policy || this.state.finnhubToggleLoading;
+    const session = String(this.state.macroMarket?.market_session?.key || "closed");
+    const collecting = enabled && session === "regular";
+    button.className = `market-data-toggle finnhub-usage-toggle ${loading ? "loading" : enabled ? "enabled" : "disabled"} ${collecting ? "collecting" : "standby"}`;
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    button.disabled = loading || policy?.can_edit !== true;
+    button.title = policy?.can_edit === false
+      ? "仅管理员可以调整平台 Finnhub 美股现货总开关"
+      : enabled
+      ? collecting
+        ? "美股常规交易时段正在采集；最新报价按股票写入数据库"
+        : "已启用，休市期间暂停调用；页面继续读取各股票最新入库报价"
+      : "已关闭；不采集，也不把 Finnhub 现货用于机会展示";
+    const status = button.querySelector("small");
+    if (status) status.textContent = loading ? "切换中" : !enabled ? "已关闭" : collecting ? "盘中采集" : "休市待机";
+  }
+
+  async toggleFinnhub() {
+    const policy = this.state.scorePolicy;
+    if (!policy || policy.can_edit !== true || this.state.finnhubToggleLoading) return;
+    const enabled = policy.finnhub_enabled === false;
+    this.state.finnhubToggleLoading = true;
+    this.renderFinnhubToggle();
+    try {
+      this.state.scorePolicy = await this.api("/finnhub-enabled", {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      });
+      this.renderFinnhubToggle();
+      await Promise.all([
+        this.loadMarketContext(),
+        this.state.view === "opportunities" ? this.loadOpportunities() : Promise.resolve(),
+      ]);
+      this.showBanner(
+        enabled
+          ? "Finnhub 美股现货已启用；仅常规交易时段采集并持续写入数据库"
+          : "Finnhub 美股现货已关闭；机会卡片不再使用该数据源",
+        "success",
+      );
+    } catch (error) {
+      this.showBanner(error.message || "Finnhub 美股现货开关保存失败", "error");
+    } finally {
+      this.state.finnhubToggleLoading = false;
+      this.renderFinnhubToggle();
+    }
   }
 
   firstValue(...values) {
@@ -1012,7 +1136,7 @@ class AiMonitorDashboard extends HTMLElement {
       <aside class="macro-risk-stack">
         <div class="macro-vix ${vixTone}"><span>VIX 恐慌指数</span><b>${numberOrDash(vix.value, 2)}</b><small>${vix.available ? `${percent(vix.change_percent)} · 真实指数` : "暂不可用"}</small></div>
         <div class="macro-breadth ${breadth.available ? "available" : "unavailable"}"><span>市场涨跌家数</span><b>${this.number(breadth.advancers)} <i>/</i> ${this.number(breadth.decliners)}</b><small>上涨 / 下跌 · A/D ${breadthRatio}${breadth.available ? "" : " · 样本不足"}</small></div>
-        <div class="macro-tide ${tideTone}"><span>Market Tide</span><b>${tide.available ? tideLabel : "暂不可用"}</b><small>${tide.available ? `净量 ${this.number(tide.net_volume)} · ${sessionActive ? "5m 实时潮汐" : "最近交易日潮汐"}` : providers.unusual_whales_configured ? "已配置，等待上游数据" : "未配置 Unusual Whales"}</small></div>
+        <div class="macro-tide ${tideTone}"><span>Market Tide</span><b>${tide.available ? tideLabel : "暂不可用"}</b><small>${tide.available ? `净量 ${this.number(tide.net_volume)} · ${sessionActive ? "5m 实时潮汐" : "最近交易日潮汐"}` : providers.unusual_whales_enabled === false ? "Unusual Whales 已关闭" : providers.unusual_whales_configured ? "已配置，等待上游数据" : "未配置 Unusual Whales"}</small></div>
         <div class="macro-event ${eventTone}"><span>宏观事件风险</span><b>${nextEvent ? this.escape(nextEvent.event_type) : "正常"}</b><small>${nextEvent ? `${eventCountdown} · ${this.escape(nextEvent.title)}` : "未来 24 小时无已登记重大事件"}</small></div>
       </aside>
     </div>
@@ -2094,6 +2218,9 @@ class AiMonitorDashboard extends HTMLElement {
   }
 
   opportunityFeatureMarkup(item) {
+    if (this.state.scorePolicy?.enabled === false) {
+      return `<section class="opportunity-feature-disabled" data-patch-key="enhanced-features"><strong>Unusual Whales 已关闭</strong><span>本卡不使用 Quote、期权流、GEX、场内/场外成交和事件门控；仅按新闻、技术指标与基础行情评估。</span></section>`;
+    }
     const evidence = item?.evidence || {};
     const stableGate = item?.gate_summary && typeof item.gate_summary === "object" ? item.gate_summary : {};
     const snapshot = this.normalizeFeatureSnapshot(item);
@@ -2285,6 +2412,8 @@ class AiMonitorDashboard extends HTMLElement {
       const indicatorRemainder = indicatorItems.length > 6 ? `<span class="evidence-chip remainder">另有 ${indicatorItems.length - 6} 项</span>` : "";
       const news = (evidence.news || []).slice(0, 2).map((entry) => `<li><time>${this.formatUnix(entry.ts)}</time><span>${this.escape(entry.title)}</span><b>${Math.round(Number(entry.score || 0) * 100)}%</b></li>`).join("");
       const market = evidence.market || {};
+      const finnhubSpot = item.finnhub_spot_quote || {};
+      const finnhubSpotAvailable = finnhubSpot.available === true && Number(finnhubSpot.price) > 0;
       const marketEnvironment = evidence.market_environment || evidence.score_snapshot?.macro_market || {};
       const macroSnapshot = evidence.macro_market_snapshot || {};
       const macroIndices = Object.fromEntries((macroSnapshot.indices || []).map((entry) => [entry.key, entry]));
@@ -2464,8 +2593,11 @@ class AiMonitorDashboard extends HTMLElement {
         : `<button class="opportunity-symbol unavailable" type="button" disabled title="该股票暂无对应的合约技术行情">${this.escape(item.symbol)}</button>`;
       const conclusionControl = `<button class="ai-conclusion-trigger" type="button" data-ai-conclusion="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 的 AI 分析结论">AI分析结论</button>`;
       const detailControl = `<button class="opportunity-detail-toggle" type="button" data-toggle-opportunity-details="${this.escape(item.id)}" aria-expanded="${expanded}">${expanded ? "收起详情 <i>⌃</i>" : "展开详情 <i>⌄</i>"}</button>`;
+      const finnhubSpotControl = finnhubSpotAvailable
+        ? `<span class="finnhub-spot-badge ${finnhubSpot.stale ? "stale" : "live"}" title="Finnhub 美股现货最新入库快照 · ${this.formatDate(finnhubSpot.fetched_at)}"><i>FH</i><b>${this.escape(this.compactNumber(Number(finnhubSpot.price)))}</b><small>${finnhubSpot.stale ? "最近入库" : "现货"}</small></span>`
+        : "";
       return `<article class="opportunity-item ${this.escape(item.status)} state-${this.escape(entryState.tone)} ${expanded ? "is-expanded" : ""} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}" data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:${historicalTab ? "history" : "current"}">
-        <header data-patch-key="header"><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${detailControl}${conclusionControl}</div><button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
+        <header data-patch-key="header"><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${finnhubSpotControl}${detailControl}${conclusionControl}</div><button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
         ${virtualEntryPanel}
         ${macroReference}
         ${this.opportunityFeatureMarkup(item)}

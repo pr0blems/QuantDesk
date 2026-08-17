@@ -467,6 +467,7 @@ def test_ai_monitor_score_policy_updates_only_six_domain_weights(
         admin_id, _ = register_and_login(client, "score-policy-admin")
         regular_id, regular_token = register_and_login(client, "score-policy-reader")
         original = {
+            "enabled": True,
             "mode": "gate",
             "rest_enabled": False,
             "websocket_enabled": True,
@@ -590,6 +591,7 @@ def test_ai_monitor_score_policy_updates_only_six_domain_weights(
             assert setting.value_json["mode"] == "score"
             assert setting.value_json["weights"] == recommended
             for preserved in (
+                "enabled",
                 "rest_enabled",
                 "websocket_enabled",
                 "channels",
