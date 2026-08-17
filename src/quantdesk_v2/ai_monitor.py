@@ -3595,12 +3595,16 @@ def signal_market_quality(
     evaluated_at = int(scan.get("evaluated_at") or 0)
     if 0 < evaluated_at < 1_000_000_000_000:
         evaluated_at *= 1_000
-    bar_close_ms = evaluated_at + _TIMEFRAME_SECONDS.get(timeframe, 3600) * 1_000
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(timeframe, 3600)
+    bar_close_ms = evaluated_at + timeframe_seconds * 1_000
     ticker_age_seconds = max(0.0, (now_ms - ticker_ts) / 1_000) if ticker_ts else None
     bar_age_seconds = max(0.0, (now_ms - bar_close_ms) / 1_000) if evaluated_at else None
+    # The most recent closed bar remains the valid technical input until the
+    # next bar closes. The former 15-minute cap incorrectly blocked 1h/4h
+    # signals long before a replacement bar could exist.
     bar_age_limit = max(
         maximum_market_age_seconds,
-        min(_TIMEFRAME_SECONDS.get(timeframe, 3600) // 4, 900),
+        timeframe_seconds + min(300, max(60, timeframe_seconds // 12)),
     )
     prediction_features = scan.get("prediction_features") or {}
     feature_quality_value = prediction_features.get("quality_score")

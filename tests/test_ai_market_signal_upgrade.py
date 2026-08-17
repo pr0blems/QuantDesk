@@ -98,6 +98,40 @@ def test_quote_halt_and_event_checks_emit_stable_blocking_codes() -> None:
     }
 
 
+def test_closed_hourly_bar_remains_valid_until_replacement_bar_can_close() -> None:
+    now = datetime(2026, 8, 16, 12, 45, tzinfo=UTC)
+    now_ms = int(now.timestamp() * 1000)
+
+    quality = ai_monitor.signal_market_quality(
+        {
+            # 11:00 open -> 12:00 close; at 12:45 it is still the latest
+            # possible closed 1h bar and must not be rejected as stale.
+            "evaluated_at": now_ms - 105 * 60 * 1000,
+            "prediction_features": {"quality_score": 0.9},
+        },
+        {"price": 100.0, "ts": now_ms},
+        "1h",
+        now,
+        maximum_market_age_seconds=120,
+        minimum_feature_quality=0.7,
+        requires_prediction_features=True,
+        enhanced_feature={
+            "quote": {
+                "bid": 99.99,
+                "ask": 100.01,
+                "quote_age_ms": 250,
+            },
+            "halt_status": "clear",
+            "data_coverage": 1.0,
+            "stale_fields": [],
+        },
+    )
+
+    assert quality["checks"]["kline_fresh"] is True
+    assert quality["bar_age_seconds"] == 45 * 60
+    assert quality["maximum_bar_age_seconds"] >= 65 * 60
+
+
 def test_trade_price_only_is_rejected_as_non_executable_reference() -> None:
     now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
     now_ms = int(now.timestamp() * 1000)

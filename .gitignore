@@ -47,6 +47,7 @@ reports/
 
 # Machine-specific launchers and editor/OS metadata
 /autostart.vbs
+/QuantDesk-NG/
 .idea/
 .vscode/
 .DS_Store
