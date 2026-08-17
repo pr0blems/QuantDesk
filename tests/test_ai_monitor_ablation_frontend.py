@@ -72,4 +72,22 @@ def test_prediction_advanced_filters_round_trip_through_url_query() -> None:
     assert "window.history.replaceState" in component
     assert "new URLSearchParams(window.location.search)" in component
     assert 'params.set("min_data_coverage", String(filters.dataCoverageMin))' in component
+    assert (
+        "timezone_offset_minutes: String(-new Date().getTimezoneOffset())"
+        in component
+    )
     assert "信号开始日期不能晚于结束日期" in component
+    assert 'if (dateFrom && !dateTo) dateTo = dateFrom;' in component
+    assert 'if (!dateFrom && dateTo) dateFrom = dateTo;' in component
+    assert 'let dateFrom = cleanDate(params.get("date_from"));' in component
+    assert 'let dateTo = cleanDate(params.get("date_to"));' in component
+    assert 'include_readiness: "false"' in component
+    assert 'applyButton.textContent = "正在筛选…"' in component
+    assert "applyButton.disabled = true" not in component
+    assert 'this.api("/opportunity-readiness")' in component
+    assert "cacheAge < 300000" in component
+    assert "this.predictionAnalyticsAbortController?.abort()" in component
+    assert "{ signal: controller.signal }" in component
+    assert "const currentAnalytics = this.state.opportunityAnalytics || {};" in component
+    assert "data.readiness || currentAnalytics.readiness || previousAnalytics.readiness" in component
+    assert "if (!background)" in component

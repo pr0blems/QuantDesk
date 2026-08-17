@@ -38,6 +38,9 @@ class AiMonitorDashboard extends HTMLElement {
       predictionPageSize: 20,
       displayLeverage: 10,
       predictionAnalyticsRequestId: 0,
+      predictionAnalyticsLoading: false,
+      predictionAnalyticsLastLoadedAt: 0,
+      predictionReadinessLoading: false,
       draftSymbols: new Set(),
       symbolSearch: "",
       opportunityTab: "current",
@@ -84,6 +87,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.historicalJudgmentRequestId = 0;
     this.scoreTrendFocus = null;
     this.scoreTrendOpportunity = null;
+    this.predictionAnalyticsAbortController = null;
     this.updateStreamAbort = null;
     this.updateStreamRetryTimer = null;
     this.updateStreamRefreshTimer = null;
@@ -240,7 +244,7 @@ class AiMonitorDashboard extends HTMLElement {
               <section id="market-ablation" class="market-ablation" aria-label="市场数据模块消融对比"><div class="analytics-loading">正在计算冻结快照消融对比…</div></section>
               <div class="analytics-control-grid">
                 <form id="prediction-filter-form" class="analytics-filters">
-                  <header><div><strong>筛选统计</strong><small>汇总指标和下方明细使用相同条件</small></div><span id="prediction-filter-result">全部历史样本</span></header>
+                  <header><div><strong>筛选统计</strong><small>汇总指标和下方明细使用相同条件；只填一个日期时按该自然日筛选</small></div><span id="prediction-filter-result">全部历史样本</span></header>
                   <div class="analytics-filter-grid">
                     <label><span>信号日期从</span><input id="prediction-date-from" type="date"></label>
                     <label><span>信号日期至</span><input id="prediction-date-to" type="date"></label>
@@ -496,6 +500,8 @@ class AiMonitorDashboard extends HTMLElement {
     this.updateStreamRefreshTimer = null;
     this.updateStreamAbort?.abort();
     this.updateStreamAbort = null;
+    this.predictionAnalyticsAbortController?.abort();
+    this.predictionAnalyticsAbortController = null;
     this.updateStreamScopes.clear();
     this.state.updateStreamStatus = "idle";
   }
@@ -672,7 +678,7 @@ class AiMonitorDashboard extends HTMLElement {
       this.renderNews();
       if (this.state.view === "runs") await this.loadRuns();
       if (this.state.view === "opportunities") await this.loadOpportunities();
-      if (this.state.view === "predictions") await this.loadPredictionAnalytics();
+      if (this.state.view === "predictions") await this.loadPredictionAnalytics({ background: true });
       this.state.lastSuccessfulRefreshAt = new Date().toISOString();
       this.state.lastRefreshError = "";
       this.state.incrementalUpdateCount += 1;
@@ -728,7 +734,10 @@ class AiMonitorDashboard extends HTMLElement {
   async loadView(view) {
     if (view === "runs") return this.loadRuns();
     if (view === "opportunities") return this.loadOpportunities();
-    if (view === "predictions") return this.loadPredictionAnalytics();
+    if (view === "predictions") {
+      void this.loadPredictionReadiness();
+      return this.loadPredictionAnalytics({ force: true, background: true });
+    }
     return undefined;
   }
 
@@ -1198,7 +1207,10 @@ class AiMonitorDashboard extends HTMLElement {
       };
       this.state.config = await this.api("/cost-config", { method: "PUT", body: JSON.stringify(payload) });
       this.renderPredictionCostConfig(this.state.config);
-      await this.loadPredictionAnalytics();
+      await Promise.all([
+        this.loadPredictionAnalytics({ force: true, interactive: true }),
+        this.loadPredictionReadiness({ force: true }),
+      ]);
       this.showBanner("成本配置已保存；命中率、净收益和实盘准备度已按当前设置重算。", "success");
     } catch (error) {
       this.showBanner(error.message || "成本配置保存失败", "error");
@@ -3173,10 +3185,14 @@ class AiMonitorDashboard extends HTMLElement {
     const cleanSymbol = (value) => String(value || "").trim().toUpperCase().replace(/[^A-Z0-9._-]/g, "").slice(0, 24);
     const cleanVersion = (value) => String(value || "").trim().slice(0, 32);
     const oneOf = (value, choices, fallback = "all") => choices.includes(value) ? value : fallback;
+    let dateFrom = cleanDate(params.get("date_from"));
+    let dateTo = cleanDate(params.get("date_to"));
+    if (dateFrom && !dateTo) dateTo = dateFrom;
+    if (!dateFrom && dateTo) dateFrom = dateTo;
     this.state.predictionFilters = {
       ...this.state.predictionFilters,
-      dateFrom: cleanDate(params.get("date_from")),
-      dateTo: cleanDate(params.get("date_to")),
+      dateFrom,
+      dateTo,
       symbol: cleanSymbol(params.get("symbol")),
       newsScoreMin: clampScore(params.get("news_score_min")),
       indicatorScoreMin: clampScore(params.get("indicator_score_min")),
@@ -3276,13 +3292,49 @@ class AiMonitorDashboard extends HTMLElement {
     if (nextUrl !== currentUrl) window.history.replaceState(window.history.state, "", nextUrl);
   }
 
-  async loadPredictionAnalytics({ scrollToList = false } = {}) {
+  async loadPredictionReadiness({ force = false } = {}) {
+    if (this.state.predictionReadinessLoading) return;
+    if (!force && this.state.opportunityAnalytics?.readiness) return;
+    this.state.predictionReadinessLoading = true;
+    try {
+      const readiness = await this.api("/opportunity-readiness");
+      this.state.opportunityAnalytics = {
+        ...(this.state.opportunityAnalytics || {}),
+        readiness,
+      };
+      if (this.state.view === "predictions") this.renderPredictionAnalytics();
+    } catch (error) {
+      this.showBanner(error.message || "实盘准备度读取失败", "error");
+    } finally {
+      this.state.predictionReadinessLoading = false;
+    }
+  }
+
+  async loadPredictionAnalytics({ scrollToList = false, interactive = false, background = false, force = false } = {}) {
+    const cacheAge = Date.now() - Number(this.state.predictionAnalyticsLastLoadedAt || 0);
+    if (background && !force && (this.state.predictionAnalyticsLoading || cacheAge < 300000)) return;
+    if (interactive) this.predictionAnalyticsAbortController?.abort();
+    else if (this.state.predictionAnalyticsLoading) return;
+
     const requestId = ++this.state.predictionAnalyticsRequestId;
+    const previousAnalytics = this.state.opportunityAnalytics || {};
+    const controller = new AbortController();
+    this.predictionAnalyticsAbortController = controller;
+    this.state.predictionAnalyticsLoading = true;
+    const applyButton = this.q("#prediction-filter-apply");
+    const filterForm = this.q("#prediction-filter-form");
+    if (interactive && applyButton) {
+      applyButton.dataset.idleLabel ||= applyButton.textContent || "应用筛选";
+      applyButton.textContent = "正在筛选…";
+      applyButton.setAttribute("aria-busy", "true");
+    }
+    if (interactive) filterForm?.setAttribute("aria-busy", "true");
     try {
       const filters = this.state.predictionFilters;
       const params = new URLSearchParams({
         limit: String(this.state.predictionPageSize),
         page: String(this.state.predictionPage),
+        timezone_offset_minutes: String(-new Date().getTimezoneOffset()),
         news_score_min: String(filters.newsScoreMin),
         indicator_score_min: String(filters.indicatorScoreMin),
         combined_score_min: String(filters.combinedScoreMin),
@@ -3293,6 +3345,7 @@ class AiMonitorDashboard extends HTMLElement {
         quote_quality: filters.quoteQuality,
         event_risk: filters.eventRisk,
         exit_reason: filters.exitReason,
+        include_readiness: "false",
       });
       if (filters.dateFrom) params.set("date_from", filters.dateFrom);
       if (filters.dateTo) params.set("date_to", filters.dateTo);
@@ -3300,29 +3353,46 @@ class AiMonitorDashboard extends HTMLElement {
       params.set("min_data_coverage", String(filters.dataCoverageMin));
       if (filters.featureVersion) params.set("feature_version", filters.featureVersion);
       if (filters.decisionVersion) params.set("decision_version", filters.decisionVersion);
-      const applyButton = this.q("#prediction-filter-apply");
-      if (applyButton) applyButton.disabled = true;
-      const data = await this.api(`/opportunity-analytics?${params}`);
+      const data = await this.api(`/opportunity-analytics?${params}`, { signal: controller.signal });
       if (requestId !== this.state.predictionAnalyticsRequestId) return;
-      this.state.opportunityAnalytics = data;
+      const currentAnalytics = this.state.opportunityAnalytics || {};
+      this.state.opportunityAnalytics = {
+        ...previousAnalytics,
+        ...currentAnalytics,
+        ...data,
+        readiness: data.readiness || currentAnalytics.readiness || previousAnalytics.readiness || null,
+      };
       this.adoptPredictionResponseFilters(data.filters);
       this.state.predictionPage = Number(data.pagination?.page || this.state.predictionPage || 1);
-      this.syncPredictionFilterInputs();
-      this.syncPredictionFiltersToUrl();
+      this.state.predictionAnalyticsLastLoadedAt = Date.now();
+      if (!background) {
+        this.syncPredictionFilterInputs();
+        this.syncPredictionFiltersToUrl();
+      }
       this.renderPredictionAnalytics();
-      if (scrollToList) window.requestAnimationFrame(() => this.q("#prediction-list")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      if (scrollToList) window.requestAnimationFrame(() => this.q("#prediction-list")?.scrollIntoView({ behavior: "auto", block: "start" }));
     } catch (error) {
+      if (error?.name === "AbortError") return;
       this.showBanner(error.message || "预测统计分析读取失败", "error");
     } finally {
-      const applyButton = this.q("#prediction-filter-apply");
-      if (applyButton && requestId === this.state.predictionAnalyticsRequestId) applyButton.disabled = false;
+      if (requestId === this.state.predictionAnalyticsRequestId) {
+        this.state.predictionAnalyticsLoading = false;
+        if (this.predictionAnalyticsAbortController === controller) this.predictionAnalyticsAbortController = null;
+      }
+      if (interactive && applyButton && requestId === this.state.predictionAnalyticsRequestId) {
+        applyButton.textContent = applyButton.dataset.idleLabel || "应用筛选";
+        applyButton.removeAttribute("aria-busy");
+        filterForm?.removeAttribute("aria-busy");
+      }
     }
   }
 
   applyPredictionFilters() {
     const clampScore = (value) => Math.min(100, Math.max(0, Number(value) || 0));
-    const dateFrom = this.q("#prediction-date-from").value;
-    const dateTo = this.q("#prediction-date-to").value;
+    let dateFrom = this.q("#prediction-date-from").value;
+    let dateTo = this.q("#prediction-date-to").value;
+    if (dateFrom && !dateTo) dateTo = dateFrom;
+    if (!dateFrom && dateTo) dateFrom = dateTo;
     if (dateFrom && dateTo && dateFrom > dateTo) {
       this.showBanner("信号开始日期不能晚于结束日期。", "error");
       return;
@@ -3353,7 +3423,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.syncPredictionFilterInputs();
     this.state.predictionPage = 1;
     this.syncPredictionFiltersToUrl();
-    this.loadPredictionAnalytics({ scrollToList: true });
+    this.loadPredictionAnalytics({ scrollToList: true, interactive: true, force: true });
   }
 
   resetPredictionFilters() {
@@ -3378,7 +3448,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.syncPredictionFilterInputs();
     this.state.predictionPage = 1;
     this.syncPredictionFiltersToUrl();
-    this.loadPredictionAnalytics({ scrollToList: true });
+    this.loadPredictionAnalytics({ scrollToList: true, interactive: true, force: true });
   }
 
   setPredictionPage(page) {
@@ -3387,7 +3457,7 @@ class AiMonitorDashboard extends HTMLElement {
     if (nextPage === this.state.predictionPage) return;
     this.state.predictionPage = nextPage;
     this.syncPredictionFiltersToUrl();
-    this.loadPredictionAnalytics({ scrollToList: true });
+    this.loadPredictionAnalytics({ scrollToList: true, interactive: true, force: true });
   }
 
   async startHistoricalReplay(event) {
@@ -3410,7 +3480,7 @@ class AiMonitorDashboard extends HTMLElement {
       };
       this.renderHistoricalReplay();
       this.showBanner("历史回放已启动；任务会从币安官方归档补采并校验数据。", "success");
-      await this.loadPredictionAnalytics();
+      await this.loadPredictionAnalytics({ force: true, background: true });
     } catch (error) {
       this.showBanner(error.message || "历史回放启动失败", "error");
     } finally {
@@ -3579,7 +3649,10 @@ class AiMonitorDashboard extends HTMLElement {
     const directionLabel = ({ long: "做多", short: "做空", all: "全部方向" })[filters.direction] || "全部方向";
     const sessionLabel = ({ premarket: "盘前", regular: "盘中", postmarket: "盘后", closed: "休市", all: "全部时段" })[filters.market_session] || "全部时段";
     const filterResult = this.q("#prediction-filter-result");
-    const scopeLabel = [filters.date_from && `从 ${filters.date_from}`, filters.date_to && `至 ${filters.date_to}`, filters.symbol && `股票 ${filters.symbol}`, filters.feature_version && `F ${filters.feature_version}`, filters.decision_version && `D ${filters.decision_version}`].filter(Boolean).join(" · ");
+    const dateScope = filters.date_from && filters.date_to && filters.date_from === filters.date_to
+      ? `日期 ${filters.date_from}`
+      : [filters.date_from && `从 ${filters.date_from}`, filters.date_to && `至 ${filters.date_to}`].filter(Boolean).join(" · ");
+    const scopeLabel = [dateScope, filters.symbol && `股票 ${filters.symbol}`, filters.feature_version && `F ${filters.feature_version}`, filters.decision_version && `D ${filters.decision_version}`].filter(Boolean).join(" · ");
     if (filterResult) filterResult.textContent = `${this.number(summary.historical_count)} 条 · ${directionLabel} · ${sessionLabel} · 新闻 ≥ ${Number(filters.news_score_min || 0).toFixed(0)} · 指标 ≥ ${Number(filters.indicator_score_min || 0).toFixed(0)} · 覆盖 ≥ ${Number(filters.min_data_coverage || 0).toFixed(0)}%${scopeLabel ? ` · ${scopeLabel}` : ""}`;
     const costTotal = this.q("#prediction-cost-total");
     if (costTotal && costConfig.example_one_hour_total_bps != null) costTotal.textContent = `1h 往返 ${Number(costConfig.example_one_hour_total_bps).toFixed(2)} bps`;

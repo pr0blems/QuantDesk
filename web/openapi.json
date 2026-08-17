@@ -6794,6 +6794,18 @@
           },
           {
             "in": "query",
+            "name": "timezone_offset_minutes",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 840,
+              "minimum": -840,
+              "title": "Timezone Offset Minutes",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
             "name": "symbol",
             "required": false,
             "schema": {
@@ -6972,6 +6984,16 @@
               "title": "Exit Reason",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "include_readiness",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Readiness",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -7004,6 +7026,32 @@
           }
         ],
         "summary": "Opportunity Analytics"
+      }
+    },
+    "/api/v2/ai-monitor/opportunity-readiness": {
+      "get": {
+        "description": "Return the global readiness gate separately from filtered list queries.",
+        "operationId": "opportunity_readiness_api_v2_ai_monitor_opportunity_readiness_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opportunity Readiness Api V2 Ai Monitor Opportunity Readiness Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Opportunity Readiness"
       }
     },
     "/api/v2/ai-monitor/overview": {

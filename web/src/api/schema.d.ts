@@ -765,6 +765,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/opportunity-readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Opportunity Readiness
+         * @description Return the global readiness gate separately from filtered list queries.
+         */
+        get: operations["opportunity_readiness_api_v2_ai_monitor_opportunity_readiness_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/overview": {
         parameters: {
             query?: never;
@@ -5172,6 +5192,7 @@ export interface operations {
                 page?: number;
                 date_from?: string | null;
                 date_to?: string | null;
+                timezone_offset_minutes?: number;
                 symbol?: string;
                 news_score_min?: number;
                 indicator_score_min?: number;
@@ -5186,6 +5207,7 @@ export interface operations {
                 quote_quality?: "all" | "passed" | "blocked" | "missing";
                 event_risk?: "all" | "clear" | "warning" | "blocked";
                 exit_reason?: string;
+                include_readiness?: boolean;
             };
             header?: never;
             path?: never;
@@ -5211,6 +5233,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    opportunity_readiness_api_v2_ai_monitor_opportunity_readiness_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

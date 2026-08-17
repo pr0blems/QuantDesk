@@ -56,6 +56,7 @@ from quantdesk_v2.ai_monitor import (
 from quantdesk_v2.interfaces.api.ai_monitor import (
     _ai_monitor_revisions,
     _changed_revision_scopes,
+    _local_date_utc_window,
     _prediction_settlement_out,
     _revision_event_id,
     _safe_market_data_health,
@@ -90,6 +91,35 @@ def test_ai_monitor_api_serializes_naive_database_datetimes_as_utc() -> None:
     assert serialized.tzinfo is UTC
     assert serialized.isoformat() == "2026-08-10T07:14:27+00:00"
     assert _utc_out(None) is None
+
+
+def test_ai_monitor_local_date_filter_uses_browser_calendar_boundaries() -> None:
+    start, end = _local_date_utc_window(
+        datetime(2026, 8, 17).date(),
+        datetime(2026, 8, 17).date(),
+        480,
+    )
+
+    assert start == datetime(2026, 8, 16, 16, 0)
+    assert end == datetime(2026, 8, 17, 16, 0)
+
+
+def test_ai_monitor_local_date_filter_supports_one_sided_ranges() -> None:
+    start, end = _local_date_utc_window(
+        datetime(2026, 8, 17).date(),
+        None,
+        -300,
+    )
+    assert start == datetime(2026, 8, 17, 5, 0)
+    assert end is None
+
+    start, end = _local_date_utc_window(
+        None,
+        datetime(2026, 8, 17).date(),
+        -300,
+    )
+    assert start is None
+    assert end == datetime(2026, 8, 18, 5, 0)
 
 
 def test_ai_monitor_revision_snapshot_scopes_private_rows_to_user() -> None:
@@ -2380,7 +2410,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260816-51"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260817-54"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2390,7 +2420,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260816-51"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260817-54"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -2715,6 +2745,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     )
     for parameter in ("news_score_min", "indicator_score_min", "direction"):
         assert parameter in api_source
+    assert '@router.get("/opportunity-readiness")' in api_source
+    assert "include_readiness: bool = Query(default=False)" in api_source
     assert ".analytics-summary" in stylesheet
     assert ".analytics-filters" in stylesheet
     assert ".analytics-cost-config" in stylesheet

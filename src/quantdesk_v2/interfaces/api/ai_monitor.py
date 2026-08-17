@@ -72,6 +72,34 @@ def _utc_out(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _local_date_utc_window(
+    date_from: date | None,
+    date_to: date | None,
+    timezone_offset_minutes: int,
+) -> tuple[datetime | None, datetime | None]:
+    """Translate an inclusive browser-local date range to UTC-naive DB bounds.
+
+    MySQL stores AI-monitor timestamps as UTC-naive ``DATETIME`` values, while the
+    date inputs represent calendar days in the browser's timezone.  Applying the
+    local dates directly to those columns shifts the effective range whenever the
+    browser is not in UTC.  The upper bound remains exclusive so an inclusive
+    ``date_to`` never loses records later that day.
+    """
+
+    offset = timedelta(minutes=timezone_offset_minutes)
+    start = (
+        datetime.combine(date_from, datetime_time.min) - offset
+        if date_from is not None
+        else None
+    )
+    end = (
+        datetime.combine(date_to + timedelta(days=1), datetime_time.min) - offset
+        if date_to is not None
+        else None
+    )
+    return start, end
+
+
 def _require_expected_user(request: Request, user: User) -> None:
     expected = request.headers.get("X-QuantDesk-User-ID", "").strip()
     if not expected:
@@ -2013,6 +2041,7 @@ def opportunity_analytics(
     page: int = Query(default=1, ge=1),
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
+    timezone_offset_minutes: int = Query(default=0, ge=-840, le=840),
     symbol: str = Query(default="", max_length=32),
     news_score_min: float = Query(default=0, ge=0, le=100),
     indicator_score_min: float = Query(default=0, ge=0, le=100),
@@ -2031,7 +2060,18 @@ def opportunity_analytics(
     ),
     event_risk: Literal["all", "clear", "warning", "blocked"] = Query(default="all"),
     exit_reason: str = Query(default="all", max_length=64),
+    include_readiness: bool = Query(default=False),
 ) -> dict[str, Any]:
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(
+            status_code=422,
+            detail="date_from must be on or before date_to",
+        )
+    date_from_utc, date_to_utc = _local_date_utc_window(
+        date_from,
+        date_to,
+        timezone_offset_minutes,
+    )
     repository = MonitorRepository(
         request.app.state.database_engine,
         request.app.state.settings.monitor_symbols_config,
@@ -2042,14 +2082,9 @@ def opportunity_analytics(
         user.id,
         limit=limit,
         page=page,
-        date_from=(
-            datetime.combine(date_from, datetime_time.min) if date_from else None
-        ),
-        date_to=(
-            datetime.combine(date_to + timedelta(days=1), datetime_time.min)
-            if date_to
-            else None
-        ),
+        date_from=date_from_utc,
+        date_to=date_to_utc,
+        timezone_offset_minutes=timezone_offset_minutes,
         symbol=symbol,
         news_score_min=news_score_min,
         indicator_score_min=indicator_score_min,
@@ -2064,11 +2099,20 @@ def opportunity_analytics(
         quote_quality=quote_quality,
         event_risk=event_risk,
         exit_reason=exit_reason,
-    )
-    result["historical_replay_readiness"] = historical_replay.replay_readiness_report(
-        db, user.id
+        include_readiness=include_readiness,
     )
     return result
+
+
+@router.get("/opportunity-readiness")
+def opportunity_readiness(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Return the global readiness gate separately from filtered list queries."""
+
+    current_config = ai_monitor.config_data(db.get(AiMonitorConfig, user.id))
+    return ai_monitor.strategy_readiness_report(db, user.id, current_config)
 
 
 @router.get("/replays")

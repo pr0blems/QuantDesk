@@ -5392,6 +5392,7 @@ def historical_opportunity_analytics(
     page: int = 1,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
+    timezone_offset_minutes: int = 0,
     symbol: str = "",
     news_score_min: float = 0.0,
     indicator_score_min: float = 0.0,
@@ -5406,10 +5407,12 @@ def historical_opportunity_analytics(
     quote_quality: str = "all",
     event_risk: str = "all",
     exit_reason: str = "all",
+    include_readiness: bool = True,
 ) -> dict[str, Any]:
     """Summarize completed virtual predictions without re-settling opportunities."""
 
     current_config = config_data(db.get(AiMonitorConfig, user_id))
+    local_date_offset = timedelta(minutes=timezone_offset_minutes)
     active_cost_settings = prediction_cost_settings(current_config)
     news_score_expression = func.coalesce(
         AiMonitorPrediction.signal_news_score,
@@ -5911,7 +5914,7 @@ def historical_opportunity_analytics(
     current_page = min(max(1, int(page)), total_pages)
     page_start = (current_page - 1) * page_size
     page_items = outcomes[page_start : page_start + page_size]
-    return {
+    result = {
         "summary": summary,
         "ablation": ablation,
         "items": page_items,
@@ -5923,7 +5926,6 @@ def historical_opportunity_analytics(
             "has_previous": current_page > 1,
             "has_next": current_page < total_pages,
         },
-        "readiness": strategy_readiness_report(db, user_id, current_config),
         "cost_config": {
             **active_cost_settings,
             "example_one_hour_total_bps": prediction_estimated_cost_bps(
@@ -5933,8 +5935,17 @@ def historical_opportunity_analytics(
             ),
         },
         "filters": {
-            "date_from": date_from.date().isoformat() if date_from else None,
-            "date_to": (date_to - timedelta(days=1)).date().isoformat() if date_to else None,
+            "date_from": (
+                (date_from + local_date_offset).date().isoformat()
+                if date_from
+                else None
+            ),
+            "date_to": (
+                (date_to + local_date_offset - timedelta(days=1)).date().isoformat()
+                if date_to
+                else None
+            ),
+            "timezone_offset_minutes": timezone_offset_minutes,
             "symbol": normalized_symbol,
             "news_score_min": float(news_score_min),
             "indicator_score_min": float(indicator_score_min),
@@ -5952,6 +5963,13 @@ def historical_opportunity_analytics(
         },
         "note": "直接统计已经完成结算的预测；命中率和净收益按右侧当前启用的手续费、滑点与资金成本动态重算，不会执行任何交易。",
     }
+    if include_readiness:
+        result["readiness"] = strategy_readiness_report(
+            db,
+            user_id,
+            current_config,
+        )
+    return result
 
 
 def settle_due_predictions(
@@ -7668,8 +7686,6 @@ def _scan_opportunities(
             "hard_gate_applied": bool(uw_signal_policy["hard_gate_enabled"]),
         },
     }
-
-
 def execute_opportunity_run(
     engine: Engine,
     run_public_id: str,
