@@ -365,6 +365,17 @@ class AiMonitorFinnhubUsageUpdate(BaseModel):
     enabled: bool
 
 
+class AiMonitorLiveCopyUpdate(BaseModel):
+    """Explicitly enable or stop routing new AI-monitor signals to live trading."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool
+    account_id: str | None = Field(default=None, min_length=36, max_length=36)
+    confirmation_name: str = Field(default="", max_length=100)
+    acknowledge_real_funds: bool = False
+
+
 class AdminUnusualWhalesRetention(BaseModel):
     """Bounded retention for high-volume, reproducible market-data tiers."""
 

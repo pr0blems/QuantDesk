@@ -13,6 +13,7 @@ import json
 import math
 import threading
 import time
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -106,6 +107,171 @@ def _strategy_universe(config: dict[str, Any]) -> list[str]:
         return universe
     eligible_set = {str(value).upper() for value in eligible}
     return [symbol for symbol in universe if symbol in eligible_set]
+
+
+def _utc_seconds(value: Any) -> float | None:
+    if isinstance(value, datetime):
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.timestamp()
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        normalized = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        return normalized.timestamp()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        parsed = float(value)
+        while parsed >= 100_000_000_000:
+            parsed /= 1000
+        return parsed if math.isfinite(parsed) else None
+    return None
+
+
+def _ai_monitor_signal(
+    account: dict[str, Any],
+    symbol: str,
+    *,
+    price: float | None = None,
+) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
+    """Return the newest eligible post-opt-in AI prediction as a live signal.
+
+    This read path never writes or places an order.  The normal live executor
+    remains responsible for signal freshness, account limits, position sizing,
+    idempotency, fill verification and exchange-native protection orders.
+    """
+
+    config = account.get("config_json")
+    config = config if isinstance(config, dict) else {}
+    if not bool(config.get("ai_monitor_live_copy_enabled")):
+        return 0, None, [], None, {}
+    enabled_at = _utc_seconds(config.get("ai_monitor_live_copy_enabled_at"))
+    if enabled_at is None:
+        return 0, None, [], None, {}
+    enabled_datetime = datetime.fromtimestamp(enabled_at, tz=UTC).replace(tzinfo=None)
+    rows = store.query(
+        """SELECT p.public_id AS prediction_public_id,
+                  o.public_id AS opportunity_public_id,
+                  p.direction,p.timeframe,p.confidence_score,p.entry_price,
+                  p.evidence_json,p.predicted_at,p.due_at,o.expires_at
+           FROM ai_monitor_predictions p
+           JOIN ai_monitor_opportunities o
+             ON o.id=p.opportunity_id AND o.user_id=p.user_id
+           WHERE p.user_id=? AND p.contract_symbol=? AND p.status='pending'
+             AND o.status IN ('candidate','discovered')
+             AND o.expires_at>CURRENT_TIMESTAMP AND p.predicted_at>=?
+           ORDER BY p.predicted_at DESC,p.id DESC LIMIT 1""",
+        (account["user_id"], symbol, enabled_datetime),
+    )
+    if not rows:
+        return 0, None, [], None, {}
+    row = dict(rows[0])
+    evidence = _json_object(row.get("evidence_json"))
+    gate = evidence.get("virtual_entry_gate")
+    if not isinstance(gate, dict) or gate.get("entry_ready") is not True:
+        return 0, None, [], None, {}
+    direction_name = str(row.get("direction") or "").lower()
+    direction = 1 if direction_name == "long" else -1 if direction_name == "short" else 0
+    if direction == 0 or str(gate.get("direction") or direction_name) != direction_name:
+        return 0, None, [], None, {}
+    try:
+        combined_score = float(row.get("confidence_score"))
+    except (TypeError, ValueError):
+        return 0, None, [], None, {}
+    minimum_score = float(config.get("ai_monitor_live_min_combined_score", 70.0))
+    if not math.isfinite(combined_score) or combined_score < minimum_score:
+        return 0, None, [], None, {}
+    predicted_at = _utc_seconds(row.get("predicted_at"))
+    due_at = _utc_seconds(row.get("due_at"))
+    expires_at = _utc_seconds(row.get("expires_at"))
+    if predicted_at is None or due_at is None or expires_at is None:
+        return 0, None, [], None, {}
+    maximum_age = max(
+        60,
+        min(int(config.get("ai_monitor_live_signal_max_age_seconds", 300)), 1800),
+    )
+    valid_until = min(predicted_at + maximum_age, due_at, expires_at)
+    if time.time() > valid_until:
+        return 0, None, [], None, {}
+    risk_plan = evidence.get("risk_plan")
+    if not isinstance(risk_plan, dict):
+        return 0, None, [], None, {}
+    try:
+        stop_loss_pct = float(risk_plan["stop_loss_pct"])
+        take_profit_pct = float(risk_plan["take_profit_pct"])
+        entry_reference = float(row.get("entry_price") or gate.get("reference_price") or 0)
+        live_reference = float(price) if price is not None else entry_reference
+    except (KeyError, TypeError, ValueError):
+        return 0, None, [], None, {}
+    if not (
+        math.isfinite(live_reference)
+        and live_reference > 0
+        and math.isfinite(stop_loss_pct)
+        and 0 < stop_loss_pct <= 20
+        and math.isfinite(take_profit_pct)
+        and 0 < take_profit_pct <= 50
+    ):
+        return 0, None, [], None, {}
+    stop_distance = live_reference * stop_loss_pct / 100
+    take_profit_distance = live_reference * take_profit_pct / 100
+    atr_pct = risk_plan.get("atr_pct")
+    try:
+        atr = live_reference * float(atr_pct) / 100 if atr_pct is not None else None
+    except (TypeError, ValueError):
+        atr = None
+    if atr is not None and (not math.isfinite(atr) or atr <= 0):
+        atr = None
+    max_leverage = max(
+        1,
+        min(
+            int(config.get("leverage", 1)),
+            int(config.get("risk_max_leverage", config.get("leverage", 1))),
+            20,
+        ),
+    )
+    risk_proposal = {
+        "stop_distance": stop_distance,
+        "take_profit_distance": take_profit_distance,
+        "risk_per_trade_pct": float(config.get("risk_per_trade_pct", 0.5)),
+        "max_margin_pct": float(
+            config.get("max_margin_per_trade_pct", config.get("position_size_pct", 2))
+        ),
+        "max_leverage": max_leverage,
+    }
+    signal_evidence = {
+        "source": "ai_monitor_live_copy_v1",
+        "score": combined_score,
+        "valid_until": valid_until,
+        "prediction_public_id": row.get("prediction_public_id"),
+        "opportunity_public_id": row.get("opportunity_public_id"),
+        "predicted_at": predicted_at,
+        "enabled_at": enabled_at,
+        "entry_gate": gate,
+        "risk_plan": risk_plan,
+        "risk_proposal": risk_proposal,
+    }
+    basis = [
+        "信号来源：AI 发现机会",
+        f"预测：{row.get('prediction_public_id')}",
+        f"机会：{row.get('opportunity_public_id')}",
+        f"方向：{'做多' if direction > 0 else '做空'}",
+        f"组合评分：{combined_score:.1f}",
+        "准入：全部入场条件已满足",
+    ]
+    return direction, atr, basis, int(predicted_at), signal_evidence
+
+
+def _execution_signal(
+    account: dict[str, Any],
+    symbol: str,
+    *,
+    price: float | None = None,
+) -> tuple[int, float | None, list[str] | None, int | None, dict[str, Any]]:
+    config = account.get("config_json")
+    config = config if isinstance(config, dict) else {}
+    if str(config.get("signal_source") or "strategy") == "ai_monitor":
+        return _ai_monitor_signal(account, symbol, price=price)
+    return _strategy_signal(account, symbol)
 
 
 def _strategy_position_side(position_mode: str, direction: int) -> str:
@@ -1349,6 +1515,23 @@ def _signal_is_fresh(
     policy: Any,
     evidence: dict[str, Any] | None = None,
 ) -> bool:
+    if (evidence or {}).get("source") == "ai_monitor_live_copy_v1":
+        maximum_age = signal_freshness(
+            signal_time,
+            max_age_seconds=policy.max_signal_age_seconds,
+        )
+        raw_valid_until = (evidence or {}).get("valid_until")
+        try:
+            valid_until = float(raw_valid_until)
+        except (TypeError, ValueError):
+            return False
+        while valid_until >= 100_000_000_000:
+            valid_until /= 1000
+        return (
+            maximum_age.fresh
+            and math.isfinite(valid_until)
+            and time.time() <= valid_until
+        )
     snapshot = account.get("strategy_snapshot_json") or {}
     if snapshot.get("strategy_kind") == "legacy_signal":
         try:
@@ -1916,7 +2099,7 @@ def _tick_account(account: dict[str, Any]) -> None:
                     or positions_changed
                 )
                 continue
-        direction, _, _, signal_time, signal_evidence = _strategy_signal(account, symbol)
+        direction, _, _, signal_time, signal_evidence = _execution_signal(account, symbol)
         if (
             signal_time is not None
             and _signal_is_fresh(
@@ -1982,7 +2165,11 @@ def _tick_account(account: dict[str, Any]) -> None:
             )
             if not admission.allowed:
                 continue
-            direction, atr, basis, signal_time, signal_evidence = _strategy_signal(account, symbol)
+            direction, atr, basis, signal_time, signal_evidence = _execution_signal(
+                account,
+                symbol,
+                price=price,
+            )
             if (
                 direction not in {-1, 1}
                 or signal_time is None

@@ -29,6 +29,7 @@ from .models import (
     AiMonitorPrediction,
     AiMonitorRun,
     CompanyProfile,
+    FinnhubQuoteSnapshot,
     MarketRiskEvent,
     MarketStreamEvent,
     News,
@@ -80,6 +81,7 @@ OPPORTUNITY_DECISION_VERSION = "hard_gate_v3_nbbo"
 OPPORTUNITY_API_VERSION = "ai_opportunity.v2"
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
+FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS = 15 * 60
 DEFAULT_UNUSUAL_WHALES_THRESHOLDS: dict[str, float | int] = {
     "quote_age_regular_ms": 2_000,
     "quote_age_extended_ms": 10_000,
@@ -4886,6 +4888,162 @@ _QUOTE_HALT_CHECK_CODES = {
 }
 
 
+def _finnhub_signal_quote_payload(
+    row: FinnhubQuoteSnapshot,
+    *,
+    signal_at: datetime,
+) -> dict[str, Any]:
+    """Return an audit-safe, last-trade-only Finnhub signal-time quote.
+
+    Finnhub's stored cash-equity snapshot is useful for the session and spot
+    context, but it is not an executable NBBO.  Keep that distinction explicit
+    so analytics can display the observation without ever treating it as a
+    passed bid/ask quality gate.
+    """
+
+    reference_at = signal_at
+    if reference_at.tzinfo is not None:
+        reference_at = reference_at.astimezone(UTC).replace(tzinfo=None)
+    fetched_at = row.fetched_at
+    if fetched_at.tzinfo is not None:
+        fetched_at = fetched_at.astimezone(UTC).replace(tzinfo=None)
+    age_ms = max(0, int((reference_at - fetched_at).total_seconds() * 1_000))
+    session_key = str(
+        macro_market.us_market_session(reference_at.replace(tzinfo=UTC)).get("key")
+        or "unknown"
+    )
+    return {
+        "available": True,
+        "provider": "finnhub",
+        "source": "finnhub_quote_snapshots",
+        "price": float(row.price),
+        "last_price": float(row.price),
+        "change": float(row.change) if row.change is not None else None,
+        "change_percent": (
+            float(row.change_percent) if row.change_percent is not None else None
+        ),
+        "day_high": float(row.day_high) if row.day_high is not None else None,
+        "day_low": float(row.day_low) if row.day_low is not None else None,
+        "day_open": float(row.day_open) if row.day_open is not None else None,
+        "previous_close": (
+            float(row.previous_close) if row.previous_close is not None else None
+        ),
+        "volume": float(row.volume) if row.volume is not None else None,
+        "source_timestamp": int(row.source_timestamp),
+        "fetched_at": fetched_at.replace(tzinfo=UTC).isoformat(),
+        "last_trade_age_ms": age_ms,
+        "market_session": session_key,
+        "live": bool(row.live),
+        "last_trade_only": True,
+        "nbbo_available": False,
+        "quality_status": "last_trade_only",
+    }
+
+
+def _latest_finnhub_signal_quotes(
+    db: Session,
+    symbols: Sequence[str],
+    *,
+    signal_at: datetime,
+    maximum_age_seconds: int = FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS,
+) -> dict[str, FinnhubQuoteSnapshot]:
+    """Load the latest persisted Finnhub observation available at signal time."""
+
+    normalized_symbols = sorted(
+        {str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()}
+    )
+    if not normalized_symbols:
+        return {}
+    reference_at = signal_at
+    if reference_at.tzinfo is not None:
+        reference_at = reference_at.astimezone(UTC).replace(tzinfo=None)
+    minimum_at = reference_at - timedelta(seconds=max(1, int(maximum_age_seconds)))
+    rows = db.scalars(
+        select(FinnhubQuoteSnapshot)
+        .where(
+            FinnhubQuoteSnapshot.symbol.in_(normalized_symbols),
+            FinnhubQuoteSnapshot.fetched_at <= reference_at,
+            FinnhubQuoteSnapshot.fetched_at >= minimum_at,
+        )
+        .order_by(
+            FinnhubQuoteSnapshot.symbol,
+            FinnhubQuoteSnapshot.fetched_at.desc(),
+            FinnhubQuoteSnapshot.id.desc(),
+        )
+    ).all()
+    latest: dict[str, FinnhubQuoteSnapshot] = {}
+    for row in rows:
+        latest.setdefault(str(row.symbol).upper(), row)
+    return latest
+
+
+def _historical_finnhub_quote_index(
+    db: Session,
+    rows: Sequence[tuple[Any, ...]],
+    *,
+    maximum_age_seconds: int = FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS,
+) -> dict[str, list[FinnhubQuoteSnapshot]]:
+    """Batch-load point-in-time Finnhub observations for analytics rows."""
+
+    if not rows:
+        return {}
+    predictions = [row[0] for row in rows]
+    symbols = sorted(
+        {str(item.symbol or "").strip().upper() for item in predictions if str(item.symbol or "").strip()}
+    )
+    if not symbols:
+        return {}
+    signal_times = [
+        item.predicted_at.astimezone(UTC).replace(tzinfo=None)
+        if item.predicted_at.tzinfo is not None
+        else item.predicted_at
+        for item in predictions
+    ]
+    earliest = min(signal_times) - timedelta(seconds=max(1, int(maximum_age_seconds)))
+    latest = max(signal_times)
+    snapshots = db.scalars(
+        select(FinnhubQuoteSnapshot)
+        .where(
+            FinnhubQuoteSnapshot.symbol.in_(symbols),
+            FinnhubQuoteSnapshot.fetched_at >= earliest,
+            FinnhubQuoteSnapshot.fetched_at <= latest,
+        )
+        .order_by(
+            FinnhubQuoteSnapshot.symbol,
+            FinnhubQuoteSnapshot.fetched_at,
+            FinnhubQuoteSnapshot.id,
+        )
+    ).all()
+    indexed: dict[str, list[FinnhubQuoteSnapshot]] = {}
+    for row in snapshots:
+        indexed.setdefault(str(row.symbol).upper(), []).append(row)
+    return indexed
+
+
+def _point_in_time_finnhub_quote(
+    index: Mapping[str, Sequence[FinnhubQuoteSnapshot]],
+    *,
+    symbol: str,
+    signal_at: datetime,
+    maximum_age_seconds: int = FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS,
+) -> FinnhubQuoteSnapshot | None:
+    """Select only observations fetched no later than the historical signal."""
+
+    reference_at = signal_at
+    if reference_at.tzinfo is not None:
+        reference_at = reference_at.astimezone(UTC).replace(tzinfo=None)
+    for row in reversed(index.get(str(symbol or "").strip().upper(), ())):
+        fetched_at = row.fetched_at
+        if fetched_at.tzinfo is not None:
+            fetched_at = fetched_at.astimezone(UTC).replace(tzinfo=None)
+        if fetched_at > reference_at:
+            continue
+        if (reference_at - fetched_at).total_seconds() <= max(1, int(maximum_age_seconds)):
+            return row
+        break
+    return None
+
+
 def _frozen_analytics_evidence(
     prediction_evidence: Mapping[str, Any],
     snapshot: OpportunityMarketSnapshot | None,
@@ -5487,6 +5645,7 @@ def historical_opportunity_analytics(
         .order_by(AiMonitorPrediction.predicted_at.desc(), AiMonitorPrediction.id.desc())
     )
     rows = db.execute(statement).all()
+    finnhub_quote_index = _historical_finnhub_quote_index(db, rows)
     opportunity_ids = sorted(
         {
             int(opportunity.id)
@@ -5573,6 +5732,31 @@ def historical_opportunity_analytics(
             market_feature,
             gate_decision,
         )
+        frozen_quote = dict(frozen_market.get("quote") or {})
+        finnhub_quote_row = None
+        if not any(
+            _finite_number(frozen_quote.get(key)) is not None
+            for key in ("last_price", "price", "bid", "ask", "midpoint")
+        ):
+            finnhub_quote_row = _point_in_time_finnhub_quote(
+                finnhub_quote_index,
+                symbol=prediction.symbol,
+                signal_at=prediction.predicted_at,
+            )
+        if finnhub_quote_row is not None:
+            frozen_quote = _finnhub_signal_quote_payload(
+                finnhub_quote_row,
+                signal_at=prediction.predicted_at,
+            )
+            frozen_market["quote"] = frozen_quote
+            frozen_market["snapshot_source"] = (
+                f"{frozen_market['snapshot_source']}+finnhub_quote_snapshot"
+            )
+            frozen_quality = dict(frozen_market.get("data_quality") or {})
+            frozen_quality.setdefault("quote_source", "finnhub_quote_snapshots")
+            frozen_quality.setdefault("last_trade_only", True)
+            frozen_quality.setdefault("quote_status", "last_trade_only")
+            frozen_market["data_quality"] = frozen_quality
         settlement_evidence = prediction_evidence.get("settlement")
         settlement_evidence = (
             dict(settlement_evidence)
@@ -5720,20 +5904,48 @@ def historical_opportunity_analytics(
             str(item).strip().upper() for item in gate_summary.get("warnings", [])
         }
         quote_payload = dict(outcome["quote"] or {})
-        quote_available = any(
+        quote_has_price = any(
             _finite_number(quote_payload.get(key)) is not None
             for key in ("last_price", "price", "bid", "ask", "midpoint")
+        )
+        quote_bid = _finite_number(quote_payload.get("bid"))
+        quote_ask = _finite_number(quote_payload.get("ask"))
+        quote_has_nbbo = bool(
+            quote_bid is not None
+            and quote_ask is not None
+            and quote_bid > 0
+            and quote_ask >= quote_bid
         )
         quote_blocked = any(
             "QUOTE" in reason or "SPREAD" in reason or "HALT" in reason
             for reason in blocking_reasons
         )
         outcome_quote_quality = (
-            "missing" if not quote_available else "blocked" if quote_blocked else "passed"
+            "missing"
+            if not quote_has_price
+            else "blocked"
+            if quote_blocked and quote_has_nbbo
+            else "passed"
+            if quote_has_nbbo
+            else "partial"
+        )
+        market_environment = dict(prediction_evidence.get("market_environment") or {})
+        score_snapshot = dict(prediction_evidence.get("score_snapshot") or {})
+        snapshot_macro = dict(score_snapshot.get("macro_market") or {})
+        computed_session = str(
+            macro_market.us_market_session(
+                prediction.predicted_at.replace(tzinfo=UTC)
+                if prediction.predicted_at.tzinfo is None
+                else prediction.predicted_at.astimezone(UTC)
+            ).get("key")
+            or "unknown"
         )
         outcome_market_session = str(
             quote_payload.get("market_session")
             or prediction_evidence.get("market_session")
+            or dict(market_environment.get("market_session") or {}).get("key")
+            or dict(snapshot_macro.get("market_session") or {}).get("key")
+            or computed_session
             or "unknown"
         ).lower()
         risk_events = prediction_evidence.get("risk_events")
@@ -5763,6 +5975,14 @@ def historical_opportunity_analytics(
         option_payload = dict(option_payload) if isinstance(option_payload, Mapping) else {}
         gex_payload = outcome.get("gex") or domains.get("gex")
         gex_payload = dict(gex_payload) if isinstance(gex_payload, Mapping) else {}
+        institutional_payload = market_flow_payload.get(
+            "institutional_flow"
+        ) or domains.get("institutional_flow")
+        institutional_payload = (
+            dict(institutional_payload)
+            if isinstance(institutional_payload, Mapping)
+            else {}
+        )
         score_components = dict(outcome["score_components"] or {})
         data_quality_payload = dict(outcome["data_quality"] or {})
         gate_coverage = _finite_number(gate_summary.get("coverage"))
@@ -5791,14 +6011,87 @@ def historical_opportunity_analytics(
             option_payload.get("score", score_components.get("option_flow"))
         )
         gex_score = _finite_number(gex_payload.get("score", score_components.get("gex")))
+        institutional_score = _finite_number(
+            institutional_payload.get(
+                "score", score_components.get("institutional_flow")
+            )
+        )
+        version_payload = dict(outcome.get("version") or {})
+        decision_at_signal = str(version_payload.get("decision") or "")
+        uw_policy_payload = dict(
+            prediction_evidence.get("unusual_whales_policy") or {}
+        )
+        uw_enabled_at_signal = bool(
+            uw_policy_payload.get(
+                "enabled", "uw_disabled" not in decision_at_signal.lower()
+            )
+        )
+
+        def feature_reason(
+            payload: Mapping[str, Any],
+            *,
+            enabled_at_signal: bool = uw_enabled_at_signal,
+            snapshot: OpportunityMarketSnapshot | None = market_snapshot,
+        ) -> str:
+            if payload and payload.get("available") is not False:
+                return "available"
+            if not enabled_at_signal:
+                return "uw_disabled_at_signal"
+            if snapshot is None:
+                return "legacy_snapshot_missing"
+            if snapshot.market_feature_snapshot_id is None:
+                return "market_feature_not_linked"
+            return "not_captured_at_signal"
+
+        quote_reason = (
+            "available"
+            if quote_has_nbbo
+            else "finnhub_last_trade_only"
+            if quote_has_price and quote_payload.get("provider") == "finnhub"
+            else "last_trade_only"
+            if quote_has_price
+            else "legacy_snapshot_missing"
+            if market_snapshot is None
+            else "no_signal_time_quote"
+        )
+        feature_availability = {
+            "unusual_whales_enabled_at_signal": uw_enabled_at_signal,
+            "snapshot_recorded": market_snapshot is not None,
+            "market_feature_linked": bool(
+                market_snapshot is not None
+                and market_snapshot.market_feature_snapshot_id is not None
+            ),
+            "quote": {
+                "available": quote_has_price,
+                "nbbo_available": quote_has_nbbo,
+                "quality": outcome_quote_quality,
+                "source": quote_payload.get("source")
+                or quote_payload.get("provider"),
+                "reason": quote_reason,
+            },
+            "option_flow": {
+                "available": feature_reason(option_payload) == "available",
+                "reason": feature_reason(option_payload),
+            },
+            "gex": {
+                "available": feature_reason(gex_payload) == "available",
+                "reason": feature_reason(gex_payload),
+            },
+            "institutional_flow": {
+                "available": feature_reason(institutional_payload) == "available",
+                "reason": feature_reason(institutional_payload),
+            },
+        }
         outcome.update(
             {
                 "option_flow_score": option_flow_score,
                 "gex_score": gex_score,
+                "institutional_score": institutional_score,
                 "market_session": outcome_market_session,
                 "quote_quality": outcome_quote_quality,
                 "event_risk": outcome_event_risk,
                 "data_coverage_pct": data_coverage_pct,
+                "feature_availability": feature_availability,
             }
         )
         outcome_exit_reason = str(
@@ -7040,6 +7333,11 @@ def _scan_opportunities(
             *(str(item.get("contract_symbol") or "") for item in candidates),
         ],
     )
+    finnhub_signal_quotes = _latest_finnhub_signal_quotes(
+        db,
+        [str(item.get("symbol") or "") for item in candidates],
+        signal_at=now,
+    )
     risk_events_by_symbol = active_market_risk_events(
         db,
         now=now,
@@ -7180,6 +7478,14 @@ def _scan_opportunities(
                 if contract_symbol
                 else None
             )
+        finnhub_quote_row = finnhub_signal_quotes.get(
+            str(candidate["symbol"]).upper()
+        )
+        finnhub_quote = (
+            _finnhub_signal_quote_payload(finnhub_quote_row, signal_at=now)
+            if finnhub_quote_row is not None
+            else {}
+        )
         market_flow = apply_enhanced_market_domains(
             market_flow,
             realtime_feature,
@@ -7265,6 +7571,15 @@ def _scan_opportunities(
             ),
             halt_cooldown_seconds=int(uw_thresholds["halt_cooldown_minutes"]) * 60,
         )
+        if not market_quality.get("quote") and finnhub_quote:
+            # Finnhub provides an auditable signal-time spot observation while
+            # UW is disabled or missing.  It must remain last-trade-only: the
+            # executable NBBO checks above deliberately stay false.
+            market_quality["quote"] = dict(finnhub_quote)
+            market_quality["quote_source"] = "finnhub_quote_snapshots"
+            market_quality["market_session"] = finnhub_quote.get(
+                "market_session", market_session
+            )
         gate_summary = stable_gate_summary(
             market_quality,
             market_flow,
@@ -7456,6 +7771,9 @@ def _scan_opportunities(
             "market": market,
             "market_flow": market_flow,
             "quote": dict(market_quality.get("quote") or {}),
+            "market_session": str(
+                market_quality.get("market_session") or market_session or "unknown"
+            ),
             "option_flow": dict(market_flow.get("option_flow") or {}),
             "gex": dict(market_flow.get("gex") or {}),
             "institutional_flow": dict(
@@ -7505,6 +7823,10 @@ def _scan_opportunities(
                 "coverage": market_quality.get("data_coverage"),
                 "stale_fields": list(market_quality.get("stale_fields") or []),
                 "quote_available": bool(market_quality.get("quote_available")),
+                "quote_source": market_quality.get("quote_source"),
+                "last_trade_only": bool(
+                    dict(market_quality.get("quote") or {}).get("last_trade_only")
+                ),
                 "flow_quality": market_flow.get("data_quality"),
             },
             "version": {

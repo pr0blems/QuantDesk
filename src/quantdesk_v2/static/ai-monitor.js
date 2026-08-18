@@ -8,6 +8,8 @@ class AiMonitorDashboard extends HTMLElement {
       macroMarket: null,
       config: null,
       scorePolicy: null,
+      liveCopy: null,
+      liveCopyLoading: false,
       uwToggleLoading: false,
       finnhubToggleLoading: false,
       indicators: [],
@@ -116,7 +118,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260817-37">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260817-38">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -127,6 +129,10 @@ class AiMonitorDashboard extends HTMLElement {
           <div class="ai-head-actions">
             <span id="ai-clock" class="ai-clock"></span>
             <span id="scheduler-state" class="status-badge idle">读取中</span>
+            <button id="live-copy-toggle" class="live-copy-toggle loading" type="button" aria-pressed="false" disabled>
+              <span class="live-copy-toggle-track" aria-hidden="true"><i></i></span>
+              <span><b>实盘跟单</b><small>读取中</small></span>
+            </button>
             <button id="uw-usage-toggle" class="uw-usage-toggle loading" type="button" aria-pressed="false" disabled>
               <span class="uw-toggle-track" aria-hidden="true"><i></i></span>
               <span><b>Unusual Whales</b><small>读取中</small></span>
@@ -149,6 +155,16 @@ class AiMonitorDashboard extends HTMLElement {
           </div>
         </header>
         <div id="ai-banner" class="ai-banner hidden" role="status"></div>
+        <div id="live-copy-modal" class="live-copy-modal hidden" aria-hidden="true">
+          <button class="live-copy-backdrop" type="button" data-live-copy-close aria-label="关闭实盘跟单设置"></button>
+          <section class="live-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="live-copy-title">
+            <header>
+              <div><span>LIVE ORDER FOLLOWING</span><h2 id="live-copy-title">实盘跟单</h2><p>仅将开启后新产生、全部准入条件已满足的 AI 机会交给现有 Binance 实盘风控执行。</p></div>
+              <button type="button" data-live-copy-close aria-label="关闭实盘跟单设置">×</button>
+            </header>
+            <div id="live-copy-body" class="live-copy-body"><div class="live-copy-loading">正在读取实盘账户与风控状态…</div></div>
+          </section>
+        </div>
         <section id="macro-market-panel" class="macro-market-panel" aria-label="美股宏观大盘环境">
           <div class="macro-market-loading"><span>US MARKET REGIME</span><strong>正在读取美股大盘环境…</strong></div>
         </section>
@@ -275,7 +291,7 @@ class AiMonitorDashboard extends HTMLElement {
                     <label><span>决策版本</span><input id="prediction-decision-version" type="search" maxlength="32" autocomplete="off" placeholder="全部版本"></label>
                     <label><span>方向筛选</span><select id="prediction-direction"><option value="all">全部方向</option><option value="long">只看做多</option><option value="short">只看做空</option></select></label>
                     <label><span>交易时段</span><select id="prediction-market-session"><option value="all">全部时段</option><option value="premarket">盘前</option><option value="regular">盘中</option><option value="postmarket">盘后</option><option value="closed">休市</option></select></label>
-                    <label><span>行情质量</span><select id="prediction-quote-quality"><option value="all">全部质量</option><option value="passed">已通过</option><option value="blocked">未通过</option><option value="missing">数据缺失</option></select></label>
+                    <label><span>行情质量</span><select id="prediction-quote-quality"><option value="all">全部质量</option><option value="passed">NBBO 已通过</option><option value="partial">仅现货价快照</option><option value="blocked">未通过</option><option value="missing">数据缺失</option></select></label>
                     <label><span>事件风险</span><select id="prediction-event-risk"><option value="all">全部事件状态</option><option value="clear">无临近事件</option><option value="warning">事件预警</option><option value="blocked">事件阻断</option></select></label>
                     <label><span>退出原因</span><select id="prediction-exit-reason"><option value="all">全部退出原因</option><option value="take_profit">止盈</option><option value="stop_loss">止损</option><option value="profit_lock">浮盈保护</option><option value="trailing_profit">移动保护</option><option value="score_reversal">评分反转</option><option value="max_holding">最大持有期</option></select></label>
                     <div class="analytics-filter-actions"><button id="prediction-filter-reset" type="button">重置</button><button id="prediction-filter-apply" class="primary" type="submit">应用筛选</button></div>
@@ -382,6 +398,9 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#ai-refresh").addEventListener("click", () => this.loadAll(true));
     this.q("#run-news").addEventListener("click", () => this.createRun("news"));
     this.q("#run-opportunity").addEventListener("click", () => this.createRun("opportunity"));
+    this.q("#live-copy-toggle").addEventListener("click", () => this.openLiveCopyModal());
+    this.qa("[data-live-copy-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyModal()));
+    this.q("#live-copy-body").addEventListener("submit", (event) => this.submitLiveCopy(event));
     this.q("#uw-usage-toggle").addEventListener("click", () => this.toggleUnusualWhales());
     this.q("#finnhub-usage-toggle").addEventListener("click", () => this.toggleFinnhub());
     this.q("#open-news-config").addEventListener("click", () => this.openConfig("news"));
@@ -669,13 +688,14 @@ class AiMonitorDashboard extends HTMLElement {
     this.state.fullLoadLoading = true;
     this.q("#ai-refresh").disabled = true;
     try {
-      const [overview, news, indicators, symbols, macroMarket, scorePolicy] = await Promise.all([
+      const [overview, news, indicators, symbols, macroMarket, scorePolicy, liveCopy] = await Promise.all([
         this.api("/overview"),
         this.api("/news?limit=160"),
         this.api("/indicators?timeframe=1h"),
         this.api("/symbols"),
         this.api("/market-context").catch(() => this.state.macroMarket || { available: false }),
         this.api("/score-policy").catch(() => this.state.scorePolicy),
+        this.api("/live-copy").catch(() => this.state.liveCopy),
       ]);
       this.state.overview = overview;
       this.state.config = overview.config;
@@ -686,6 +706,7 @@ class AiMonitorDashboard extends HTMLElement {
       this.state.symbols = symbols.items || [];
       this.state.macroMarket = macroMarket;
       if (scorePolicy) this.state.scorePolicy = scorePolicy;
+      if (liveCopy) this.state.liveCopy = liveCopy;
       this.renderOverview();
       this.renderMacroMarket();
       this.renderNews();
@@ -709,17 +730,19 @@ class AiMonitorDashboard extends HTMLElement {
     if (!this.state.running || this.state.busyRun || this.state.fullLoadLoading || this.state.liveStateLoading || document.visibilityState === "hidden") return;
     this.state.liveStateLoading = true;
     try {
-      const [overview, news, macroMarket, scorePolicy] = await Promise.all([
+      const [overview, news, macroMarket, scorePolicy, liveCopy] = await Promise.all([
         this.api("/overview"),
         this.api("/news?limit=160"),
         this.api("/market-context").catch(() => this.state.macroMarket || { available: false }),
         this.api("/score-policy").catch(() => this.state.scorePolicy),
+        this.api("/live-copy").catch(() => this.state.liveCopy),
       ]);
       this.state.overview = overview;
       this.state.config = overview.config;
       this.state.news = news.items || [];
       this.state.macroMarket = macroMarket;
       if (scorePolicy) this.state.scorePolicy = scorePolicy;
+      if (liveCopy) this.state.liveCopy = liveCopy;
       this.renderOverview();
       this.renderMacroMarket();
       this.renderNews();
@@ -809,10 +832,146 @@ class AiMonitorDashboard extends HTMLElement {
     const state = this.q("#scheduler-state");
     state.textContent = config.enabled ? "自动监控中" : "自动监控已暂停";
     state.className = `status-badge ${config.enabled ? "running" : "idle"}`;
+    this.renderLiveCopyToggle();
     this.renderUnusualWhalesToggle();
     this.renderFinnhubToggle();
     this.q("#model-warning").classList.toggle("hidden", Boolean(data.model_configured));
     this.renderSignalHealth();
+  }
+
+  renderLiveCopyToggle() {
+    const button = this.q("#live-copy-toggle");
+    if (!button) return;
+    const status = this.state.liveCopy;
+    const loading = !status || this.state.liveCopyLoading;
+    const enabled = status?.enabled === true;
+    const suspended = status?.requested_enabled === true && !enabled;
+    const ready = status?.ready_to_enable === true;
+    button.className = `live-copy-toggle ${loading ? "loading" : enabled ? "enabled" : suspended ? "suspended" : ready ? "ready" : "disabled"}`;
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    button.disabled = loading;
+    button.title = loading
+      ? "正在读取实盘跟单状态"
+      : enabled
+      ? "AI 新信号正在接入实盘账户；点击查看或停止新开仓"
+      : suspended
+      ? "跟单配置仍在，但实盘账户或服务器当前不可执行"
+      : ready
+      ? "点击查看风控并确认开启实盘跟单"
+      : "当前不可开启；点击查看缺少的实盘条件";
+    const label = button.querySelector("small");
+    if (label) label.textContent = loading ? "读取中" : enabled ? "真实资金 · 已开启" : suspended ? "账户不可执行" : ready ? "已关闭 · 可开启" : "已关闭";
+  }
+
+  async loadLiveCopyStatus({ quiet = false } = {}) {
+    try {
+      this.state.liveCopy = await this.api("/live-copy");
+      this.renderLiveCopyToggle();
+      this.renderLiveCopyModal();
+      return this.state.liveCopy;
+    } catch (error) {
+      if (!quiet) this.showBanner(error.message || "实盘跟单状态读取失败", "error");
+      return null;
+    }
+  }
+
+  async openLiveCopyModal() {
+    const modal = this.q("#live-copy-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.renderLiveCopyModal();
+    await this.loadLiveCopyStatus({ quiet: true });
+  }
+
+  closeLiveCopyModal() {
+    const modal = this.q("#live-copy-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  renderLiveCopyModal() {
+    const target = this.q("#live-copy-body");
+    if (!target) return;
+    const status = this.state.liveCopy;
+    if (!status) {
+      target.innerHTML = `<div class="live-copy-loading">正在读取实盘账户与风控状态…</div>`;
+      return;
+    }
+    const account = status.account || null;
+    const risk = account?.risk || {};
+    const blockers = Array.isArray(status.blockers) ? status.blockers : [];
+    const riskMarkup = account ? `<section class="live-copy-account">
+      <header><div><span>执行账户</span><strong>${this.escape(account.name)}</strong><small>${account.status === "active" ? "已通过 Binance 预检并运行" : `账户状态：${this.escape(account.status)}`}</small></div><b class="${account.status === "active" ? "active" : "paused"}">${account.status === "active" ? "已启用" : "未启用"}</b></header>
+      <dl>
+        <div><dt>杠杆上限</dt><dd>${this.number(risk.leverage)}x</dd></div>
+        <div><dt>最大持仓</dt><dd>${this.number(risk.max_positions)} 个</dd></div>
+        <div><dt>单笔风险</dt><dd>${this.number(risk.risk_per_trade_pct)}%</dd></div>
+        <div><dt>总风险上限</dt><dd>${this.number(risk.max_total_risk_pct)}%</dd></div>
+        <div><dt>保证金上限</dt><dd>${this.number(risk.margin_cap_pct)}%</dd></div>
+        <div><dt>日亏损上限</dt><dd>${this.number(risk.daily_loss_limit_pct)}%</dd></div>
+        <div><dt>回撤上限</dt><dd>${this.number(risk.max_drawdown_pct)}%</dd></div>
+        <div><dt>信号时效</dt><dd>${this.number(risk.signal_max_age_seconds)} 秒</dd></div>
+      </dl>
+    </section>` : "";
+    const guarantees = `<section class="live-copy-guarantees"><strong>执行边界</strong><ul><li>只接收开启后生成、入场条件全部通过的新信号</li><li>同一预测使用唯一订单键，重复刷新不会重复开仓</li><li>成交后必须建立交易所止损与止盈；保护失败会平仓并停机</li><li>关闭跟单只停止新开仓，不会擅自平掉已有持仓</li></ul></section>`;
+    if (status.enabled) {
+      target.innerHTML = `<div class="live-copy-danger"><span>REAL FUNDS ACTIVE</span><strong>实盘跟单已开启</strong><p>符合条件的新 AI 机会会由现有 Binance 实盘引擎自动提交订单。</p></div>${riskMarkup}${guarantees}<form class="live-copy-form" data-live-copy-mode="disable"><input type="hidden" name="account_id" value="${this.escape(account?.id || "")}"><div class="live-copy-disable-note">停止后不再开新仓；已有仓位的止损、止盈和退出管理继续运行。</div><button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>停止实盘跟单</button></form>`;
+      return;
+    }
+    const blockerMarkup = blockers.length
+      ? `<section class="live-copy-blockers"><strong>开启前还需完成</strong>${blockers.map((item) => `<span>× ${this.escape(item)}</span>`).join("")}<a href="/next/#/live">前往实盘交易页</a></section>`
+      : "";
+    const enableForm = status.ready_to_enable && account?.status === "active"
+      ? `<form class="live-copy-form" data-live-copy-mode="enable">
+          <input type="hidden" name="account_id" value="${this.escape(account.id)}">
+          <label><span>输入实盘账户名称确认</span><input name="confirmation_name" autocomplete="off" required placeholder="请输入 ${this.escape(account.name)}"></label>
+          <label class="live-copy-ack"><input name="acknowledge_real_funds" type="checkbox" required><span>我确认系统会自动提交真实 Binance 订单，可能产生真实资金损失。</span></label>
+          <button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>确认开启实盘跟单</button>
+        </form>`
+      : "";
+    target.innerHTML = `<div class="live-copy-safe"><span>DEFAULT OFF</span><strong>实盘跟单当前关闭</strong><p>发现机会仍只记录预测；除非在这里明确确认，否则不会把 AI 信号提交给实盘引擎。</p></div>${riskMarkup}${blockerMarkup}${guarantees}${enableForm}`;
+  }
+
+  async submitLiveCopy(event) {
+    const form = event.target.closest("[data-live-copy-mode]");
+    if (!form) return;
+    event.preventDefault();
+    if (this.state.liveCopyLoading) return;
+    const mode = form.dataset.liveCopyMode;
+    const data = new FormData(form);
+    const payload = mode === "enable"
+      ? {
+          enabled: true,
+          account_id: String(data.get("account_id") || ""),
+          confirmation_name: String(data.get("confirmation_name") || ""),
+          acknowledge_real_funds: data.get("acknowledge_real_funds") === "on",
+        }
+      : {
+          enabled: false,
+          account_id: String(data.get("account_id") || "") || null,
+          confirmation_name: "",
+          acknowledge_real_funds: false,
+        };
+    this.state.liveCopyLoading = true;
+    this.renderLiveCopyToggle();
+    this.renderLiveCopyModal();
+    try {
+      this.state.liveCopy = await this.api("/live-copy", { method: "PUT", body: JSON.stringify(payload) });
+      this.renderLiveCopyToggle();
+      this.closeLiveCopyModal();
+      this.showBanner(
+        payload.enabled
+          ? "实盘跟单已开启：只处理开启后产生的新信号，订单继续受账户风控与保护单约束。"
+          : "实盘跟单已停止：不再开新仓，已有仓位的保护与退出管理保持有效。",
+        payload.enabled ? "error" : "success",
+      );
+    } catch (error) {
+      this.showBanner(error.message || "实盘跟单设置保存失败", "error");
+    } finally {
+      this.state.liveCopyLoading = false;
+      this.renderLiveCopyToggle();
+      this.renderLiveCopyModal();
+    }
   }
 
   renderUnusualWhalesToggle() {
@@ -3391,7 +3550,7 @@ class AiMonitorDashboard extends HTMLElement {
       decisionVersion: cleanVersion(params.get("decision_version")),
       direction: oneOf(params.get("direction"), ["long", "short"]),
       marketSession: oneOf(params.get("market_session"), ["premarket", "regular", "postmarket", "closed"]),
-      quoteQuality: oneOf(params.get("quote_quality"), ["passed", "blocked", "missing"]),
+      quoteQuality: oneOf(params.get("quote_quality"), ["passed", "partial", "blocked", "missing"]),
       eventRisk: oneOf(params.get("event_risk"), ["clear", "warning", "blocked"]),
       exitReason: params.get("exit_reason") && params.get("exit_reason") !== "all" ? String(params.get("exit_reason")).trim().slice(0, 64) : "all",
     };
@@ -3442,7 +3601,7 @@ class AiMonitorDashboard extends HTMLElement {
     if (has("decision_version")) filters.decisionVersion = String(responseFilters.decision_version || "");
     if (has("direction")) filters.direction = ["long", "short"].includes(responseFilters.direction) ? responseFilters.direction : "all";
     if (has("market_session")) filters.marketSession = ["premarket", "regular", "postmarket", "closed"].includes(responseFilters.market_session) ? responseFilters.market_session : "all";
-    if (has("quote_quality")) filters.quoteQuality = ["passed", "blocked", "missing"].includes(responseFilters.quote_quality) ? responseFilters.quote_quality : "all";
+    if (has("quote_quality")) filters.quoteQuality = ["passed", "partial", "blocked", "missing"].includes(responseFilters.quote_quality) ? responseFilters.quote_quality : "all";
     if (has("event_risk")) filters.eventRisk = ["clear", "warning", "blocked"].includes(responseFilters.event_risk) ? responseFilters.event_risk : "all";
     if (has("exit_reason")) filters.exitReason = responseFilters.exit_reason && responseFilters.exit_reason !== "all" ? String(responseFilters.exit_reason) : "all";
   }
@@ -3603,7 +3762,7 @@ class AiMonitorDashboard extends HTMLElement {
       decisionVersion: this.q("#prediction-decision-version").value.trim().slice(0, 32),
       direction: ["long", "short"].includes(directionValue) ? directionValue : "all",
       marketSession: ["premarket", "regular", "postmarket", "closed"].includes(marketSessionValue) ? marketSessionValue : "all",
-      quoteQuality: ["passed", "blocked", "missing"].includes(quoteQualityValue) ? quoteQualityValue : "all",
+      quoteQuality: ["passed", "partial", "blocked", "missing"].includes(quoteQualityValue) ? quoteQualityValue : "all",
       eventRisk: ["clear", "warning", "blocked"].includes(eventRiskValue) ? eventRiskValue : "all",
       exitReason: exitReasonValue && exitReasonValue !== "all" ? exitReasonValue : "all",
     };
@@ -3711,12 +3870,13 @@ class AiMonitorDashboard extends HTMLElement {
 
   predictionFeatureSnapshot(item) {
     const snapshot = this.normalizeFeatureSnapshot(item);
+    const availability = item?.feature_availability && typeof item.feature_availability === "object" ? item.feature_availability : {};
     const quoteCheckKeys = ["price_available", "ticker_fresh", "quote_fresh", "spread_acceptable", "quote_sane", "not_halted"];
     const quoteCheckValues = quoteCheckKeys.filter((key) => Object.prototype.hasOwnProperty.call(item?.gate_summary?.checks || {}, key)).map((key) => item.gate_summary.checks[key]);
     const gateQuotePassed = quoteCheckValues.some((value) => value === false) ? false : quoteCheckValues.length ? quoteCheckValues.every((value) => value === true) : undefined;
     const quotePassed = this.firstValue(snapshot.quote.passed, snapshot.quote.quality_passed, gateQuotePassed, item?.quote_quality_passed);
     const explicitQuoteQuality = String(item?.quote_quality || "").toLowerCase();
-    const quoteQuality = ["passed", "blocked", "missing"].includes(explicitQuoteQuality)
+    const quoteQuality = ["passed", "partial", "blocked", "missing"].includes(explicitQuoteQuality)
       ? explicitQuoteQuality
       : quotePassed === false
       ? "blocked"
@@ -3735,7 +3895,7 @@ class AiMonitorDashboard extends HTMLElement {
     };
     return {
       quoteQuality,
-      quoteAgeMs: score(snapshot.quote, "age_ms", "quote_age_ms", "latency_ms"),
+      quoteAgeMs: score(snapshot.quote, "age_ms", "quote_age_ms", "last_trade_age_ms", "latency_ms"),
       spreadBps: score(snapshot.quote, "spread_bps", "bid_ask_spread_bps"),
       session,
       optionScore: score(snapshot.optionFlow, "score", "directional_score", "flow_score"),
@@ -3749,17 +3909,30 @@ class AiMonitorDashboard extends HTMLElement {
       featureVersion: this.firstValue(snapshot.version.feature, item?.feature_version, item?.feature_set_version, snapshot.dataQuality.version, "--"),
       decisionVersion: this.firstValue(snapshot.version.decision, item?.decision_version, item?.strategy_version, item?.policy_version, "--"),
       snapshotId: this.firstValue(snapshot.signalSnapshot.id, item?.feature_snapshot_id, item?.snapshot_id, "--"),
+      availability,
     };
   }
 
   predictionFeatureCells(item) {
     const feature = this.predictionFeatureSnapshot(item);
     const sessionLabel = ({ premarket: "盘前", regular: "盘中", postmarket: "盘后", closed: "休市", unknown: "时段未知" })[feature.session] || feature.session;
-    const quoteLabel = ({ passed: "行情通过", blocked: "行情阻断", missing: "行情缺失" })[feature.quoteQuality];
+    const quoteLabel = ({ passed: "NBBO 已通过", partial: "现货价快照（非盘口）", blocked: "行情阻断", missing: "行情缺失" })[feature.quoteQuality];
+    const reasonLabel = (reason) => ({
+      uw_disabled_at_signal: "采集关闭",
+      legacy_snapshot_missing: "历史未冻结",
+      market_feature_not_linked: "信号时无快照",
+      not_captured_at_signal: "信号时无数据",
+      finnhub_last_trade_only: "Finnhub 现货快照",
+      last_trade_only: "仅现货价",
+      no_signal_time_quote: "信号时无行情",
+    })[String(reason || "")] || "未采集";
+    const optionReason = reasonLabel(feature.availability?.option_flow?.reason);
+    const gexReason = reasonLabel(feature.availability?.gex?.reason);
+    const institutionalReason = reasonLabel(feature.availability?.institutional_flow?.reason);
     const eventTone = ["critical", "blocked", "high"].includes(feature.eventRisk) ? "blocked" : ["medium", "warning"].includes(feature.eventRisk) ? "warning" : ["clear", "normal"].includes(feature.eventRisk) ? "passed" : "missing";
     const eventLabel = ({ clear: "无临近事件", normal: "无临近事件", medium: "事件预警", warning: "事件预警", high: "高风险事件", critical: "重大事件阻断", blocked: "事件阻断", unknown: "事件数据缺失" })[feature.eventRisk] || feature.eventRisk;
-    return `<td><span class="prediction-context ${feature.quoteQuality}">${this.escape(sessionLabel)} · ${this.escape(quoteLabel)}</span><small>${feature.quoteAgeMs == null ? "时效 --" : `延迟 ${Math.round(feature.quoteAgeMs)}ms`} · ${feature.spreadBps == null ? "点差 --" : `${feature.spreadBps.toFixed(1)} bps`}</small></td>
-      <td><span class="prediction-feature-score">期权 ${feature.optionScore == null ? "--" : feature.optionScore.toFixed(1)}</span><small>GEX ${feature.gexScore == null ? "--" : feature.gexScore.toFixed(1)} · 机构 ${feature.institutionalScore == null ? "--" : feature.institutionalScore.toFixed(1)}</small></td>
+    return `<td><span class="prediction-context ${feature.quoteQuality}">${this.escape(sessionLabel)} · ${this.escape(quoteLabel)}</span><small>${feature.quoteAgeMs == null ? reasonLabel(feature.availability?.quote?.reason) : `信号时延 ${Math.round(feature.quoteAgeMs)}ms`} · ${feature.spreadBps == null ? "无 NBBO 点差" : `${feature.spreadBps.toFixed(1)} bps`}</small></td>
+      <td><span class="prediction-feature-score">期权 ${feature.optionScore == null ? this.escape(optionReason) : feature.optionScore.toFixed(1)}</span><small>GEX ${feature.gexScore == null ? this.escape(gexReason) : feature.gexScore.toFixed(1)} · 机构 ${feature.institutionalScore == null ? this.escape(institutionalReason) : feature.institutionalScore.toFixed(1)}</small></td>
       <td><span class="prediction-context ${eventTone}">${this.escape(eventLabel)}</span><small>覆盖 ${feature.coverage == null ? "--" : `${feature.coverage.toFixed(0)}%`} · API ${this.escape(feature.apiVersion)}</small><small>F ${this.escape(feature.featureVersion)} / D ${this.escape(feature.decisionVersion)} · 快照 ${this.escape(feature.snapshotId)}</small></td>`;
   }
 

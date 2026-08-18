@@ -33,6 +33,8 @@ from ...models import (
     AiMonitorRun,
     AuditLog,
     CompanyProfile,
+    LiveOrderIntent,
+    LiveTradingAccount,
     News,
     NewsAiAnalysisRecord,
     NewsAiBatch,
@@ -42,6 +44,7 @@ from ...models import (
     Security,
     SecurityFinancialSnapshot,
     SecurityFundamentalAnalysis,
+    StrategyDeployment,
     User,
     UserSession,
     utcnow,
@@ -52,6 +55,7 @@ from ...schemas import (
     AiMonitorConfigUpdate,
     AiMonitorCostConfigUpdate,
     AiMonitorFinnhubUsageUpdate,
+    AiMonitorLiveCopyUpdate,
     AiMonitorNewsAnalyzeRequest,
     AiMonitorNewsSystemPromptUpdate,
     AiMonitorReplayRequest,
@@ -415,6 +419,118 @@ def _score_policy_out(db: Session, *, can_edit: bool) -> dict[str, Any]:
             "missing_data": "缺失域不计中性分，也不占有效权重",
             "hard_gate": "仅平台 mode=gate 时参与硬门控；当前保存操作启用评分但不启用硬门控",
             "history": "历史机会继续使用生成时冻结的权重版本，不追溯改写",
+        },
+    }
+
+
+def _binance_trade_permission_requested(user: User) -> bool:
+    permissions = user.binance_permissions or {}
+    requested = permissions.get("requested") if isinstance(permissions, Mapping) else None
+    return isinstance(requested, list) and "TRADE" in requested
+
+
+def _live_copy_account_out(
+    account: LiveTradingAccount,
+    *,
+    unresolved_order_count: int,
+) -> dict[str, Any]:
+    config = dict(account.config_json or {})
+    return {
+        "id": account.public_id,
+        "name": account.name,
+        "status": account.status,
+        "configured": bool(config.get("ai_monitor_live_copy_enabled")),
+        "enabled_at": config.get("ai_monitor_live_copy_enabled_at"),
+        "last_tick_at": _utc_out(account.last_tick_at),
+        "last_error_code": account.last_error_code,
+        "unresolved_order_count": int(unresolved_order_count),
+        "risk": {
+            "leverage": int(config.get("leverage", 1)),
+            "max_positions": int(config.get("max_positions", 1)),
+            "risk_per_trade_pct": float(config.get("risk_per_trade_pct", 0.5)),
+            "max_total_risk_pct": float(config.get("max_total_risk_pct", 4)),
+            "margin_cap_pct": round(float(config.get("margin_cap", 0.2)) * 100, 4),
+            "daily_loss_limit_pct": float(config.get("daily_loss_limit_pct", 2)),
+            "max_drawdown_pct": float(config.get("max_drawdown_pct", 6)),
+            "round_trip_cost_bps": float(config.get("round_trip_cost_bps", 16)),
+            "signal_max_age_seconds": int(
+                config.get("ai_monitor_live_signal_max_age_seconds", 300)
+            ),
+        },
+    }
+
+
+def _live_copy_out(
+    db: Session,
+    request: Request,
+    user: User,
+) -> dict[str, Any]:
+    accounts = db.scalars(
+        select(LiveTradingAccount)
+        .where(
+            LiveTradingAccount.user_id == user.id,
+            LiveTradingAccount.status != "archived",
+        )
+        .order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
+    ).all()
+    unresolved_rows = db.execute(
+        select(LiveOrderIntent.live_account_id, func.count(LiveOrderIntent.id))
+        .where(
+            LiveOrderIntent.user_id == user.id,
+            LiveOrderIntent.status == "unknown",
+        )
+        .group_by(LiveOrderIntent.live_account_id)
+    ).all()
+    unresolved_by_account = {int(account_id): int(count) for account_id, count in unresolved_rows}
+    items = [
+        _live_copy_account_out(
+            account,
+            unresolved_order_count=unresolved_by_account.get(int(account.id), 0),
+        )
+        for account in accounts
+    ]
+    configured = next((item for item in items if item["configured"]), None)
+    active = next((item for item in items if item["status"] == "active"), None)
+    selected = configured or active or (items[0] if items else None)
+    system_enabled = bool(request.app.state.settings.binance_live_trading_enabled)
+    credentials_configured = bool(user.binance_credentials_configured)
+    trade_permission_requested = _binance_trade_permission_requested(user)
+    blockers: list[str] = []
+    if not system_enabled:
+        blockers.append("服务器实盘交易总开关未开启")
+    if not credentials_configured:
+        blockers.append("尚未配置 Binance API 凭据")
+    if not trade_permission_requested:
+        blockers.append("Binance API 未申请 TRADE 权限")
+    if active is None:
+        blockers.append("请先在实盘交易页完成账户预检并启用一个实盘账户")
+    elif int(active["unresolved_order_count"] or 0) > 0:
+        blockers.append("存在状态未知的 Binance 订单，需先完成对账")
+    requested_enabled = bool(configured and configured["configured"])
+    enabled = bool(
+        requested_enabled
+        and configured is not None
+        and configured["status"] == "active"
+        and system_enabled
+    )
+    return {
+        "enabled": enabled,
+        "requested_enabled": requested_enabled,
+        "server_enabled": system_enabled,
+        "credentials_configured": credentials_configured,
+        "trade_permission_requested": trade_permission_requested,
+        "ready_to_enable": not blockers,
+        "blockers": blockers,
+        "account": selected,
+        "accounts": items,
+        "signal_policy": {
+            "source": "ai_monitor",
+            "new_signals_only": True,
+            "require_entry_ready": True,
+            "minimum_combined_score": 70,
+            "maximum_signal_age_seconds": 300,
+            "existing_positions_on_disable": "keep_protected_and_manage_exits",
+            "idempotent_orders": True,
         },
     }
 
@@ -1113,6 +1229,152 @@ def get_score_policy(
     """Expose the platform six-domain score policy without market-data secrets."""
 
     return _score_policy_out(db, can_edit=bool(user.is_admin))
+
+
+@router.get("/live-copy")
+def get_live_copy_status(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Return a secret-free, fail-closed view of AI-monitor live following."""
+
+    return _live_copy_out(db, request, user)
+
+
+@router.put("/live-copy")
+def update_live_copy_status(
+    payload: AiMonitorLiveCopyUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Route only future entry-ready AI signals to one already-armed live account.
+
+    This endpoint never arms an account and never sends an exchange order.  It
+    only publishes the signal-source switch consumed by the existing live
+    executor, whose position sizing, loss limits, idempotency, fill verification
+    and exchange-native stop/target protections remain authoritative.
+    """
+
+    _require_expected_user(request, user)
+    locked_user = db.scalar(select(User).where(User.id == user.id).with_for_update())
+    if locked_user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    accounts = db.scalars(
+        select(LiveTradingAccount)
+        .where(
+            LiveTradingAccount.user_id == user.id,
+            LiveTradingAccount.status != "archived",
+        )
+        .order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
+        .with_for_update()
+    ).all()
+
+    if payload.enabled:
+        if not request.app.state.settings.binance_live_trading_enabled:
+            raise HTTPException(status_code=503, detail="服务器实盘交易总开关未开启")
+        if not locked_user.binance_credentials_configured:
+            raise HTTPException(status_code=409, detail="请先配置 Binance API 凭据")
+        if not _binance_trade_permission_requested(locked_user):
+            raise HTTPException(status_code=409, detail="Binance API 未申请 TRADE 权限")
+        if not payload.account_id:
+            raise HTTPException(status_code=409, detail="请选择已启用的实盘账户")
+        account = next(
+            (item for item in accounts if item.public_id == payload.account_id),
+            None,
+        )
+        if account is None:
+            raise HTTPException(status_code=404, detail="实盘账户不存在")
+        if account.status != "active":
+            raise HTTPException(
+                status_code=409,
+                detail="请先在实盘交易页完成预检并启用该账户",
+            )
+        if (
+            payload.confirmation_name != account.name
+            or not payload.acknowledge_real_funds
+        ):
+            raise HTTPException(status_code=409, detail="实盘资金确认不匹配")
+        deployment = db.scalar(
+            select(StrategyDeployment.id).where(
+                StrategyDeployment.user_id == user.id,
+                StrategyDeployment.mode == "live",
+                StrategyDeployment.target_account_id == account.id,
+                StrategyDeployment.status == "running",
+            )
+        )
+        if deployment is None:
+            raise HTTPException(status_code=409, detail="实盘执行部署尚未运行")
+        unresolved = db.scalar(
+            select(func.count(LiveOrderIntent.id)).where(
+                LiveOrderIntent.user_id == user.id,
+                LiveOrderIntent.live_account_id == account.id,
+                LiveOrderIntent.status == "unknown",
+            )
+        )
+        if int(unresolved or 0):
+            raise HTTPException(
+                status_code=409,
+                detail="存在状态未知的 Binance 订单，请先完成对账",
+            )
+        for candidate in accounts:
+            candidate_config = dict(candidate.config_json or {})
+            candidate_config["ai_monitor_live_copy_enabled"] = False
+            if candidate.id == account.id:
+                candidate_config.update(
+                    {
+                        "signal_source": "ai_monitor",
+                        "ai_monitor_live_copy_enabled": True,
+                        "ai_monitor_live_copy_enabled_at": utcnow().isoformat(),
+                        "ai_monitor_live_signal_max_age_seconds": 300,
+                        "ai_monitor_live_min_combined_score": 70.0,
+                        "ai_monitor_live_require_entry_ready": True,
+                    }
+                )
+            candidate.config_json = candidate_config
+        action = "ai_monitor.live_copy.enable"
+        resource_id = account.public_id
+        metadata = {
+            "account_id": account.public_id,
+            "new_signals_only": True,
+            "maximum_signal_age_seconds": 300,
+            "minimum_combined_score": 70.0,
+            "existing_risk_controls_preserved": True,
+        }
+    else:
+        account = next(
+            (
+                item
+                for item in accounts
+                if item.public_id == payload.account_id
+                or bool((item.config_json or {}).get("ai_monitor_live_copy_enabled"))
+            ),
+            None,
+        )
+        if account is not None:
+            account_config = dict(account.config_json or {})
+            account_config.update(
+                {
+                    "signal_source": "ai_monitor",
+                    "ai_monitor_live_copy_enabled": False,
+                    "ai_monitor_live_copy_disabled_at": utcnow().isoformat(),
+                }
+            )
+            account.config_json = account_config
+        action = "ai_monitor.live_copy.disable"
+        resource_id = account.public_id if account is not None else "none"
+        metadata = {
+            "account_id": account.public_id if account is not None else None,
+            "new_entries_stopped": True,
+            "existing_positions_closed": False,
+            "existing_protections_preserved": True,
+        }
+
+    _audit(db, request, user.id, action, resource_id, metadata)
+    db.commit()
+    db.refresh(locked_user)
+    return _live_copy_out(db, request, locked_user)
 
 
 @router.put("/score-policy")
@@ -2232,7 +2494,9 @@ def opportunity_analytics(
     market_session: Literal[
         "all", "premarket", "regular", "postmarket", "closed", "unknown"
     ] = Query(default="all"),
-    quote_quality: Literal["all", "passed", "blocked", "missing"] = Query(
+    quote_quality: Literal[
+        "all", "passed", "partial", "blocked", "missing"
+    ] = Query(
         default="all"
     ),
     event_risk: Literal["all", "clear", "warning", "blocked"] = Query(default="all"),

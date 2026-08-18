@@ -599,6 +599,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/live-copy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Live Copy Status
+         * @description Return a secret-free, fail-closed view of AI-monitor live following.
+         */
+        get: operations["get_live_copy_status_api_v2_ai_monitor_live_copy_get"];
+        /**
+         * Update Live Copy Status
+         * @description Route only future entry-ready AI signals to one already-armed live account.
+         *
+         *     This endpoint never arms an account and never sends an exchange order.  It
+         *     only publishes the signal-source switch consumed by the existing live
+         *     executor, whose position sizing, loss limits, idempotency, fill verification
+         *     and exchange-native stop/target protections remain authoritative.
+         */
+        put: operations["update_live_copy_status_api_v2_ai_monitor_live_copy_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/market-context": {
         parameters: {
             query?: never;
@@ -2592,6 +2621,26 @@ export interface components {
          * @description Toggle platform-wide Finnhub US cash-equity quote collection.
          */
         AiMonitorFinnhubUsageUpdate: {
+            /** Enabled */
+            enabled: boolean;
+        };
+        /**
+         * AiMonitorLiveCopyUpdate
+         * @description Explicitly enable or stop routing new AI-monitor signals to live trading.
+         */
+        AiMonitorLiveCopyUpdate: {
+            /** Account Id */
+            account_id?: string | null;
+            /**
+             * Acknowledge Real Funds
+             * @default false
+             */
+            acknowledge_real_funds: boolean;
+            /**
+             * Confirmation Name
+             * @default
+             */
+            confirmation_name: string;
             /** Enabled */
             enabled: boolean;
         };
@@ -5002,6 +5051,63 @@ export interface operations {
             };
         };
     };
+    get_live_copy_status_api_v2_ai_monitor_live_copy_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    update_live_copy_status_api_v2_ai_monitor_live_copy_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorLiveCopyUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     market_context_api_v2_ai_monitor_market_context_get: {
         parameters: {
             query?: never;
@@ -5334,7 +5440,7 @@ export interface operations {
                 decision_version?: string;
                 direction?: "all" | "long" | "short";
                 market_session?: "all" | "premarket" | "regular" | "postmarket" | "closed" | "unknown";
-                quote_quality?: "all" | "passed" | "blocked" | "missing";
+                quote_quality?: "all" | "passed" | "partial" | "blocked" | "missing";
                 event_risk?: "all" | "clear" | "warning" | "blocked";
                 exit_reason?: string;
                 include_readiness?: boolean;

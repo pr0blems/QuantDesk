@@ -1033,6 +1033,45 @@
         "title": "AiMonitorFinnhubUsageUpdate",
         "type": "object"
       },
+      "AiMonitorLiveCopyUpdate": {
+        "additionalProperties": false,
+        "description": "Explicitly enable or stop routing new AI-monitor signals to live trading.",
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "acknowledge_real_funds": {
+            "default": false,
+            "title": "Acknowledge Real Funds",
+            "type": "boolean"
+          },
+          "confirmation_name": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Confirmation Name",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "AiMonitorLiveCopyUpdate",
+        "type": "object"
+      },
       "AiMonitorNewsAnalyzeRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6434,6 +6473,76 @@
         "summary": "Indicators"
       }
     },
+    "/api/v2/ai-monitor/live-copy": {
+      "get": {
+        "description": "Return a secret-free, fail-closed view of AI-monitor live following.",
+        "operationId": "get_live_copy_status_api_v2_ai_monitor_live_copy_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Live Copy Status Api V2 Ai Monitor Live Copy Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Live Copy Status"
+      },
+      "put": {
+        "description": "Route only future entry-ready AI signals to one already-armed live account.\n\nThis endpoint never arms an account and never sends an exchange order.  It\nonly publishes the signal-source switch consumed by the existing live\nexecutor, whose position sizing, loss limits, idempotency, fill verification\nand exchange-native stop/target protections remain authoritative.",
+        "operationId": "update_live_copy_status_api_v2_ai_monitor_live_copy_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorLiveCopyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Live Copy Status Api V2 Ai Monitor Live Copy Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Live Copy Status"
+      }
+    },
     "/api/v2/ai-monitor/market-context": {
       "get": {
         "description": "Return the cached US macro regime used by opportunity scoring.",
@@ -7089,6 +7198,7 @@
               "enum": [
                 "all",
                 "passed",
+                "partial",
                 "blocked",
                 "missing"
               ],
