@@ -1870,6 +1870,8 @@ td.negative { color: var(--ai-red); }
   border-color: rgba(255, 120, 136, .46);
   background: rgba(255, 120, 136, .055);
 }
+.live-copy-config-button { min-height: 36px; padding: 7px 11px; border-color: rgba(158, 133, 255, .48) !important; color: var(--ai-brand) !important; background: rgba(158, 133, 255, .06) !important; white-space: nowrap; }
+.live-copy-config-button:hover { border-color: var(--ai-brand) !important; background: rgba(158, 133, 255, .13) !important; }
 .live-copy-toggle > span:last-child { display: grid; gap: 0; text-align: left; line-height: 1.05; }
 .live-copy-toggle b { color: var(--ai-text); font-size: 12px; white-space: nowrap; }
 .live-copy-toggle small { margin-top: 3px; color: var(--ai-red); font-size: 10px; }
@@ -1907,6 +1909,7 @@ td.negative { color: var(--ai-red); }
 .live-copy-modal.hidden { display: none; }
 .live-copy-backdrop { position: absolute; inset: 0; border: 0; background: rgba(0, 0, 0, .78); backdrop-filter: blur(6px); }
 .live-copy-dialog { width: min(780px, calc(100vw - 40px)); max-height: calc(100vh - 48px); position: relative; overflow: auto; border: 1px solid var(--ai-line-strong); background: #111511; box-shadow: 0 24px 80px rgba(0, 0, 0, .64); }
+.live-copy-config-dialog { width: min(920px, calc(100vw - 40px)); }
 .live-copy-dialog > header { position: sticky; top: 0; z-index: 2; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 22px; border-bottom: 1px solid var(--ai-line); background: rgba(17, 21, 17, .97); }
 .live-copy-dialog > header span { color: var(--ai-red); font: 800 11px/1.2 Consolas, monospace; letter-spacing: .16em; }
 .live-copy-dialog > header h2 { margin: 5px 0 4px; color: var(--ai-text); font-size: 26px; }
@@ -1960,6 +1963,29 @@ td.negative { color: var(--ai-red); }
 .live-copy-form button.danger { min-height: 42px; justify-self: end; padding: 9px 18px; border-color: var(--ai-red); color: #fff; background: #a83949; font-weight: 800; }
 .live-copy-form button.danger:hover { background: #c24859; }
 .live-copy-disable-note { color: var(--ai-gold); font-size: 12px; line-height: 1.5; }
+.live-copy-config-alert { display: grid; gap: 5px; padding: 13px 15px; border-left: 4px solid var(--ai-red); background: rgba(255, 120, 136, .08); }
+.live-copy-config-alert strong { color: var(--ai-red); font-size: 15px; }
+.live-copy-config-alert p { margin: 0; color: var(--ai-text); font-size: 12px; line-height: 1.55; }
+.live-copy-config-summary { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid rgba(91, 214, 170, .32); background: rgba(91, 214, 170, .045); }
+.live-copy-config-summary > span { color: var(--ai-green); font: 800 10px Consolas, monospace; letter-spacing: .12em; }
+.live-copy-config-summary > strong { color: var(--ai-text); font-size: 16px; }
+.live-copy-config-summary > p { margin: 0; color: var(--ai-muted); font-size: 12px; line-height: 1.5; }
+.live-copy-config-form { display: grid; gap: 14px; }
+.live-copy-config-form fieldset { min-width: 0; margin: 0; padding: 0; border: 1px solid var(--ai-line); background: #101410; }
+.live-copy-config-form legend { margin-left: 12px; padding: 0 6px; color: var(--ai-brand); font-size: 12px; font-weight: 800; }
+.live-copy-config-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.live-copy-config-grid > label { min-width: 0; display: grid; align-content: start; gap: 6px; padding: 12px; border-right: 1px solid var(--ai-line); border-bottom: 1px solid var(--ai-line); }
+.live-copy-config-grid label > span:first-child { color: var(--ai-text); font-size: 12px; font-weight: 700; }
+.live-copy-config-grid input[type="number"],
+.live-copy-config-grid select { width: 100%; min-height: 38px; padding: 7px 9px; border: 1px solid var(--ai-line-strong); color: var(--ai-text); background: #0b0e0b; }
+.live-copy-config-grid small { color: var(--ai-dim); font-size: 10px; line-height: 1.35; }
+.live-copy-direction { grid-template-columns: 1fr 1fr; }
+.live-copy-direction > span:first-child,
+.live-copy-direction > small { grid-column: 1 / -1; }
+.live-copy-direction > span:not(:first-child) { color: var(--ai-text); font-size: 12px; }
+.live-copy-config-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.live-copy-config-actions > span { color: var(--ai-gold); font-size: 11px; }
+.live-copy-config-actions > button { min-height: 40px; padding: 8px 16px; border-color: var(--ai-brand); color: #080a08; background: var(--ai-brand); font-weight: 800; }
 
 /* Platform Unusual Whales usage switch */
 .ai-head-actions > .uw-usage-toggle {
@@ -2111,5 +2137,7 @@ td.negative { color: var(--ai-red); }
   .live-copy-modal { padding: 8px; }
   .live-copy-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
   .live-copy-account dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-copy-config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-copy-config-actions { align-items: stretch; flex-direction: column; }
   .opportunity-feature-disabled { align-items: flex-start; flex-direction: column; gap: 3px; }
 }

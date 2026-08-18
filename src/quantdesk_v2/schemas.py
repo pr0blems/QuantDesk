@@ -376,6 +376,38 @@ class AiMonitorLiveCopyUpdate(BaseModel):
     acknowledge_real_funds: bool = False
 
 
+class AiMonitorLiveCopyConfigUpdate(BaseModel):
+    """Risk and execution policy for the isolated AI-monitor live account."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str | None = Field(default=None, min_length=36, max_length=36)
+    position_mode: Literal["one_way", "hedge"] = "one_way"
+    leverage: int = Field(default=10, ge=1, le=20)
+    max_positions: int = Field(default=10, ge=1, le=20)
+    position_size_pct: float = Field(default=2.0, ge=0.1, le=20.0)
+    risk_per_trade_pct: float = Field(default=0.5, ge=0.1, le=5.0)
+    max_total_risk_pct: float = Field(default=4.0, ge=0.5, le=50.0)
+    margin_cap_pct: float = Field(default=20.0, ge=1.0, le=100.0)
+    daily_loss_limit_pct: float = Field(default=2.0, ge=0.5, le=20.0)
+    max_drawdown_pct: float = Field(default=6.0, ge=1.0, le=50.0)
+    round_trip_cost_bps: float = Field(default=16.0, ge=0.0, le=500.0)
+    signal_max_age_seconds: int = Field(default=300, ge=60, le=1_800)
+    minimum_combined_score: float = Field(default=70.0, ge=0.0, le=100.0)
+    allow_long: bool = True
+    allow_short: bool = True
+
+    @model_validator(mode="after")
+    def validate_live_risk_policy(self) -> Self:
+        if not self.allow_long and not self.allow_short:
+            raise ValueError("at least one live direction must remain enabled")
+        if self.risk_per_trade_pct > self.max_total_risk_pct:
+            raise ValueError("risk_per_trade_pct cannot exceed max_total_risk_pct")
+        if self.position_size_pct > self.margin_cap_pct:
+            raise ValueError("position_size_pct cannot exceed margin_cap_pct")
+        return self
+
+
 class AdminUnusualWhalesRetention(BaseModel):
     """Bounded retention for high-volume, reproducible market-data tiers."""
 

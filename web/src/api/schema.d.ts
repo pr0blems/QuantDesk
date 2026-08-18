@@ -649,6 +649,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/live-copy/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update Live Copy Config
+         * @description Persist risk settings for the isolated opportunity execution account.
+         *
+         *     Saving does not enable a disabled account.  If an already-enabled account was
+         *     stopped solely because its Binance position mode did not match, explicitly
+         *     saving the corrected mode re-arms that same isolated execution domain.
+         */
+        put: operations["update_live_copy_config_api_v2_ai_monitor_live_copy_config_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/market-context": {
         parameters: {
             query?: never;
@@ -2644,6 +2668,85 @@ export interface components {
         AiMonitorFinnhubUsageUpdate: {
             /** Enabled */
             enabled: boolean;
+        };
+        /**
+         * AiMonitorLiveCopyConfigUpdate
+         * @description Risk and execution policy for the isolated AI-monitor live account.
+         */
+        AiMonitorLiveCopyConfigUpdate: {
+            /** Account Id */
+            account_id?: string | null;
+            /**
+             * Allow Long
+             * @default true
+             */
+            allow_long: boolean;
+            /**
+             * Allow Short
+             * @default true
+             */
+            allow_short: boolean;
+            /**
+             * Daily Loss Limit Pct
+             * @default 2
+             */
+            daily_loss_limit_pct: number;
+            /**
+             * Leverage
+             * @default 10
+             */
+            leverage: number;
+            /**
+             * Margin Cap Pct
+             * @default 20
+             */
+            margin_cap_pct: number;
+            /**
+             * Max Drawdown Pct
+             * @default 6
+             */
+            max_drawdown_pct: number;
+            /**
+             * Max Positions
+             * @default 10
+             */
+            max_positions: number;
+            /**
+             * Max Total Risk Pct
+             * @default 4
+             */
+            max_total_risk_pct: number;
+            /**
+             * Minimum Combined Score
+             * @default 70
+             */
+            minimum_combined_score: number;
+            /**
+             * Position Mode
+             * @default one_way
+             * @enum {string}
+             */
+            position_mode: "one_way" | "hedge";
+            /**
+             * Position Size Pct
+             * @default 2
+             */
+            position_size_pct: number;
+            /**
+             * Risk Per Trade Pct
+             * @default 0.5
+             */
+            risk_per_trade_pct: number;
+            /**
+             * Round Trip Cost Bps
+             * @default 16
+             */
+            round_trip_cost_bps: number;
+            /**
+             * Signal Max Age Seconds
+             * @default 300
+             */
+            signal_max_age_seconds: number;
         };
         /**
          * AiMonitorLiveCopyUpdate
@@ -5140,6 +5243,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["AiMonitorLiveCopyUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_live_copy_config_api_v2_ai_monitor_live_copy_config_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorLiveCopyConfigUpdate"];
             };
         };
         responses: {

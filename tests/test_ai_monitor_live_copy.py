@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from quantdesk_v2 import live_engine
-from quantdesk_v2.schemas import AiMonitorLiveCopyUpdate
+from quantdesk_v2.schemas import AiMonitorLiveCopyConfigUpdate, AiMonitorLiveCopyUpdate
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,12 +34,12 @@ def _account(*, enabled: bool = True) -> dict:
     }
 
 
-def _prediction_row(*, entry_ready: bool = True) -> dict:
+def _prediction_row(*, entry_ready: bool = True, direction: str = "long") -> dict:
     predicted_at = datetime(2026, 8, 17, 10, 0, 0)
     return {
         "prediction_public_id": "prediction-public-id",
         "opportunity_public_id": "opportunity-public-id",
-        "direction": "long",
+        "direction": direction,
         "timeframe": "1h",
         "confidence_score": 82.5,
         "entry_price": 100,
@@ -49,7 +49,7 @@ def _prediction_row(*, entry_ready: bool = True) -> dict:
         "evidence_json": {
             "virtual_entry_gate": {
                 "entry_ready": entry_ready,
-                "direction": "long",
+                "direction": direction,
                 "reference_price": 100,
             },
             "risk_plan": {
@@ -68,6 +68,17 @@ def test_live_copy_schema_requires_explicit_true_only_at_endpoint_boundary() -> 
     assert disabled.acknowledge_real_funds is False
     with pytest.raises(ValidationError):
         AiMonitorLiveCopyUpdate(enabled=True, unexpected=True)  # type: ignore[call-arg]
+
+
+def test_live_copy_config_validates_direction_and_risk_boundaries() -> None:
+    policy = AiMonitorLiveCopyConfigUpdate(position_mode="hedge", allow_short=True)
+
+    assert policy.position_mode == "hedge"
+    assert policy.minimum_combined_score == 70
+    with pytest.raises(ValidationError):
+        AiMonitorLiveCopyConfigUpdate(allow_long=False, allow_short=False)
+    with pytest.raises(ValidationError):
+        AiMonitorLiveCopyConfigUpdate(risk_per_trade_pct=4, max_total_risk_pct=2)
 
 
 def test_ai_monitor_live_signal_is_fresh_bounded_and_carries_protection(
@@ -119,6 +130,24 @@ def test_ai_monitor_live_signal_fails_closed_when_disabled_or_gate_not_ready(
 
     monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [_prediction_row(entry_ready=False)])
     assert live_engine._ai_monitor_signal(_account(), "AAPLUSDT")[0] == 0
+
+
+def test_ai_monitor_live_signal_honors_independent_direction_switches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 17, 10, 1, tzinfo=UTC).timestamp()
+    monkeypatch.setattr(live_engine.time, "time", lambda: now)
+    monkeypatch.setattr(
+        live_engine.store,
+        "query",
+        lambda *_args, **_kwargs: [_prediction_row(direction="short")],
+    )
+    account = _account()
+    account["config_json"]["ai_monitor_live_allow_short"] = False
+    assert live_engine._ai_monitor_signal(account, "AAPLUSDT", price=100)[0] == 0
+
+    account["config_json"]["ai_monitor_live_allow_short"] = True
+    assert live_engine._ai_monitor_signal(account, "AAPLUSDT", price=100)[0] == -1
 
 
 def test_ai_monitor_live_signal_expires_without_falling_back_to_strategy(
@@ -195,9 +224,17 @@ def test_ai_monitor_live_copy_ui_requires_modal_confirmation() -> None:
 
     assert 'id="live-copy-toggle"' in frontend
     assert 'id="live-copy-modal"' in frontend
+    assert 'id="live-copy-config-button"' in frontend
+    assert 'id="live-copy-config-modal"' in frontend
+    assert 'aria-busy="true"' in frontend
+    assert "button.disabled = false" in frontend
+    assert "void this.loadLiveCopyStatus" in frontend
+    assert "data-live-copy-retry" in frontend
     assert "acknowledge_real_funds" in frontend
     assert "只接收开启后生成" in frontend
     assert '@router.put("/live-copy")' in api
+    assert '@router.put("/live-copy/config")' in api
+    assert "ai_monitor_live_allow_short" in api
     assert "_ensure_ai_monitor_live_account" in api
     assert '"execution_scope": _AI_MONITOR_LIVE_SCOPE' in api
     assert '"ordinary_strategy_switch_independent": True' in api

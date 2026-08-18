@@ -9,7 +9,9 @@ class AiMonitorDashboard extends HTMLElement {
       config: null,
       scorePolicy: null,
       liveCopy: null,
+      liveCopyError: "",
       liveCopyLoading: false,
+      liveCopyConfigLoading: false,
       uwToggleLoading: false,
       finnhubToggleLoading: false,
       indicators: [],
@@ -118,7 +120,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260818-41">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260818-42">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -129,10 +131,11 @@ class AiMonitorDashboard extends HTMLElement {
           <div class="ai-head-actions">
             <span id="ai-clock" class="ai-clock"></span>
             <span id="scheduler-state" class="status-badge idle">读取中</span>
-            <button id="live-copy-toggle" class="live-copy-toggle loading" type="button" aria-pressed="false" disabled>
+            <button id="live-copy-toggle" class="live-copy-toggle loading" type="button" aria-pressed="false" aria-busy="true">
               <span class="live-copy-toggle-track" aria-hidden="true"><i></i></span>
               <span><b>实盘跟单</b><small>读取中</small></span>
             </button>
+            <button id="live-copy-config-button" class="live-copy-config-button" type="button">跟单配置</button>
             <button id="uw-usage-toggle" class="uw-usage-toggle loading" type="button" aria-pressed="false" disabled>
               <span class="uw-toggle-track" aria-hidden="true"><i></i></span>
               <span><b>Unusual Whales</b><small>读取中</small></span>
@@ -157,12 +160,22 @@ class AiMonitorDashboard extends HTMLElement {
         <div id="ai-banner" class="ai-banner hidden" role="status"></div>
         <div id="live-copy-modal" class="live-copy-modal hidden" aria-hidden="true">
           <button class="live-copy-backdrop" type="button" data-live-copy-close aria-label="关闭实盘跟单设置"></button>
-          <section class="live-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="live-copy-title">
+          <section class="live-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="live-copy-title" tabindex="-1">
             <header>
               <div><span>AI SIGNAL LIVE EXECUTION</span><h2 id="live-copy-title">发现机会独立实盘跟单</h2><p>只执行本页“发现机会”产生的新信号；独立于实盘交易页的其他策略、账户开关和部署状态。</p></div>
               <button type="button" data-live-copy-close aria-label="关闭实盘跟单设置">×</button>
             </header>
             <div id="live-copy-body" class="live-copy-body"><div class="live-copy-loading">正在读取 AI 机会独立执行域…</div></div>
+          </section>
+        </div>
+        <div id="live-copy-config-modal" class="live-copy-modal hidden" aria-hidden="true">
+          <button class="live-copy-backdrop" type="button" data-live-copy-config-close aria-label="关闭实盘跟单配置"></button>
+          <section class="live-copy-dialog live-copy-config-dialog" role="dialog" aria-modal="true" aria-labelledby="live-copy-config-title" tabindex="-1">
+            <header>
+              <div><span>ISOLATED LIVE RISK POLICY</span><h2 id="live-copy-config-title">实盘跟单配置</h2><p>只影响“发现机会”独立实盘账户的新开仓；不会修改其他策略。保存配置不会自动开启已关闭的跟单。</p></div>
+              <button type="button" data-live-copy-config-close aria-label="关闭实盘跟单配置">×</button>
+            </header>
+            <div id="live-copy-config-body" class="live-copy-body"><div class="live-copy-loading">正在读取独立实盘风险参数…</div></div>
           </section>
         </div>
         <section id="macro-market-panel" class="macro-market-panel" aria-label="美股宏观大盘环境">
@@ -398,9 +411,22 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#ai-refresh").addEventListener("click", () => this.loadAll(true));
     this.q("#run-news").addEventListener("click", () => this.createRun("news"));
     this.q("#run-opportunity").addEventListener("click", () => this.createRun("opportunity"));
-    this.q("#live-copy-toggle").addEventListener("click", () => this.openLiveCopyModal());
+    this.q("#live-copy-toggle").addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.openLiveCopyModal();
+    });
+    this.q("#live-copy-config-button").addEventListener("click", () => this.openLiveCopyConfigModal());
     this.qa("[data-live-copy-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyModal()));
+    this.qa("[data-live-copy-config-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyConfigModal()));
     this.q("#live-copy-body").addEventListener("submit", (event) => this.submitLiveCopy(event));
+    this.q("#live-copy-config-body").addEventListener("submit", (event) => this.submitLiveCopyConfig(event));
+    this.q("#live-copy-body").addEventListener("click", (event) => {
+      if (!event.target.closest("[data-live-copy-retry]")) return;
+      this.state.liveCopyError = "";
+      this.renderLiveCopyModal();
+      void this.loadLiveCopyStatus();
+    });
     this.q("#uw-usage-toggle").addEventListener("click", () => this.toggleUnusualWhales());
     this.q("#finnhub-usage-toggle").addEventListener("click", () => this.toggleFinnhub());
     this.q("#open-news-config").addEventListener("click", () => this.openConfig("news"));
@@ -854,7 +880,8 @@ class AiMonitorDashboard extends HTMLElement {
     const ready = status?.ready_to_enable === true;
     button.className = `live-copy-toggle ${loading ? "loading" : enabled ? "enabled" : suspended ? "suspended" : ready ? "ready" : "disabled"}`;
     button.setAttribute("aria-pressed", enabled ? "true" : "false");
-    button.disabled = loading;
+    button.setAttribute("aria-busy", loading ? "true" : "false");
+    button.disabled = false;
     button.title = loading
       ? "正在读取 AI 机会独立跟单状态"
       : enabled
@@ -871,21 +898,29 @@ class AiMonitorDashboard extends HTMLElement {
   async loadLiveCopyStatus({ quiet = false } = {}) {
     try {
       this.state.liveCopy = await this.api("/live-copy");
+      this.state.liveCopyError = "";
       this.renderLiveCopyToggle();
       this.renderLiveCopyModal();
+      this.renderLiveCopyConfigModal();
       return this.state.liveCopy;
     } catch (error) {
+      this.state.liveCopyError = error.message || "实盘跟单状态读取失败";
+      this.renderLiveCopyToggle();
+      this.renderLiveCopyModal();
+      this.renderLiveCopyConfigModal();
       if (!quiet) this.showBanner(error.message || "实盘跟单状态读取失败", "error");
       return null;
     }
   }
 
-  async openLiveCopyModal() {
+  openLiveCopyModal() {
     const modal = this.q("#live-copy-modal");
     modal.classList.remove("hidden");
     modal.setAttribute("aria-hidden", "false");
     this.renderLiveCopyModal();
-    await this.loadLiveCopyStatus({ quiet: true });
+    const dialog = modal.querySelector(".live-copy-dialog");
+    requestAnimationFrame(() => dialog?.focus({ preventScroll: true }));
+    if (!this.state.liveCopyLoading) void this.loadLiveCopyStatus({ quiet: true });
   }
 
   closeLiveCopyModal() {
@@ -894,12 +929,121 @@ class AiMonitorDashboard extends HTMLElement {
     modal.setAttribute("aria-hidden", "true");
   }
 
+  openLiveCopyConfigModal() {
+    const modal = this.q("#live-copy-config-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.renderLiveCopyConfigModal();
+    const dialog = modal.querySelector(".live-copy-dialog");
+    requestAnimationFrame(() => dialog?.focus({ preventScroll: true }));
+    if (!this.state.liveCopyLoading) void this.loadLiveCopyStatus({ quiet: true });
+  }
+
+  closeLiveCopyConfigModal() {
+    const modal = this.q("#live-copy-config-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  renderLiveCopyConfigModal() {
+    const target = this.q("#live-copy-config-body");
+    if (!target) return;
+    const status = this.state.liveCopy;
+    if (!status) {
+      target.innerHTML = this.state.liveCopyError
+        ? `<div class="live-copy-loading"><strong>实盘参数读取失败</strong><p>${this.escape(this.state.liveCopyError)}</p></div>`
+        : `<div class="live-copy-loading">正在读取独立实盘风险参数…</div>`;
+      return;
+    }
+    const account = status.account || {};
+    const risk = account.risk || {};
+    const modeMismatch = account.last_error_code === "position_mode_changed";
+    const modeWarning = modeMismatch
+      ? `<div class="live-copy-config-alert"><strong>当前未下单的直接原因：持仓模式不一致</strong><p>独立账户已启用，但 Binance 实际为双向持仓；当前配置缺少对应模式，因此执行器已安全停机且没有提交任何订单。这里已建议“对冲 / 双向持仓”，保存后会重新校验。</p></div>`
+      : "";
+    const directionLabel = `${risk.allow_long !== false ? "做多" : ""}${risk.allow_long !== false && risk.allow_short !== false ? " + " : ""}${risk.allow_short !== false ? "做空" : ""}`;
+    target.innerHTML = `${modeWarning}
+      <section class="live-copy-config-summary">
+        <span>${status.enabled ? "实盘运行中" : status.requested_enabled ? "已启用但安全停机" : "当前关闭"}</span>
+        <strong>新信号方向：${this.escape(directionLabel || "未配置")}</strong>
+        <p>开仓使用市价单，成交后立即建立交易所止损和止盈；参数只对后续新开仓生效，已有仓位不重写。</p>
+      </section>
+      <form class="live-copy-config-form" data-live-copy-config-form>
+        <input type="hidden" name="account_id" value="${this.escape(account.id || "")}">
+        <fieldset><legend>账户与持仓模式</legend><div class="live-copy-config-grid">
+          <label><span>Binance 持仓模式</span><select name="position_mode"><option value="one_way" ${risk.position_mode === "one_way" ? "selected" : ""}>单向持仓</option><option value="hedge" ${risk.position_mode === "hedge" ? "selected" : ""}>对冲 / 双向持仓</option></select><small>必须与交易所账户实际模式一致</small></label>
+          <label><span>杠杆上限</span><input name="leverage" type="number" min="1" max="20" step="1" value="${this.escape(risk.leverage ?? 10)}"><small>最高 20x；实际仓位仍受风险预算约束</small></label>
+          <label><span>最大同时持仓</span><input name="max_positions" type="number" min="1" max="20" step="1" value="${this.escape(risk.max_positions ?? 10)}"><small>仅本独立执行域</small></label>
+          <label><span>单笔名义仓位</span><input name="position_size_pct" type="number" min="0.1" max="20" step="0.1" value="${this.escape(risk.position_size_pct ?? 2)}"><small>占账户权益 %</small></label>
+        </div></fieldset>
+        <fieldset><legend>风险边界</legend><div class="live-copy-config-grid">
+          <label><span>单笔风险上限</span><input name="risk_per_trade_pct" type="number" min="0.1" max="5" step="0.1" value="${this.escape(risk.risk_per_trade_pct ?? 0.5)}"><small>占账户权益 %</small></label>
+          <label><span>总风险上限</span><input name="max_total_risk_pct" type="number" min="0.5" max="50" step="0.1" value="${this.escape(risk.max_total_risk_pct ?? 4)}"><small>全部独立跟单仓位合计 %</small></label>
+          <label><span>保证金占用上限</span><input name="margin_cap_pct" type="number" min="1" max="100" step="0.1" value="${this.escape(risk.margin_cap_pct ?? 20)}"><small>占账户权益 %</small></label>
+          <label><span>单日亏损上限</span><input name="daily_loss_limit_pct" type="number" min="0.5" max="20" step="0.1" value="${this.escape(risk.daily_loss_limit_pct ?? 2)}"><small>触发后停止新开仓</small></label>
+          <label><span>最大回撤上限</span><input name="max_drawdown_pct" type="number" min="1" max="50" step="0.1" value="${this.escape(risk.max_drawdown_pct ?? 6)}"><small>触发后安全停机</small></label>
+          <label><span>往返成本估计</span><input name="round_trip_cost_bps" type="number" min="0" max="500" step="0.1" value="${this.escape(risk.round_trip_cost_bps ?? 16)}"><small>手续费 + 滑点，bps</small></label>
+        </div></fieldset>
+        <fieldset><legend>信号准入</legend><div class="live-copy-config-grid">
+          <label><span>最低组合评分</span><input name="minimum_combined_score" type="number" min="0" max="100" step="0.1" value="${this.escape(risk.minimum_combined_score ?? 70)}"><small>低于该分数不会实盘开仓</small></label>
+          <label><span>信号最大延迟</span><input name="signal_max_age_seconds" type="number" min="60" max="1800" step="30" value="${this.escape(risk.signal_max_age_seconds ?? 300)}"><small>秒；超时信号不追单</small></label>
+          <label class="live-copy-direction"><span>允许方向</span><span><input name="allow_long" type="checkbox" ${risk.allow_long !== false ? "checked" : ""}> 做多</span><span><input name="allow_short" type="checkbox" ${risk.allow_short !== false ? "checked" : ""}> 做空</span><small>至少保留一个方向</small></label>
+        </div></fieldset>
+        <div class="live-copy-config-actions"><span>保存不会开启当前已关闭的实盘跟单。</span><button type="submit" ${this.state.liveCopyConfigLoading ? "disabled" : ""}>${this.state.liveCopyConfigLoading ? "保存中…" : "保存实盘跟单配置"}</button></div>
+      </form>`;
+  }
+
+  async submitLiveCopyConfig(event) {
+    const form = event.target.closest("[data-live-copy-config-form]");
+    if (!form) return;
+    event.preventDefault();
+    if (this.state.liveCopyConfigLoading) return;
+    const data = new FormData(form);
+    const payload = {
+      account_id: String(data.get("account_id") || "") || null,
+      position_mode: String(data.get("position_mode") || "one_way"),
+      leverage: Number(data.get("leverage")),
+      max_positions: Number(data.get("max_positions")),
+      position_size_pct: Number(data.get("position_size_pct")),
+      risk_per_trade_pct: Number(data.get("risk_per_trade_pct")),
+      max_total_risk_pct: Number(data.get("max_total_risk_pct")),
+      margin_cap_pct: Number(data.get("margin_cap_pct")),
+      daily_loss_limit_pct: Number(data.get("daily_loss_limit_pct")),
+      max_drawdown_pct: Number(data.get("max_drawdown_pct")),
+      round_trip_cost_bps: Number(data.get("round_trip_cost_bps")),
+      signal_max_age_seconds: Number(data.get("signal_max_age_seconds")),
+      minimum_combined_score: Number(data.get("minimum_combined_score")),
+      allow_long: data.get("allow_long") === "on",
+      allow_short: data.get("allow_short") === "on",
+    };
+    if (!payload.allow_long && !payload.allow_short) {
+      this.showBanner("做多和做空不能同时关闭", "error");
+      return;
+    }
+    this.state.liveCopyConfigLoading = true;
+    this.renderLiveCopyConfigModal();
+    try {
+      this.state.liveCopy = await this.api("/live-copy/config", { method: "PUT", body: JSON.stringify(payload) });
+      this.renderLiveCopyToggle();
+      this.renderLiveCopyModal();
+      this.closeLiveCopyConfigModal();
+      this.showBanner("发现机会独立实盘参数已保存；只对后续新开仓生效。", "success");
+    } catch (error) {
+      this.showBanner(error.message || "实盘跟单配置保存失败", "error");
+    } finally {
+      this.state.liveCopyConfigLoading = false;
+      this.renderLiveCopyConfigModal();
+    }
+  }
+
   renderLiveCopyModal() {
     const target = this.q("#live-copy-body");
     if (!target) return;
     const status = this.state.liveCopy;
     if (!status) {
-      target.innerHTML = `<div class="live-copy-loading">正在读取 AI 机会独立执行域…</div>`;
+      target.innerHTML = this.state.liveCopyError
+        ? `<div class="live-copy-loading"><strong>独立跟单状态读取失败</strong><p>${this.escape(this.state.liveCopyError)}</p><button type="button" data-live-copy-retry>重新读取</button></div>`
+        : `<div class="live-copy-loading">正在读取 AI 机会独立执行域…</div>`;
       return;
     }
     const account = status.account || null;
@@ -908,14 +1052,18 @@ class AiMonitorDashboard extends HTMLElement {
     const riskMarkup = account ? `<section class="live-copy-account">
       <header><div><span>AI 机会独立执行域</span><strong>${this.escape(account.name)}</strong><small>${account.provisioned ? "独立账户与订单命名空间已建立" : "首次开启时自动建立；无需前往实盘交易页"}</small></div><b class="${account.status === "active" ? "active" : "paused"}">${account.status === "active" ? "运行中" : "独立待命"}</b></header>
       <dl>
+        <div><dt>持仓模式</dt><dd>${risk.position_mode === "hedge" ? "双向" : "单向"}</dd></div>
         <div><dt>杠杆上限</dt><dd>${this.number(risk.leverage)}x</dd></div>
         <div><dt>最大持仓</dt><dd>${this.number(risk.max_positions)} 个</dd></div>
+        <div><dt>单笔仓位</dt><dd>${this.number(risk.position_size_pct)}%</dd></div>
         <div><dt>单笔风险</dt><dd>${this.number(risk.risk_per_trade_pct)}%</dd></div>
         <div><dt>总风险上限</dt><dd>${this.number(risk.max_total_risk_pct)}%</dd></div>
         <div><dt>保证金上限</dt><dd>${this.number(risk.margin_cap_pct)}%</dd></div>
         <div><dt>日亏损上限</dt><dd>${this.number(risk.daily_loss_limit_pct)}%</dd></div>
         <div><dt>回撤上限</dt><dd>${this.number(risk.max_drawdown_pct)}%</dd></div>
         <div><dt>信号时效</dt><dd>${this.number(risk.signal_max_age_seconds)} 秒</dd></div>
+        <div><dt>最低组合分</dt><dd>${this.number(risk.minimum_combined_score)}</dd></div>
+        <div><dt>允许方向</dt><dd>${risk.allow_long !== false ? "多" : ""}${risk.allow_long !== false && risk.allow_short !== false ? " / " : ""}${risk.allow_short !== false ? "空" : ""}</dd></div>
       </dl>
     </section>` : "";
     const isolation = `<section class="live-copy-isolation"><span>ISOLATED SIGNAL SOURCE</span><strong>不读取、不启停、不改写实盘交易页的其他策略</strong><p>本执行域只消费“发现机会”信号，并维护独立的账户记录、部署状态、幂等订单键和风控快照。Binance API 凭据及交易所总权益仍属于同一用户账户。</p></section>`;

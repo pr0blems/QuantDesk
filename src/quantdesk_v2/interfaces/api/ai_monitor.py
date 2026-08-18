@@ -59,6 +59,7 @@ from ...schemas import (
     AiMonitorConfigUpdate,
     AiMonitorCostConfigUpdate,
     AiMonitorFinnhubUsageUpdate,
+    AiMonitorLiveCopyConfigUpdate,
     AiMonitorLiveCopyUpdate,
     AiMonitorNewsAnalyzeRequest,
     AiMonitorNewsSystemPromptUpdate,
@@ -812,6 +813,9 @@ def _ai_monitor_live_config(*, enabled: bool) -> dict[str, Any]:
         "ai_monitor_live_signal_max_age_seconds": 300,
         "ai_monitor_live_min_combined_score": 70.0,
         "ai_monitor_live_require_entry_ready": True,
+        "ai_monitor_live_allow_long": True,
+        "ai_monitor_live_allow_short": True,
+        "position_mode": "one_way",
     }
 
 
@@ -913,7 +917,7 @@ def _ensure_ai_monitor_live_account(
             StrategyDeployment.mode == "live",
             StrategyDeployment.target_account_id == account.id,
         )
-        .order_by(StrategyDeployment.id)
+        .order_by(StrategyDeployment.id.desc())
         .with_for_update()
     )
     if deployment is None:
@@ -957,8 +961,13 @@ def _live_copy_account_out(
         "last_error_code": account.last_error_code,
         "unresolved_order_count": int(unresolved_order_count),
         "risk": {
+            "position_mode": str(
+                config.get("position_mode")
+                or ("hedge" if account.last_error_code == "position_mode_changed" else "one_way")
+            ),
             "leverage": int(config.get("leverage", 1)),
             "max_positions": int(config.get("max_positions", 1)),
+            "position_size_pct": float(config.get("position_size_pct", 2)),
             "risk_per_trade_pct": float(config.get("risk_per_trade_pct", 0.5)),
             "max_total_risk_pct": float(config.get("max_total_risk_pct", 4)),
             "margin_cap_pct": round(float(config.get("margin_cap", 0.2)) * 100, 4),
@@ -968,6 +977,11 @@ def _live_copy_account_out(
             "signal_max_age_seconds": int(
                 config.get("ai_monitor_live_signal_max_age_seconds", 300)
             ),
+            "minimum_combined_score": float(
+                config.get("ai_monitor_live_min_combined_score", 70)
+            ),
+            "allow_long": bool(config.get("ai_monitor_live_allow_long", True)),
+            "allow_short": bool(config.get("ai_monitor_live_allow_short", True)),
         },
     }
 
@@ -1010,8 +1024,10 @@ def _live_copy_out(
             "independent": True,
             "provisioned": False,
             "risk": {
+                "position_mode": str(preview["position_mode"]),
                 "leverage": int(preview["leverage"]),
                 "max_positions": int(preview["max_positions"]),
+                "position_size_pct": float(preview["position_size_pct"]),
                 "risk_per_trade_pct": float(preview["risk_per_trade_pct"]),
                 "max_total_risk_pct": float(preview["max_total_risk_pct"]),
                 "margin_cap_pct": round(float(preview["margin_cap"]) * 100, 4),
@@ -1021,6 +1037,11 @@ def _live_copy_out(
                 "signal_max_age_seconds": int(
                     preview["ai_monitor_live_signal_max_age_seconds"]
                 ),
+                "minimum_combined_score": float(
+                    preview["ai_monitor_live_min_combined_score"]
+                ),
+                "allow_long": bool(preview["ai_monitor_live_allow_long"]),
+                "allow_short": bool(preview["ai_monitor_live_allow_short"]),
             },
         }
     credentials_configured = bool(user.binance_credentials_configured)
@@ -1061,8 +1082,10 @@ def _live_copy_out(
             "ordinary_strategy_switch_independent": True,
             "new_signals_only": True,
             "require_entry_ready": True,
-            "minimum_combined_score": 70,
-            "maximum_signal_age_seconds": 300,
+            "minimum_combined_score": selected["risk"]["minimum_combined_score"],
+            "maximum_signal_age_seconds": selected["risk"]["signal_max_age_seconds"],
+            "allow_long": selected["risk"]["allow_long"],
+            "allow_short": selected["risk"]["allow_short"],
             "existing_positions_on_disable": "keep_protected_and_manage_exits",
             "idempotent_orders": True,
         },
@@ -1842,6 +1865,116 @@ def get_live_copy_status(
     """Return a secret-free, fail-closed view of AI-monitor live following."""
 
     return _live_copy_out(db, request, user)
+
+
+@router.put("/live-copy/config")
+def update_live_copy_config(
+    payload: AiMonitorLiveCopyConfigUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Persist risk settings for the isolated opportunity execution account.
+
+    Saving does not enable a disabled account.  If an already-enabled account was
+    stopped solely because its Binance position mode did not match, explicitly
+    saving the corrected mode re-arms that same isolated execution domain.
+    """
+
+    _require_expected_user(request, user)
+    locked_user = db.scalar(select(User).where(User.id == user.id).with_for_update())
+    if locked_user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    account, deployment = _ensure_ai_monitor_live_account(db, locked_user)
+    if payload.account_id and payload.account_id != account.public_id:
+        raise HTTPException(status_code=409, detail="实盘跟单账户已变化，请刷新后重试")
+
+    previous_config = dict(account.config_json or {})
+    requested_enabled = bool(previous_config.get("ai_monitor_live_copy_enabled"))
+    account_config = {
+        **_ai_monitor_live_config(enabled=requested_enabled),
+        **previous_config,
+        "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+        "signal_source": _AI_MONITOR_LIVE_SCOPE,
+        "position_mode": payload.position_mode,
+        "leverage": payload.leverage,
+        "risk_max_leverage": payload.leverage,
+        "max_positions": payload.max_positions,
+        "position_size_pct": payload.position_size_pct,
+        "max_margin_per_trade_pct": payload.position_size_pct,
+        "risk_per_trade_pct": payload.risk_per_trade_pct,
+        "max_total_risk_pct": payload.max_total_risk_pct,
+        "margin_cap": payload.margin_cap_pct / 100.0,
+        "daily_loss_limit_pct": payload.daily_loss_limit_pct,
+        "max_drawdown_pct": payload.max_drawdown_pct,
+        "round_trip_cost_bps": payload.round_trip_cost_bps,
+        "max_signal_age_seconds": payload.signal_max_age_seconds,
+        "ai_monitor_live_signal_max_age_seconds": payload.signal_max_age_seconds,
+        "ai_monitor_live_min_combined_score": payload.minimum_combined_score,
+        "ai_monitor_live_allow_long": payload.allow_long,
+        "ai_monitor_live_allow_short": payload.allow_short,
+    }
+    account.config_json = account_config
+    account.credential_version = locked_user.binance_key_version
+    risk_keys = (
+        "leverage",
+        "risk_max_leverage",
+        "max_positions",
+        "position_size_pct",
+        "max_margin_per_trade_pct",
+        "margin_cap",
+        "risk_per_trade_pct",
+        "max_total_risk_pct",
+        "daily_loss_limit_pct",
+        "max_drawdown_pct",
+        "round_trip_cost_bps",
+        "max_ticker_age_seconds",
+        "max_signal_age_seconds",
+        "block_high_risk_products",
+    )
+    deployment.risk_override_json = {
+        key: account_config[key] for key in risk_keys if key in account_config
+    }
+    deployment.runtime_state_json = {
+        **dict(deployment.runtime_state_json or {}),
+        "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+        "position_mode": payload.position_mode,
+    }
+
+    resumed_after_mode_fix = bool(
+        requested_enabled and account.last_error_code == "position_mode_changed"
+    )
+    if resumed_after_mode_fix:
+        account.status = "active"
+        account.last_error_code = None
+        account.armed_at = utcnow()
+        deployment.status = "running"
+        deployment.last_error_code = None
+        deployment.started_at = deployment.started_at or utcnow()
+
+    _audit(
+        db,
+        request,
+        user.id,
+        "ai_monitor.live_copy.config_update",
+        account.public_id,
+        {
+            "account_id": account.public_id,
+            "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+            "position_mode": payload.position_mode,
+            "leverage": payload.leverage,
+            "max_positions": payload.max_positions,
+            "minimum_combined_score": payload.minimum_combined_score,
+            "allow_long": payload.allow_long,
+            "allow_short": payload.allow_short,
+            "resumed_after_position_mode_fix": resumed_after_mode_fix,
+            "enabled_state_changed": False,
+        },
+    )
+    db.commit()
+    db.refresh(locked_user)
+    live_engine.start()
+    return _live_copy_out(db, request, locked_user)
 
 
 @router.put("/live-copy")

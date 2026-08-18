@@ -174,6 +174,10 @@ def _ai_monitor_signal(
     direction = 1 if direction_name == "long" else -1 if direction_name == "short" else 0
     if direction == 0 or str(gate.get("direction") or direction_name) != direction_name:
         return 0, None, [], None, {}
+    if direction > 0 and not bool(config.get("ai_monitor_live_allow_long", True)):
+        return 0, None, [], None, {}
+    if direction < 0 and not bool(config.get("ai_monitor_live_allow_short", True)):
+        return 0, None, [], None, {}
     try:
         combined_score = float(row.get("confidence_score"))
     except (TypeError, ValueError):

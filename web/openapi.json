@@ -1033,6 +1033,123 @@
         "title": "AiMonitorFinnhubUsageUpdate",
         "type": "object"
       },
+      "AiMonitorLiveCopyConfigUpdate": {
+        "additionalProperties": false,
+        "description": "Risk and execution policy for the isolated AI-monitor live account.",
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "allow_long": {
+            "default": true,
+            "title": "Allow Long",
+            "type": "boolean"
+          },
+          "allow_short": {
+            "default": true,
+            "title": "Allow Short",
+            "type": "boolean"
+          },
+          "daily_loss_limit_pct": {
+            "default": 2.0,
+            "maximum": 20.0,
+            "minimum": 0.5,
+            "title": "Daily Loss Limit Pct",
+            "type": "number"
+          },
+          "leverage": {
+            "default": 10,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Leverage",
+            "type": "integer"
+          },
+          "margin_cap_pct": {
+            "default": 20.0,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Margin Cap Pct",
+            "type": "number"
+          },
+          "max_drawdown_pct": {
+            "default": 6.0,
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Max Drawdown Pct",
+            "type": "number"
+          },
+          "max_positions": {
+            "default": 10,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max Positions",
+            "type": "integer"
+          },
+          "max_total_risk_pct": {
+            "default": 4.0,
+            "maximum": 50.0,
+            "minimum": 0.5,
+            "title": "Max Total Risk Pct",
+            "type": "number"
+          },
+          "minimum_combined_score": {
+            "default": 70.0,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Minimum Combined Score",
+            "type": "number"
+          },
+          "position_mode": {
+            "default": "one_way",
+            "enum": [
+              "one_way",
+              "hedge"
+            ],
+            "title": "Position Mode",
+            "type": "string"
+          },
+          "position_size_pct": {
+            "default": 2.0,
+            "maximum": 20.0,
+            "minimum": 0.1,
+            "title": "Position Size Pct",
+            "type": "number"
+          },
+          "risk_per_trade_pct": {
+            "default": 0.5,
+            "maximum": 5.0,
+            "minimum": 0.1,
+            "title": "Risk Per Trade Pct",
+            "type": "number"
+          },
+          "round_trip_cost_bps": {
+            "default": 16.0,
+            "maximum": 500.0,
+            "minimum": 0.0,
+            "title": "Round Trip Cost Bps",
+            "type": "number"
+          },
+          "signal_max_age_seconds": {
+            "default": 300,
+            "maximum": 1800.0,
+            "minimum": 60.0,
+            "title": "Signal Max Age Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "AiMonitorLiveCopyConfigUpdate",
+        "type": "object"
+      },
       "AiMonitorLiveCopyUpdate": {
         "additionalProperties": false,
         "description": "Explicitly enable or stop routing new AI-monitor signals to live trading.",
@@ -6625,6 +6742,52 @@
           }
         ],
         "summary": "Update Live Copy Status"
+      }
+    },
+    "/api/v2/ai-monitor/live-copy/config": {
+      "put": {
+        "description": "Persist risk settings for the isolated opportunity execution account.\n\nSaving does not enable a disabled account.  If an already-enabled account was\nstopped solely because its Binance position mode did not match, explicitly\nsaving the corrected mode re-arms that same isolated execution domain.",
+        "operationId": "update_live_copy_config_api_v2_ai_monitor_live_copy_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorLiveCopyConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Live Copy Config Api V2 Ai Monitor Live Copy Config Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Live Copy Config"
       }
     },
     "/api/v2/ai-monitor/market-context": {
