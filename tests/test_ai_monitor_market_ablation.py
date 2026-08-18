@@ -362,7 +362,7 @@ def test_immutable_market_snapshot_takes_precedence_over_prediction_fallback() -
     assert result["quote"]["bid"] == 100.0
     assert result["flow"]["option_flow"]["score"] == 77.0
     assert result["version"] == {
-        "api": "ai_opportunity.v2",
+        "api": "ai_opportunity.v3",
         "feature": "snapshot-feature-v1",
         "weights": "snapshot-weights-v1",
         "decision": "snapshot-decision-v1",

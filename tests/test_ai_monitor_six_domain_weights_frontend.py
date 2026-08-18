@@ -60,7 +60,10 @@ def test_ai_monitor_exposes_unusual_whales_platform_switch() -> None:
     assert 'this.api("/finnhub-enabled", {' in SCRIPT
     assert "Finnhub 美股现货" in SCRIPT
     assert "盘中采集" in SCRIPT
-    assert "finnhub-spot-badge" in SCRIPT
+    assert "provider-quote-badge" in SCRIPT
+    assert "binanceQuote" in SCRIPT
+    assert "finnhubSpot" in SCRIPT
+    assert "unusualWhalesQuote" in SCRIPT
     assert "5分钟/次" in SCRIPT
 
 

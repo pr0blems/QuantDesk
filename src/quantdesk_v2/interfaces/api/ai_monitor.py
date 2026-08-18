@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as datetime_time
@@ -19,11 +20,12 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import StreamingResponse
 
-from ... import ai_monitor, historical_replay, news_ai
+from ... import ai_monitor, historical_replay, live_engine, news_ai
 from ...ai_model_config import global_ai_model_configured
 from ...database import get_db
 from ...dependencies import bearer, get_current_user, require_admin_write
 from ...finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
+from ...market_config import TRADFI_UNIVERSE_KEY, tradfi_symbols
 from ...models import (
     AdminSetting,
     AiMonitorConfig,
@@ -45,8 +47,10 @@ from ...models import (
     SecurityFinancialSnapshot,
     SecurityFundamentalAnalysis,
     StrategyDeployment,
+    StrategyRevision,
     User,
     UserSession,
+    UserStrategy,
     utcnow,
 )
 from ...monitor import MonitorRepository, MonitorUnavailable
@@ -70,6 +74,25 @@ router = APIRouter(prefix="/ai-monitor")
 _STREAM_POLL_SECONDS = 2.0
 _STREAM_HEARTBEAT_SECONDS = 15.0
 _STREAM_RETRY_MILLISECONDS = 3000
+_AI_MONITOR_LIVE_SCOPE = "ai_monitor"
+_AI_MONITOR_LIVE_ACCOUNT_NAME = "AI发现机会独立跟单"
+_AI_MONITOR_LIVE_ADAPTER_NAME = "__AI Monitor Live Execution Adapter__"
+_AI_MONITOR_LIVE_RISK_DEFAULTS: dict[str, Any] = {
+    "leverage": 10,
+    "risk_max_leverage": 10,
+    "max_positions": 10,
+    "position_size_pct": 2.0,
+    "max_margin_per_trade_pct": 2.0,
+    "margin_cap": 0.2,
+    "risk_per_trade_pct": 0.5,
+    "max_total_risk_pct": 4.0,
+    "daily_loss_limit_pct": 2.0,
+    "max_drawdown_pct": 6.0,
+    "round_trip_cost_bps": 16.0,
+    "max_ticker_age_seconds": 120,
+    "max_signal_age_seconds": 300,
+    "block_high_risk_products": True,
+}
 
 
 def _utc_out(value: datetime | None) -> datetime | None:
@@ -77,6 +100,321 @@ def _utc_out(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _finite_price(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if number > 0 else None
+
+
+def _quote_time(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return _utc_out(value)
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp <= 0:
+            return None
+        if timestamp > 10_000_000_000:
+            timestamp /= 1_000
+        try:
+            return datetime.fromtimestamp(timestamp, tz=UTC)
+        except (OSError, OverflowError, ValueError):
+            return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return _utc_out(parsed)
+
+
+def _quote_age_seconds(observed_at: datetime | None, now: datetime) -> float | None:
+    if observed_at is None:
+        return None
+    return round(max(0.0, (now - observed_at).total_seconds()), 3)
+
+
+def _price_comparison_out(
+    live_market: Mapping[str, Any] | None,
+    spot_quote: Mapping[str, Any] | None,
+    enhanced_market: Mapping[str, Any] | None,
+    *,
+    direction: str | None = None,
+    news_score: float | None = None,
+    news_count: int = 0,
+    new_news_count: int = 0,
+    reused_news_count: int = 0,
+    memory_window_hours: int = 168,
+) -> dict[str, Any]:
+    """Build a current three-provider quote view without treating it as risk-free arbitrage.
+
+    Binance is the execution/valuation source for the mapped contract. Finnhub and
+    Unusual Whales describe the US cash-market reference and may be delayed or
+    closed.  A spread is therefore a basis observation until both legs are fresh,
+    synchronized and executable.
+    """
+
+    now = datetime.now(UTC)
+    market = dict(live_market or {})
+    finnhub = dict(spot_quote or {})
+    enhanced = dict(enhanced_market or {})
+    uw_quote = dict(enhanced.get("quote") or {})
+
+    binance_price = _finite_price(market.get("price"))
+    binance_at = _quote_time(market.get("ts"))
+    binance_age = _quote_age_seconds(binance_at, now)
+    binance = {
+        "source": "binance",
+        "label": "BN",
+        "venue": "mapped_contract",
+        "role": "execution",
+        "available": binance_price is not None,
+        "price": binance_price,
+        "observed_at": binance_at,
+        "age_seconds": binance_age,
+        "fresh": bool(binance_price is not None and binance_age is not None and binance_age <= 120),
+    }
+
+    finnhub_price = _finite_price(finnhub.get("price"))
+    finnhub_previous_close = _finite_price(finnhub.get("previous_close"))
+    finnhub_at = _quote_time(finnhub.get("source_timestamp")) or _quote_time(
+        finnhub.get("fetched_at")
+    )
+    finnhub_age = _quote_age_seconds(finnhub_at, now)
+    finnhub_fresh = bool(
+        finnhub_price is not None
+        and finnhub.get("stale") is not True
+        and finnhub.get("live") is True
+        and finnhub_age is not None
+        and finnhub_age <= 600
+    )
+    finnhub_source = {
+        "source": "finnhub",
+        "label": "FH",
+        "venue": "us_cash_last_trade",
+        "role": "reference",
+        "available": finnhub_price is not None,
+        "price": finnhub_price,
+        "previous_close": finnhub_previous_close,
+        "observed_at": finnhub_at,
+        "age_seconds": finnhub_age,
+        "fresh": finnhub_fresh,
+        "live": bool(finnhub.get("live")),
+        "storage": finnhub.get("storage"),
+    }
+
+    uw_bid = _finite_price(uw_quote.get("bid"))
+    uw_ask = _finite_price(uw_quote.get("ask"))
+    uw_last = _finite_price(uw_quote.get("last_price"))
+    uw_previous_close = _finite_price(uw_quote.get("previous_close"))
+    uw_midpoint = (
+        (uw_bid + uw_ask) / 2
+        if uw_bid is not None and uw_ask is not None and uw_ask >= uw_bid
+        else None
+    )
+    uw_price = uw_midpoint or uw_last
+    uw_at = (
+        _quote_time(uw_quote.get("quote_received_at_ms"))
+        or _quote_time(uw_quote.get("received_at_ms"))
+        or _quote_time(enhanced.get("captured_at"))
+        or _quote_time(enhanced.get("bucket_at"))
+    )
+    uw_age = _quote_age_seconds(uw_at, now)
+    uw_fresh = bool(uw_price is not None and uw_age is not None and uw_age <= 360)
+    unusual_whales = {
+        "source": "unusual_whales",
+        "label": "UW",
+        "venue": "us_cash_nbbo" if uw_midpoint is not None else "us_cash_last_trade",
+        "role": "reference",
+        "available": uw_price is not None,
+        "price": uw_price,
+        "previous_close": uw_previous_close,
+        "bid": uw_bid,
+        "ask": uw_ask,
+        "spread_bps": uw_quote.get("spread_bps"),
+        "observed_at": uw_at,
+        "age_seconds": uw_age,
+        "fresh": uw_fresh,
+        "market_session": uw_quote.get("market_session"),
+    }
+
+    fresh_references = [
+        source
+        for source in (finnhub_source, unusual_whales)
+        if source["fresh"] and source["price"] is not None
+    ]
+    reference_price = (
+        sum(float(source["price"]) for source in fresh_references)
+        / len(fresh_references)
+        if fresh_references
+        else None
+    )
+    available_references = [
+        source
+        for source in (finnhub_source, unusual_whales)
+        if source["available"] and source["price"] is not None
+    ]
+    latest_reference = max(
+        available_references,
+        key=lambda source: (
+            source["observed_at"].timestamp()
+            if isinstance(source.get("observed_at"), datetime)
+            else 0.0
+        ),
+        default=None,
+    )
+    snapshot_reference_price = (
+        float(latest_reference["price"]) if latest_reference is not None else None
+    )
+    snapshot_reference_at = (
+        latest_reference.get("observed_at") if latest_reference is not None else None
+    )
+    snapshot_reference_source = (
+        latest_reference.get("source") if latest_reference is not None else None
+    )
+    previous_close_price = finnhub_previous_close or uw_previous_close
+    basis_bps = (
+        round((binance_price / reference_price - 1) * 10_000, 4)
+        if binance_price is not None and reference_price is not None
+        else None
+    )
+    snapshot_gap_bps = (
+        round((binance_price / snapshot_reference_price - 1) * 10_000, 4)
+        if binance_price is not None and snapshot_reference_price is not None
+        else None
+    )
+    previous_close_gap_bps = (
+        round((binance_price / previous_close_price - 1) * 10_000, 4)
+        if binance_price is not None and previous_close_price is not None
+        else None
+    )
+    provider_divergence_bps = (
+        round(abs(finnhub_price / uw_price - 1) * 10_000, 4)
+        if finnhub_price is not None and uw_price is not None
+        else None
+    )
+    comparable = bool(binance["fresh"] and fresh_references)
+    threshold_bps = 30.0
+    if not binance["available"]:
+        state = "execution_unavailable"
+    elif not comparable and (snapshot_reference_price is not None or previous_close_price is not None):
+        state = "opening_gap_watch"
+    elif not comparable:
+        state = "reference_unavailable"
+    elif basis_bps is not None and abs(basis_bps) >= threshold_bps:
+        state = "spread_watch"
+    else:
+        state = "aligned"
+    pair_direction = None
+    if comparable and basis_bps is not None and abs(basis_bps) >= threshold_bps:
+        pair_direction = (
+            "short_binance_long_spot"
+            if basis_bps > 0
+            else "long_binance_short_spot"
+        )
+
+    normalized_direction = str(direction or "").strip().lower()
+    normalized_news_score = (
+        max(0.0, min(100.0, float(news_score)))
+        if news_score is not None
+        else None
+    )
+    normalized_news_count = max(0, int(news_count or 0))
+    normalized_new_news_count = max(0, int(new_news_count or 0))
+    normalized_reused_news_count = max(0, int(reused_news_count or 0))
+    normalized_memory_window_hours = max(1, int(memory_window_hours or 168))
+    forecast_gap_bps = snapshot_gap_bps
+    if forecast_gap_bps is None:
+        forecast_gap_bps = previous_close_gap_bps
+    forecast_available = bool(
+        binance_price is not None
+        and forecast_gap_bps is not None
+        and normalized_direction in {"long", "short"}
+        and normalized_news_score is not None
+    )
+    forecast_direction = (
+        "down"
+        if normalized_direction == "short"
+        else "up"
+        if normalized_direction == "long"
+        else "neutral"
+    )
+    gap_aligned = bool(
+        forecast_available
+        and (
+            (normalized_direction == "long" and float(forecast_gap_bps) >= 0)
+            or (normalized_direction == "short" and float(forecast_gap_bps) <= 0)
+        )
+    )
+    forecast_confidence = normalized_news_score
+    if forecast_available and forecast_confidence is not None:
+        if abs(float(forecast_gap_bps)) >= threshold_bps:
+            forecast_confidence += 8.0 if gap_aligned else -8.0
+        forecast_confidence += min(5.0, max(0, normalized_news_count - 1))
+        if provider_divergence_bps is not None and provider_divergence_bps >= 100:
+            forecast_confidence -= 5.0
+        forecast_confidence = round(max(0.0, min(99.0, forecast_confidence)), 1)
+    if not forecast_available or (normalized_news_score or 0) < 60:
+        forecast_label = "neutral_watch"
+    elif forecast_direction == "down":
+        forecast_label = "bearish_open"
+    else:
+        forecast_label = "bullish_open"
+    return {
+        "version": "cross_venue_basis_v2",
+        "execution_source": "binance",
+        "sources": {
+            "binance": binance,
+            "finnhub": finnhub_source,
+            "unusual_whales": unusual_whales,
+        },
+        "reference_price": reference_price,
+        "fresh_reference_count": len(fresh_references),
+        "snapshot_reference_price": snapshot_reference_price,
+        "snapshot_reference_at": snapshot_reference_at,
+        "snapshot_reference_source": snapshot_reference_source,
+        "previous_close_price": previous_close_price,
+        "basis_bps": basis_bps,
+        "snapshot_gap_bps": snapshot_gap_bps,
+        "previous_close_gap_bps": previous_close_gap_bps,
+        "provider_divergence_bps": provider_divergence_bps,
+        "provider_divergence_mode": (
+            "live" if finnhub_fresh and uw_fresh else "snapshot"
+        ) if provider_divergence_bps is not None else None,
+        "minimum_watch_bps": threshold_bps,
+        "state": state,
+        "pair_direction": pair_direction,
+        "comparable": comparable,
+        "actionable": False,
+        "research_only_reason": "cash_contract_basis_requires_synchronized_executable_two_leg_quotes",
+        "opening_forecast": {
+            "available": forecast_available,
+            "label": forecast_label,
+            "direction": forecast_direction,
+            "confidence": forecast_confidence,
+            "news_score": normalized_news_score,
+            "news_count": normalized_news_count,
+            "related_news_count": normalized_news_count,
+            "new_news_count": normalized_new_news_count,
+            "reused_news_count": normalized_reused_news_count,
+            "memory_window_hours": normalized_memory_window_hours,
+            "gap_bps": forecast_gap_bps,
+            "gap_aligned": gap_aligned if forecast_available else None,
+            "reference_mode": (
+                "latest_cash_snapshot"
+                if snapshot_reference_price is not None
+                else "previous_close"
+                if previous_close_price is not None
+                else "unavailable"
+            ),
+            "research_only": True,
+        },
+        "calculated_at": now,
+    }
 
 
 def _local_date_utc_window(
@@ -429,6 +767,177 @@ def _binance_trade_permission_requested(user: User) -> bool:
     return isinstance(requested, list) and "TRADE" in requested
 
 
+def _is_ai_monitor_live_account(account: LiveTradingAccount) -> bool:
+    config = account.config_json or {}
+    return (
+        isinstance(config, Mapping)
+        and str(config.get("execution_scope") or "") == _AI_MONITOR_LIVE_SCOPE
+    )
+
+
+def _ai_monitor_live_account(
+    db: Session,
+    user_id: int,
+    *,
+    for_update: bool = False,
+) -> LiveTradingAccount | None:
+    query = (
+        select(LiveTradingAccount)
+        .where(
+            LiveTradingAccount.user_id == user_id,
+            LiveTradingAccount.status != "archived",
+        )
+        .order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
+    )
+    if for_update:
+        query = query.with_for_update()
+    return next(
+        (
+            account
+            for account in db.scalars(query).all()
+            if _is_ai_monitor_live_account(account)
+        ),
+        None,
+    )
+
+
+def _ai_monitor_live_config(*, enabled: bool) -> dict[str, Any]:
+    return {
+        **_AI_MONITOR_LIVE_RISK_DEFAULTS,
+        "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+        "signal_source": _AI_MONITOR_LIVE_SCOPE,
+        "symbols": tradfi_symbols(),
+        "universe_key": TRADFI_UNIVERSE_KEY,
+        "ai_monitor_live_copy_enabled": enabled,
+        "ai_monitor_live_signal_max_age_seconds": 300,
+        "ai_monitor_live_min_combined_score": 70.0,
+        "ai_monitor_live_require_entry_ready": True,
+    }
+
+
+def _ai_monitor_live_adapter(
+    db: Session,
+    user: User,
+) -> tuple[UserStrategy, StrategyRevision]:
+    strategy = db.scalar(
+        select(UserStrategy)
+        .where(
+            UserStrategy.user_id == user.id,
+            UserStrategy.name == _AI_MONITOR_LIVE_ADAPTER_NAME,
+        )
+        .order_by(UserStrategy.id)
+        .with_for_update()
+    )
+    if strategy is None:
+        strategy = UserStrategy(
+            public_id=str(uuid.uuid4()),
+            user_id=user.id,
+            source_template_id=None,
+            name=_AI_MONITOR_LIVE_ADAPTER_NAME,
+            category="execution_adapter",
+            description="AI 发现机会独立实盘执行适配器；不参与普通策略求值。",
+            status="archived",
+            version=1,
+            engine_key="multi_factor",
+            strategy_kind="legacy_signal",
+            lifecycle_status="retired",
+            spec_schema_version=None,
+            spec_json=None,
+            spec_hash=None,
+            risk_level="high",
+            parameter_schema_json=[],
+            parameters_json={},
+            risk_defaults_json=dict(_AI_MONITOR_LIVE_RISK_DEFAULTS),
+            created_via="manual",
+        )
+        db.add(strategy)
+        db.flush()
+    revision = db.scalar(
+        select(StrategyRevision)
+        .where(
+            StrategyRevision.user_id == user.id,
+            StrategyRevision.user_strategy_id == strategy.id,
+            StrategyRevision.version == strategy.version,
+        )
+        .with_for_update()
+    )
+    if revision is None:
+        snapshot = {
+            "public_id": strategy.public_id,
+            "name": "AI 发现机会独立信号",
+            "version": strategy.version,
+            "engine_key": strategy.engine_key,
+            "strategy_kind": strategy.strategy_kind,
+            "parameters": {},
+            "risk_defaults": dict(_AI_MONITOR_LIVE_RISK_DEFAULTS),
+            "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+        }
+        revision = StrategyRevision(
+            user_strategy_id=strategy.id,
+            user_id=user.id,
+            version=strategy.version,
+            change_source="manual",
+            change_summary="创建 AI 机会独立执行适配器",
+            snapshot_json=snapshot,
+            validation_json={"execution_adapter": True, "ordinary_strategy": False},
+            published_at=utcnow(),
+        )
+        db.add(revision)
+        db.flush()
+    return strategy, revision
+
+
+def _ensure_ai_monitor_live_account(
+    db: Session,
+    user: User,
+) -> tuple[LiveTradingAccount, StrategyDeployment]:
+    strategy, revision = _ai_monitor_live_adapter(db, user)
+    account = _ai_monitor_live_account(db, user.id, for_update=True)
+    if account is None:
+        account = LiveTradingAccount(
+            public_id=str(uuid.uuid4()),
+            user_id=user.id,
+            strategy_id=strategy.id,
+            name=_AI_MONITOR_LIVE_ACCOUNT_NAME,
+            status="paused",
+            config_json=_ai_monitor_live_config(enabled=False),
+            strategy_snapshot_json=dict(revision.snapshot_json or {}),
+            credential_version=user.binance_key_version,
+        )
+        db.add(account)
+        db.flush()
+    deployment = db.scalar(
+        select(StrategyDeployment)
+        .where(
+            StrategyDeployment.user_id == user.id,
+            StrategyDeployment.mode == "live",
+            StrategyDeployment.target_account_id == account.id,
+        )
+        .order_by(StrategyDeployment.id)
+        .with_for_update()
+    )
+    if deployment is None:
+        deployment = StrategyDeployment(
+            public_id=str(uuid.uuid4()),
+            user_id=user.id,
+            strategy_id=strategy.id,
+            strategy_revision_id=revision.id,
+            mode="live",
+            target_account_id=account.id,
+            name=_AI_MONITOR_LIVE_ACCOUNT_NAME,
+            status="paused",
+            universe_override_json={
+                "universe_key": TRADFI_UNIVERSE_KEY,
+                "symbols": tradfi_symbols(),
+            },
+            risk_override_json=dict(_AI_MONITOR_LIVE_RISK_DEFAULTS),
+            runtime_state_json={"execution_scope": _AI_MONITOR_LIVE_SCOPE},
+        )
+        db.add(deployment)
+        db.flush()
+    return account, deployment
+
+
 def _live_copy_account_out(
     account: LiveTradingAccount,
     *,
@@ -439,6 +948,9 @@ def _live_copy_account_out(
         "id": account.public_id,
         "name": account.name,
         "status": account.status,
+        "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+        "independent": True,
+        "provisioned": True,
         "configured": bool(config.get("ai_monitor_live_copy_enabled")),
         "enabled_at": config.get("ai_monitor_live_copy_enabled_at"),
         "last_tick_at": _utc_out(account.last_tick_at),
@@ -465,66 +977,88 @@ def _live_copy_out(
     request: Request,
     user: User,
 ) -> dict[str, Any]:
-    accounts = db.scalars(
-        select(LiveTradingAccount)
-        .where(
-            LiveTradingAccount.user_id == user.id,
-            LiveTradingAccount.status != "archived",
+    account = _ai_monitor_live_account(db, user.id)
+    unresolved_order_count = 0
+    selected: dict[str, Any]
+    if account is not None:
+        unresolved_order_count = int(
+            db.scalar(
+                select(func.count(LiveOrderIntent.id)).where(
+                    LiveOrderIntent.user_id == user.id,
+                    LiveOrderIntent.live_account_id == account.id,
+                    LiveOrderIntent.status == "unknown",
+                )
+            )
+            or 0
         )
-        .order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
-    ).all()
-    unresolved_rows = db.execute(
-        select(LiveOrderIntent.live_account_id, func.count(LiveOrderIntent.id))
-        .where(
-            LiveOrderIntent.user_id == user.id,
-            LiveOrderIntent.status == "unknown",
-        )
-        .group_by(LiveOrderIntent.live_account_id)
-    ).all()
-    unresolved_by_account = {int(account_id): int(count) for account_id, count in unresolved_rows}
-    items = [
-        _live_copy_account_out(
+        selected = _live_copy_account_out(
             account,
-            unresolved_order_count=unresolved_by_account.get(int(account.id), 0),
+            unresolved_order_count=unresolved_order_count,
         )
-        for account in accounts
-    ]
-    configured = next((item for item in items if item["configured"]), None)
-    active = next((item for item in items if item["status"] == "active"), None)
-    selected = configured or active or (items[0] if items else None)
-    system_enabled = bool(request.app.state.settings.binance_live_trading_enabled)
+    else:
+        preview = _ai_monitor_live_config(enabled=False)
+        selected = {
+            "id": None,
+            "name": _AI_MONITOR_LIVE_ACCOUNT_NAME,
+            "status": "ready",
+            "configured": False,
+            "enabled_at": None,
+            "last_tick_at": None,
+            "last_error_code": None,
+            "unresolved_order_count": 0,
+            "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+            "independent": True,
+            "provisioned": False,
+            "risk": {
+                "leverage": int(preview["leverage"]),
+                "max_positions": int(preview["max_positions"]),
+                "risk_per_trade_pct": float(preview["risk_per_trade_pct"]),
+                "max_total_risk_pct": float(preview["max_total_risk_pct"]),
+                "margin_cap_pct": round(float(preview["margin_cap"]) * 100, 4),
+                "daily_loss_limit_pct": float(preview["daily_loss_limit_pct"]),
+                "max_drawdown_pct": float(preview["max_drawdown_pct"]),
+                "round_trip_cost_bps": float(preview["round_trip_cost_bps"]),
+                "signal_max_age_seconds": int(
+                    preview["ai_monitor_live_signal_max_age_seconds"]
+                ),
+            },
+        }
     credentials_configured = bool(user.binance_credentials_configured)
     trade_permission_requested = _binance_trade_permission_requested(user)
     blockers: list[str] = []
-    if not system_enabled:
-        blockers.append("服务器实盘交易总开关未开启")
     if not credentials_configured:
         blockers.append("尚未配置 Binance API 凭据")
     if not trade_permission_requested:
         blockers.append("Binance API 未申请 TRADE 权限")
-    if active is None:
-        blockers.append("请先在实盘交易页完成账户预检并启用一个实盘账户")
-    elif int(active["unresolved_order_count"] or 0) > 0:
+    if not tradfi_symbols():
+        blockers.append("Binance TradFi 交易品种池为空")
+    if unresolved_order_count > 0:
         blockers.append("存在状态未知的 Binance 订单，需先完成对账")
-    requested_enabled = bool(configured and configured["configured"])
+    requested_enabled = bool(selected["configured"])
     enabled = bool(
         requested_enabled
-        and configured is not None
-        and configured["status"] == "active"
-        and system_enabled
+        and selected["status"] == "active"
     )
     return {
         "enabled": enabled,
         "requested_enabled": requested_enabled,
-        "server_enabled": system_enabled,
+        "server_enabled": True,
+        "ordinary_live_server_enabled": bool(
+            request.app.state.settings.binance_live_trading_enabled
+        ),
+        "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+        "independent_execution": True,
+        "confirmation_name": _AI_MONITOR_LIVE_ACCOUNT_NAME,
         "credentials_configured": credentials_configured,
         "trade_permission_requested": trade_permission_requested,
         "ready_to_enable": not blockers,
         "blockers": blockers,
         "account": selected,
-        "accounts": items,
+        "accounts": [selected],
         "signal_policy": {
             "source": "ai_monitor",
+            "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+            "ordinary_strategy_switch_independent": True,
             "new_signals_only": True,
             "require_entry_ready": True,
             "minimum_combined_score": 70,
@@ -668,6 +1202,8 @@ def _stable_quote_available(quote: Mapping[str, Any]) -> bool:
 def _stable_opportunity_contract(
     evidence: dict[str, Any],
     snapshot: OpportunityMarketSnapshot | None,
+    *,
+    recompute_current_gate: bool = False,
 ) -> dict[str, Any]:
     market_flow = dict(evidence.get("market_flow") or {})
     if snapshot is not None:
@@ -703,6 +1239,32 @@ def _stable_opportunity_contract(
         version.setdefault("feature", ai_monitor.MARKET_FEATURE_VERSION)
         version.setdefault("weights", ai_monitor.OPPORTUNITY_WEIGHTS_VERSION)
         version.setdefault("decision", ai_monitor.OPPORTUNITY_DECISION_VERSION)
+
+    if recompute_current_gate:
+        # Current opportunities may contain a gate snapshot written before
+        # Binance became the primary execution venue.  Re-apply the active
+        # policy to the latest stored market inputs so delayed/closed US cash
+        # references remain observations in record/score mode instead of
+        # incorrectly blocking a fresh Binance contract quote.  Frozen
+        # prediction/history responses deliberately skip this branch.
+        market_quality = dict(evidence.get("market_quality") or {})
+        signal_policy = dict(evidence.get("unusual_whales_policy") or {})
+        policy_mode = str(
+            signal_policy.get("effective_mode")
+            or market_quality.get("policy_mode")
+            or gate_summary.get("policy_mode")
+            or "record"
+        ).strip().lower()
+        if market_quality:
+            gate_summary = ai_monitor.stable_gate_summary(
+                market_quality,
+                market_flow,
+                evaluated_at=datetime.now(UTC),
+                policy_mode=policy_mode,
+            )
+            version["decision"] = gate_summary.get(
+                "decision_version", ai_monitor.OPPORTUNITY_DECISION_VERSION
+            )
 
     if not gate_summary:
         market_quality = dict(evidence.get("market_quality") or {})
@@ -820,6 +1382,7 @@ def _opportunity_out(
     live_market: dict[str, Any] | None = None,
     market_snapshot: OpportunityMarketSnapshot | None = None,
     spot_quote: dict[str, Any] | None = None,
+    enhanced_market: Mapping[str, Any] | None = None,
     *,
     use_frozen: bool = False,
 ) -> dict[str, Any]:
@@ -831,6 +1394,7 @@ def _opportunity_out(
     stable_contract = _stable_opportunity_contract(
         contract_evidence,
         market_snapshot if use_frozen else None,
+        recompute_current_gate=not use_frozen,
     )
     if market_snapshot is not None and not use_frozen:
         stable_contract["signal_snapshot"] = {
@@ -882,6 +1446,42 @@ def _opportunity_out(
         "expired": "expired",
         "dismissed": "dismissed",
     }.get(item.status, "candidate")
+    news_trigger = (
+        dict(contract_evidence.get("news_trigger") or {})
+        if isinstance(contract_evidence.get("news_trigger"), Mapping)
+        else {}
+    )
+    evidence_news = (
+        list(contract_evidence.get("news") or [])
+        if isinstance(contract_evidence.get("news"), list)
+        else []
+    )
+    related_news_ids = {
+        str(news_id)
+        for news_id in (item.news_ids_json or [])
+        if str(news_id)
+    }
+    related_news_ids.update(
+        str(news_item.get("id"))
+        for news_item in evidence_news
+        if isinstance(news_item, Mapping) and str(news_item.get("id") or "")
+    )
+    new_news_ids = {
+        str(news_id)
+        for news_id in (news_trigger.get("new_news_ids") or [])
+        if str(news_id)
+    }
+    price_comparison = _price_comparison_out(
+        live_market,
+        spot_quote,
+        enhanced_market,
+        direction=item.direction,
+        news_score=news_score,
+        news_count=len(related_news_ids),
+        new_news_count=len(new_news_ids),
+        reused_news_count=int(news_trigger.get("reused_news_count") or 0),
+        memory_window_hours=int(news_trigger.get("memory_window_hours") or 168),
+    )
     return {
         **stable_contract,
         "id": item.public_id,
@@ -934,6 +1534,8 @@ def _opportunity_out(
             else None
         ),
         "finnhub_spot_quote": dict(spot_quote or {}),
+        "binance_contract_quote": dict(price_comparison["sources"]["binance"]),
+        "price_comparison": price_comparison,
         "prediction_created_at": (
             _utc_out(prediction.predicted_at) if prediction is not None else None
         ),
@@ -1249,63 +1851,33 @@ def update_live_copy_status(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, Any]:
-    """Route only future entry-ready AI signals to one already-armed live account.
+    """Control the dedicated AI-monitor live execution domain.
 
-    This endpoint never arms an account and never sends an exchange order.  It
-    only publishes the signal-source switch consumed by the existing live
-    executor, whose position sizing, loss limits, idempotency, fill verification
-    and exchange-native stop/target protections remain authoritative.
+    The dedicated account and deployment are infrastructure adapters only; they
+    never evaluate or inherit the user's ordinary live strategies.  The endpoint
+    itself never sends an exchange order.  It only arms the isolated AI signal
+    source consumed by the live executor, whose loss limits, idempotency, fill
+    verification and exchange-native stop/target protections remain authoritative.
     """
 
     _require_expected_user(request, user)
     locked_user = db.scalar(select(User).where(User.id == user.id).with_for_update())
     if locked_user is None:
         raise HTTPException(status_code=404, detail="user not found")
-    accounts = db.scalars(
-        select(LiveTradingAccount)
-        .where(
-            LiveTradingAccount.user_id == user.id,
-            LiveTradingAccount.status != "archived",
-        )
-        .order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
-        .with_for_update()
-    ).all()
 
     if payload.enabled:
-        if not request.app.state.settings.binance_live_trading_enabled:
-            raise HTTPException(status_code=503, detail="服务器实盘交易总开关未开启")
         if not locked_user.binance_credentials_configured:
             raise HTTPException(status_code=409, detail="请先配置 Binance API 凭据")
         if not _binance_trade_permission_requested(locked_user):
             raise HTTPException(status_code=409, detail="Binance API 未申请 TRADE 权限")
-        if not payload.account_id:
-            raise HTTPException(status_code=409, detail="请选择已启用的实盘账户")
-        account = next(
-            (item for item in accounts if item.public_id == payload.account_id),
-            None,
-        )
-        if account is None:
-            raise HTTPException(status_code=404, detail="实盘账户不存在")
-        if account.status != "active":
-            raise HTTPException(
-                status_code=409,
-                detail="请先在实盘交易页完成预检并启用该账户",
-            )
         if (
-            payload.confirmation_name != account.name
+            payload.confirmation_name != _AI_MONITOR_LIVE_ACCOUNT_NAME
             or not payload.acknowledge_real_funds
         ):
             raise HTTPException(status_code=409, detail="实盘资金确认不匹配")
-        deployment = db.scalar(
-            select(StrategyDeployment.id).where(
-                StrategyDeployment.user_id == user.id,
-                StrategyDeployment.mode == "live",
-                StrategyDeployment.target_account_id == account.id,
-                StrategyDeployment.status == "running",
-            )
-        )
-        if deployment is None:
-            raise HTTPException(status_code=409, detail="实盘执行部署尚未运行")
+        if not tradfi_symbols():
+            raise HTTPException(status_code=503, detail="Binance TradFi 交易品种池为空")
+        account, deployment = _ensure_ai_monitor_live_account(db, locked_user)
         unresolved = db.scalar(
             select(func.count(LiveOrderIntent.id)).where(
                 LiveOrderIntent.user_id == user.id,
@@ -1318,45 +1890,56 @@ def update_live_copy_status(
                 status_code=409,
                 detail="存在状态未知的 Binance 订单，请先完成对账",
             )
-        for candidate in accounts:
+        legacy_accounts = db.scalars(
+            select(LiveTradingAccount)
+            .where(
+                LiveTradingAccount.user_id == user.id,
+                LiveTradingAccount.status != "archived",
+                LiveTradingAccount.id != account.id,
+            )
+            .with_for_update()
+        ).all()
+        for candidate in legacy_accounts:
             candidate_config = dict(candidate.config_json or {})
             candidate_config["ai_monitor_live_copy_enabled"] = False
-            if candidate.id == account.id:
-                candidate_config.update(
-                    {
-                        "signal_source": "ai_monitor",
-                        "ai_monitor_live_copy_enabled": True,
-                        "ai_monitor_live_copy_enabled_at": utcnow().isoformat(),
-                        "ai_monitor_live_signal_max_age_seconds": 300,
-                        "ai_monitor_live_min_combined_score": 70.0,
-                        "ai_monitor_live_require_entry_ready": True,
-                    }
-                )
+            if candidate_config.get("signal_source") == _AI_MONITOR_LIVE_SCOPE:
+                candidate_config["signal_source"] = "strategy"
             candidate.config_json = candidate_config
+        account_config = {
+            **_ai_monitor_live_config(enabled=True),
+            **dict(account.config_json or {}),
+            "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+            "signal_source": _AI_MONITOR_LIVE_SCOPE,
+            "ai_monitor_live_copy_enabled": True,
+            "ai_monitor_live_copy_enabled_at": utcnow().isoformat(),
+        }
+        account.config_json = account_config
+        account.status = "active"
+        account.credential_version = locked_user.binance_key_version
+        account.armed_at = utcnow()
+        account.last_error_code = None
+        deployment.status = "running"
+        deployment.started_at = deployment.started_at or utcnow()
+        deployment.last_error_code = None
         action = "ai_monitor.live_copy.enable"
         resource_id = account.public_id
         metadata = {
             "account_id": account.public_id,
+            "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+            "ordinary_strategy_switch_independent": True,
             "new_signals_only": True,
             "maximum_signal_age_seconds": 300,
             "minimum_combined_score": 70.0,
             "existing_risk_controls_preserved": True,
         }
     else:
-        account = next(
-            (
-                item
-                for item in accounts
-                if item.public_id == payload.account_id
-                or bool((item.config_json or {}).get("ai_monitor_live_copy_enabled"))
-            ),
-            None,
-        )
+        account = _ai_monitor_live_account(db, user.id, for_update=True)
         if account is not None:
             account_config = dict(account.config_json or {})
             account_config.update(
                 {
-                    "signal_source": "ai_monitor",
+                    "execution_scope": _AI_MONITOR_LIVE_SCOPE,
+                    "signal_source": _AI_MONITOR_LIVE_SCOPE,
                     "ai_monitor_live_copy_enabled": False,
                     "ai_monitor_live_copy_disabled_at": utcnow().isoformat(),
                 }
@@ -1374,6 +1957,7 @@ def update_live_copy_status(
     _audit(db, request, user.id, action, resource_id, metadata)
     db.commit()
     db.refresh(locked_user)
+    live_engine.start()
     return _live_copy_out(db, request, locked_user)
 
 
@@ -1919,6 +2503,7 @@ def opportunities(
     )
     live_tickers: dict[str, dict[str, Any]] = {}
     finnhub_spot_quotes: dict[str, dict[str, Any]] = {}
+    enhanced_market_features: dict[str, RealtimeMarketFeatureSnapshot] = {}
     if items:
         try:
             repository = MonitorRepository(
@@ -1933,6 +2518,11 @@ def opportunities(
         quote_service = getattr(request.app.state, "finnhub_us_quote_service", None)
         if isinstance(quote_service, FinnhubUsQuoteService) and quote_service.enabled:
             finnhub_spot_quotes = quote_service.latest_many(item.symbol for item in items)
+        enhanced_market_features = ai_monitor.latest_realtime_feature_snapshots(
+            db,
+            [item.symbol for item in items],
+        )
+    response_now = utcnow()
     return {
         "items": [
             _opportunity_out(
@@ -1943,7 +2533,21 @@ def opportunities(
                 finnhub_spot_quotes.get(
                     FinnhubUsQuoteService.normalize_symbol(item.symbol)
                 ),
-                use_frozen=include_expired,
+                ai_monitor.realtime_feature_payload(
+                    enhanced_market_features.get(item.symbol.strip().upper())
+                ),
+                # The frontend requests active and historical rows together so
+                # it can switch tabs without a second round-trip.  The query's
+                # ``include_expired`` flag must not freeze active candidates;
+                # only genuinely inactive/expired rows use their immutable
+                # signal-time market snapshot.
+                use_frozen=bool(
+                    include_expired
+                    and (
+                        item.status not in {"candidate", "discovered"}
+                        or item.expires_at <= response_now
+                    )
+                ),
             )
             for item in items
         ]

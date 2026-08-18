@@ -81,7 +81,7 @@ def configure(
 def start() -> None:
     global _started
     with _start_lock:
-        if _started or _settings is None or not _settings.binance_live_trading_enabled:
+        if _started or _settings is None:
             return
         _started = True
         threading.Thread(target=live_loop, daemon=True, name="binance-live").start()
@@ -270,6 +270,10 @@ def _execution_signal(
     config = account.get("config_json")
     config = config if isinstance(config, dict) else {}
     if str(config.get("signal_source") or "strategy") == "ai_monitor":
+        if str(config.get("execution_scope") or "") != "ai_monitor":
+            # Pre-isolation accounts may still carry the legacy AI source flag.
+            # Fail closed instead of resuming either AI or strategy entries.
+            return 0, None, [], None, {}
         return _ai_monitor_signal(account, symbol, price=price)
     return _strategy_signal(account, symbol)
 
@@ -307,6 +311,13 @@ def _active_accounts(account_id: int | None = None) -> list[dict[str, Any]]:
         account["config_json"] = _json_object(account.get("config_json"))
         account["strategy_snapshot_json"] = _json_object(account.get("strategy_snapshot_json"))
         account["deployment_mode"] = "live"
+        if (
+            _settings is not None
+            and not _settings.binance_live_trading_enabled
+            and str(account["config_json"].get("execution_scope") or "")
+            != "ai_monitor"
+        ):
+            continue
         accounts.append(account)
     return accounts
 
@@ -370,6 +381,13 @@ def _recovery_accounts() -> list[dict[str, Any]]:
         account["config_json"] = _json_object(account.get("config_json"))
         account["strategy_snapshot_json"] = _json_object(account.get("strategy_snapshot_json"))
         account["deployment_mode"] = "live"
+        if (
+            _settings is not None
+            and not _settings.binance_live_trading_enabled
+            and str(account["config_json"].get("execution_scope") or "")
+            != "ai_monitor"
+        ):
+            continue
         accounts.append(account)
     return accounts
 
@@ -2268,7 +2286,7 @@ def _recover_account(account: dict[str, Any]) -> None:
 
 
 def tick(account_id: int | None = None) -> None:
-    if _settings is None or not _settings.binance_live_trading_enabled:
+    if _settings is None:
         return
     with store.advisory_lock("quantdesk-binance-live-tick", 0) as acquired:
         if not acquired:

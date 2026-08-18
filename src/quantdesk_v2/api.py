@@ -2234,9 +2234,16 @@ def _live_account_record(
     )
     if account_id:
         query = query.where(LiveTradingAccount.public_id == account_id)
-    else:
-        query = query.order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
-    return db.scalar(query)
+    query = query.order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
+    return next(
+        (
+            account
+            for account in db.scalars(query).all()
+            if str((account.config_json or {}).get("execution_scope") or "")
+            != "ai_monitor"
+        ),
+        None,
+    )
 
 
 def _live_account_out(account: LiveTradingAccount, *, enabled: bool) -> dict[str, Any]:
@@ -2725,7 +2732,7 @@ def list_live_accounts(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    accounts = db.scalars(
+    account_rows = db.scalars(
         select(LiveTradingAccount)
         .where(
             LiveTradingAccount.user_id == user.id,
@@ -2733,6 +2740,12 @@ def list_live_accounts(
         )
         .order_by(LiveTradingAccount.created_at, LiveTradingAccount.id)
     ).all()
+    accounts = [
+        account
+        for account in account_rows
+        if str((account.config_json or {}).get("execution_scope") or "")
+        != "ai_monitor"
+    ]
     enabled = request.app.state.settings.binance_live_trading_enabled
     universe = tradfi_symbols()
     return {
@@ -2760,13 +2773,19 @@ def create_live_account(
         raise HTTPException(status_code=409, detail="configure Binance credentials first")
     if not _binance_permissions_include_trade(user):
         raise HTTPException(status_code=409, detail="Binance TRADE permission was not requested")
-    existing_count = db.scalar(
-        select(func.count(LiveTradingAccount.id)).where(
+    existing_accounts = db.scalars(
+        select(LiveTradingAccount).where(
             LiveTradingAccount.user_id == user.id,
             LiveTradingAccount.status != "archived",
         )
+    ).all()
+    existing_count = sum(
+        1
+        for account in existing_accounts
+        if str((account.config_json or {}).get("execution_scope") or "")
+        != "ai_monitor"
     )
-    if int(existing_count or 0) >= 10:
+    if existing_count >= 10:
         raise HTTPException(status_code=409, detail="live account limit reached")
     strategy = get_user_strategy(db, user.id, payload.strategy_id)
     if strategy is None or strategy.status != "active" or strategy.lifecycle_status != "published":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -18,6 +19,7 @@ def _account(*, enabled: bool = True) -> dict:
         "user_id": 7,
         "deployment_id": 11,
         "config_json": {
+            "execution_scope": "ai_monitor",
             "signal_source": "ai_monitor",
             "ai_monitor_live_copy_enabled": enabled,
             "ai_monitor_live_copy_enabled_at": "2026-08-17T09:59:00+00:00",
@@ -136,6 +138,57 @@ def test_ai_monitor_live_signal_expires_without_falling_back_to_strategy(
     assert live_engine._execution_signal(_account(), "AAPLUSDT")[0] == 0
 
 
+def test_legacy_strategy_account_cannot_consume_ai_monitor_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = _account()
+    legacy["config_json"].pop("execution_scope")
+    monkeypatch.setattr(
+        live_engine,
+        "_ai_monitor_signal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ordinary live strategy must not consume AI signals")
+        ),
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_strategy_signal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy AI source must fail closed, not resume strategy")
+        ),
+    )
+
+    assert live_engine._execution_signal(legacy, "AAPLUSDT") == (0, None, [], None, {})
+
+
+def test_independent_ai_account_runs_when_ordinary_live_server_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "id": 1,
+            "config_json": {"signal_source": "strategy"},
+            "strategy_snapshot_json": {},
+        },
+        {
+            "id": 2,
+            "config_json": {
+                "signal_source": "ai_monitor",
+                "execution_scope": "ai_monitor",
+            },
+            "strategy_snapshot_json": {},
+        },
+    ]
+    monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: rows)
+    monkeypatch.setattr(
+        live_engine,
+        "_settings",
+        SimpleNamespace(binance_live_trading_enabled=False),
+    )
+
+    assert [item["id"] for item in live_engine._active_accounts()] == [2]
+
+
 def test_ai_monitor_live_copy_ui_requires_modal_confirmation() -> None:
     frontend = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
     api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
@@ -145,7 +198,12 @@ def test_ai_monitor_live_copy_ui_requires_modal_confirmation() -> None:
     assert "acknowledge_real_funds" in frontend
     assert "只接收开启后生成" in frontend
     assert '@router.put("/live-copy")' in api
-    assert "account.status != \"active\"" in api
+    assert "_ensure_ai_monitor_live_account" in api
+    assert '"execution_scope": _AI_MONITOR_LIVE_SCOPE' in api
+    assert '"ordinary_strategy_switch_independent": True' in api
     assert "LiveOrderIntent.status == \"unknown\"" in api
     assert '"ai_monitor_live_copy_enabled_at": utcnow().isoformat()' in api
     assert '"existing_positions_closed": False' in api
+    assert "发现机会独立实盘跟单" in frontend
+    assert "不读取、不启停、不改写实盘交易页的其他策略" in frontend
+    assert 'href="/next/#/live"' not in frontend

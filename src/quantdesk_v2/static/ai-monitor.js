@@ -118,7 +118,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260817-38">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260818-41">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -159,10 +159,10 @@ class AiMonitorDashboard extends HTMLElement {
           <button class="live-copy-backdrop" type="button" data-live-copy-close aria-label="关闭实盘跟单设置"></button>
           <section class="live-copy-dialog" role="dialog" aria-modal="true" aria-labelledby="live-copy-title">
             <header>
-              <div><span>LIVE ORDER FOLLOWING</span><h2 id="live-copy-title">实盘跟单</h2><p>仅将开启后新产生、全部准入条件已满足的 AI 机会交给现有 Binance 实盘风控执行。</p></div>
+              <div><span>AI SIGNAL LIVE EXECUTION</span><h2 id="live-copy-title">发现机会独立实盘跟单</h2><p>只执行本页“发现机会”产生的新信号；独立于实盘交易页的其他策略、账户开关和部署状态。</p></div>
               <button type="button" data-live-copy-close aria-label="关闭实盘跟单设置">×</button>
             </header>
-            <div id="live-copy-body" class="live-copy-body"><div class="live-copy-loading">正在读取实盘账户与风控状态…</div></div>
+            <div id="live-copy-body" class="live-copy-body"><div class="live-copy-loading">正在读取 AI 机会独立执行域…</div></div>
           </section>
         </div>
         <section id="macro-market-panel" class="macro-market-panel" aria-label="美股宏观大盘环境">
@@ -443,6 +443,11 @@ class AiMonitorDashboard extends HTMLElement {
       this.toggleOpportunityDetails(detailButton);
     }, true);
     opportunityList.addEventListener("click", (event) => {
+      const marketFlowButton = event.target.closest("[data-market-flow-trend]");
+      if (marketFlowButton) {
+        this.openMarketFlowTrend(marketFlowButton.dataset.marketFlowTrend, marketFlowButton);
+        return;
+      }
       const scoreButton = event.target.closest("[data-score-trend]");
       if (scoreButton) {
         this.openScoreTrend(scoreButton.dataset.scoreTrend, scoreButton);
@@ -851,16 +856,16 @@ class AiMonitorDashboard extends HTMLElement {
     button.setAttribute("aria-pressed", enabled ? "true" : "false");
     button.disabled = loading;
     button.title = loading
-      ? "正在读取实盘跟单状态"
+      ? "正在读取 AI 机会独立跟单状态"
       : enabled
-      ? "AI 新信号正在接入实盘账户；点击查看或停止新开仓"
+      ? "本页 AI 新信号正在独立执行；点击查看或停止新开仓"
       : suspended
-      ? "跟单配置仍在，但实盘账户或服务器当前不可执行"
+      ? "独立跟单配置仍在，但 Binance 凭据或订单状态当前不可执行"
       : ready
-      ? "点击查看风控并确认开启实盘跟单"
-      : "当前不可开启；点击查看缺少的实盘条件";
+      ? "点击查看独立风控并确认开启实盘跟单"
+      : "当前不可开启；点击查看缺少的 Binance 执行条件";
     const label = button.querySelector("small");
-    if (label) label.textContent = loading ? "读取中" : enabled ? "真实资金 · 已开启" : suspended ? "账户不可执行" : ready ? "已关闭 · 可开启" : "已关闭";
+    if (label) label.textContent = loading ? "读取中" : enabled ? "独立域 · 已开启" : suspended ? "独立域暂停" : ready ? "独立域 · 可开启" : "独立域 · 未就绪";
   }
 
   async loadLiveCopyStatus({ quiet = false } = {}) {
@@ -894,14 +899,14 @@ class AiMonitorDashboard extends HTMLElement {
     if (!target) return;
     const status = this.state.liveCopy;
     if (!status) {
-      target.innerHTML = `<div class="live-copy-loading">正在读取实盘账户与风控状态…</div>`;
+      target.innerHTML = `<div class="live-copy-loading">正在读取 AI 机会独立执行域…</div>`;
       return;
     }
     const account = status.account || null;
     const risk = account?.risk || {};
     const blockers = Array.isArray(status.blockers) ? status.blockers : [];
     const riskMarkup = account ? `<section class="live-copy-account">
-      <header><div><span>执行账户</span><strong>${this.escape(account.name)}</strong><small>${account.status === "active" ? "已通过 Binance 预检并运行" : `账户状态：${this.escape(account.status)}`}</small></div><b class="${account.status === "active" ? "active" : "paused"}">${account.status === "active" ? "已启用" : "未启用"}</b></header>
+      <header><div><span>AI 机会独立执行域</span><strong>${this.escape(account.name)}</strong><small>${account.provisioned ? "独立账户与订单命名空间已建立" : "首次开启时自动建立；无需前往实盘交易页"}</small></div><b class="${account.status === "active" ? "active" : "paused"}">${account.status === "active" ? "运行中" : "独立待命"}</b></header>
       <dl>
         <div><dt>杠杆上限</dt><dd>${this.number(risk.leverage)}x</dd></div>
         <div><dt>最大持仓</dt><dd>${this.number(risk.max_positions)} 个</dd></div>
@@ -913,23 +918,25 @@ class AiMonitorDashboard extends HTMLElement {
         <div><dt>信号时效</dt><dd>${this.number(risk.signal_max_age_seconds)} 秒</dd></div>
       </dl>
     </section>` : "";
-    const guarantees = `<section class="live-copy-guarantees"><strong>执行边界</strong><ul><li>只接收开启后生成、入场条件全部通过的新信号</li><li>同一预测使用唯一订单键，重复刷新不会重复开仓</li><li>成交后必须建立交易所止损与止盈；保护失败会平仓并停机</li><li>关闭跟单只停止新开仓，不会擅自平掉已有持仓</li></ul></section>`;
+    const isolation = `<section class="live-copy-isolation"><span>ISOLATED SIGNAL SOURCE</span><strong>不读取、不启停、不改写实盘交易页的其他策略</strong><p>本执行域只消费“发现机会”信号，并维护独立的账户记录、部署状态、幂等订单键和风控快照。Binance API 凭据及交易所总权益仍属于同一用户账户。</p></section>`;
+    const guarantees = `<section class="live-copy-guarantees"><strong>执行边界</strong><ul><li>只接收开启后生成、入场条件全部通过的本页新信号</li><li>普通实盘策略暂停、启用或修改，不影响这里的跟单开关</li><li>同一预测使用唯一订单键，重复刷新不会重复开仓</li><li>成交后必须建立交易所止损与止盈；保护失败会平仓并停机</li><li>关闭跟单只停止新开仓，不会擅自平掉已有持仓</li></ul></section>`;
     if (status.enabled) {
-      target.innerHTML = `<div class="live-copy-danger"><span>REAL FUNDS ACTIVE</span><strong>实盘跟单已开启</strong><p>符合条件的新 AI 机会会由现有 Binance 实盘引擎自动提交订单。</p></div>${riskMarkup}${guarantees}<form class="live-copy-form" data-live-copy-mode="disable"><input type="hidden" name="account_id" value="${this.escape(account?.id || "")}"><div class="live-copy-disable-note">停止后不再开新仓；已有仓位的止损、止盈和退出管理继续运行。</div><button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>停止实盘跟单</button></form>`;
+      target.innerHTML = `<div class="live-copy-danger"><span>REAL FUNDS ACTIVE</span><strong>发现机会独立跟单已开启</strong><p>仅本页满足准入条件的新 AI 信号会自动提交 Binance 订单。</p></div>${isolation}${riskMarkup}${guarantees}<form class="live-copy-form" data-live-copy-mode="disable"><input type="hidden" name="account_id" value="${this.escape(account?.id || "")}"><div class="live-copy-disable-note">停止后不再开新仓；本执行域已有仓位的止损、止盈和退出管理继续运行。</div><button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>停止独立实盘跟单</button></form>`;
       return;
     }
     const blockerMarkup = blockers.length
-      ? `<section class="live-copy-blockers"><strong>开启前还需完成</strong>${blockers.map((item) => `<span>× ${this.escape(item)}</span>`).join("")}<a href="/next/#/live">前往实盘交易页</a></section>`
+      ? `<section class="live-copy-blockers"><strong>独立执行域尚缺少必要条件</strong>${blockers.map((item) => `<span>× ${this.escape(item)}</span>`).join("")}</section>`
       : "";
-    const enableForm = status.ready_to_enable && account?.status === "active"
+    const confirmationName = String(status.confirmation_name || account?.name || "AI发现机会独立跟单");
+    const enableForm = status.ready_to_enable
       ? `<form class="live-copy-form" data-live-copy-mode="enable">
-          <input type="hidden" name="account_id" value="${this.escape(account.id)}">
-          <label><span>输入实盘账户名称确认</span><input name="confirmation_name" autocomplete="off" required placeholder="请输入 ${this.escape(account.name)}"></label>
-          <label class="live-copy-ack"><input name="acknowledge_real_funds" type="checkbox" required><span>我确认系统会自动提交真实 Binance 订单，可能产生真实资金损失。</span></label>
-          <button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>确认开启实盘跟单</button>
+          <input type="hidden" name="account_id" value="${this.escape(account?.id || "")}">
+          <label><span>输入“${this.escape(confirmationName)}”确认</span><input name="confirmation_name" autocomplete="off" required placeholder="请输入 ${this.escape(confirmationName)}"></label>
+          <label class="live-copy-ack"><input name="acknowledge_real_funds" type="checkbox" required><span>我确认本页 AI 信号会通过独立执行域自动提交真实 Binance 订单，可能产生真实资金损失。</span></label>
+          <button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>确认开启独立实盘跟单</button>
         </form>`
       : "";
-    target.innerHTML = `<div class="live-copy-safe"><span>DEFAULT OFF</span><strong>实盘跟单当前关闭</strong><p>发现机会仍只记录预测；除非在这里明确确认，否则不会把 AI 信号提交给实盘引擎。</p></div>${riskMarkup}${blockerMarkup}${guarantees}${enableForm}`;
+    target.innerHTML = `<div class="live-copy-safe"><span>DEFAULT OFF</span><strong>发现机会独立跟单当前关闭</strong><p>本页仍只记录预测；开启后系统会自动建立独立执行域，不要求实盘交易页的其他策略处于启用状态。</p></div>${isolation}${riskMarkup}${blockerMarkup}${guarantees}${enableForm}`;
   }
 
   async submitLiveCopy(event) {
@@ -942,7 +949,7 @@ class AiMonitorDashboard extends HTMLElement {
     const payload = mode === "enable"
       ? {
           enabled: true,
-          account_id: String(data.get("account_id") || ""),
+          account_id: String(data.get("account_id") || "") || null,
           confirmation_name: String(data.get("confirmation_name") || ""),
           acknowledge_real_funds: data.get("acknowledge_real_funds") === "on",
         }
@@ -961,8 +968,8 @@ class AiMonitorDashboard extends HTMLElement {
       this.closeLiveCopyModal();
       this.showBanner(
         payload.enabled
-          ? "实盘跟单已开启：只处理开启后产生的新信号，订单继续受账户风控与保护单约束。"
-          : "实盘跟单已停止：不再开新仓，已有仓位的保护与退出管理保持有效。",
+          ? "发现机会独立跟单已开启：只处理本页开启后产生的新信号，不受其他实盘策略开关影响。"
+          : "发现机会独立跟单已停止：不再开新仓，已有仓位的保护与退出管理保持有效。",
         payload.enabled ? "error" : "success",
       );
     } catch (error) {
@@ -1967,6 +1974,23 @@ class AiMonitorDashboard extends HTMLElement {
       const parsed = Number(value);
       return Number.isFinite(parsed) ? parsed : null;
     };
+    const flowPoint = (point = {}, fallback = {}) => {
+      const snapshot = point?.market_flow_snapshot && typeof point.market_flow_snapshot === "object" ? point.market_flow_snapshot : {};
+      return {
+        market_flow: numeric(point?.market_flow, point?.components?.market_flow, snapshot.score, fallback.score),
+        main_force_ratio: numeric(snapshot.main_force_ratio, point?.main_force_ratio, fallback.main_force_ratio),
+        active_buy_ratio: numeric(snapshot.active_buy_ratio, point?.active_buy_ratio, fallback.active_buy_ratio),
+        book_imbalance: numeric(snapshot.book_imbalance, point?.book_imbalance, fallback.book_imbalance),
+        book_imbalance_5: numeric(snapshot.book_imbalance_5, point?.book_imbalance_5, fallback.book_imbalance_5),
+        bid_depth_notional: numeric(snapshot.bid_depth_notional, point?.bid_depth_notional, fallback.bid_depth_notional),
+        ask_depth_notional: numeric(snapshot.ask_depth_notional, point?.ask_depth_notional, fallback.ask_depth_notional),
+        bid_depth_notional_5: numeric(snapshot.bid_depth_notional_5, point?.bid_depth_notional_5, fallback.bid_depth_notional_5),
+        ask_depth_notional_5: numeric(snapshot.ask_depth_notional_5, point?.ask_depth_notional_5, fallback.ask_depth_notional_5),
+        bid_depth_change_30s_pct: numeric(snapshot.bid_depth_change_30s_pct, point?.bid_depth_change_30s_pct, fallback.bid_depth_change_30s_pct),
+        ask_depth_change_30s_pct: numeric(snapshot.ask_depth_change_30s_pct, point?.ask_depth_change_30s_pct, fallback.ask_depth_change_30s_pct),
+        data_quality: numeric(snapshot.data_quality, point?.data_quality, fallback.data_quality),
+      };
+    };
     const entryPoint = {
       calculated_at: item?.prediction_created_at,
       news: numeric(item?.prediction_news_score),
@@ -1985,7 +2009,7 @@ class AiMonitorDashboard extends HTMLElement {
       calculated_at: point?.calculated_at,
       news: numeric(point?.news, point?.components?.news),
       technical: numeric(point?.technical, point?.components?.technical),
-      market_flow: numeric(point?.market_flow, point?.components?.market_flow),
+      ...flowPoint(point),
       option_flow: numeric(point?.option_flow, point?.components?.option_flow),
       gex: numeric(point?.gex, point?.components?.gex),
       institutional: numeric(point?.institutional, point?.institutional_flow, point?.components?.institutional),
@@ -1993,11 +2017,12 @@ class AiMonitorDashboard extends HTMLElement {
       combined: numeric(point?.combined, point?.score),
     })).filter((point) => point.calculated_at && Number.isFinite(point.combined)));
     const snapshot = evidence.score_snapshot || {};
+    const fallbackFlow = { ...(evidence.market_flow || {}), ...stableFlow };
     const fallback = {
       calculated_at: snapshot.calculated_at || item?.updated_at || item?.discovered_at,
       news: numeric(snapshot.news, stableScores.news, item?.news_score),
       technical: numeric(snapshot.technical, stableScores.technical, item?.indicator_score),
-      market_flow: numeric(snapshot.market_flow, stableScores.market_flow, stableFlow.score, evidence.market_flow?.score),
+      ...flowPoint(snapshot, fallbackFlow),
       option_flow: numeric(snapshot.option_flow, stableScores.option_flow, stableFlow.option_flow?.score, item?.option_flow?.score, evidence.option_flow?.score),
       gex: numeric(snapshot.gex, stableScores.gex, item?.gex?.score, evidence.gex?.score),
       institutional: numeric(snapshot.institutional, snapshot.institutional_flow, stableScores.institutional_flow, stableFlow.institutional_flow?.score, item?.institutional_flow?.score, evidence.institutional_flow?.score),
@@ -2023,6 +2048,93 @@ class AiMonitorDashboard extends HTMLElement {
       arrow: direction === "up" ? "↑" : direction === "down" ? "↓" : "→",
       badge: previous ? `${delta > 0 ? "+" : ""}${delta.toFixed(1)}` : "首个点",
     };
+  }
+
+  marketFlowTrendState(history) {
+    const points = history.filter((point) => Number.isFinite(point.market_flow));
+    const latest = points.at(-1);
+    const previous = points.at(-2);
+    const delta = latest && previous ? latest.market_flow - previous.market_flow : 0;
+    const direction = delta > 0.05 ? "up" : delta < -0.05 ? "down" : "flat";
+    const totalDepth = (point) => {
+      if (!point) return null;
+      const bid = Number(point.bid_depth_notional);
+      const ask = Number(point.ask_depth_notional);
+      if (!Number.isFinite(bid) && !Number.isFinite(ask)) return null;
+      return (Number.isFinite(bid) ? bid : 0) + (Number.isFinite(ask) ? ask : 0);
+    };
+    const latestDepth = totalDepth(latest);
+    const previousDepth = totalDepth(previous);
+    const depthDeltaPct = latestDepth != null && previousDepth > 0 ? (latestDepth / previousDepth - 1) * 100 : null;
+    return {
+      points,
+      latest,
+      previous,
+      delta,
+      direction,
+      arrow: direction === "up" ? "↑" : direction === "down" ? "↓" : "→",
+      badge: previous ? `${delta > 0 ? "+" : ""}${delta.toFixed(1)}` : "首个点",
+      latestDepth,
+      depthDeltaPct,
+    };
+  }
+
+  renderMarketFlowTrendChart(item, history) {
+    const state = this.marketFlowTrendState(history);
+    if (!state.points.length) return '<div class="score-trend-empty">暂无资金盘口历史，下一轮机会扫描后开始记录。</div>';
+    const width = 920;
+    const scoreHeight = 245;
+    const amountHeight = 250;
+    const padding = { left: 58, right: 24, top: 20, bottom: 42 };
+    const scoreWidth = width - padding.left - padding.right;
+    const scoreChartHeight = scoreHeight - padding.top - padding.bottom;
+    const x = (index, length) => padding.left + (length === 1 ? scoreWidth / 2 : scoreWidth * index / (length - 1));
+    const scoreY = (value) => padding.top + scoreChartHeight * (1 - Math.max(0, Math.min(100, Number(value))) / 100);
+    const scoreGrid = [0, 25, 50, 75, 100].map((value) => `<g><line x1="${padding.left}" y1="${scoreY(value)}" x2="${width - padding.right}" y2="${scoreY(value)}"></line><text x="${padding.left - 10}" y="${scoreY(value) + 4}">${value}</text></g>`).join("");
+    const scoreLine = state.points.map((point, index) => `${x(index, state.points.length).toFixed(2)},${scoreY(point.market_flow).toFixed(2)}`).join(" ");
+    const scoreDots = state.points.map((point, index) => `<circle cx="${x(index, state.points.length).toFixed(2)}" cy="${scoreY(point.market_flow).toFixed(2)}" r="4"><title>${this.escape(this.formatDate(point.calculated_at))} · 盘口评分 ${point.market_flow.toFixed(1)}</title></circle>`).join("");
+    const scoreLabels = [0, Math.floor((state.points.length - 1) / 2), state.points.length - 1].filter((value, index, values) => values.indexOf(value) === index).map((index, position, values) => `<text class="score-time-label" x="${x(index, state.points.length)}" y="${scoreHeight - 12}" text-anchor="${position === 0 ? "start" : position === values.length - 1 ? "end" : "middle"}">${this.escape(this.formatDate(state.points[index].calculated_at))}</text>`).join("");
+    const amountPoints = history.filter((point) => Number.isFinite(point.bid_depth_notional) || Number.isFinite(point.ask_depth_notional));
+    const amounts = amountPoints.flatMap((point) => [point.bid_depth_notional, point.ask_depth_notional]).filter(Number.isFinite);
+    const amountMinRaw = amounts.length ? Math.min(...amounts) : 0;
+    const amountMaxRaw = amounts.length ? Math.max(...amounts) : 0;
+    const amountSpan = Math.max(amountMaxRaw - amountMinRaw, Math.abs(amountMaxRaw) * 0.08, 1);
+    const amountMin = Math.max(0, amountMinRaw - amountSpan * 0.08);
+    const amountMax = amountMaxRaw + amountSpan * 0.08;
+    const amountChartHeight = amountHeight - padding.top - padding.bottom;
+    const amountY = (value) => padding.top + amountChartHeight * (1 - (Number(value) - amountMin) / Math.max(amountMax - amountMin, 1));
+    const amountGridValues = [amountMin, (amountMin + amountMax) / 2, amountMax];
+    const amountGrid = amountGridValues.map((value) => `<g><line x1="${padding.left}" y1="${amountY(value)}" x2="${width - padding.right}" y2="${amountY(value)}"></line><text x="${padding.left - 10}" y="${amountY(value) + 4}">${this.escape(this.compactNumber(value))}</text></g>`).join("");
+    const amountLine = (key, className) => {
+      const points = amountPoints.map((point, index) => Number.isFinite(point[key]) ? `${x(index, amountPoints.length).toFixed(2)},${amountY(point[key]).toFixed(2)}` : "").filter(Boolean).join(" ");
+      return points ? `<g class="score-line ${className}"><polyline points="${points}"></polyline></g>` : "";
+    };
+    const amountLabels = amountPoints.length ? [0, Math.floor((amountPoints.length - 1) / 2), amountPoints.length - 1].filter((value, index, values) => values.indexOf(value) === index).map((index, position, values) => `<text class="score-time-label" x="${x(index, amountPoints.length)}" y="${amountHeight - 12}" text-anchor="${position === 0 ? "start" : position === values.length - 1 ? "end" : "middle"}">${this.escape(this.formatDate(amountPoints[index].calculated_at))}</text>`).join("") : "";
+    const scoreValues = state.points.map((point) => point.market_flow);
+    const latest = state.latest;
+    const bias = latest.market_flow >= 55 ? "买方偏强" : latest.market_flow <= 45 ? "卖方偏强" : "资金中性";
+    const latestBid = Number.isFinite(latest.bid_depth_notional) ? this.compactNumber(latest.bid_depth_notional) : "--";
+    const latestAsk = Number.isFinite(latest.ask_depth_notional) ? this.compactNumber(latest.ask_depth_notional) : "--";
+    const rows = state.points.map((point, index) => {
+      const previous = state.points[index - 1];
+      const delta = previous ? point.market_flow - previous.market_flow : null;
+      const deltaClass = delta == null || Math.abs(delta) <= 0.05 ? "flat" : delta > 0 ? "up" : "down";
+      const percentage = (value) => Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "--";
+      return { point, delta, deltaClass, percentage };
+    }).slice(-12).reverse().map(({ point, delta, deltaClass, percentage }) => `<tr><td>${this.escape(this.formatDate(point.calculated_at))}</td><td>${point.market_flow.toFixed(1)}</td><td class="${deltaClass}">${delta == null ? "--" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)}`}</td><td>${Number.isFinite(point.bid_depth_notional) ? this.escape(this.compactNumber(point.bid_depth_notional)) : "--"}</td><td>${Number.isFinite(point.ask_depth_notional) ? this.escape(this.compactNumber(point.ask_depth_notional)) : "--"}</td><td>${Number.isFinite(point.main_force_ratio) ? point.main_force_ratio.toFixed(3) : "--"}</td><td>${percentage(point.active_buy_ratio)}</td><td>${Number.isFinite(point.bid_depth_change_30s_pct) ? `${point.bid_depth_change_30s_pct.toFixed(1)}%` : "--"} / ${Number.isFinite(point.ask_depth_change_30s_pct) ? `${point.ask_depth_change_30s_pct.toFixed(1)}%` : "--"}</td></tr>`).join("");
+    const amountChart = amountPoints.length
+      ? `<section class="score-trend-chart-panel market-flow-amount-panel"><header><div><strong>买卖盘名义资金量变化</strong><small>当前扫描保存的前 100 档名义金额；不同时间点同口径比较</small></div><div class="score-trend-legend"><span class="bid-depth"><i></i>买方深度</span><span class="ask-depth"><i></i>卖方深度</span></div></header><svg class="score-trend-chart" viewBox="0 0 ${width} ${amountHeight}" role="img" aria-label="${this.escape(item.symbol)} 买卖盘名义资金量走势"><g class="score-grid">${amountGrid}</g>${amountLine("bid_depth_notional", "bid-depth")}${amountLine("ask_depth_notional", "ask-depth")}${amountLabels}</svg></section>`
+      : '<section class="market-flow-amount-empty"><strong>资金量历史尚在积累</strong><span>已有盘口强弱评分；买卖盘名义金额会从下一轮扫描开始逐点保存，不会用当前快照伪造历史。</span></section>';
+    return `<section class="score-trend-summary market-flow-summary">
+        <article><span>当前盘口评分</span><b>${latest.market_flow.toFixed(1)}</b><small>${this.escape(this.formatDate(latest.calculated_at))}</small></article>
+        <article class="${state.direction}"><span>较上次</span><b>${state.arrow} ${state.badge}</b><small>${state.points.length} 个资金扫描点</small></article>
+        <article><span>区间最高 / 最低</span><b>${Math.max(...scoreValues).toFixed(1)} / ${Math.min(...scoreValues).toFixed(1)}</b><small>仅当前机会生命周期</small></article>
+        <article><span>买方 / 卖方深度</span><b>${this.escape(latestBid)} / ${this.escape(latestAsk)}</b><small>${state.depthDeltaPct == null ? "较上次暂无可比数据" : `总深度较上次 ${state.depthDeltaPct >= 0 ? "+" : ""}${state.depthDeltaPct.toFixed(1)}%`}</small></article>
+        <article><span>资金方向</span><b>${bias}</b><small>主力量比 ${Number.isFinite(latest.main_force_ratio) ? latest.main_force_ratio.toFixed(3) : "--"}</small></article>
+      </section>
+      <section class="score-trend-chart-panel market-flow-score-panel"><header><div><strong>资金盘口强度走势</strong><small>纵轴 0–100 分；50 为中性，越高表示越支持当前预测方向</small></div><div class="score-trend-legend"><span class="market_flow"><i></i>资金盘口评分</span></div></header><svg class="score-trend-chart" viewBox="0 0 ${width} ${scoreHeight}" role="img" aria-label="${this.escape(item.symbol)} 资金盘口评分走势"><g class="score-grid">${scoreGrid}</g><g class="score-threshold neutral"><line x1="${padding.left}" y1="${scoreY(50)}" x2="${width - padding.right}" y2="${scoreY(50)}"></line><text x="${width - padding.right - 4}" y="${scoreY(50) - 6}">中性线 50</text></g><g class="score-line market_flow"><polyline points="${scoreLine}"></polyline>${scoreDots}</g>${scoreLabels}</svg></section>
+      ${amountChart}
+      <section class="score-trend-ledger market-flow-ledger"><header><strong>最近资金盘口明细</strong><small>评分是方向强度，不等同于资金金额；金额为 Binance 合约可见盘口名义值</small></header><div><table><thead><tr><th>计算时间</th><th>盘口评分</th><th>变化</th><th>买方深度</th><th>卖方深度</th><th>主力量比</th><th>主动买入</th><th>30秒挂单增速 买/卖</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   }
 
   renderScoreTrendChart(item, history) {
@@ -2092,6 +2204,24 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#score-trend-title").textContent = `${item.symbol} · 组合评分走势`;
     this.q("#score-trend-subtitle").textContent = `${item.contract_symbol} · ${item.timeframe} 周期 · ${history.length} 个扫描点`;
     this.q("#score-trend-body").innerHTML = this.renderScoreTrendChart(item, history);
+    this.q(".score-trend-foot").innerHTML = "<span>当前机会评分随扫描更新</span><strong>预测入场评分保持冻结</strong>";
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.q("#score-trend-close").focus({ preventScroll: true });
+  }
+
+  openMarketFlowTrend(opportunityId, trigger) {
+    const item = this.state.opportunities.find((opportunity) => opportunity.id === opportunityId);
+    if (!item) return;
+    const history = this.opportunityScoreHistory(item);
+    const state = this.marketFlowTrendState(history);
+    const modal = this.q("#score-trend-modal");
+    this.scoreTrendOpportunity = item;
+    this.scoreTrendFocus = trigger || null;
+    this.q("#score-trend-title").textContent = `${item.symbol} · 资金盘口变化`;
+    this.q("#score-trend-subtitle").textContent = `${item.contract_symbol} · ${item.timeframe} 周期 · ${state.points.length} 个资金扫描点`;
+    this.q("#score-trend-body").innerHTML = this.renderMarketFlowTrendChart(item, history);
+    this.q(".score-trend-foot").innerHTML = "<span>盘口评分与买卖盘名义资金量随扫描更新</span><strong>不把评分冒充真实资金金额</strong>";
     modal.classList.remove("hidden");
     modal.setAttribute("aria-hidden", "false");
     this.q("#score-trend-close").focus({ preventScroll: true });
@@ -2112,9 +2242,14 @@ class AiMonitorDashboard extends HTMLElement {
     const evidence = item?.evidence || {};
     const frozenGate = item?.prediction_entry_gate;
     const liveGate = evidence.virtual_entry_gate;
+    const stableGate = item?.gate_summary && typeof item.gate_summary === "object" ? item.gate_summary : null;
+    const hasCurrentDecisionChecks = stableGate
+      && stableGate.decision_checks
+      && typeof stableGate.decision_checks === "object"
+      && Object.keys(stableGate.decision_checks).length > 0;
     const source = frozenGate && Array.isArray(frozenGate.checks)
       ? frozenGate
-      : liveGate && Array.isArray(liveGate.checks)
+      : !hasCurrentDecisionChecks && liveGate && Array.isArray(liveGate.checks)
       ? liveGate
       : null;
     if (source) return { ...source, frozen: source === frozenGate };
@@ -2127,13 +2262,19 @@ class AiMonitorDashboard extends HTMLElement {
     const newsScore = Number(this.firstValue(item?.news_score, scores.news, 0));
     const indicatorScore = Number(this.firstValue(item?.indicator_score, scores.technical, 0));
     const combinedScore = Number(this.firstValue(item?.combined_score, scores.combined, 0));
-    const entryPrice = Number(this.firstValue(item?.prediction_entry_price, market.price, snapshot.quote.price, snapshot.quote.last_price, 0));
+    const entryPrice = Number(this.firstValue(
+      item?.prediction_entry_price,
+      item?.binance_contract_quote?.price,
+      market.price,
+      snapshot.quote.price,
+      snapshot.quote.last_price,
+      0,
+    ));
     const minimumNewsScore = Number(config.minimum_news_confidence ?? 0.6) * 100;
     const minimumIndicatorScore = Number(config.minimum_indicator_score ?? 65);
     const minimumCombinedScore = Number(config.minimum_combined_score ?? 75);
     const trigger = evidence.news_trigger || {};
     const marketQuality = evidence.market_quality || {};
-    const stableGate = item?.gate_summary && typeof item.gate_summary === "object" ? item.gate_summary : null;
     const gateLabels = {
       price_available: ["实时价格", "必须取得有效参考价格"],
       ticker_fresh: ["行情时效", "实时行情必须在允许延迟内"],
@@ -2147,8 +2288,9 @@ class AiMonitorDashboard extends HTMLElement {
       event_window_clear: ["事件窗口", "不得处于高影响事件窗口"],
       directional_conflict_clear: ["盘口冲突", "资金方向不得与候选方向强冲突"],
     };
+    const stableChecksSource = stableGate?.decision_checks || stableGate?.checks || {};
     const stableChecks = stableGate
-      ? Object.entries(stableGate.checks || {}).map(([key, value]) => ({
+      ? Object.entries(stableChecksSource).map(([key, value]) => ({
           key,
           label: gateLabels[key]?.[0] || key,
           passed: value === true,
@@ -2484,12 +2626,13 @@ class AiMonitorDashboard extends HTMLElement {
           // 行情流会频繁改变评分。只更新评分按钮，保留头部交互按钮的 DOM 身份，
           // 否则按钮会在 pointerdown/click 之间被替换，表现为偶发“点击无反应”。
           syncAttributes(currentSection, nextSection);
-          const currentScore = currentSection.querySelector("[data-score-trend]");
-          const nextScore = nextSection.querySelector("[data-score-trend]");
-          if (currentScore && nextScore) {
+          ["[data-market-flow-trend]", "[data-score-trend]"].forEach((selector) => {
+            const currentScore = currentSection.querySelector(selector);
+            const nextScore = nextSection.querySelector(selector);
+            if (!currentScore || !nextScore) return;
             syncAttributes(currentScore, nextScore);
             currentScore.replaceChildren(...nextScore.childNodes);
-          }
+          });
           return;
         }
         syncAttributes(currentSection, nextSection);
@@ -2571,8 +2714,11 @@ class AiMonitorDashboard extends HTMLElement {
       const indicatorRemainder = indicatorItems.length > 6 ? `<span class="evidence-chip remainder">另有 ${indicatorItems.length - 6} 项</span>` : "";
       const news = (evidence.news || []).slice(0, 2).map((entry) => `<li><time>${this.formatUnix(entry.ts)}</time><span>${this.escape(entry.title)}</span><b>${Math.round(Number(entry.score || 0) * 100)}%</b></li>`).join("");
       const market = evidence.market || {};
-      const finnhubSpot = item.finnhub_spot_quote || {};
-      const finnhubSpotAvailable = finnhubSpot.available === true && Number(finnhubSpot.price) > 0;
+      const priceComparison = item.price_comparison || {};
+      const priceSources = priceComparison.sources || {};
+      const binanceQuote = priceSources.binance || item.binance_contract_quote || {};
+      const finnhubSpot = priceSources.finnhub || item.finnhub_spot_quote || {};
+      const unusualWhalesQuote = priceSources.unusual_whales || {};
       const marketEnvironment = evidence.market_environment || evidence.score_snapshot?.macro_market || {};
       const macroSnapshot = evidence.macro_market_snapshot || {};
       const macroIndices = Object.fromEntries((macroSnapshot.indices || []).map((entry) => [entry.key, entry]));
@@ -2638,6 +2784,15 @@ class AiMonitorDashboard extends HTMLElement {
         : ` · 入场 ${Number(frozenCombinedScore).toFixed(1)}`;
       const scoreHistory = this.opportunityScoreHistory(item);
       const scoreTrend = this.scoreTrendState(scoreHistory);
+      const marketFlowTrend = this.marketFlowTrendState(scoreHistory);
+      const currentFlow = { ...(evidence.market_flow || {}), ...(item.flow || {}) };
+      const displayedMarketFlowScore = Number(this.firstValue(marketFlowTrend.latest?.market_flow, item.score_components?.market_flow, currentFlow.score));
+      const marketFlowBidDepth = this.firstValue(marketFlowTrend.latest?.bid_depth_notional, currentFlow.bid_depth_notional);
+      const marketFlowAskDepth = this.firstValue(marketFlowTrend.latest?.ask_depth_notional, currentFlow.ask_depth_notional);
+      const marketFlowDepthLabel = Number.isFinite(Number(marketFlowBidDepth)) || Number.isFinite(Number(marketFlowAskDepth))
+        ? `买 ${Number.isFinite(Number(marketFlowBidDepth)) ? this.compactNumber(Number(marketFlowBidDepth)) : "--"} · 卖 ${Number.isFinite(Number(marketFlowAskDepth)) ? this.compactNumber(Number(marketFlowAskDepth)) : "--"}`
+        : "等待资金量快照";
+      const marketFlowControl = `<button class="market-flow-score ${marketFlowTrend.direction}" type="button" data-market-flow-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 资金盘口变化走势"><span>资金盘口</span><strong><i>${marketFlowTrend.arrow}</i>${Number.isFinite(displayedMarketFlowScore) ? displayedMarketFlowScore.toFixed(1) : "--"}</strong><small>${this.escape(marketFlowDepthLabel)}</small><em>${marketFlowTrend.badge}</em></button>`;
       const displayedCombinedScore = Number(this.firstValue(item.combined_score, item.score_components?.combined));
       const displayedNewsScore = Number(this.firstValue(item.news_score, item.score_components?.news));
       const displayedIndicatorScore = Number(this.firstValue(item.indicator_score, item.score_components?.technical));
@@ -2661,7 +2816,7 @@ class AiMonitorDashboard extends HTMLElement {
         return `<span class="virtual-entry-check ${check.passed ? "passed" : check.current == null ? "missing" : "blocked"}" title="${this.escape(check.detail || "")}"><i>${check.passed ? "✓" : check.current == null ? "--" : "×"}</i><em>${this.escape(check.label)}</em><b>${this.escape(current)}</b><small>${check.source === "stable_gate_summary" || ["market_flow_conflict", "indicator_policy", "new_news_trigger", "market_quality"].includes(check.key) ? "" : `门槛 ${this.escape(required)}`}</small></span>`;
       }).join("");
       const triggerPriceValue = Number(item.prediction_entry_price || 0);
-      const liveReferencePrice = Number(entryGate.reference_price ?? market.price ?? 0);
+      const liveReferencePrice = Number(binanceQuote.price ?? entryGate.reference_price ?? market.price ?? 0);
       const displayedEntryPrice = triggerPriceValue > 0 ? triggerPriceValue : liveReferencePrice;
       const entryPriceLabel = triggerPriceValue > 0 ? "冻结触发价格" : "当前参考价 · 未冻结";
       const entryTime = item.prediction_created_at || entryGate.checked_at;
@@ -2752,11 +2907,73 @@ class AiMonitorDashboard extends HTMLElement {
         : `<button class="opportunity-symbol unavailable" type="button" disabled title="该股票暂无对应的合约技术行情">${this.escape(item.symbol)}</button>`;
       const conclusionControl = `<button class="ai-conclusion-trigger" type="button" data-ai-conclusion="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 的 AI 分析结论">AI分析结论</button>`;
       const detailControl = `<button class="opportunity-detail-toggle" type="button" data-toggle-opportunity-details="${this.escape(item.id)}" aria-expanded="${expanded}">${expanded ? "收起详情 <i>⌃</i>" : "展开详情 <i>⌄</i>"}</button>`;
-      const finnhubSpotControl = finnhubSpotAvailable
-        ? `<span class="finnhub-spot-badge ${finnhubSpot.stale ? "stale" : "live"}" title="Finnhub 美股现货最新入库快照 · ${this.formatDate(finnhubSpot.fetched_at)}"><i>FH</i><b>${this.escape(this.compactNumber(Number(finnhubSpot.price)))}</b><small>${finnhubSpot.stale ? "最近入库" : "现货"}</small></span>`
+      const providerQuoteBadge = (source, tone, liveLabel) => source?.available && Number(source.price) > 0
+        ? `<span class="provider-quote-badge ${tone} ${source.fresh ? "live" : "stale"}" title="${this.escape(liveLabel)} · ${source.fresh ? "新鲜" : "延迟/休市"} · ${this.formatDate(source.observed_at)}"><i>${this.escape(source.label || "--")}</i><b>${this.escape(this.compactNumber(Number(source.price)))}</b><small>${source.fresh ? "实时" : "延迟"}</small></span>`
         : "";
+      const binancePriceControl = providerQuoteBadge(binanceQuote, "binance", "Binance 映射合约执行参考价");
+      const finnhubSpotControl = providerQuoteBadge(finnhubSpot, "finnhub", "Finnhub 美股现货参考价");
+      const unusualWhalesControl = providerQuoteBadge(unusualWhalesQuote, "unusual-whales", "Unusual Whales 美股 NBBO/成交参考价");
+      const finiteComparisonValue = (value) => value != null && value !== "" && Number.isFinite(Number(value))
+        ? Number(value)
+        : null;
+      const basisBps = finiteComparisonValue(priceComparison.basis_bps);
+      const snapshotGapBps = finiteComparisonValue(priceComparison.snapshot_gap_bps);
+      const previousCloseGapBps = finiteComparisonValue(priceComparison.previous_close_gap_bps);
+      const providerDivergenceBps = finiteComparisonValue(priceComparison.provider_divergence_bps);
+      const liveBasisMode = priceComparison.comparable === true;
+      const openingForecast = priceComparison.opening_forecast || {};
+      const forecastDirection = String(openingForecast.direction || "neutral");
+      const relatedNewsCount = Math.max(0, Number(openingForecast.related_news_count ?? openingForecast.news_count ?? item.news_ids?.length ?? evidence.news?.length ?? 0));
+      const newNewsCount = Math.max(0, Number(openingForecast.new_news_count ?? newsTrigger.new_news_ids?.length ?? 0));
+      const reusedNewsCount = Math.max(0, Number(openingForecast.reused_news_count ?? newsTrigger.reused_news_count ?? 0));
+      const memoryWindowHours = Math.max(1, Number(openingForecast.memory_window_hours ?? newsTrigger.memory_window_hours ?? 168));
+      const memoryWindowLabel = memoryWindowHours % 24 === 0 ? `${memoryWindowHours / 24} 天` : `${memoryWindowHours} 小时`;
+      const displayedGapBps = liveBasisMode ? basisBps : snapshotGapBps ?? previousCloseGapBps;
+      const displayedReferencePrice = liveBasisMode
+        ? finiteComparisonValue(priceComparison.reference_price)
+        : finiteComparisonValue(priceComparison.snapshot_reference_price) ?? finiteComparisonValue(priceComparison.previous_close_price);
+      const basisState = String(priceComparison.state || "reference_unavailable");
+      const basisStateLabel = basisState === "spread_watch"
+        ? "价差观察"
+        : basisState === "aligned"
+        ? "价格接近"
+        : basisState === "opening_gap_watch"
+        ? "跨时段预判"
+        : basisState === "execution_unavailable"
+        ? "执行价缺失"
+        : "参考价缺失";
+      const livePairDirection = priceComparison.pair_direction === "short_binance_long_spot"
+        ? "BN 偏高：空合约 / 多现货"
+        : priceComparison.pair_direction === "long_binance_short_spot"
+        ? "BN 偏低：多合约 / 空现货"
+        : "价差在观察阈值内";
+      const forecastLabel = openingForecast.label === "bearish_open"
+        ? `偏空开盘 · ${Number(openingForecast.confidence || 0).toFixed(0)}分`
+        : openingForecast.label === "bullish_open"
+        ? `偏多开盘 · ${Number(openingForecast.confidence || 0).toFixed(0)}分`
+        : openingForecast.available
+        ? "中性观察"
+        : "等待参考快照";
+      const comparisonConclusion = liveBasisMode ? livePairDirection : forecastLabel;
+      const gapLabel = liveBasisMode ? "BN / 实时现货基差" : "BN / 最近现货差";
+      const referenceLabel = liveBasisMode ? "实时现货参考" : "最近现货快照";
+      const divergenceSuffix = priceComparison.provider_divergence_mode === "snapshot" ? " · 快照" : "";
+      const basisExplanation = liveBasisMode
+        ? "实时多源报价仅用于基差观察；只有两端均可执行时才具备套利研究意义"
+        : openingForecast.available
+        ? `${newNewsCount > 0 ? `本轮新增 ${newNewsCount} 条` : "本轮没有新增新闻"} · 当前机会关联 ${relatedNewsCount} 条${reusedNewsCount > 0 ? `（沿用 ${reusedNewsCount} 条）` : ""} · ${memoryWindowLabel} AI 记忆用于新新闻回溯；${openingForecast.gap_aligned ? "价格与新闻方向共振" : "价格与新闻方向未共振"}。这是开盘概率预判，不是无风险套利`
+        : "缺少可用现货快照或新闻方向，暂不生成开盘缺口预判";
+      const basisPanel = `<section class="cross-venue-basis ${this.escape(basisState)} forecast-${this.escape(forecastDirection)}" data-patch-key="price-comparison" aria-label="跨市场价格比对与开盘预判">
+        <strong><i>${liveBasisMode ? "LIVE BASIS" : "OPEN GAP"}</i>${this.escape(basisStateLabel)}</strong>
+        <span><em>${gapLabel}</em><b>${displayedGapBps == null ? "--" : `${displayedGapBps >= 0 ? "+" : ""}${displayedGapBps.toFixed(1)} bps`}</b><small>${!liveBasisMode && previousCloseGapBps != null ? `BN / 昨收 ${previousCloseGapBps >= 0 ? "+" : ""}${previousCloseGapBps.toFixed(1)} bps` : ""}</small></span>
+        <span><em>${referenceLabel}</em><b>${displayedReferencePrice == null ? "--" : this.escape(this.compactNumber(displayedReferencePrice))}</b><small>${!liveBasisMode && priceComparison.previous_close_price ? `昨收 ${this.escape(this.compactNumber(Number(priceComparison.previous_close_price)))}` : ""}</small></span>
+        <span><em>FH / UW 分歧${divergenceSuffix}</em><b>${providerDivergenceBps == null ? "--" : `${providerDivergenceBps.toFixed(1)} bps`}</b></span>
+        <span class="basis-direction"><em>${liveBasisMode ? "配对观察" : "开盘预判"}</em><b>${this.escape(comparisonConclusion)}</b></span>
+        <small>${this.escape(basisExplanation)}</small>
+      </section>`;
       return `<article class="opportunity-item ${this.escape(item.status)} state-${this.escape(entryState.tone)} ${expanded ? "is-expanded" : ""} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}" data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:${historicalTab ? "history" : "current"}">
-        <header data-patch-key="header"><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${finnhubSpotControl}${detailControl}${conclusionControl}</div><button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
+        <header data-patch-key="header"><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${detailControl}${conclusionControl}</div>${marketFlowControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
+        ${basisPanel}
         ${virtualEntryPanel}
         ${macroReference}
         ${this.opportunityFeatureMarkup(item)}
@@ -2779,6 +2996,11 @@ class AiMonitorDashboard extends HTMLElement {
     }
     const evidence = item.evidence || {};
     const newsItems = Array.isArray(evidence.news) ? evidence.news : [];
+    const newsTrigger = evidence.news_trigger && typeof evidence.news_trigger === "object" ? evidence.news_trigger : {};
+    const relatedNewsCount = Math.max(newsItems.length, Array.isArray(item.news_ids) ? item.news_ids.length : 0);
+    const newNewsCount = Array.isArray(newsTrigger.new_news_ids) ? newsTrigger.new_news_ids.length : 0;
+    const memoryWindowHours = Math.max(1, Number(newsTrigger.memory_window_hours || 168));
+    const memoryWindowLabel = memoryWindowHours % 24 === 0 ? `${memoryWindowHours / 24} 天` : `${memoryWindowHours} 小时`;
     const indicatorItems = Array.isArray(evidence.indicators) ? evidence.indicators : [];
     const legacyMarketFlow = evidence.market_flow && typeof evidence.market_flow === "object" ? evidence.market_flow : {};
     const marketFlow = { ...legacyMarketFlow, ...(item?.flow && typeof item.flow === "object" ? item.flow : {}) };
@@ -2840,6 +3062,12 @@ class AiMonitorDashboard extends HTMLElement {
     const marketPriceSource = this.firstValue(item?.quote?.price, item?.quote?.last_price, evidence.market?.price);
     const marketPrice = marketPriceSource == null ? "无数据" : this.compactNumber(marketPriceSource);
     const analysisMarkup = `
+      <section class="ai-conclusion-refresh-meta" aria-label="AI 结论更新口径">
+        <article><span>当前机会证据</span><b>${relatedNewsCount} 条</b><small>弹窗“相关新闻”使用同一组新闻 ID</small></article>
+        <article><span>本轮新增新闻</span><b>${newNewsCount} 条</b><small>${newNewsCount > 0 ? "已触发 AI 研判与机会重算" : "本轮沿用最近一次有效研判"}</small></article>
+        <article><span>历史记忆窗口</span><b>${this.escape(memoryWindowLabel)}</b><small>旧新闻与前序判断作为上下文，不冒充新事实</small></article>
+        <article><span>结论更新时间</span><b>${this.escape(this.formatDate(item.updated_at || item.discovered_at))}</b><small>新相关新闻分析完成后自动刷新</small></article>
+      </section>
       <section class="ai-conclusion-summary ${directionClass}">
         <div><span>综合研判</span><h3>AI 新闻分析${directionText} ${this.escape(item.symbol)}</h3><p>${this.escape(primaryReason)} ${this.escape(technicalConclusion)}</p></div>
         <strong>${directionLabel}<small>${statusLabel}</small></strong>

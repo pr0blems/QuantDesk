@@ -77,8 +77,8 @@ PREDICTION_FOLLOW_THROUGH_BARS = 3
 PREDICTION_FOLLOW_THROUGH_LOSS_BPS = -15.0
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
-OPPORTUNITY_DECISION_VERSION = "hard_gate_v3_nbbo"
-OPPORTUNITY_API_VERSION = "ai_opportunity.v2"
+OPPORTUNITY_DECISION_VERSION = "binance_primary_v4"
+OPPORTUNITY_API_VERSION = "ai_opportunity.v3"
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
 FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS = 15 * 60
@@ -903,6 +903,35 @@ def append_score_history(
     return history[-max(2, int(limit)) :]
 
 
+def market_flow_history_snapshot(flow: Mapping[str, Any] | None) -> dict[str, float]:
+    """Keep the auditable market-flow inputs needed for the UI trend view."""
+
+    source = flow or {}
+    keys = (
+        "score",
+        "main_force_ratio",
+        "active_buy_ratio",
+        "book_imbalance",
+        "book_imbalance_5",
+        "bid_depth_notional",
+        "ask_depth_notional",
+        "bid_depth_notional_5",
+        "ask_depth_notional_5",
+        "bid_depth_change_5s_pct",
+        "ask_depth_change_5s_pct",
+        "bid_depth_change_30s_pct",
+        "ask_depth_change_30s_pct",
+        "spread_bps",
+        "data_quality",
+    )
+    snapshot: dict[str, float] = {}
+    for key in keys:
+        value = _finite_number(source.get(key))
+        if value is not None:
+            snapshot[key] = value
+    return snapshot
+
+
 def prediction_live_score_snapshot(
     prediction: AiMonitorPrediction,
     candidate: Mapping[str, Any],
@@ -1037,6 +1066,7 @@ def prediction_live_score_snapshot(
         "news": news_score,
         "technical": technical_score,
         "market_flow": flow_score,
+        "market_flow_snapshot": market_flow_history_snapshot(flow),
         "base_combined": base_combined_score,
         "macro_adjustment": float(market_environment.get("adjustment") or 0),
         "macro_market": market_environment,
@@ -3872,26 +3902,23 @@ def stable_gate_summary(
         "kline_fresh",
         "feature_quality",
     }
-    # NBBO and halt checks protect execution safety, not model quality.  They
-    # remain hard gates in record/score modes; those modes only relax the
-    # optional enhanced-domain and macro/event checks.
-    execution_safety_keys = {
-        "reference_quote_available",
-        "quote_fresh",
-        "spread_acceptable",
-        "quote_sane",
-        "not_halted",
+    # Binance is the execution and valuation venue for mapped contracts.
+    # Finnhub/UW cash-market quotes are cross-venue references: in record and
+    # score modes they can adjust confidence and raise warnings, but a closed or
+    # delayed US cash feed must not make a fresh Binance contract untradable.
+    # Deployments that intentionally require synchronized cash NBBO must opt in
+    # to ``gate`` mode.
+    # The mapped Binance contract is the execution venue for the core strategy.
+    # Cash-market NBBO/flow providers are asynchronous references and can be
+    # closed while Binance remains live.  Keep those domains out of the hard
+    # execution gate in every policy mode; ``gate`` still applies the strict
+    # directional-flow conflict below, while cross-venue basis has its own
+    # synchronized-quote eligibility state.
+    decision_checks = {
+        key: passed
+        for key, passed in checks.items()
+        if key in legacy_quality_keys
     }
-    decision_checks = (
-        dict(checks)
-        if normalized_mode == "gate"
-        else {
-            key: passed
-            for key, passed in checks.items()
-            if key in legacy_quality_keys
-            or (normalized_mode != "disabled" and key in execution_safety_keys)
-        }
-    )
     decision_checks["directional_conflict_clear"] = (
         True
         if normalized_mode == "disabled"
@@ -3916,7 +3943,7 @@ def stable_gate_summary(
         for key in ("option_flow", "gex", "institutional_flow"):
             if not bool(dict(flow_domains.get(key) or {}).get("available")):
                 warnings.append(f"{key.upper()}_UNAVAILABLE")
-    if normalized_mode in {"record", "score"}:
+    if normalized_mode != "disabled":
         warnings.extend(
             f"OBSERVED_ONLY:{code}"
             for code in observed_blocking_reasons
@@ -3941,9 +3968,11 @@ def stable_gate_summary(
         ),
         "policy_mode": normalized_mode,
         "hard_gate_applied": normalized_mode == "gate",
-        "execution_safety_gate_applied": normalized_mode != "disabled",
+        "execution_safety_gate_applied": False,
+        "execution_price_source": "binance",
+        "reference_quote_role": "observe_and_score",
         "evaluated_at": evaluated_at.isoformat(),
-        "decision_version": f"uw_{normalized_mode}_decision_v1",
+        "decision_version": f"binance_primary_{normalized_mode}_v2",
     }
 
 
@@ -7686,6 +7715,7 @@ def _scan_opportunities(
             "news": float(candidate["news_score"]),
             "technical": indicator_score,
             "market_flow": flow_score,
+            "market_flow_snapshot": market_flow_history_snapshot(market_flow),
             "base_combined": base_combined_score,
             "macro_adjustment": float(market_environment.get("adjustment") or 0),
             "macro_market": market_environment,
@@ -8099,7 +8129,7 @@ def start(engine: Engine, master_key: str, symbols_config: Path) -> None:
     ).start()
     threading.Thread(
         target=_ingest_worker_loop,
-        args=(engine, master_key),
+        args=(engine, master_key, symbols_config),
         daemon=True,
         name="ai-news-immediate",
     ).start()
@@ -8197,7 +8227,7 @@ def _worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
         time.sleep(PREDICTION_SETTLEMENT_POLL_SECONDS)
 
 
-def _ingest_worker_loop(engine: Engine, master_key: str) -> None:
+def _ingest_worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
     """Run collector-triggered model calls independently from backlog scans."""
 
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
@@ -8212,7 +8242,7 @@ def _ingest_worker_loop(engine: Engine, master_key: str) -> None:
                 rescued = _enqueue_failed_legacy_news(db)
             if rescued:
                 print(f"[ai-monitor] queued {rescued} news from legacy failed batches")
-            while _run_ingested_news(factory, engine, master_key):
+            while _run_ingested_news(factory, engine, master_key, symbols_config):
                 pass
         except Exception as exc:
             print(f"[ai-monitor] immediate news worker error: {type(exc).__name__}")
@@ -8222,6 +8252,7 @@ def _run_ingested_news(
     factory: sessionmaker[Session],
     engine: Engine,
     master_key: str,
+    symbols_config: Path,
 ) -> bool:
     """Immediately analyze one deduplicated batch emitted by the collector."""
 
@@ -8271,6 +8302,8 @@ def _run_ingested_news(
         run_public_id,
         master_key,
         news_ids=pending_ids,
+        symbols_config=symbols_config,
+        trigger_opportunity=True,
     )
     return True
 

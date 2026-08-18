@@ -27,6 +27,7 @@ from quantdesk_v2.ai_monitor import (
     indicator_catalog,
     indicator_conflicts,
     indicator_templates,
+    market_flow_history_snapshot,
     market_flow_snapshot,
     match_configured_indicators,
     merged_opportunity_expiration,
@@ -58,6 +59,7 @@ from quantdesk_v2.interfaces.api.ai_monitor import (
     _changed_revision_scopes,
     _local_date_utc_window,
     _prediction_settlement_out,
+    _price_comparison_out,
     _revision_event_id,
     _safe_market_data_health,
     _sse_message,
@@ -80,6 +82,99 @@ from quantdesk_v2.schemas import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_price_comparison_uses_binance_as_execution_and_cash_feeds_as_reference() -> None:
+    now = datetime.now(UTC)
+    now_ms = int(now.timestamp() * 1000)
+
+    result = _price_comparison_out(
+        {"price": 101.0, "ts": now_ms},
+        {
+            "price": 100.0,
+            "source_timestamp": int(now.timestamp()),
+            "fetched_at": now,
+            "available": True,
+            "stale": False,
+            "live": True,
+        },
+        {
+            "captured_at": now.isoformat(),
+            "quote": {
+                "bid": 99.9,
+                "ask": 100.1,
+                "quote_received_at_ms": now_ms,
+            },
+        },
+    )
+
+    assert result["execution_source"] == "binance"
+    assert result["sources"]["binance"]["fresh"] is True
+    assert result["sources"]["finnhub"]["fresh"] is True
+    assert result["sources"]["unusual_whales"]["fresh"] is True
+    assert result["reference_price"] == pytest.approx(100.0)
+    assert result["basis_bps"] == pytest.approx(100.0)
+    assert result["state"] == "spread_watch"
+    assert result["pair_direction"] == "short_binance_long_spot"
+    assert result["actionable"] is False
+
+
+def test_price_comparison_uses_stale_cash_snapshot_for_opening_gap_forecast() -> None:
+    now = datetime.now(UTC)
+    stale_at = now - timedelta(hours=2)
+
+    result = _price_comparison_out(
+        {"price": 95.0, "ts": int(now.timestamp() * 1000)},
+        {
+            "price": 100.0,
+            "previous_close": 99.0,
+            "source_timestamp": int(stale_at.timestamp()),
+            "fetched_at": stale_at,
+            "available": True,
+            "stale": True,
+            "live": False,
+        },
+        {
+            "captured_at": stale_at.isoformat(),
+            "quote": {
+                "bid": 99.9,
+                "ask": 100.1,
+                "quote_received_at_ms": int(stale_at.timestamp() * 1000),
+            },
+        },
+        direction="short",
+        news_score=85.0,
+        news_count=4,
+        new_news_count=1,
+        reused_news_count=3,
+        memory_window_hours=168,
+    )
+
+    assert result["comparable"] is False
+    assert result["reference_price"] is None
+    assert result["basis_bps"] is None
+    assert result["state"] == "opening_gap_watch"
+    assert result["snapshot_reference_price"] == pytest.approx(100.0)
+    assert result["snapshot_gap_bps"] == pytest.approx(-500.0)
+    assert result["previous_close_gap_bps"] == pytest.approx(-404.0404)
+    assert result["provider_divergence_bps"] == pytest.approx(0.0)
+    assert result["provider_divergence_mode"] == "snapshot"
+    assert result["pair_direction"] is None
+    forecast = result["opening_forecast"]
+    assert forecast["available"] is True
+    assert forecast["label"] == "bearish_open"
+    assert forecast["direction"] == "down"
+    assert forecast["confidence"] == pytest.approx(96.0)
+    assert forecast["news_score"] == pytest.approx(85.0)
+    assert forecast["related_news_count"] == 4
+    assert forecast["new_news_count"] == 1
+    assert forecast["reused_news_count"] == 3
+    assert forecast["memory_window_hours"] == 168
+    assert forecast["gap_bps"] == pytest.approx(-500.0)
+    assert forecast["gap_aligned"] is True
+    assert forecast["reference_mode"] == "latest_cash_snapshot"
+    assert forecast["research_only"] is True
+    assert result["actionable"] is False
 
 
 def test_ai_monitor_api_serializes_naive_database_datetimes_as_utc() -> None:
@@ -255,6 +350,49 @@ def test_stable_opportunity_contract_normalizes_legacy_gate_check_list() -> None
     }
 
 
+def test_current_opportunity_recomputes_cash_reference_failures_as_observations() -> None:
+    evidence = {
+        "market_quality": {
+            "quote_available": False,
+            "data_status": "degraded",
+            "checks": {
+                "price_available": True,
+                "ticker_fresh": True,
+                "kline_fresh": True,
+                "feature_quality": True,
+                "reference_quote_available": False,
+                "quote_fresh": False,
+                "spread_acceptable": False,
+            },
+        },
+        "market_flow": {"hard_conflict": False, "legacy_hard_conflict": False},
+        "unusual_whales_policy": {"effective_mode": "record"},
+        "gate_summary": {
+            "passed": False,
+            "blocking_reasons": ["REFERENCE_QUOTE_UNAVAILABLE"],
+        },
+    }
+
+    current = _stable_opportunity_contract(
+        evidence,
+        None,
+        recompute_current_gate=True,
+    )
+    frozen = _stable_opportunity_contract(evidence, None)
+
+    assert current["gate_summary"]["passed"] is True
+    assert current["gate_summary"]["execution_price_source"] == "binance"
+    assert current["gate_summary"]["decision_checks"] == {
+        "price_available": True,
+        "ticker_fresh": True,
+        "kline_fresh": True,
+        "feature_quality": True,
+        "directional_conflict_clear": True,
+    }
+    assert "OBSERVED_ONLY:REFERENCE_QUOTE_UNAVAILABLE" in current["gate_summary"]["warnings"]
+    assert frozen["gate_summary"]["passed"] is False
+
+
 def test_prediction_settlement_metadata_explains_pending_market_retry() -> None:
     now = datetime.now(UTC).replace(tzinfo=None)
     item = SimpleNamespace(
@@ -413,6 +551,8 @@ def test_ai_monitor_worker_recovers_abandoned_runs_continuously() -> None:
     assert 'name="ai-news-immediate"' in source
     assert "def _ingest_worker_loop(" in source
     assert "def _enqueue_failed_legacy_news(" in source
+    assert "trigger_opportunity=True" in source
+    assert "symbols_config=symbols_config" in source
 
 
 def test_collector_news_queue_is_ordered_and_deduplicated() -> None:
@@ -790,6 +930,31 @@ def test_live_score_history_seeds_legacy_snapshot_and_is_bounded() -> None:
         )
     assert len(history) == 96
     assert history[-1]["combined"] == 99
+
+
+def test_market_flow_history_snapshot_keeps_trend_inputs_only() -> None:
+    snapshot = market_flow_history_snapshot(
+        {
+            "score": 67,
+            "main_force_ratio": 0.81,
+            "active_buy_ratio": 0.63,
+            "bid_depth_notional": 1_250_000,
+            "ask_depth_notional": 980_000,
+            "bid_depth_change_30s_pct": 12.5,
+            "ask_depth_change_30s_pct": -4.5,
+            "ignored_payload": "not persisted",
+        }
+    )
+
+    assert snapshot == {
+        "score": 67.0,
+        "main_force_ratio": 0.81,
+        "active_buy_ratio": 0.63,
+        "bid_depth_notional": 1_250_000.0,
+        "ask_depth_notional": 980_000.0,
+        "bid_depth_change_30s_pct": 12.5,
+        "ask_depth_change_30s_pct": -4.5,
+    }
 
 
 def test_pending_prediction_rescore_uses_its_frozen_timeframe_and_weights() -> None:
@@ -2410,7 +2575,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260817-61"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260818-68"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2440,6 +2605,17 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'class="ai-nav-root active"' in component
     assert 'class="ai-subnav-group"' in component
     assert "<p><strong>发现机会</strong><small>二级菜单</small></p>" not in component
+    assert 'basisState === "opening_gap_watch"' in component
+    assert '"跨时段预判"' in component
+    assert '"开盘预判"' in component
+    assert "本轮没有新增新闻" in component
+    assert "当前机会关联" in component
+    assert "AI 记忆用于新新闻回溯" in component
+    assert "新相关新闻分析完成后自动刷新" in component
+    assert "用最近现货快照、当前 BN 价格和" not in component
+    assert 'value != null && value !== ""' in component
+    assert '这是开盘概率预判，不是无风险套利' in component
+    assert ".cross-venue-basis.opening_gap_watch" in stylesheet
     assert component.index('class="ai-nav-root active"') < component.index(
         'class="ai-subnav-group"'
     )
@@ -2544,6 +2720,13 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "const unique = new Map()" in component
     assert "renderScoreTrendChart(item, history)" in component
     assert "openScoreTrend(opportunityId, trigger)" in component
+    assert 'data-market-flow-trend="${this.escape(item.id)}"' in component
+    assert "openMarketFlowTrend(opportunityId, trigger)" in component
+    assert "renderMarketFlowTrendChart(item, history)" in component
+    assert "资金盘口变化" in component
+    assert "买卖盘名义资金量变化" in component
+    assert "不把评分冒充真实资金金额" in component
+    assert ".market-flow-score" in stylesheet
     assert "evidence.score_history" in component
     assert 'class="score-trend-chart"' in component
     assert 'class="score-line ${definition.key}"' in component

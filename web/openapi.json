@@ -6583,7 +6583,7 @@
         "summary": "Get Live Copy Status"
       },
       "put": {
-        "description": "Route only future entry-ready AI signals to one already-armed live account.\n\nThis endpoint never arms an account and never sends an exchange order.  It\nonly publishes the signal-source switch consumed by the existing live\nexecutor, whose position sizing, loss limits, idempotency, fill verification\nand exchange-native stop/target protections remain authoritative.",
+        "description": "Control the dedicated AI-monitor live execution domain.\n\nThe dedicated account and deployment are infrastructure adapters only; they\nnever evaluate or inherit the user's ordinary live strategies.  The endpoint\nitself never sends an exchange order.  It only arms the isolated AI signal\nsource consumed by the live executor, whose loss limits, idempotency, fill\nverification and exchange-native stop/target protections remain authoritative.",
         "operationId": "update_live_copy_status_api_v2_ai_monitor_live_copy_put",
         "requestBody": {
           "content": {

@@ -64,7 +64,7 @@ def test_available_domains_are_renormalized_without_requiring_every_feed() -> No
     assert result["domains"]["gex"]["score"] is None
 
 
-def test_quote_halt_and_event_checks_emit_stable_blocking_codes() -> None:
+def test_quote_halt_and_event_checks_emit_observed_codes_for_binance_execution() -> None:
     now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
     now_ms = int(now.timestamp() * 1000)
     quality = ai_monitor.signal_market_quality(
@@ -99,8 +99,9 @@ def test_quote_halt_and_event_checks_emit_stable_blocking_codes() -> None:
         evaluated_at=now,
     )
 
-    assert gates["status"] == "blocked"
-    assert set(gates["blocking_reasons"]) >= {
+    assert gates["status"] == "degraded"
+    assert gates["blocking_reasons"] == []
+    assert set(gates["observed_blocking_reasons"]) >= {
         "REFERENCE_SPREAD_TOO_WIDE",
         "SYMBOL_HALTED_OR_COOLDOWN",
         "HIGH_IMPACT_EVENT_WINDOW",
@@ -170,9 +171,10 @@ def test_trade_price_only_is_rejected_as_non_executable_reference() -> None:
     assert quality["checks"]["quote_fresh"] is False
     assert quality["checks"]["spread_acceptable"] is False
     assert quality["checks"]["quote_sane"] is False
-    assert gates["passed"] is False
-    assert gates["blocking_reasons"] == ["REFERENCE_QUOTE_UNAVAILABLE"]
-    assert gates["execution_safety_gate_applied"] is True
+    assert gates["passed"] is True
+    assert gates["blocking_reasons"] == []
+    assert "OBSERVED_ONLY:REFERENCE_QUOTE_UNAVAILABLE" in gates["warnings"]
+    assert gates["execution_safety_gate_applied"] is False
 
 
 def test_signal_upgrade_tables_are_registered_in_metadata() -> None:
@@ -640,7 +642,7 @@ def test_six_domain_score_renormalizes_only_real_quality_weighted_evidence() -> 
     assert result["missing_domains"] == ["gex"]
 
 
-def test_record_mode_observes_optional_failures_but_blocks_bad_spread() -> None:
+def test_record_mode_observes_external_quote_failures_without_blocking_binance() -> None:
     now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
     quality = {
         "checks": {
@@ -670,17 +672,17 @@ def test_record_mode_observes_optional_failures_but_blocks_bad_spread() -> None:
         quality, flow, evaluated_at=now, policy_mode="gate"
     )
 
-    assert recorded["passed"] is False
-    assert scored["passed"] is False
-    assert recorded["blocking_reasons"] == ["REFERENCE_SPREAD_TOO_WIDE"]
-    assert scored["blocking_reasons"] == ["REFERENCE_SPREAD_TOO_WIDE"]
+    assert recorded["passed"] is True
+    assert scored["passed"] is True
+    assert recorded["blocking_reasons"] == []
+    assert scored["blocking_reasons"] == []
+    assert "OBSERVED_ONLY:REFERENCE_SPREAD_TOO_WIDE" in recorded["warnings"]
     assert "REFERENCE_SPREAD_TOO_WIDE" in recorded["observed_blocking_reasons"]
     assert "HIGH_IMPACT_EVENT_WINDOW" in recorded["observed_blocking_reasons"]
-    assert gated["passed"] is False
-    assert set(gated["blocking_reasons"]) == {
-        "REFERENCE_SPREAD_TOO_WIDE",
-        "HIGH_IMPACT_EVENT_WINDOW",
-    }
+    assert gated["passed"] is True
+    assert gated["blocking_reasons"] == []
+    assert "OBSERVED_ONLY:REFERENCE_SPREAD_TOO_WIDE" in gated["warnings"]
+    assert "OBSERVED_ONLY:HIGH_IMPACT_EVENT_WINDOW" in gated["warnings"]
 
 
 def test_disabled_mode_bypasses_unusual_whales_execution_gates() -> None:
@@ -801,7 +803,7 @@ def test_missing_coverage_metric_does_not_create_a_false_gate_failure() -> None:
     )["passed"] is True
 
 
-def test_stale_nbbo_and_halt_are_hard_gates_in_every_policy_mode() -> None:
+def test_stale_nbbo_and_halt_are_observations_for_binance_execution() -> None:
     now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
     now_ms = int(now.timestamp() * 1000)
     scan = {
@@ -856,10 +858,12 @@ def test_stale_nbbo_and_halt_are_hard_gates_in_every_policy_mode() -> None:
         halt_gate = ai_monitor.stable_gate_summary(
             halted, _legacy_flow(), evaluated_at=now, policy_mode=mode
         )
-        assert stale_gate["passed"] is False
-        assert stale_gate["blocking_reasons"] == ["REFERENCE_QUOTE_STALE"]
-        assert halt_gate["passed"] is False
-        assert halt_gate["blocking_reasons"] == ["SYMBOL_HALTED_OR_COOLDOWN"]
+        assert stale_gate["passed"] is True
+        assert stale_gate["blocking_reasons"] == []
+        assert halt_gate["passed"] is True
+        assert halt_gate["blocking_reasons"] == []
+        assert "OBSERVED_ONLY:REFERENCE_QUOTE_STALE" in stale_gate["warnings"]
+        assert "OBSERVED_ONLY:SYMBOL_HALTED_OR_COOLDOWN" in halt_gate["warnings"]
 
 
 def test_quote_freshness_uses_capture_time_not_minute_bucket_start() -> None:
@@ -894,7 +898,7 @@ def test_quote_freshness_uses_capture_time_not_minute_bucket_start() -> None:
     assert quality["checks"]["quote_fresh"] is True
 
 
-def test_transitional_quality_summary_cannot_bypass_quote_or_halt_gate() -> None:
+def test_transitional_external_quote_failures_are_observed_outside_gate_mode() -> None:
     now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
     base_checks = {
         "price_available": True,
@@ -919,5 +923,7 @@ def test_transitional_quality_summary_cannot_bypass_quote_or_halt_gate() -> None
         policy_mode="score",
     )
 
-    assert missing_quote["blocking_reasons"] == ["REFERENCE_QUOTE_UNAVAILABLE"]
-    assert halted["blocking_reasons"] == ["SYMBOL_HALTED_OR_COOLDOWN"]
+    assert missing_quote["blocking_reasons"] == []
+    assert halted["blocking_reasons"] == []
+    assert "OBSERVED_ONLY:REFERENCE_QUOTE_UNAVAILABLE" in missing_quote["warnings"]
+    assert "OBSERVED_ONLY:SYMBOL_HALTED_OR_COOLDOWN" in halted["warnings"]

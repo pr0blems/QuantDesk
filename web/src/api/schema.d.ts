@@ -633,12 +633,13 @@ export interface paths {
         get: operations["get_live_copy_status_api_v2_ai_monitor_live_copy_get"];
         /**
          * Update Live Copy Status
-         * @description Route only future entry-ready AI signals to one already-armed live account.
+         * @description Control the dedicated AI-monitor live execution domain.
          *
-         *     This endpoint never arms an account and never sends an exchange order.  It
-         *     only publishes the signal-source switch consumed by the existing live
-         *     executor, whose position sizing, loss limits, idempotency, fill verification
-         *     and exchange-native stop/target protections remain authoritative.
+         *     The dedicated account and deployment are infrastructure adapters only; they
+         *     never evaluate or inherit the user's ordinary live strategies.  The endpoint
+         *     itself never sends an exchange order.  It only arms the isolated AI signal
+         *     source consumed by the live executor, whose loss limits, idempotency, fill
+         *     verification and exchange-native stop/target protections remain authoritative.
          */
         put: operations["update_live_copy_status_api_v2_ai_monitor_live_copy_put"];
         post?: never;
