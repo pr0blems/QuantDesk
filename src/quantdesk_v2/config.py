@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     # News-source rows contain the endpoint and polling policy, never this secret.
     unusual_whales_api_key: SecretStr = SecretStr("")
 
+    # Read-only external feed of completed AI news analyses. The secret is
+    # server-side only and may be overridden with EXTERNAL_NEWS_API_KEY.
+    external_news_api_key: SecretStr = SecretStr("")
+    external_news_ws_poll_seconds: float = 2.0
+
     monitor_symbols_config: Path = Path("config/tradfi_symbols.json")
 
     @property
@@ -109,6 +114,13 @@ class Settings(BaseSettings):
         self._validate_binance_futures_settings()
         self._validate_openai_settings()
         self._validate_finnhub_settings()
+        external_news_api_key = self.external_news_api_key.get_secret_value()
+        if external_news_api_key and len(external_news_api_key) < 12:
+            raise RuntimeError("EXTERNAL_NEWS_API_KEY must contain at least 12 characters")
+        if not 0.5 <= self.external_news_ws_poll_seconds <= 30:
+            raise RuntimeError(
+                "EXTERNAL_NEWS_WS_POLL_SECONDS must be between 0.5 and 30"
+            )
         if self.app_env.lower() == "production":
             if not self.db_ssl_required:
                 raise RuntimeError("Production database connections must require TLS")

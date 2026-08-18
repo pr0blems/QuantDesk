@@ -4437,6 +4437,71 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/public/v1/news": {
+      "get": {
+        "description": "Return completed AI news analyses using an opaque incremental cursor.",
+        "operationId": "public_analyzed_news_api_public_v1_news_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Public Analyzed News Api Public V1 News Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Public Analyzed News",
+        "tags": [
+          "public-news"
+        ]
+      }
+    },
     "/api/v2/admin/ai-model": {
       "get": {
         "description": "Return the platform-wide DeepSeek setting without exposing its secret.",

@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+    "/api/public/v1/news": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Public Analyzed News
+         * @description Return completed AI news analyses using an opaque incremental cursor.
+         */
+        get: operations["public_analyzed_news_api_public_v1_news_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/admin/ai-model": {
         parameters: {
             query?: never;
@@ -3827,6 +3847,40 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    public_analyzed_news_api_public_v1_news_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     global_ai_model_api_v2_admin_ai_model_get: {
         parameters: {
             query?: never;

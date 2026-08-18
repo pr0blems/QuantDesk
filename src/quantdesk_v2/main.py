@@ -28,6 +28,7 @@ from .config import Settings, get_settings
 from .database import build_engine, engine
 from .finnhub import FinnhubClient, FinnhubMarketStatusService, FinnhubWebhookReceiver
 from .finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
+from .interfaces.api.public_news import router as public_news_router
 from .macro_market import MacroMarketService, configure_default_service, us_market_session
 from .models import AdminSetting
 from .news import _unusual_whales_api_key
@@ -384,7 +385,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=runtime_settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "X-QuantDesk-User-ID"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-API-Key",
+            "X-QuantDesk-User-ID",
+        ],
     )
     app.add_middleware(
         SecurityHeadersMiddleware,
@@ -393,6 +399,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(admin_router)
     app.include_router(strategy_router)
+    app.include_router(public_news_router)
 
     if runtime_settings.static_dir.is_dir():
         app.mount(
