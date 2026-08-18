@@ -86,9 +86,11 @@ def _bearer_key(value: str | None) -> str | None:
     return credential.strip() or None
 
 
-def _provided_http_key(request: Request) -> str | None:
-    return request.headers.get("X-API-Key") or _bearer_key(
-        request.headers.get("Authorization")
+def _provided_http_key(request: Request, query_key: str | None = None) -> str | None:
+    return (
+        request.headers.get("X-API-Key")
+        or _bearer_key(request.headers.get("Authorization"))
+        or query_key
     )
 
 
@@ -106,8 +108,11 @@ def _key_matches(provided: str | None, expected: str) -> bool:
     return secrets.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
-def _require_http_key(request: Request) -> None:
-    if not _key_matches(_provided_http_key(request), _configured_key(request)):
+def _require_http_key(request: Request, *, query_key: str | None = None) -> None:
+    if not _key_matches(
+        _provided_http_key(request, query_key),
+        _configured_key(request),
+    ):
         raise HTTPException(
             status_code=401,
             detail="invalid API key",
@@ -190,10 +195,15 @@ def public_analyzed_news(
     db: Annotated[Session, Depends(get_db)],
     limit: int = Query(default=20, ge=1, le=_MAX_PAGE_SIZE),
     cursor: str | None = Query(default=None, max_length=512),
+    key: str | None = Query(
+        default=None,
+        max_length=512,
+        description="API key for clients that cannot set an authentication header",
+    ),
 ) -> dict[str, Any]:
     """Return completed AI news analyses using an opaque incremental cursor."""
 
-    _require_http_key(request)
+    _require_http_key(request, query_key=key)
     try:
         decoded_cursor = _decode_cursor(cursor)
     except ValueError as exc:

@@ -3852,6 +3852,8 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string | null;
+                /** @description API key for clients that cannot set an authentication header */
+                key?: string | null;
             };
             header?: never;
             path?: never;

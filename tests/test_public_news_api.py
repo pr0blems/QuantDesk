@@ -90,6 +90,23 @@ def test_http_feed_requires_key_and_exposes_only_public_analysis_fields() -> Non
     assert "ai_claim_batch_id" not in public_item
 
 
+def test_http_feed_accepts_api_key_query_parameter() -> None:
+    item = _news()
+    with TestClient(_app([item])) as client:
+        authorized = client.get(
+            "/api/public/v1/news",
+            params={"key": _TEST_API_KEY, "limit": 1},
+        )
+        rejected = client.get(
+            "/api/public/v1/news",
+            params={"key": "wrong-key", "limit": 1},
+        )
+
+    assert authorized.status_code == 200
+    assert authorized.json()["items"][0]["id"] == item.id
+    assert rejected.status_code == 401
+
+
 def test_cursor_round_trip_preserves_utc_time_and_tie_breaker() -> None:
     item = _news()
     encoded = public_news._encode_cursor(item)

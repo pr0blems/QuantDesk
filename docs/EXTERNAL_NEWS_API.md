@@ -4,9 +4,11 @@
 
 ## 鉴权
 
-- HTTP：请求头 `X-API-Key: <KEY>`，也支持 `Authorization: Bearer <KEY>`。
+- HTTP：支持查询参数 `?key=<KEY>`、请求头 `X-API-Key: <KEY>`，也支持 `Authorization: Bearer <KEY>`。
 - WebSocket：服务端程序优先使用同样的请求头；浏览器可使用查询参数 `?key=<KEY>`。
 - 生产环境必须通过 HTTPS/WSS 调用，避免 KEY 明文传输。
+
+查询参数适合不能设置请求头的客户端，但 KEY 会出现在浏览器历史和访问日志中；可设置请求头时仍建议优先使用请求头鉴权。
 
 KEY 默认由服务端 `EXTERNAL_NEWS_API_KEY` 配置。修改配置后需要重启后端。
 
@@ -17,11 +19,23 @@ GET /api/public/v1/news?limit=20
 X-API-Key: <KEY>
 ```
 
+直接使用 URL 查询参数：
+
+```text
+https://binance.taoz.chat/api/public/v1/news?key=<KEY>&limit=20
+```
+
 响应中的 `next_cursor` 用于增量拉取：
 
 ```http
 GET /api/public/v1/news?limit=100&cursor=<next_cursor>
 X-API-Key: <KEY>
+```
+
+查询参数形式：
+
+```text
+https://binance.taoz.chat/api/public/v1/news?key=<KEY>&limit=100&cursor=<next_cursor>
 ```
 
 不传 `cursor` 时返回最新分析，按分析时间倒序；传入后返回游标之后的新分析，按时间正序。

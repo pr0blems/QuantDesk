@@ -4470,6 +4470,25 @@
               ],
               "title": "Cursor"
             }
+          },
+          {
+            "description": "API key for clients that cannot set an authentication header",
+            "in": "query",
+            "name": "key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "API key for clients that cannot set an authentication header",
+              "title": "Key"
+            }
           }
         ],
         "responses": {
