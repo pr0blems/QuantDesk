@@ -40,6 +40,9 @@ _MAX_PENDING_EVENTS = 2_048
 _MAX_NUMBER = Decimal("1e30")
 _MAX_UPDATE_ID = 2**63 - 1
 
+_LIVE_BOOKS_LOCK = threading.RLock()
+_LIVE_BOOKS: dict[str, DepthOrderBook] = {}
+
 
 class _DepthConnection(Protocol):
     def recv(self, timeout: float | None = None) -> str | bytes: ...
@@ -349,6 +352,87 @@ class DepthOrderBook:
         with self._lock:
             return self._metrics_unlocked(record=False) if self._synced else None
 
+    def level_snapshot(self, limit: int = TOP_LEVELS) -> dict[str, Any] | None:
+        """Return a JSON-ready, point-in-time view of the visible order book.
+
+        The collector owns the only mutable book.  API consumers get a copied
+        snapshot while holding the book lock, so bid and ask ranks always come
+        from the same Binance update id.
+        """
+
+        if isinstance(limit, bool) or limit not in {20, 50, 100}:
+            raise ValueError("depth level snapshot limit must be 20, 50, or 100")
+        with self._lock:
+            if not self._synced or not self._bids or not self._asks:
+                return None
+            bids = sorted(self._bids.items(), reverse=True)[:limit]
+            asks = sorted(self._asks.items())[:limit]
+            if not bids or not asks:
+                return None
+            metrics = self._metrics_unlocked(record=False)
+            best_bid = bids[0][0]
+            best_ask = asks[0][0]
+            mid_price = (best_bid + best_ask) / Decimal(2)
+
+            def rows(levels: Sequence[tuple[Decimal, Decimal]]) -> list[dict[str, Any]]:
+                cumulative_quantity = Decimal(0)
+                cumulative_notional = Decimal(0)
+                output: list[dict[str, Any]] = []
+                for rank, (price, quantity) in enumerate(levels, start=1):
+                    notional = price * quantity
+                    cumulative_quantity += quantity
+                    cumulative_notional += notional
+                    output.append(
+                        {
+                            "rank": rank,
+                            "price": float(price),
+                            "quantity": float(quantity),
+                            "notional": float(notional),
+                            "cumulative_quantity": float(cumulative_quantity),
+                            "cumulative_notional": float(cumulative_notional),
+                            "distance_bps": float(
+                                (price - mid_price) / mid_price * Decimal(10_000)
+                            ),
+                        }
+                    )
+                return output
+
+            bid_rows = rows(bids)
+            ask_rows = rows(asks)
+            largest_bid = max(bid_rows, key=lambda row: row["notional"])
+            largest_ask = max(ask_rows, key=lambda row: row["notional"])
+            captured_at = int(self._timestamp)
+            now = int(time.time())
+            bid_total = bid_rows[-1]["cumulative_notional"]
+            ask_total = ask_rows[-1]["cumulative_notional"]
+            return {
+                "symbol": self.symbol,
+                "source": "binance_futures_diff_depth",
+                "captured_at": captured_at,
+                "age_seconds": max(0, now - captured_at) if captured_at else None,
+                "last_update_id": self._last_update_id,
+                "limit": limit,
+                "best_bid": float(best_bid),
+                "best_ask": float(best_ask),
+                "mid_price": float(mid_price),
+                "spread": float(best_ask - best_bid),
+                "spread_bps": metrics.spread_bps,
+                "bid_depth_notional": bid_total,
+                "ask_depth_notional": ask_total,
+                "bid_ask_ratio": bid_total / ask_total if ask_total > 0 else None,
+                "book_imbalance": _imbalance(
+                    Decimal(str(bid_total)), Decimal(str(ask_total))
+                ),
+                "bid_depth_change_5s_pct": metrics.bid_depth_change_5s_pct,
+                "ask_depth_change_5s_pct": metrics.ask_depth_change_5s_pct,
+                "bid_depth_change_30s_pct": metrics.bid_depth_change_30s_pct,
+                "ask_depth_change_30s_pct": metrics.ask_depth_change_30s_pct,
+                "largest_bid_wall": largest_bid,
+                "largest_ask_wall": largest_ask,
+                "bids": bid_rows,
+                "asks": ask_rows,
+            }
+
     def heartbeat(self, timestamp: int | None = None) -> DepthMetrics | None:
         """Refresh freshness while a live stream still owns this synchronized book."""
 
@@ -479,6 +563,29 @@ def _imbalance(bid_notional: Decimal, ask_notional: Decimal) -> float:
         return 0.0
     value = float((bid_notional - ask_notional) / denominator)
     return max(-1.0, min(1.0, value)) if math.isfinite(value) else 0.0
+
+
+def live_order_book_snapshot(symbol: str, limit: int = TOP_LEVELS) -> dict[str, Any] | None:
+    """Read one synchronized book exposed by the running market-data engine."""
+
+    normalized = _normalize_symbol(symbol)
+    with _LIVE_BOOKS_LOCK:
+        book = _LIVE_BOOKS.get(normalized)
+    return book.level_snapshot(limit) if book is not None else None
+
+
+def _register_live_books(collectors: Sequence[DepthStreamCollector]) -> None:
+    with _LIVE_BOOKS_LOCK:
+        for collector in collectors:
+            _LIVE_BOOKS.update(collector.books)
+
+
+def _unregister_live_books(collectors: Sequence[DepthStreamCollector]) -> None:
+    with _LIVE_BOOKS_LOCK:
+        for collector in collectors:
+            for symbol, book in collector.books.items():
+                if _LIVE_BOOKS.get(symbol) is book:
+                    _LIVE_BOOKS.pop(symbol, None)
 
 
 def _bridges_snapshot(event: _DepthEvent, snapshot_id: int) -> bool:
@@ -810,23 +917,27 @@ def ws_depth_loop(
         DepthStreamCollector(group, on_metrics, snapshot_limit=snapshot_limit)
         for group in groups
     ]
-    if len(collectors) == 1:
-        collectors[0].run_forever(stop, should_pause)
-        return
-    threads = [
-        threading.Thread(
-            target=collector.run_forever,
-            args=(stop, should_pause),
-            daemon=True,
-            name=f"depth-stream-{index + 1}",
-        )
-        for index, collector in enumerate(collectors)
-    ]
-    for thread in threads:
-        thread.start()
-    while not stop.wait(0.5):
-        if any(not thread.is_alive() for thread in threads):
-            stop.set()
-            raise RuntimeError("a Binance depth collector group stopped unexpectedly")
-    for thread in threads:
-        thread.join(timeout=1)
+    _register_live_books(collectors)
+    try:
+        if len(collectors) == 1:
+            collectors[0].run_forever(stop, should_pause)
+            return
+        threads = [
+            threading.Thread(
+                target=collector.run_forever,
+                args=(stop, should_pause),
+                daemon=True,
+                name=f"depth-stream-{index + 1}",
+            )
+            for index, collector in enumerate(collectors)
+        ]
+        for thread in threads:
+            thread.start()
+        while not stop.wait(0.5):
+            if any(not thread.is_alive() for thread in threads):
+                stop.set()
+                raise RuntimeError("a Binance depth collector group stopped unexpectedly")
+        for thread in threads:
+            thread.join(timeout=1)
+    finally:
+        _unregister_live_books(collectors)

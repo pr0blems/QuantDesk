@@ -7323,6 +7323,63 @@
         "summary": "Opportunity News Analysis Records"
       }
     },
+    "/api/v2/ai-monitor/opportunities/{opportunity_id}/order-book": {
+      "get": {
+        "description": "Expose the synchronized Binance Futures book already held in memory.",
+        "operationId": "opportunity_order_book_api_v2_ai_monitor_opportunities__opportunity_id__order_book_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "opportunity_id",
+            "required": true,
+            "schema": {
+              "title": "Opportunity Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opportunity Order Book Api V2 Ai Monitor Opportunities  Opportunity Id  Order Book Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Opportunity Order Book"
+      }
+    },
     "/api/v2/ai-monitor/opportunity-analytics": {
       "get": {
         "operationId": "opportunity_analytics_api_v2_ai_monitor_opportunity_analytics_get",

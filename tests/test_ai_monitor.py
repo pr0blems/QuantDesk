@@ -2234,10 +2234,38 @@ def test_market_flow_snapshot_combines_real_inputs_and_blocks_opposite_direction
     assert bullish["hard_conflict"] is False
     assert bullish["directional_data_available"] is True
     assert bullish["fresh"] is True
+    assert bullish["depth_status"] == "fresh"
+    assert bullish["depth_age_seconds"] == 0
+    assert bullish["depth_unavailable_reason"] is None
     assert bullish["data_quality"] >= 0.5
     assert bullish["bid_level_count"] == 100
     assert bullish["sources"]["order_count"] == "visible_price_levels_proxy"
     assert bearish["hard_conflict"] is True
+
+
+def test_market_flow_snapshot_explains_stale_binance_depth() -> None:
+    now = datetime(2026, 8, 11, 8, 0, tzinfo=UTC)
+    snapshot = market_flow_snapshot(
+        {
+            "depth": {
+                "TESTUSDT": {
+                    "ts": int(now.timestamp()) - 31,
+                    "bid_depth_notional": 100,
+                    "ask_depth_notional": 90,
+                }
+            }
+        },
+        symbol="TEST",
+        contract_symbol="TESTUSDT",
+        direction="long",
+        now=now,
+    )
+
+    assert snapshot["freshness"]["depth"] is False
+    assert snapshot["depth_status"] == "stale"
+    assert snapshot["depth_age_seconds"] == 31
+    assert snapshot["depth_unavailable_reason"] == "BINANCE_DEPTH_SNAPSHOT_STALE"
+    assert snapshot["bid_depth_notional"] is None
 
 
 def test_ai_monitor_prediction_table_is_separate_from_trading_orders() -> None:
@@ -2497,6 +2525,22 @@ def test_opportunity_related_news_endpoint_is_tenant_scoped() -> None:
     assert "AiMonitorOpportunity.user_id == user.id" in endpoint
     assert "opportunity.news_ids_json" in endpoint
     assert "News.id.in_(news_ids)" in endpoint
+
+
+def test_opportunity_live_order_book_endpoint_is_tenant_scoped() -> None:
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
+        encoding="utf-8"
+    )
+    endpoint = api[
+        api.index('@router.get("/opportunities/{opportunity_id}/order-book")') : api.index(
+            '@router.get("/opportunities/{opportunity_id}/news")'
+        )
+    ]
+
+    assert "AiMonitorOpportunity.public_id == opportunity_id" in endpoint
+    assert "AiMonitorOpportunity.user_id == user.id" in endpoint
+    assert "ws_depth.live_order_book_snapshot(contract_symbol, limit)" in endpoint
+    assert 'status_code=503' in endpoint
     assert 'raise HTTPException(status_code=404, detail="opportunity not found")' in endpoint
 
 
@@ -2577,7 +2621,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260819-72"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260819-75"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2587,7 +2631,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260819-72"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260819-75"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -2810,6 +2854,12 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".opportunity-score.down" in stylesheet
     assert ".score-trend-modal" in stylesheet
     assert ".score-trend-chart" in stylesheet
+    assert 'id="order-book-modal"' in component
+    assert 'data-order-book="${this.escape(item.id)}"' in component
+    assert '/order-book?limit=${this.orderBookLimit}' in component
+    assert "买卖盘口梯形表" in component
+    assert ".order-book-ladder" in stylesheet
+    assert ".order-book-chart" in stylesheet
     assert ".score-line.combined" in stylesheet
     assert ".score-line.market_flow" in stylesheet
     assert ".virtual-entry-gate" in stylesheet

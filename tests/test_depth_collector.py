@@ -122,6 +122,42 @@ def test_depth_book_reports_side_counts_spread_and_rolling_growth() -> None:
     assert metrics.imbalance_change_5s is not None
 
 
+def test_depth_book_exports_ranked_live_level_snapshot() -> None:
+    book = DepthOrderBook("BTCUSDT")
+    snapshot = book.load_snapshot(
+        _snapshot(
+            bids=[["100", "2"], ["99", "3"]],
+            asks=[["101", "4"], ["102", "5"]],
+        )
+    )
+    assert snapshot is not None
+
+    levels = book.level_snapshot(20)
+
+    assert levels is not None
+    assert levels["source"] == "binance_futures_diff_depth"
+    assert levels["best_bid"] == pytest.approx(100)
+    assert levels["best_ask"] == pytest.approx(101)
+    assert levels["mid_price"] == pytest.approx(100.5)
+    assert levels["bid_depth_notional"] == pytest.approx(497)
+    assert levels["ask_depth_notional"] == pytest.approx(914)
+    assert levels["bids"][0]["rank"] == 1
+    assert levels["bids"][0]["cumulative_notional"] == pytest.approx(200)
+    assert levels["bids"][1]["cumulative_notional"] == pytest.approx(497)
+    assert levels["asks"][0]["distance_bps"] > 0
+    assert levels["bids"][0]["distance_bps"] < 0
+    assert levels["largest_bid_wall"]["price"] == pytest.approx(99)
+    assert levels["largest_ask_wall"]["price"] == pytest.approx(102)
+
+
+def test_depth_book_level_snapshot_requires_a_synchronized_book() -> None:
+    book = DepthOrderBook("BTCUSDT")
+
+    assert book.level_snapshot(100) is None
+    with pytest.raises(ValueError, match="20, 50, or 100"):
+        book.level_snapshot(10)
+
+
 def test_depth_gap_invalidates_until_fresh_snapshot_bridges_it() -> None:
     book = DepthOrderBook("BTCUSDT")
     assert book.load_snapshot(_snapshot()) is not None

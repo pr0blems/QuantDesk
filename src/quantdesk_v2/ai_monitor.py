@@ -4429,6 +4429,7 @@ def market_flow_snapshot(
     contract = contract_symbol.upper()
     equity = symbol.upper()
     depth = dict(inputs.get("depth", {}).get(contract, {}))
+    raw_depth = dict(depth)
     positioning = dict(inputs.get("positioning", {}).get(contract, {}))
     ticker = dict(inputs.get("ticker", {}).get(contract, {}))
     underlying = dict(inputs.get("underlying", {}).get(contract, {}))
@@ -4437,7 +4438,25 @@ def market_flow_snapshot(
     now_ms = now_seconds * 1_000
 
     depth_ts = int(depth.get("ts") or 0)
-    depth_fresh = 0 <= now_seconds - depth_ts <= 30 if depth_ts else False
+    depth_age_seconds = now_seconds - depth_ts if depth_ts else None
+    depth_fresh = (
+        0 <= depth_age_seconds <= 30 if depth_age_seconds is not None else False
+    )
+    if not raw_depth:
+        depth_status = "missing"
+        depth_unavailable_reason = "BINANCE_DEPTH_SNAPSHOT_MISSING"
+    elif not depth_ts:
+        depth_status = "invalid"
+        depth_unavailable_reason = "BINANCE_DEPTH_TIMESTAMP_MISSING"
+    elif depth_age_seconds is not None and depth_age_seconds < 0:
+        depth_status = "invalid"
+        depth_unavailable_reason = "BINANCE_DEPTH_CLOCK_SKEW"
+    elif not depth_fresh:
+        depth_status = "stale"
+        depth_unavailable_reason = "BINANCE_DEPTH_SNAPSHOT_STALE"
+    else:
+        depth_status = "fresh"
+        depth_unavailable_reason = None
     if not depth_fresh:
         depth = {}
     positioning_ts = int(positioning.get("snapshot_at_ms") or 0)
@@ -4550,6 +4569,10 @@ def market_flow_snapshot(
             "depth": depth_fresh,
             "positioning": positioning_fresh,
         },
+        "depth_status": depth_status,
+        "depth_age_seconds": depth_age_seconds,
+        "depth_freshness_limit_seconds": 30,
+        "depth_unavailable_reason": depth_unavailable_reason,
         "confirms_direction": confirms_direction,
         "hard_conflict": hard_conflict,
         "main_force_ratio": round(main_force_ratio, 6)

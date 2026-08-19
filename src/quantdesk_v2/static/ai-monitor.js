@@ -102,6 +102,14 @@ class AiMonitorDashboard extends HTMLElement {
     this.historicalJudgmentRequestId = 0;
     this.scoreTrendFocus = null;
     this.scoreTrendOpportunity = null;
+    this.orderBookFocus = null;
+    this.orderBookOpportunity = null;
+    this.orderBookSnapshot = null;
+    this.orderBookPreviousSnapshot = null;
+    this.orderBookLimit = 100;
+    this.orderBookPaused = false;
+    this.orderBookRequestId = 0;
+    this.orderBookTimer = null;
     this.predictionAnalyticsAbortController = null;
     this.opportunitiesAbortController = null;
     this.newsScrollAnimationFrame = null;
@@ -125,13 +133,14 @@ class AiMonitorDashboard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this.closeOrderBook(false);
     this.pause();
     document.removeEventListener("visibilitychange", this.handleVisibilityChange);
   }
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260819-48">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260819-49">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -359,6 +368,22 @@ class AiMonitorDashboard extends HTMLElement {
           <footer class="score-trend-foot"><span>当前机会评分随扫描更新</span><strong>预测入场评分保持冻结</strong></footer>
         </section>
       </div>
+      <div id="order-book-modal" class="order-book-modal hidden" aria-hidden="true">
+        <button class="order-book-backdrop" type="button" data-order-book-close aria-label="关闭实时盘口"></button>
+        <section class="order-book-dialog" role="dialog" aria-modal="true" aria-labelledby="order-book-title">
+          <header class="order-book-head">
+            <div><span class="eyebrow">BINANCE FUTURES LIVE DEPTH</span><h2 id="order-book-title">实时100档盘口</h2><p id="order-book-subtitle">读取 Binance Futures 本地同步订单簿。</p></div>
+            <div class="order-book-actions">
+              <span id="order-book-live-state" class="order-book-live-state syncing">同步中</span>
+              <div class="order-book-limit" role="group" aria-label="盘口档位"><button type="button" data-order-book-limit="20">20档</button><button type="button" data-order-book-limit="50">50档</button><button class="active" type="button" data-order-book-limit="100">100档</button></div>
+              <button id="order-book-pause" type="button">暂停刷新</button>
+              <button id="order-book-close" class="ai-conclusion-close" type="button" data-order-book-close aria-label="关闭实时盘口">×</button>
+            </div>
+          </header>
+          <div id="order-book-body" class="order-book-body"><div class="order-book-loading">正在同步 Binance 实时盘口…</div></div>
+          <footer class="order-book-foot"><span>页面每秒读取一次本地 WebSocket 订单簿，底层深度流约 500ms 更新</span><strong>金额为 Binance 合约可见限价单名义金额，不代表真实主力资金</strong></footer>
+        </section>
+      </div>
       <div id="ai-conclusion-modal" class="ai-conclusion-modal hidden" aria-hidden="true">
         <button class="ai-conclusion-backdrop" type="button" data-conclusion-close aria-label="关闭 AI 分析结论"></button>
         <section class="ai-conclusion-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-conclusion-title">
@@ -503,6 +528,11 @@ class AiMonitorDashboard extends HTMLElement {
       this.toggleOpportunityDetails(detailButton);
     }, true);
     opportunityList.addEventListener("click", (event) => {
+      const orderBookButton = event.target.closest("[data-order-book]");
+      if (orderBookButton) {
+        this.openOrderBook(orderBookButton.dataset.orderBook, orderBookButton);
+        return;
+      }
       const marketFlowButton = event.target.closest("[data-market-flow-trend]");
       if (marketFlowButton) {
         this.openMarketFlowTrend(marketFlowButton.dataset.marketFlowTrend, marketFlowButton);
@@ -544,6 +574,13 @@ class AiMonitorDashboard extends HTMLElement {
         settled_price_at: opportunity.outcome?.settled_price_at,
       } : null);
     });
+    this.qa("[data-order-book-close]").forEach((button) => button.addEventListener("click", () => this.closeOrderBook()));
+    this.qa("[data-order-book-limit]").forEach((button) => button.addEventListener("click", () => this.setOrderBookLimit(Number(button.dataset.orderBookLimit))));
+    this.q("#order-book-pause").addEventListener("click", () => this.toggleOrderBookPause());
+    this.q("#order-book-body").addEventListener("click", (event) => {
+      const row = event.target.closest("[data-order-book-side][data-order-book-rank]");
+      if (row) this.selectOrderBookLevel(row.dataset.orderBookSide, Number(row.dataset.orderBookRank));
+    });
     this.qa("[data-score-trend-close]").forEach((button) => button.addEventListener("click", () => this.closeScoreTrend()));
     this.qa("[data-conclusion-close]").forEach((button) => button.addEventListener("click", () => this.closeAiConclusion()));
     this.qa("[data-conclusion-view]").forEach((button) => button.addEventListener("click", () => this.showAiConclusionView(button.dataset.conclusionView)));
@@ -570,6 +607,8 @@ class AiMonitorDashboard extends HTMLElement {
       if (event.key !== "Escape") return;
       if (!this.q("#macro-impact-modal").classList.contains("hidden")) {
         this.closeMacroImpact();
+      } else if (!this.q("#order-book-modal").classList.contains("hidden")) {
+        this.closeOrderBook();
       } else if (!this.q("#score-trend-modal").classList.contains("hidden")) {
         this.closeScoreTrend();
       } else if (!this.q("#historical-judgment-modal").classList.contains("hidden")) {
@@ -635,6 +674,8 @@ class AiMonitorDashboard extends HTMLElement {
     this.predictionAnalyticsAbortController = null;
     this.opportunitiesAbortController?.abort();
     this.opportunitiesAbortController = null;
+    window.clearInterval(this.orderBookTimer);
+    this.orderBookTimer = null;
     if (this.newsScrollAnimationFrame != null) {
       window.cancelAnimationFrame(this.newsScrollAnimationFrame);
       this.newsScrollAnimationFrame = null;
@@ -2360,6 +2401,7 @@ class AiMonitorDashboard extends HTMLElement {
     const evidence = item?.evidence || {};
     const stableScores = item?.score_components && typeof item.score_components === "object" ? item.score_components : {};
     const stableFlow = item?.flow && typeof item.flow === "object" ? item.flow : {};
+    const currentFlow = item?.current_market_flow && typeof item.current_market_flow === "object" ? item.current_market_flow : {};
     const raw = Array.isArray(evidence.score_history) ? evidence.score_history : [];
     const history = [];
     const numeric = (...values) => {
@@ -2409,8 +2451,24 @@ class AiMonitorDashboard extends HTMLElement {
       macro: numeric(point?.macro, point?.macro_context, point?.components?.macro),
       combined: numeric(point?.combined, point?.score),
     })).filter((point) => point.calculated_at && Number.isFinite(point.combined)));
+    if (currentFlow.fresh === true && currentFlow.observed_at && Number.isFinite(Number(currentFlow.score))) {
+      history.push({
+        calculated_at: currentFlow.observed_at,
+        news: numeric(stableScores.news, item?.news_score),
+        technical: numeric(stableScores.technical, item?.indicator_score),
+        ...flowPoint({}, currentFlow),
+        option_flow: numeric(stableScores.option_flow, stableFlow.option_flow?.score),
+        gex: numeric(stableScores.gex, item?.gex?.score),
+        institutional: numeric(stableScores.institutional_flow, stableFlow.institutional_flow?.score),
+        macro: numeric(stableScores.macro),
+        combined: numeric(stableScores.combined, item?.combined_score),
+        live_depth: true,
+      });
+    }
     const snapshot = evidence.score_snapshot || {};
-    const fallbackFlow = { ...(evidence.market_flow || {}), ...stableFlow };
+    // Historical score points must only use their signal-time snapshot.  Live
+    // Binance depth is appended above as a separately timestamped point.
+    const fallbackFlow = { ...(evidence.market_flow || {}) };
     const fallback = {
       calculated_at: snapshot.calculated_at || item?.updated_at || item?.discovered_at,
       news: numeric(snapshot.news, stableScores.news, item?.news_score),
@@ -2585,6 +2643,198 @@ class AiMonitorDashboard extends HTMLElement {
         </svg>
       </section>
       <section class="score-trend-ledger"><header><strong>最近评分明细</strong><small>分项缺失显示 --；最多保留 96 个扫描点</small></header><div><table><thead><tr><th>计算时间</th><th>组合分</th><th>变化</th>${series.filter((definition) => definition.key !== "combined").map((definition) => `<th>${definition.label}</th>`).join("")}</tr></thead><tbody>${recentRows}</tbody></table></div></section>`;
+  }
+
+  async openOrderBook(opportunityId, trigger) {
+    const item = this.state.opportunities.find((opportunity) => opportunity.id === opportunityId);
+    if (!item) return;
+    this.orderBookOpportunity = item;
+    this.orderBookFocus = trigger || null;
+    this.orderBookSnapshot = null;
+    this.orderBookPreviousSnapshot = null;
+    this.orderBookLimit = 100;
+    this.orderBookPaused = false;
+    this.q("#order-book-title").textContent = `${item.symbol} · 实时100档盘口`;
+    this.q("#order-book-subtitle").textContent = `${item.contract_symbol} · Binance Futures 映射合约 · 买卖各 100 档`;
+    this.q("#order-book-body").innerHTML = '<div class="order-book-loading">正在同步 Binance 实时盘口…</div>';
+    const modal = this.q("#order-book-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.syncOrderBookControls();
+    this.q("#order-book-close").focus({ preventScroll: true });
+    await this.loadOrderBook();
+    this.startOrderBookPolling();
+  }
+
+  closeOrderBook(restoreFocus = true) {
+    window.clearInterval(this.orderBookTimer);
+    this.orderBookTimer = null;
+    this.orderBookRequestId += 1;
+    const modal = this.q("#order-book-modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    this.orderBookOpportunity = null;
+    this.orderBookSnapshot = null;
+    this.orderBookPreviousSnapshot = null;
+    const focusTarget = this.orderBookFocus;
+    this.orderBookFocus = null;
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
+  }
+
+  startOrderBookPolling() {
+    window.clearInterval(this.orderBookTimer);
+    this.orderBookTimer = null;
+    if (this.orderBookPaused || !this.orderBookOpportunity) return;
+    this.orderBookTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") this.loadOrderBook();
+    }, 1000);
+  }
+
+  setOrderBookLimit(limit) {
+    if (![20, 50, 100].includes(limit) || limit === this.orderBookLimit) return;
+    this.orderBookLimit = limit;
+    this.orderBookPreviousSnapshot = null;
+    this.syncOrderBookControls();
+    this.loadOrderBook();
+  }
+
+  toggleOrderBookPause() {
+    this.orderBookPaused = !this.orderBookPaused;
+    if (this.orderBookPaused) {
+      // Invalidate an in-flight frame so the visible snapshot really freezes
+      // at the moment the operator presses pause.
+      this.orderBookRequestId += 1;
+      window.clearInterval(this.orderBookTimer);
+      this.orderBookTimer = null;
+    } else {
+      this.loadOrderBook();
+      this.startOrderBookPolling();
+    }
+    this.syncOrderBookControls();
+  }
+
+  syncOrderBookControls() {
+    this.qa("[data-order-book-limit]").forEach((button) => button.classList.toggle("active", Number(button.dataset.orderBookLimit) === this.orderBookLimit));
+    const pause = this.q("#order-book-pause");
+    if (pause) {
+      pause.classList.toggle("active", this.orderBookPaused);
+      pause.textContent = this.orderBookPaused ? "继续刷新" : "暂停刷新";
+    }
+    const liveState = this.q("#order-book-live-state");
+    if (liveState && this.orderBookPaused) {
+      liveState.className = "order-book-live-state paused";
+      liveState.textContent = "已暂停";
+    }
+  }
+
+  async loadOrderBook() {
+    const item = this.orderBookOpportunity;
+    if (!item) return;
+    const requestId = ++this.orderBookRequestId;
+    try {
+      const snapshot = await this.api(`/opportunities/${encodeURIComponent(item.id)}/order-book?limit=${this.orderBookLimit}`);
+      if (requestId !== this.orderBookRequestId || this.orderBookOpportunity?.id !== item.id) return;
+      this.orderBookPreviousSnapshot = this.orderBookSnapshot;
+      this.orderBookSnapshot = snapshot;
+      this.renderOrderBook();
+    } catch (error) {
+      if (requestId !== this.orderBookRequestId || !this.orderBookOpportunity) return;
+      const liveState = this.q("#order-book-live-state");
+      liveState.className = "order-book-live-state error";
+      liveState.textContent = "同步中断";
+      if (!this.orderBookSnapshot) this.q("#order-book-body").innerHTML = `<div class="order-book-empty"><strong>实时盘口暂未同步</strong><span>${this.escape(error.message || "Binance 深度采集器正在重连，请稍后重试。")}</span><button type="button" data-order-book-retry>重新读取</button></div>`;
+      this.q("[data-order-book-retry]")?.addEventListener("click", () => this.loadOrderBook());
+    }
+  }
+
+  orderBookDelta(row, side) {
+    const previousRows = this.orderBookPreviousSnapshot?.[side] || [];
+    const previous = previousRows.find((entry) => Number(entry.price) === Number(row.price));
+    if (!previous) return null;
+    const delta = Number(row.quantity) - Number(previous.quantity);
+    return Number.isFinite(delta) ? delta : null;
+  }
+
+  renderOrderBookChart(snapshot) {
+    const bids = Array.isArray(snapshot.bids) ? snapshot.bids : [];
+    const asks = Array.isArray(snapshot.asks) ? snapshot.asks : [];
+    if (!bids.length || !asks.length) return '<div class="order-book-chart-empty">累计深度不足</div>';
+    const width = 780;
+    const height = 230;
+    const padding = { left: 28, right: 28, top: 20, bottom: 28 };
+    const prices = [...bids, ...asks].map((row) => Number(row.price)).filter(Number.isFinite);
+    const minPrice = Math.min(...prices);
+    const maxPrice = Math.max(...prices);
+    const maxDepth = Math.max(...bids.map((row) => Number(row.cumulative_notional) || 0), ...asks.map((row) => Number(row.cumulative_notional) || 0), 1);
+    const x = (price) => padding.left + ((Number(price) - minPrice) / Math.max(maxPrice - minPrice, Number.EPSILON)) * (width - padding.left - padding.right);
+    const y = (depth) => height - padding.bottom - (Number(depth) / maxDepth) * (height - padding.top - padding.bottom);
+    const points = (rows) => rows.map((row) => `${x(row.price).toFixed(1)},${y(row.cumulative_notional).toFixed(1)}`).join(" ");
+    const midX = x(snapshot.mid_price);
+    return `<svg class="order-book-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this.escape(snapshot.contract_symbol)} 累计深度图">
+      <defs><linearGradient id="bid-depth-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5bd6aa" stop-opacity=".26"/><stop offset="1" stop-color="#5bd6aa" stop-opacity="0"/></linearGradient><linearGradient id="ask-depth-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff7888" stop-opacity=".26"/><stop offset="1" stop-color="#ff7888" stop-opacity="0"/></linearGradient></defs>
+      <g class="order-book-chart-grid"><line x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}"/><line x1="${midX}" y1="${padding.top}" x2="${midX}" y2="${height - padding.bottom}"/></g>
+      <polygon class="bid-fill" points="${points(bids)} ${x(bids[bids.length - 1].price)},${height - padding.bottom} ${x(bids[0].price)},${height - padding.bottom}"/><polygon class="ask-fill" points="${points(asks)} ${x(asks[asks.length - 1].price)},${height - padding.bottom} ${x(asks[0].price)},${height - padding.bottom}"/>
+      <polyline class="bid-line" points="${points(bids)}"/><polyline class="ask-line" points="${points(asks)}"/>
+      <text x="${padding.left}" y="${height - 8}">${this.escape(this.compactNumber(minPrice))}</text><text x="${midX}" y="${height - 8}" text-anchor="middle">中间价 ${this.escape(this.compactNumber(snapshot.mid_price))}</text><text x="${width - padding.right}" y="${height - 8}" text-anchor="end">${this.escape(this.compactNumber(maxPrice))}</text>
+    </svg>`;
+  }
+
+  renderOrderBook() {
+    const snapshot = this.orderBookSnapshot;
+    if (!snapshot) return;
+    const bids = Array.isArray(snapshot.bids) ? snapshot.bids : [];
+    const asks = Array.isArray(snapshot.asks) ? snapshot.asks : [];
+    const age = Number(snapshot.age_seconds);
+    const live = Number.isFinite(age) && age <= 4;
+    const liveState = this.q("#order-book-live-state");
+    liveState.className = `order-book-live-state ${this.orderBookPaused ? "paused" : live ? "live" : "stale"}`;
+    liveState.textContent = this.orderBookPaused ? "已暂停" : live ? `实时 · ${age.toFixed(0)}s` : `延迟 · ${Number.isFinite(age) ? `${age.toFixed(0)}s` : "--"}`;
+    const rows = Math.max(bids.length, asks.length);
+    const maxNotional = Math.max(...bids.map((row) => Number(row.notional) || 0), ...asks.map((row) => Number(row.notional) || 0), 1);
+    const largestBidRank = Number(snapshot.largest_bid_wall?.rank);
+    const largestAskRank = Number(snapshot.largest_ask_wall?.rank);
+    const deltaMarkup = (row, side) => {
+      if (!row) return "";
+      const delta = this.orderBookDelta(row, side);
+      if (delta == null || Math.abs(delta) < Number.EPSILON) return '<small class="flat">—</small>';
+      return `<small class="${delta > 0 ? "up" : "down"}">${delta > 0 ? "+" : ""}${this.escape(this.compactNumber(delta))}</small>`;
+    };
+    const levelCell = (row, side, content, extraClass = "") => row ? `<button class="order-book-level ${side} ${extraClass}" type="button" data-order-book-side="${side}" data-order-book-rank="${row.rank}" style="--depth:${Math.max(2, Number(row.notional) / maxNotional * 100).toFixed(1)}%">${content}</button>` : "--";
+    const bodyRows = Array.from({ length: rows }, (_, index) => {
+      const bid = bids[index];
+      const ask = asks[index];
+      const bidWall = bid && bid.rank === largestBidRank ? '<i>买墙</i>' : "";
+      const askWall = ask && ask.rank === largestAskRank ? '<i>卖墙</i>' : "";
+      return `<tr>
+        <td>${bid ? this.escape(this.compactMetric(bid.cumulative_notional)) : "--"}</td><td>${bid ? levelCell(bid, "bid", `${this.escape(this.compactMetric(bid.notional))}${deltaMarkup(bid, "bids")}`) : "--"}</td><td>${bid ? levelCell(bid, "bid", `${this.escape(this.compactNumber(bid.quantity))}${bidWall}`) : "--"}</td><td class="distance bid">${bid ? `${Number(bid.distance_bps).toFixed(1)} bps` : "--"}</td>
+        <td class="order-book-prices"><span class="bid">${bid ? this.escape(this.compactNumber(bid.price)) : "--"}</span><span class="ask">${ask ? this.escape(this.compactNumber(ask.price)) : "--"}</span></td>
+        <td>${ask ? levelCell(ask, "ask", `${this.escape(this.compactNumber(ask.quantity))}${askWall}`) : "--"}</td><td>${ask ? levelCell(ask, "ask", `${this.escape(this.compactMetric(ask.notional))}${deltaMarkup(ask, "asks")}`) : "--"}</td><td>${ask ? this.escape(this.compactMetric(ask.cumulative_notional)) : "--"}</td><td class="distance ask">${ask ? `+${Number(ask.distance_bps).toFixed(1)} bps` : "--"}</td>
+      </tr>`;
+    }).join("");
+    const ratio = Number(snapshot.bid_ask_ratio);
+    const ratioTone = !Number.isFinite(ratio) ? "flat" : ratio > 1.05 ? "up" : ratio < .95 ? "down" : "flat";
+    const change = (value) => value == null || !Number.isFinite(Number(value)) ? "--" : `${Number(value) > 0 ? "+" : ""}${Number(value).toFixed(1)}%`;
+    this.q("#order-book-body").innerHTML = `<section class="order-book-summary">
+      <article class="bid"><span>买方 ${snapshot.limit} 档</span><b>${this.escape(this.compactMetric(snapshot.bid_depth_notional, " U"))}</b><small>30秒 ${change(snapshot.bid_depth_change_30s_pct)}</small></article>
+      <article class="ask"><span>卖方 ${snapshot.limit} 档</span><b>${this.escape(this.compactMetric(snapshot.ask_depth_notional, " U"))}</b><small>30秒 ${change(snapshot.ask_depth_change_30s_pct)}</small></article>
+      <article class="${ratioTone}"><span>买卖深度比</span><b>${Number.isFinite(ratio) ? ratio.toFixed(3) : "--"}</b><small>失衡 ${Number(snapshot.book_imbalance || 0).toFixed(3)}</small></article>
+      <article><span>最优价差</span><b>${Number(snapshot.spread_bps).toFixed(2)} bps</b><small>${this.escape(this.compactNumber(snapshot.best_bid))} / ${this.escape(this.compactNumber(snapshot.best_ask))}</small></article>
+      <article class="bid"><span>最大买墙</span><b>${this.escape(this.compactMetric(snapshot.largest_bid_wall?.notional, " U"))}</b><small>${this.escape(this.compactNumber(snapshot.largest_bid_wall?.price))} · 第 ${this.number(snapshot.largest_bid_wall?.rank)} 档</small></article>
+      <article class="ask"><span>最大卖墙</span><b>${this.escape(this.compactMetric(snapshot.largest_ask_wall?.notional, " U"))}</b><small>${this.escape(this.compactNumber(snapshot.largest_ask_wall?.price))} · 第 ${this.number(snapshot.largest_ask_wall?.rank)} 档</small></article>
+    </section>
+    <div class="order-book-workspace"><section class="order-book-ladder"><header><strong>买卖盘口梯形表</strong><small>更新 ${this.escape(this.formatUnix(snapshot.captured_at))} · Update ID ${this.escape(snapshot.last_update_id)}</small></header><div><table><thead><tr><th>买方累计</th><th>买方金额 / Δ数量</th><th>买方数量</th><th>距中间价</th><th>买价 / 卖价</th><th>卖方数量</th><th>卖方金额 / Δ数量</th><th>卖方累计</th><th>距中间价</th></tr></thead><tbody>${bodyRows}</tbody></table></div></section>
+      <aside class="order-book-visual"><section><header><strong>累计深度走势</strong><small>绿色买盘 · 红色卖盘</small></header>${this.renderOrderBookChart(snapshot)}</section><section id="order-book-selection" class="order-book-selection"><span>LEVEL INSPECTOR</span><strong>点击任意档位查看详情</strong><small>展示该档价格、数量、名义金额与距中间价距离。</small></section><section class="order-book-definition"><strong>数据口径</strong><p>买方/卖方深度为当前可见限价挂单的价格 × 数量汇总。撤单可能瞬间消失，因此它是流动性快照，不等同于成交资金或主力净流入。</p></section></aside></div>`;
+  }
+
+  selectOrderBookLevel(side, rank) {
+    const rows = side === "ask" ? this.orderBookSnapshot?.asks : this.orderBookSnapshot?.bids;
+    const row = (rows || []).find((entry) => Number(entry.rank) === rank);
+    const target = this.q("#order-book-selection");
+    if (!row || !target) return;
+    const delta = this.orderBookDelta(row, side === "ask" ? "asks" : "bids");
+    target.className = `order-book-selection ${side}`;
+    target.innerHTML = `<span>${side === "ask" ? "SELL LEVEL" : "BUY LEVEL"} · 第 ${rank} 档</span><strong>${this.escape(this.compactNumber(row.price))}</strong><div><b>数量 ${this.escape(this.compactNumber(row.quantity))}</b><b>名义金额 ${this.escape(this.compactMetric(row.notional, " U"))}</b><b>累计 ${this.escape(this.compactMetric(row.cumulative_notional, " U"))}</b><b>距中间价 ${Number(row.distance_bps).toFixed(2)} bps</b></div><small>较上一帧数量 ${delta == null ? "无可比快照" : `${delta > 0 ? "+" : ""}${this.escape(this.compactNumber(delta))}`}</small>`;
   }
 
   openScoreTrend(opportunityId, trigger) {
@@ -3019,7 +3269,7 @@ class AiMonitorDashboard extends HTMLElement {
           // 行情流会频繁改变评分。只更新评分按钮，保留头部交互按钮的 DOM 身份，
           // 否则按钮会在 pointerdown/click 之间被替换，表现为偶发“点击无反应”。
           syncAttributes(currentSection, nextSection);
-          ["[data-market-flow-trend]", "[data-score-trend]"].forEach((selector) => {
+          ["[data-order-book]", "[data-market-flow-trend]", "[data-score-trend]"].forEach((selector) => {
             const currentScore = currentSection.querySelector(selector);
             const nextScore = nextSection.querySelector(selector);
             if (!currentScore || !nextScore) return;
@@ -3213,6 +3463,8 @@ class AiMonitorDashboard extends HTMLElement {
         ? `买 ${Number.isFinite(Number(marketFlowBidDepth)) ? this.compactNumber(Number(marketFlowBidDepth)) : "--"} · 卖 ${Number.isFinite(Number(marketFlowAskDepth)) ? this.compactNumber(Number(marketFlowAskDepth)) : "--"}`
         : "等待资金量快照";
       const marketFlowControl = `<button class="market-flow-score ${marketFlowTrend.direction}" type="button" data-market-flow-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 资金盘口变化走势"><span>资金盘口</span><strong><i>${marketFlowTrend.arrow}</i>${Number.isFinite(displayedMarketFlowScore) ? displayedMarketFlowScore.toFixed(1) : "--"}</strong><small>${this.escape(marketFlowDepthLabel)}</small><em>${marketFlowTrend.badge}</em></button>`;
+      const liveBookRatio = Number(marketFlowAskDepth) > 0 && Number.isFinite(Number(marketFlowBidDepth)) ? Number(marketFlowBidDepth) / Number(marketFlowAskDepth) : null;
+      const orderBookControl = marketAvailable ? `<button class="order-book-trigger" type="button" data-order-book="${this.escape(item.id)}" title="查看 ${this.escape(item.contract_symbol)} Binance 实时买卖各100档"><span>盘口100档</span><small>${liveBookRatio == null ? "实时买卖梯形表" : `买卖比 ${liveBookRatio.toFixed(2)}`}</small></button>` : "";
       const displayedCombinedScore = Number(this.firstValue(item.combined_score, item.score_components?.combined));
       const displayedNewsScore = Number(this.firstValue(item.news_score, item.score_components?.news));
       const displayedIndicatorScore = Number(this.firstValue(item.indicator_score, item.score_components?.technical));
@@ -3392,7 +3644,7 @@ class AiMonitorDashboard extends HTMLElement {
         <small>${this.escape(basisExplanation)}</small>
       </section>`;
       return `<article class="opportunity-item ${this.escape(item.status)} state-${this.escape(entryState.tone)} ${expanded ? "is-expanded" : ""} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}" data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:${historicalTab ? "history" : "current"}">
-        <header data-patch-key="header"><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${detailControl}${conclusionControl}</div>${marketFlowControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
+        <header data-patch-key="header"><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${orderBookControl}${detailControl}${conclusionControl}</div>${marketFlowControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
         ${basisPanel}
         ${virtualEntryPanel}
         ${macroReference}

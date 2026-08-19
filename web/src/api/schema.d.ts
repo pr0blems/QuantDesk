@@ -876,6 +876,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/opportunities/{opportunity_id}/order-book": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Opportunity Order Book
+         * @description Expose the synchronized Binance Futures book already held in memory.
+         */
+        get: operations["opportunity_order_book_api_v2_ai_monitor_opportunities__opportunity_id__order_book_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/opportunity-analytics": {
         parameters: {
             query?: never;
@@ -5677,6 +5697,41 @@ export interface operations {
     opportunity_news_analysis_records_api_v2_ai_monitor_opportunities__opportunity_id__news_analysis_records_get: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                opportunity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    opportunity_order_book_api_v2_ai_monitor_opportunities__opportunity_id__order_book_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
             header?: never;
             path: {
                 opportunity_id: string;

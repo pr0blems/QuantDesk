@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import StreamingResponse
 
-from ... import ai_monitor, historical_replay, live_engine, macro_ai, news_ai
+from ... import ai_monitor, historical_replay, live_engine, macro_ai, news_ai, ws_depth
 from ...ai_model_config import global_ai_model_configured
 from ...ai_monitor_read_models import read_models_available
 from ...database import get_db
@@ -1497,6 +1497,7 @@ def _opportunity_out(
     item: AiMonitorOpportunity,
     prediction: AiMonitorPrediction | None = None,
     live_market: dict[str, Any] | None = None,
+    current_market_flow: Mapping[str, Any] | None = None,
     market_snapshot: OpportunityMarketSnapshot | None = None,
     spot_quote: dict[str, Any] | None = None,
     enhanced_market: Mapping[str, Any] | None = None,
@@ -1513,6 +1514,35 @@ def _opportunity_out(
         market_snapshot if use_frozen else None,
         recompute_current_gate=not use_frozen,
     )
+    live_flow = dict(current_market_flow or {})
+    if live_flow and not use_frozen:
+        captured_at = live_flow.get("captured_at")
+        try:
+            captured_at = int(captured_at) if captured_at is not None else 0
+        except (TypeError, ValueError):
+            captured_at = 0
+        live_flow["observed_at"] = (
+            _utc_out(datetime.fromtimestamp(captured_at, tz=UTC))
+            if captured_at > 0
+            else None
+        )
+        # ``flow`` is the display contract for current opportunities.  Keep
+        # signal-time enhanced domains, but let live Binance depth and taker
+        # inputs replace stale/null scalar fields.  The immutable evidence and
+        # historical market snapshot are never rewritten.
+        stable_contract["flow"] = {
+            **dict(stable_contract.get("flow") or {}),
+            **live_flow,
+        }
+        stable_contract["current_market_flow"] = live_flow
+        stable_contract["flow_display_source"] = (
+            "binance_live"
+            if live_flow.get("fresh")
+            else "signal_snapshot"
+        )
+    else:
+        stable_contract["current_market_flow"] = None
+        stable_contract["flow_display_source"] = "signal_snapshot"
     if market_snapshot is not None and not use_frozen:
         stable_contract["signal_snapshot"] = {
             "id": market_snapshot.id,
@@ -3001,6 +3031,7 @@ def opportunities(
         else {}
     )
     live_tickers: dict[str, dict[str, Any]] = {}
+    current_market_flows: dict[int, dict[str, Any]] = {}
     finnhub_spot_quotes: dict[str, dict[str, Any]] = {}
     enhanced_market_features: dict[str, RealtimeMarketFeatureSnapshot] = {}
     if items:
@@ -3012,8 +3043,21 @@ def opportunities(
             live_tickers = repository.latest_tickers(
                 [item.contract_symbol for item in items]
             )
+            market_flow_inputs = ai_monitor._market_flow_input_maps(db, repository)
+            market_flow_now = datetime.now(UTC)
+            current_market_flows = {
+                item.id: ai_monitor.market_flow_snapshot(
+                    market_flow_inputs,
+                    symbol=item.symbol,
+                    contract_symbol=item.contract_symbol,
+                    direction=item.direction,
+                    now=market_flow_now,
+                )
+                for item in items
+            }
         except MonitorUnavailable:
             live_tickers = {}
+            current_market_flows = {}
         quote_service = getattr(request.app.state, "finnhub_us_quote_service", None)
         if isinstance(quote_service, FinnhubUsQuoteService) and quote_service.enabled:
             finnhub_spot_quotes = quote_service.latest_many(item.symbol for item in items)
@@ -3028,6 +3072,7 @@ def opportunities(
                 item,
                 prediction_by_opportunity_id.get(item.id),
                 live_tickers.get((item.contract_symbol or "").upper()),
+                current_market_flows.get(item.id),
                 snapshot_by_opportunity_id.get(item.id),
                 finnhub_spot_quotes.get(
                     FinnhubUsQuoteService.normalize_symbol(item.symbol)
@@ -3070,6 +3115,42 @@ def opportunities(
         "current_read_model" if projection_page is not None else "source_fallback"
     )
     return response
+
+
+@router.get("/opportunities/{opportunity_id}/order-book")
+def opportunity_order_book(
+    opportunity_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    limit: int = Query(default=100),
+) -> dict[str, Any]:
+    """Expose the synchronized Binance Futures book already held in memory."""
+
+    if limit not in {20, 50, 100}:
+        raise HTTPException(status_code=422, detail="limit must be 20, 50, or 100")
+    opportunity = db.scalar(
+        select(AiMonitorOpportunity).where(
+            AiMonitorOpportunity.public_id == opportunity_id,
+            AiMonitorOpportunity.user_id == user.id,
+        )
+    )
+    if opportunity is None:
+        raise HTTPException(status_code=404, detail="opportunity not found")
+    contract_symbol = str(opportunity.contract_symbol or "").strip().upper()
+    if not contract_symbol:
+        raise HTTPException(status_code=409, detail="opportunity has no Binance contract mapping")
+    snapshot = ws_depth.live_order_book_snapshot(contract_symbol, limit)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Binance live order book is synchronizing; retry shortly",
+        )
+    return {
+        **snapshot,
+        "opportunity_id": str(opportunity.public_id),
+        "equity_symbol": str(opportunity.symbol or "").strip().upper(),
+        "contract_symbol": contract_symbol,
+    }
 
 
 @router.get("/opportunities/{opportunity_id}/news")
