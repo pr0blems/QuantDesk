@@ -365,6 +365,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finnhub_client,
         app.state.finnhub_us_quote_service,
         app.state.unusual_whales_market_client,
+        engine=database_engine,
         cache_seconds=5,
         finnhub_enabled=bool(initial_finnhub_config.get("enabled", True)),
         unusual_whales_enabled=initial_uw_enabled,

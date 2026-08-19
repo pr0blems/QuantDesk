@@ -10,7 +10,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import Settings, get_settings
 
 
-def build_engine(settings: Settings, poolclass: type | None = None) -> Engine:
+def build_engine(
+    settings: Settings,
+    poolclass: type | None = None,
+    *,
+    connect_timeout: int = 8,
+    read_timeout: int = 20,
+    write_timeout: int = 20,
+) -> Engine:
     url = settings.database_url_value
     kwargs: dict[str, Any] = {
         "pool_pre_ping": True,
@@ -19,9 +26,9 @@ def build_engine(settings: Settings, poolclass: type | None = None) -> Engine:
         "max_overflow": 20,
     }
     connect_args: dict[str, Any] = {
-        "connect_timeout": 8,
-        "read_timeout": 20,
-        "write_timeout": 20,
+        "connect_timeout": max(1, int(connect_timeout)),
+        "read_timeout": max(1, int(read_timeout)),
+        "write_timeout": max(1, int(write_timeout)),
         "charset": "utf8mb4",
     }
     if settings.db_ssl_required:

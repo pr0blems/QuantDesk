@@ -36,6 +36,8 @@ READ_MODEL_TABLES = frozenset(
         "ai_monitor_score_history",
     }
 )
+PROJECTION_FLUSH_BATCH_SIZE = 100
+SCORE_HISTORY_READ_BATCH_SIZE = 1000
 _availability_cache: dict[int, tuple[float, bool]] = {}
 _availability_lock = threading.Lock()
 
@@ -311,6 +313,8 @@ def refresh_prediction_facts(
             for key, value in values.items():
                 setattr(fact, key, value)
         changed += 1
+        if changed % PROJECTION_FLUSH_BATCH_SIZE == 0:
+            db.flush()
     return changed
 
 
@@ -407,6 +411,8 @@ def refresh_current_opportunities(
                 setattr(row, field, value)
             row.row_version = int(row.row_version or 0) + 1
         changed += 1
+        if changed % PROJECTION_FLUSH_BATCH_SIZE == 0:
+            db.flush()
     return changed
 
 
@@ -424,82 +430,117 @@ def refresh_score_history(
     if user_id is not None:
         max_id_statement = max_id_statement.where(AiMonitorScoreHistory.user_id == user_id)
     max_processed_id = int(db.scalar(max_id_statement) or 0)
-    statement = (
-        select(OpportunityGateDecision)
-        .where(OpportunityGateDecision.id > max_processed_id)
-        .order_by(OpportunityGateDecision.id)
-        .limit(max(1, min(int(limit), 20000)))
-    )
-    if user_id is not None:
-        statement = statement.where(OpportunityGateDecision.user_id == user_id)
-    decisions = list(db.scalars(statement).all())
+    remaining = max(1, min(int(limit), 100000))
+    cursor_id = max_processed_id
     changed = 0
-    for decision in decisions:
-        sampled_at = _five_minute_bucket(decision.decision_at)
-        row = db.scalar(
-            select(AiMonitorScoreHistory).where(
-                AiMonitorScoreHistory.opportunity_id == decision.opportunity_id,
-                AiMonitorScoreHistory.sampled_at == sampled_at,
-            )
+    while remaining > 0:
+        batch_limit = min(SCORE_HISTORY_READ_BATCH_SIZE, remaining)
+        statement = (
+            select(OpportunityGateDecision)
+            .where(OpportunityGateDecision.id > cursor_id)
+            .order_by(OpportunityGateDecision.id)
+            .limit(batch_limit)
         )
-        scores = _mapping(decision.score_components_json)
-        market_flow = _mapping(decision.market_flow_snapshot_json)
-        domains = _mapping(scores.get("domains"))
-        coverage = _decimal(
-            _first(
-                _mapping(decision.data_quality_json).get("coverage"),
-                _mapping(decision.data_quality_json).get("data_coverage"),
-            )
+        if user_id is not None:
+            statement = statement.where(OpportunityGateDecision.user_id == user_id)
+        decisions = list(db.scalars(statement).all())
+        if not decisions:
+            break
+
+        opportunity_ids = sorted({decision.opportunity_id for decision in decisions})
+        sampled_times = [_five_minute_bucket(decision.decision_at) for decision in decisions]
+        existing_statement = select(AiMonitorScoreHistory).where(
+            AiMonitorScoreHistory.opportunity_id.in_(opportunity_ids),
+            AiMonitorScoreHistory.sampled_at >= min(sampled_times),
+            AiMonitorScoreHistory.sampled_at <= max(sampled_times),
         )
-        if coverage is not None and coverage <= 1:
-            coverage *= 100
-        blockers = list(decision.blocking_reasons_json or [])
-        values = {
-            "gate_decision_id": decision.id,
-            "user_id": decision.user_id,
-            "direction": decision.direction,
-            "gate_status": decision.gate_status,
-            "primary_blocker": str(blockers[0])[:191] if blockers else None,
-            "news_score": _decimal(_first(scores.get("news"), scores.get("news_score"))),
-            "technical_score": _decimal(_first(scores.get("technical"), scores.get("indicator"))),
-            "market_context_score": _domain_score(domains, "macro_market"),
-            "option_flow_score": _decimal(
-                _first(
-                    _mapping(market_flow.get("option_flow")).get("score"),
-                    _domain_score(domains, "options_flow"),
-                )
-            ),
-            "gex_score": _decimal(
-                _first(_mapping(market_flow.get("gex")).get("score"), _domain_score(domains, "gex"))
-            ),
-            "institutional_flow_score": _decimal(
-                _first(
-                    _mapping(market_flow.get("institutional_flow")).get("score"),
-                    _domain_score(domains, "institutional_flow"),
-                )
-            ),
-            "market_flow_score": _decimal(
-                _first(scores.get("market_flow"), market_flow.get("score"))
-            ),
-            "combined_score": _decimal(
-                _first(scores.get("combined"), scores.get("combined_score"))
-            ),
-            "data_coverage": coverage,
-            "feature_version": decision.feature_version,
-            "weights_version": decision.weights_version,
-            "decision_version": decision.decision_version,
+        if user_id is not None:
+            existing_statement = existing_statement.where(
+                AiMonitorScoreHistory.user_id == user_id
+            )
+        existing = {
+            (row.opportunity_id, row.sampled_at): row
+            for row in db.scalars(existing_statement).all()
         }
-        if row is None:
-            row = AiMonitorScoreHistory(
-                opportunity_id=decision.opportunity_id,
-                sampled_at=sampled_at,
-                **values,
+
+        for decision in decisions:
+            sampled_at = _five_minute_bucket(decision.decision_at)
+            key = (decision.opportunity_id, sampled_at)
+            row = existing.get(key)
+            scores = _mapping(decision.score_components_json)
+            market_flow = _mapping(decision.market_flow_snapshot_json)
+            domains = _mapping(scores.get("domains"))
+            coverage = _decimal(
+                _first(
+                    _mapping(decision.data_quality_json).get("coverage"),
+                    _mapping(decision.data_quality_json).get("data_coverage"),
+                )
             )
-            db.add(row)
-        else:
-            for field, value in values.items():
-                setattr(row, field, value)
-        changed += 1
+            if coverage is not None and coverage <= 1:
+                coverage *= 100
+            blockers = list(decision.blocking_reasons_json or [])
+            values = {
+                "gate_decision_id": decision.id,
+                "user_id": decision.user_id,
+                "direction": decision.direction,
+                "gate_status": decision.gate_status,
+                "primary_blocker": str(blockers[0])[:191] if blockers else None,
+                "news_score": _decimal(
+                    _first(scores.get("news"), scores.get("news_score"))
+                ),
+                "technical_score": _decimal(
+                    _first(scores.get("technical"), scores.get("indicator"))
+                ),
+                "market_context_score": _domain_score(domains, "macro_market"),
+                "option_flow_score": _decimal(
+                    _first(
+                        _mapping(market_flow.get("option_flow")).get("score"),
+                        _domain_score(domains, "options_flow"),
+                    )
+                ),
+                "gex_score": _decimal(
+                    _first(
+                        _mapping(market_flow.get("gex")).get("score"),
+                        _domain_score(domains, "gex"),
+                    )
+                ),
+                "institutional_flow_score": _decimal(
+                    _first(
+                        _mapping(market_flow.get("institutional_flow")).get("score"),
+                        _domain_score(domains, "institutional_flow"),
+                    )
+                ),
+                "market_flow_score": _decimal(
+                    _first(scores.get("market_flow"), market_flow.get("score"))
+                ),
+                "combined_score": _decimal(
+                    _first(scores.get("combined"), scores.get("combined_score"))
+                ),
+                "data_coverage": coverage,
+                "feature_version": decision.feature_version,
+                "weights_version": decision.weights_version,
+                "decision_version": decision.decision_version,
+            }
+            if row is None:
+                row = AiMonitorScoreHistory(
+                    opportunity_id=decision.opportunity_id,
+                    sampled_at=sampled_at,
+                    **values,
+                )
+                db.add(row)
+                existing[key] = row
+            else:
+                for field, value in values.items():
+                    setattr(row, field, value)
+            changed += 1
+            if changed % PROJECTION_FLUSH_BATCH_SIZE == 0:
+                db.flush()
+
+        db.flush()
+        cursor_id = max(decision.id for decision in decisions)
+        remaining -= len(decisions)
+        if len(decisions) < batch_limit:
+            break
     return changed
 
 

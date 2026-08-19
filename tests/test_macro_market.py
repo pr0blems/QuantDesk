@@ -1,11 +1,16 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from quantdesk_v2.macro_market import (
     MacroMarketService,
+    _bis_policy_metric,
     apply_market_adjustment,
+    capital_retreat_snapshot,
+    global_central_bank_matrix,
+    macro_entry_policy,
     macro_event_calendar,
     opportunity_market_context,
     sector_key,
+    treasury_curve_snapshot,
     us_market_session,
 )
 
@@ -25,6 +30,44 @@ class _CountingUnusualWhalesClient:
     def market_tide(self):
         self.tide_calls += 1
         return {"available": True, "source": "unusual_whales_market_tide"}
+
+
+def test_bis_policy_metric_derives_latest_rate_and_last_action() -> None:
+    metric = _bis_policy_metric(
+        [
+            {"TIME_PERIOD": "2026-07-01", "OBS_VALUE": "3.50"},
+            {"TIME_PERIOD": "2026-07-29", "OBS_VALUE": "3.75"},
+            {"TIME_PERIOD": "2026-08-18", "OBS_VALUE": "3.75"},
+        ],
+        key="FED",
+        label="美联储",
+    )
+
+    assert metric["available"] is True
+    assert metric["policy_rate"] == "3.750%"
+    assert metric["as_of"] == "2026-08-18"
+    assert metric["last_action_bps"] == 25.0
+    assert "上调" in metric["last_action"]
+
+
+def test_central_bank_matrix_marks_partial_bis_coverage() -> None:
+    matrix = global_central_bank_matrix(
+        datetime(2026, 8, 19, tzinfo=UTC),
+        {
+            "FED": {
+                "available": True,
+                "policy_rate": "3.750%",
+                "midpoint": 3.75,
+                "last_action": "2026-07-29 上调至 3.750%",
+                "as_of": "2026-08-18",
+                "source_url": "https://data.bis.org/topics/CBPOL",
+            }
+        },
+    )
+
+    assert matrix["coverage"] == {"available": 1, "required": 3}
+    assert matrix["rows"][0]["rate_status"] == "live"
+    assert matrix["rows"][1]["rate_status"] == "fallback"
 
 
 def test_unusual_whales_macro_snapshot_is_cached_for_five_minutes() -> None:
@@ -192,3 +235,71 @@ def test_closed_session_applies_a_transparent_liquidity_discount() -> None:
     )
 
     assert any(item["key"] == "market_session" for item in context["factors"])
+
+
+def test_direct_treasury_curve_classifies_long_end_term_premium_pressure() -> None:
+    nominal = []
+    real = []
+    for offset in range(30):
+        day = datetime(2026, 8, 18, tzinfo=UTC).date() - timedelta(days=offset)
+        nominal.append(
+            {
+                "Date": day.strftime("%m/%d/%Y"),
+                "2 Yr": "4.00",
+                "5 Yr": "4.30",
+                "10 Yr": str(4.80 - min(offset, 5) * 0.02),
+                "30 Yr": str(5.20 - min(offset, 5) * 0.03),
+            }
+        )
+        real.append({"Date": day.strftime("%m/%d/%Y"), "10 Yr": "2.30"})
+
+    curve = treasury_curve_snapshot(nominal, real)
+    policy = macro_entry_policy(
+        {
+            "treasury_curve": curve,
+            "capital_retreat": {},
+            "events": {},
+            "vix": {},
+        }
+    )
+
+    assert curve["available"] is True
+    assert curve["shock"]["regime"] == "term_premium_fiscal"
+    assert curve["shock"]["changes_5d_bps"]["2Y"] == 0
+    assert curve["shock"]["changes_5d_bps"]["10Y"] == 10
+    assert policy["state"] == "tightening"
+    assert policy["threshold_delta"] == 5
+    assert policy["long_position_multiplier"] == 0.6
+
+
+def test_capital_retreat_requires_two_available_independent_confirmations() -> None:
+    snapshot = {
+        "indices": [{"key": "SPX", "change_percent": -0.2}],
+        "macro_assets": [
+            {"key": "EQUAL_WEIGHT", "change_percent": -1.0},
+            {"key": "HIGH_YIELD", "change_percent": -0.8},
+            {"key": "DXY", "change_percent": 0.5},
+        ],
+        "breadth": {"advance_decline_ratio": 0.5},
+        "market_structure": {
+            "breadth_persistence": {
+                "available": True,
+                "relative_5d_percent": -0.9,
+                "relative_20d_percent": -1.4,
+            },
+            "credit_dollar": {
+                "available": True,
+                "high_yield_5d_percent": -1.1,
+                "dollar_5d_percent": 0.8,
+            },
+        },
+        "vix": {"change_percent": 5.0},
+        "move": {"change_percent": 3.0},
+    }
+
+    retreat = capital_retreat_snapshot(snapshot)
+
+    assert retreat["confirmed"] is True
+    assert retreat["met_count"] == 2
+    assert retreat["available_count"] == 2
+    assert retreat["checks"][0]["available"] is False

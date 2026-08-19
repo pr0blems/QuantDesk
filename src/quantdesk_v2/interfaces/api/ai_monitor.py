@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -20,7 +21,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import StreamingResponse
 
-from ... import ai_monitor, historical_replay, live_engine, news_ai
+from ... import ai_monitor, historical_replay, live_engine, macro_ai, news_ai
 from ...ai_model_config import global_ai_model_configured
 from ...ai_monitor_read_models import read_models_available
 from ...database import get_db
@@ -1920,6 +1921,7 @@ def ai_monitor_events(
 @router.get("/market-context")
 def market_context(
     request: Request,
+    background_tasks: BackgroundTasks,
     _: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, Any]:
     """Return the cached US macro regime used by opportunity scoring."""
@@ -1928,7 +1930,55 @@ def market_context(
         request.app.state.database_engine,
         request.app.state.settings.monitor_symbols_config,
     )
-    return request.app.state.macro_market_service.snapshot(repository)
+    snapshot = request.app.state.macro_market_service.snapshot(repository)
+    fingerprint = macro_ai.macro_analysis_fingerprint(snapshot)
+    previous = getattr(request.app.state, "macro_ai_scheduled_fingerprint", None)
+    previous_at = float(getattr(request.app.state, "macro_ai_scheduled_at", 0.0) or 0.0)
+    monotonic_now = time.monotonic()
+    if fingerprint != previous or monotonic_now - previous_at >= 6 * 60 * 60:
+        request.app.state.macro_ai_scheduled_fingerprint = fingerprint
+        request.app.state.macro_ai_scheduled_at = monotonic_now
+        background_tasks.add_task(
+            macro_ai.refresh_macro_analysis,
+            request.app.state.database_engine,
+            request.app.state.settings.credential_master_key.get_secret_value(),
+            snapshot,
+        )
+    return snapshot
+
+
+@router.get("/market-context/ai-analysis")
+def market_context_ai_analysis(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    repository = MonitorRepository(
+        request.app.state.database_engine,
+        request.app.state.settings.monitor_symbols_config,
+    )
+    snapshot = request.app.state.macro_market_service.snapshot(repository)
+    return macro_ai.macro_analysis_state(db, snapshot)
+
+
+@router.post("/market-context/ai-analysis/refresh")
+async def refresh_market_context_ai_analysis(
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    force: bool = Query(default=False),
+) -> dict[str, Any]:
+    repository = MonitorRepository(
+        request.app.state.database_engine,
+        request.app.state.settings.monitor_symbols_config,
+    )
+    snapshot = request.app.state.macro_market_service.snapshot(repository)
+    return await run_in_threadpool(
+        macro_ai.refresh_macro_analysis,
+        request.app.state.database_engine,
+        request.app.state.settings.credential_master_key.get_secret_value(),
+        snapshot,
+        force=bool(force and user.is_admin),
+    )
 
 
 @router.get("/config")

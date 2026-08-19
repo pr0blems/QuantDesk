@@ -6816,6 +6816,78 @@
         "summary": "Market Context"
       }
     },
+    "/api/v2/ai-monitor/market-context/ai-analysis": {
+      "get": {
+        "operationId": "market_context_ai_analysis_api_v2_ai_monitor_market_context_ai_analysis_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Market Context Ai Analysis Api V2 Ai Monitor Market Context Ai Analysis Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Market Context Ai Analysis"
+      }
+    },
+    "/api/v2/ai-monitor/market-context/ai-analysis/refresh": {
+      "post": {
+        "operationId": "refresh_market_context_ai_analysis_api_v2_ai_monitor_market_context_ai_analysis_refresh_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Refresh Market Context Ai Analysis Api V2 Ai Monitor Market Context Ai Analysis Refresh Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Refresh Market Context Ai Analysis"
+      }
+    },
     "/api/v2/ai-monitor/news": {
       "get": {
         "operationId": "news_api_v2_ai_monitor_news_get",

@@ -184,11 +184,35 @@ def _ai_monitor_signal(
         return 0, None, [], None, {}
     if direction < 0 and not bool(config.get("ai_monitor_live_allow_short", True)):
         return 0, None, [], None, {}
+    market_environment = evidence.get("market_environment")
+    market_environment = (
+        market_environment if isinstance(market_environment, dict) else {}
+    )
+    macro_policy = evidence.get("macro_entry_policy")
+    if not isinstance(macro_policy, dict):
+        macro_policy = market_environment.get("entry_policy")
+    macro_policy = macro_policy if isinstance(macro_policy, dict) else {}
+    if not bool(macro_policy.get("entry_allowed", True)):
+        return 0, None, [], None, {}
+    try:
+        macro_position_multiplier = float(
+            macro_policy.get("position_multiplier", 1.0)
+        )
+    except (TypeError, ValueError):
+        macro_position_multiplier = 1.0
+    macro_position_multiplier = max(0.0, min(1.0, macro_position_multiplier))
+    if macro_position_multiplier <= 0:
+        return 0, None, [], None, {}
     try:
         combined_score = float(row.get("confidence_score"))
     except (TypeError, ValueError):
         return 0, None, [], None, {}
-    minimum_score = float(config.get("ai_monitor_live_min_combined_score", 70.0))
+    readiness = evidence.get("live_readiness")
+    readiness = readiness if isinstance(readiness, dict) else {}
+    minimum_score = max(
+        float(config.get("ai_monitor_live_min_combined_score", 70.0)),
+        float(readiness.get("minimum_combined_score", 0.0) or 0.0),
+    )
     if not math.isfinite(combined_score) or combined_score < minimum_score:
         return 0, None, [], None, {}
     predicted_at = _utc_seconds(row.get("predicted_at"))
@@ -242,11 +266,14 @@ def _ai_monitor_signal(
     risk_proposal = {
         "stop_distance": stop_distance,
         "take_profit_distance": take_profit_distance,
-        "risk_per_trade_pct": float(config.get("risk_per_trade_pct", 0.5)),
+        "risk_per_trade_pct": float(config.get("risk_per_trade_pct", 0.5))
+        * macro_position_multiplier,
         "max_margin_pct": float(
             config.get("max_margin_per_trade_pct", config.get("position_size_pct", 2))
-        ),
+        )
+        * macro_position_multiplier,
         "max_leverage": max_leverage,
+        "macro_position_multiplier": macro_position_multiplier,
     }
     signal_evidence = {
         "source": "ai_monitor_live_copy_v1",
@@ -264,6 +291,7 @@ def _ai_monitor_signal(
         "entry_gate": gate,
         "risk_plan": risk_plan,
         "risk_proposal": risk_proposal,
+        "macro_policy": macro_policy,
     }
     basis = [
         "信号来源：AI 发现机会",

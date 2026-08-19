@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 from quantdesk_v2.ai_monitor_read_models import (
     read_models_available,
     reconcile_ai_monitor_read_models,
-    refresh_ai_monitor_read_models,
+    refresh_current_opportunities,
+    refresh_prediction_facts,
+    refresh_score_history,
 )
 from quantdesk_v2.config import get_settings
 from quantdesk_v2.database import build_engine
@@ -83,7 +85,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    engine = build_engine(get_settings())
+    # The shared MySQL service can need more than the API's 20-second request
+    # timeout for large maintenance writes.  Keep the relaxed timeout isolated
+    # to this rebuild command; online request handling retains its fail-fast
+    # defaults.
+    engine = build_engine(
+        get_settings(),
+        connect_timeout=15,
+        read_timeout=180,
+        write_timeout=180,
+    )
     with Session(engine, expire_on_commit=False) as db:
         available = read_models_available(db, refresh=True)
         report: dict[str, object] = {
@@ -98,14 +109,37 @@ def main() -> int:
             return 2 if args.apply else 0
         report["before"] = _projection_counts(db, args.user_id)
         if args.apply:
-            report["changed"] = refresh_ai_monitor_read_models(
+            prediction_facts = refresh_prediction_facts(
                 db,
                 user_id=args.user_id,
-                prediction_limit=args.prediction_limit,
-                score_limit=args.score_limit,
-                force_availability_check=True,
+                limit=args.prediction_limit,
             )
             db.commit()
+            current_opportunities = refresh_current_opportunities(
+                db,
+                user_id=args.user_id,
+            )
+            db.commit()
+            score_history = 0
+            remaining = max(1, int(args.score_limit))
+            while remaining > 0:
+                chunk_limit = min(1000, remaining)
+                changed = refresh_score_history(
+                    db,
+                    user_id=args.user_id,
+                    limit=chunk_limit,
+                )
+                db.commit()
+                score_history += changed
+                remaining -= changed
+                if changed < chunk_limit:
+                    break
+            report["changed"] = {
+                "available": True,
+                "prediction_facts": prediction_facts,
+                "current_opportunities": current_opportunities,
+                "score_history": score_history,
+            }
             report["after"] = _projection_counts(db, args.user_id)
             report["reconciliation"] = reconcile_ai_monitor_read_models(
                 db,

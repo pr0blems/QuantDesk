@@ -6,6 +6,9 @@ class AiMonitorDashboard extends HTMLElement {
       view: "opportunities",
       overview: null,
       macroMarket: null,
+      macroAi: null,
+      macroAiLoading: false,
+      macroAiError: "",
       config: null,
       scorePolicy: null,
       liveCopy: null,
@@ -128,7 +131,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260819-46">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260819-48">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -189,6 +192,16 @@ class AiMonitorDashboard extends HTMLElement {
         <section id="macro-market-panel" class="macro-market-panel" aria-label="美股宏观大盘环境">
           <div class="macro-market-loading"><span>US MARKET REGIME</span><strong>正在读取美股大盘环境…</strong></div>
         </section>
+        <div id="macro-impact-modal" class="live-copy-modal hidden" aria-hidden="true">
+          <button class="live-copy-backdrop" type="button" data-macro-impact-close aria-label="关闭宏观因素判断"></button>
+          <section class="live-copy-dialog macro-impact-dialog" role="dialog" aria-modal="true" aria-labelledby="macro-impact-title" tabindex="-1">
+            <header>
+              <div><span>MACRO ADMISSION CONTROL</span><h2 id="macro-impact-title">宏观因素判断</h2><p>直接收益率、全球央行、资金撤退确认与行业敏感度共同控制准入门槛和仓位，不替代 Binance 交易与结算价格。</p></div>
+              <button type="button" data-macro-impact-close aria-label="关闭宏观因素判断">×</button>
+            </header>
+            <div id="macro-impact-body" class="macro-impact-body"><div class="live-copy-loading">正在整理当前宏观判断…</div></div>
+          </section>
+        </div>
         <section id="signal-health-strip" class="signal-health-strip" aria-label="实时数据健康与风险状态" aria-live="polite">
           <div class="signal-health-loading"><span>DATA PIPELINE</span><strong>正在检查行情与信号数据覆盖…</strong></div>
         </section>
@@ -437,6 +450,14 @@ class AiMonitorDashboard extends HTMLElement {
     });
     this.q("#uw-usage-toggle").addEventListener("click", () => this.toggleUnusualWhales());
     this.q("#finnhub-usage-toggle").addEventListener("click", () => this.toggleFinnhub());
+    this.qa("[data-macro-impact-close]").forEach((button) => button.addEventListener("click", () => this.closeMacroImpact()));
+    this.q("#macro-impact-body").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-refresh-macro-ai]");
+      if (button) void this.loadMacroAiAnalysis({ force: true });
+    });
+    this.q("#macro-market-panel").addEventListener("click", (event) => {
+      if (event.target.closest("[data-open-macro-impact]")) this.openMacroImpact();
+    });
     this.q("#open-news-config").addEventListener("click", () => this.openConfig("news"));
     this.q("#open-weight-config").addEventListener("click", () => this.openConfig("weights"));
     this.q("#open-config").addEventListener("click", () => this.openConfig("indicators"));
@@ -547,7 +568,9 @@ class AiMonitorDashboard extends HTMLElement {
     });
     this.shadowRoot.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if (!this.q("#score-trend-modal").classList.contains("hidden")) {
+      if (!this.q("#macro-impact-modal").classList.contains("hidden")) {
+        this.closeMacroImpact();
+      } else if (!this.q("#score-trend-modal").classList.contains("hidden")) {
         this.closeScoreTrend();
       } else if (!this.q("#historical-judgment-modal").classList.contains("hidden")) {
         this.closeHistoricalJudgment();
@@ -967,6 +990,92 @@ class AiMonitorDashboard extends HTMLElement {
     const modal = this.q("#live-copy-config-modal");
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
+  }
+
+  openMacroImpact() {
+    const modal = this.q("#macro-impact-modal");
+    this.renderMacroImpact();
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    requestAnimationFrame(() => modal.querySelector(".macro-impact-dialog")?.focus({ preventScroll: true }));
+    void this.loadMacroAiAnalysis();
+  }
+
+  closeMacroImpact() {
+    const modal = this.q("#macro-impact-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  async loadMacroAiAnalysis({ force = false } = {}) {
+    if (this.state.macroAiLoading) return;
+    this.state.macroAiLoading = true;
+    this.state.macroAiError = "";
+    this.renderMacroImpact();
+    try {
+      this.state.macroAi = await this.api(`/market-context/ai-analysis/refresh${force ? "?force=true" : ""}`, { method: "POST" });
+    } catch (error) {
+      this.state.macroAiError = error.message || "AI 宏观分析暂不可用";
+      try {
+        this.state.macroAi = await this.api("/market-context/ai-analysis");
+      } catch (_) {
+        // Keep the last successful interpretation visible.
+      }
+    } finally {
+      this.state.macroAiLoading = false;
+      this.renderMacroImpact();
+    }
+  }
+
+  renderMacroImpact() {
+    const target = this.q("#macro-impact-body");
+    if (!target) return;
+    const data = this.state.macroMarket || {};
+    const policy = data.entry_policy || {};
+    const curve = data.treasury_curve || {};
+    const shock = curve.shock || {};
+    const retreat = data.capital_retreat || {};
+    const banks = data.central_banks || {};
+    const numberOrDash = (value, digits = 2) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "--";
+    const bp = (value) => Number.isFinite(Number(value)) ? `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(1)}bp` : "--";
+    const nominal = Array.isArray(curve.nominal) ? curve.nominal : [];
+    const curveItems = [curve.real_10y, curve.breakeven_10y, ...(Array.isArray(curve.curves) ? curve.curves : [])].filter(Boolean);
+    const yieldCards = nominal.map((item) => `<article class="macro-yield-card ${item.available ? "" : "unavailable"}"><header><span>${this.escape(item.key || "--")}</span><b>${numberOrDash(item.value, 3)}%</b></header><div><em>1日 ${bp(item.change_bps?.["1d"])}</em><em>5日 ${bp(item.change_bps?.["5d"])}</em><em>20日 ${bp(item.change_bps?.["20d"])}</em></div><small>Z-Score ${numberOrDash(item.zscore, 2)} · ${this.escape(item.as_of || "等待官方数据")}</small></article>`).join("");
+    const curveCards = curveItems.map((item) => `<article><span>${this.escape(item.label || item.key || "--")}</span><b>${numberOrDash(item.value, 2)}${item.unit === "bps" ? "bp" : "%"}</b><small>5日 ${bp(item.change_bps?.["5d"])}</small></article>`).join("");
+    const bankRows = (Array.isArray(banks.rows) ? banks.rows : []).map((item) => `<tr><td><strong>${this.escape(item.label || item.key)}</strong></td><td>${this.escape(item.policy_rate || "--")}</td><td>${this.escape(item.last_action || "--")}</td><td>${this.escape(item.vote_split || "--")}</td><td>${this.escape(item.next_meeting || "--")}</td><td class="${item.market_path?.available ? "positive" : "flat"}">${this.escape(item.market_path?.label || "未接入")}</td></tr>`).join("");
+    const retreatChecks = (Array.isArray(retreat.checks) ? retreat.checks : []).map((item) => `<article class="${item.met ? "met" : item.available ? "clear" : "unknown"}"><span>${item.met ? "✓" : item.available ? "○" : "--"}</span><div><strong>${this.escape(item.label || "确认项")}</strong><small>${this.escape(item.detail || "暂无说明")}</small></div></article>`).join("");
+    const sectorRows = (Array.isArray(data.sector_impacts) ? data.sector_impacts : []).map((item) => `<article class="${this.escape(item.state || "neutral")}"><header><strong>${this.escape(item.label || item.key)}</strong><b>${Number(item.adjustment) >= 0 ? "+" : ""}${numberOrDash(item.adjustment, 1)} 分</b></header><p>${this.escape((item.reasons || []).join("；") || "当前无显著宏观偏置")}</p></article>`).join("");
+    const sources = Array.isArray(data.data_sources) ? data.data_sources : [];
+    const sourceRows = sources.map((item) => `<article class="macro-source-card ${this.escape(item.status || "unavailable")}">
+      <header><span>${this.escape(item.tier || "source")}</span><b>${this.escape({ healthy: "正常", scheduled: "等待时段", stale: "旧快照", fallback: "官方回退", degraded: "降级", disabled: "已关闭", unavailable: "不可用" }[item.status] || item.status || "未知")}</b></header>
+      <strong>${this.escape(item.label || item.key)}</strong><p>${this.escape(item.role || "")}</p>
+      <dl><div><dt>来源</dt><dd>${this.escape(item.source || "--")}</dd></div><div><dt>更新</dt><dd>${this.escape(item.cadence || "--")}</dd></div><div><dt>数据日</dt><dd>${this.escape(item.as_of || "--")}</dd></div><div><dt>最近成功</dt><dd>${item.last_success_at ? this.formatDate(item.last_success_at) : "--"}</dd></div><div><dt>下次检查</dt><dd>${item.next_refresh_at ? this.formatDate(item.next_refresh_at) : "随行情流"}</dd></div></dl>
+    </article>`).join("");
+    const aiState = this.state.macroAi || {};
+    const ai = aiState.analysis || {};
+    const aiSectorRows = (Array.isArray(ai.sector_impacts) ? ai.sector_impacts : []).map((item) => `<span class="${this.escape(item.direction || "neutral")}"><b>${this.escape(item.sector || "行业")}</b>${this.escape(item.reason || "")}</span>`).join("");
+    const aiConstraints = (Array.isArray(ai.trading_constraints) ? ai.trading_constraints : []).map((item) => `<li>${this.escape(item)}</li>`).join("");
+    const aiRisks = (Array.isArray(ai.risks) ? ai.risks : []).map((item) => `<li>${this.escape(item)}</li>`).join("");
+    const aiLimitations = (Array.isArray(ai.data_limitations) ? ai.data_limitations : []).map((item) => `<li>${this.escape(item)}</li>`).join("");
+    const aiStatus = this.state.macroAiLoading ? "正在调用全局 DeepSeek 分析最新宏观快照…" : this.state.macroAiError || aiState.last_error || (!aiState.configured ? "全局 DeepSeek 尚未配置" : "等待首次宏观分析");
+    const policyTone = policy.state === "major_event_credit" || policy.state === "rate_liquidity_shock" ? "danger" : policy.state === "tightening" ? "warning" : "healthy";
+    target.innerHTML = `<section class="macro-policy-hero ${policyTone}">
+      <div><span>当前准入状态</span><h3>${this.escape(policy.label || "宏观数据不足")}</h3><p>${this.escape((policy.reasons || []).join("；") || "等待形成有效宏观判断")}</p></div>
+      <div class="macro-policy-metrics"><article><span>入场门槛</span><b>+${numberOrDash(policy.threshold_delta, 0)} 分</b></article><article><span>多头仓位</span><b>${numberOrDash(Number(policy.long_position_multiplier) * 100, 0)}%</b></article><article><span>空头仓位</span><b>${numberOrDash(Number(policy.short_position_multiplier) * 100, 0)}%</b></article><article><span>顺势多单</span><b>${policy.pause_new_trend_longs ? "暂停新增" : "允许"}</b></article></div>
+    </section>
+    <section class="macro-impact-section macro-ai-analysis ${this.escape(ai.regime || "neutral")}"><header><div><span>AI · MACRO INTERPRETATION</span><h3>AI 宏观分析</h3></div><div class="macro-ai-actions"><small>${aiState.generated_at ? `${this.formatDate(aiState.generated_at)} · ${this.escape(aiState.model || "DeepSeek")} · ${this.escape(aiState.trigger_reason || "自动更新")}` : "确定性规则先计算，AI 后解释"}</small><button type="button" data-refresh-macro-ai ${this.state.macroAiLoading ? "disabled" : ""}>${this.state.macroAiLoading ? "分析中…" : "重新分析"}</button></div></header>
+      ${aiState.available && ai ? `<div class="macro-ai-hero"><div><span>${this.escape(ai.regime || "neutral")}</span><h4>${this.escape(ai.headline || "宏观环境解读")}</h4><p>${this.escape(ai.summary || "")}</p></div><strong>${numberOrDash(ai.confidence, 0)}<small>AI 置信度</small></strong></div>
+      <div class="macro-ai-evidence"><article><span>利率冲击</span><p>${this.escape(ai.rate_analysis || "未形成明确结论")}</p></article><article><span>央行路径</span><p>${this.escape(ai.central_bank_analysis || "未形成明确结论")}</p></article><article><span>流动性 / 撤资</span><p>${this.escape(ai.liquidity_analysis || "未形成明确结论")}</p></article></div>
+      ${aiSectorRows ? `<div class="macro-ai-sectors">${aiSectorRows}</div>` : ""}
+      <div class="macro-ai-lists"><article><strong>执行约束</strong><ul>${aiConstraints || "<li>沿用确定性准入门槛和仓位系数</li>"}</ul></article><article><strong>主要风险</strong><ul>${aiRisks || "<li>暂无新增风险说明</li>"}</ul></article><article><strong>数据限制</strong><ul>${aiLimitations || "<li>无额外说明</li>"}</ul></article></div>` : `<div class="macro-ai-empty"><strong>${this.escape(aiStatus)}</strong><p>AI 只解释当前数据、利率冲击、央行差异和行业影响；不会直接改分、下单或覆盖 Binance 主价格。</p></div>`}
+      <footer><b>触发规则</b><span>宏观语义快照变化、分析超过 6 小时或管理员手动刷新；相同快照 15 分钟内去重。</span><em>仅作风险解释，不参与确定性准入计算</em></footer>
+    </section>
+    <section class="macro-impact-section macro-source-health"><header><div><span>DATA PROVENANCE & SCHEDULE</span><h3>数据来源与更新状态</h3></div><small>官方主源 + 实时参考 + 非阻断回退；失败不覆盖最后成功快照</small></header><div class="macro-source-grid">${sourceRows || "<p>数据来源状态暂不可用</p>"}</div></section>
+    <section class="macro-impact-section"><header><div><span>01 · DIRECT TREASURY CURVE</span><h3>美国财政部直接收益率</h3></div><small>${this.escape(curve.as_of || "等待更新")} · 日频官方曲线</small></header><div class="macro-yield-grid">${yieldCards || "<p>收益率曲线暂不可用</p>"}</div><div class="macro-curve-grid">${curveCards}</div><div class="macro-shock-summary ${this.escape(shock.severity || "unknown")}"><strong>${this.escape(shock.label || "冲击类型待确认")}</strong><p>${this.escape([...(shock.reasons || []), ...(shock.impacts || [])].join("；") || "尚未形成可验证的利率冲击分类")}</p></div></section>
+    <section class="macro-impact-section"><header><div><span>02 · GLOBAL CENTRAL BANKS</span><h3>全球央行矩阵</h3></div><small>市场预期路径缺源时明确标记，不做推测</small></header><div class="macro-bank-table"><table><thead><tr><th>央行</th><th>政策利率</th><th>最近动作</th><th>投票分歧</th><th>下次会议</th><th>市场路径</th></tr></thead><tbody>${bankRows}</tbody></table></div><div class="macro-bank-spreads">${(banks.spreads || []).map((item) => `<span>${this.escape(item.label)} <b>${numberOrDash(item.value_bps, 1)}bp</b><small>5日 ${bp(item.change_5d_bps)}</small></span>`).join("")}</div></section>
+    <section class="macro-impact-section"><header><div><span>03 · CAPITAL RETREAT</span><h3>资金撤退确认 · ${retreat.confirmed ? "已确认" : "未确认"}</h3></div><small>${this.number(retreat.met_count)} / ${this.number(retreat.required_count)} 条满足</small></header><div class="macro-retreat-grid">${retreatChecks}</div><p class="macro-impact-note">只有至少两个独立条件同时成立，才定义为美股全面撤资；不可用的数据不会被当作满足。</p></section>
+    <section class="macro-impact-section"><header><div><span>04 · SECTOR SENSITIVITY</span><h3>行业敏感度映射</h3></div><small>影响个股方向评分与仓位，不做全市场统一扣分</small></header><div class="macro-sector-impact-grid">${sectorRows}</div></section>
+    <footer class="macro-impact-source"><strong>执行口径</strong><span>Binance 映射合约始终作为交易与结算主价格。宏观层只控制准入门槛、方向放行与仓位系数。</span><small>${this.escape(data.source_note || "")}</small></footer>`;
   }
 
   renderLiveCopyConfigModal() {
@@ -1431,6 +1540,7 @@ class AiMonitorDashboard extends HTMLElement {
     const tide = data.market_tide || {};
     const providers = data.providers || {};
     const eventState = data.events || {};
+    const entryPolicy = data.entry_policy || {};
     const nextEvent = eventState.next_event || null;
     const indexCards = indices.map((item) => {
       const liveProxy = item.realtime_proxy || null;
@@ -1467,7 +1577,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.patchStablePanel(target, `<header class="macro-market-heading" data-patch-key="macro-heading">
       <div><span>US MARKET REGIME</span><strong>宏观大盘环境</strong><small>${this.escape(data.source_note || "指数、波动率、市场宽度和事件风险")}</small></div>
       <div class="macro-session ${this.escape(sessionKey)} ${sessionActive ? "live" : ""}"><span><i></i>${this.escape(session.label || "休市")}</span><b>${sessionActive ? "实时波动" : session.realtime_expected ? "等待实时确认" : "行情静止"}</b><small>美东 ${this.escape(String(session.local_time || "").slice(11, 19) || "--")} · 更新 ${capturedLabel}</small></div>
-      <div class="macro-regime ${this.escape(sentiment.key || "neutral")}"><span>环境结论</span><b>${this.escape(sentiment.label || "数据不足")}</b><small>${Number.isFinite(Number(sentiment.score)) ? `情绪 ${Number(sentiment.score).toFixed(0)} / 100` : "等待行情"}${data.stale ? " · 缓存数据" : ""}</small></div>
+      <button class="macro-regime ${this.escape(sentiment.key || "neutral")}" type="button" data-open-macro-impact aria-label="查看宏观因素判断"><span>环境结论</span><b>${this.escape(entryPolicy.label || sentiment.label || "数据不足")}</b><small>门槛 +${numberOrDash(entryPolicy.threshold_delta, 0)} · 多头仓位 ${numberOrDash(Number(entryPolicy.long_position_multiplier) * 100, 0)}% · 点击查看依据</small></button>
       <div class="macro-countdown ${this.escape(sessionKey)}" data-market-countdown data-target-at="${this.escape(session.countdown_target_at || "")}" data-target-label="${this.escape(session.countdown_label || "交易时段倒计时")}"><span data-market-countdown-state>${this.escape(session.countdown_label || "交易时段倒计时")}</span><b data-market-countdown-value>--:--:--</b><small>${countdownEt} ET · 本地 ${countdownLocal}</small></div>
     </header>
     <div class="macro-market-body" data-patch-key="macro-body">

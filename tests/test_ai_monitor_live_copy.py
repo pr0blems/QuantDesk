@@ -117,6 +117,30 @@ def test_ai_monitor_live_signal_is_fresh_bounded_and_carries_protection(
     assert live_engine._signal_is_fresh(_account(), signal_time, policy, evidence)
 
 
+def test_ai_monitor_live_signal_applies_frozen_macro_position_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 17, 10, 1, tzinfo=UTC).timestamp()
+    row = _prediction_row()
+    row["evidence_json"]["macro_entry_policy"] = {
+        "entry_allowed": True,
+        "position_multiplier": 0.25,
+        "state": "rate_liquidity_shock",
+    }
+    row["evidence_json"]["live_readiness"] = {"minimum_combined_score": 80}
+    monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [row])
+    monkeypatch.setattr(live_engine.time, "time", lambda: now)
+
+    direction, _atr, _basis, _signal_time, evidence = live_engine._ai_monitor_signal(
+        _account(), "AAPLUSDT", price=102
+    )
+
+    assert direction == 1
+    assert evidence["risk_proposal"]["risk_per_trade_pct"] == pytest.approx(0.125)
+    assert evidence["risk_proposal"]["max_margin_pct"] == pytest.approx(0.5)
+    assert evidence["risk_proposal"]["macro_position_multiplier"] == 0.25
+
+
 def test_ai_monitor_live_signal_fails_closed_when_disabled_or_gate_not_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

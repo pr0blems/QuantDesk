@@ -44,6 +44,7 @@ reports/
 
 # Local design verification notes
 /design-qa.md
+/.codex-runtime/
 
 # Machine-specific launchers and editor/OS metadata
 /autostart.vbs

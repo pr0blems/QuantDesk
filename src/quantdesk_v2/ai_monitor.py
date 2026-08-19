@@ -1057,13 +1057,23 @@ def prediction_live_score_snapshot(
         frozen_readiness.get("minimum_indicator_score", 65.0)
     )
     minimum_combined_score = float(
-        frozen_readiness.get("minimum_combined_score", 70.0)
+        frozen_readiness.get(
+            "base_minimum_combined_score",
+            frozen_readiness.get("minimum_combined_score", 70.0),
+        )
     )
+    entry_policy = dict(market_environment.get("entry_policy") or {})
+    threshold_delta = float(entry_policy.get("threshold_delta") or 0)
+    effective_minimum_combined_score = min(
+        100.0, minimum_combined_score + max(0.0, threshold_delta)
+    )
+    macro_entry_allowed = bool(entry_policy.get("entry_allowed", True))
     entry_confirmed = bool(
         indicator_policy.get("passed")
         and technical_score >= minimum_indicator_score
-        and combined_score >= minimum_combined_score
+        and combined_score >= effective_minimum_combined_score
         and not bool(flow.get("hard_conflict"))
+        and macro_entry_allowed
     )
     return {
         "news": news_score,
@@ -1093,6 +1103,9 @@ def prediction_live_score_snapshot(
             "minimum_indicator_score": minimum_indicator_score,
             "minimum_combined_score": minimum_combined_score,
         },
+        "effective_minimum_combined_score": effective_minimum_combined_score,
+        "macro_entry_allowed": macro_entry_allowed,
+        "macro_policy": entry_policy,
     }
 
 
@@ -1250,6 +1263,8 @@ def virtual_entry_gate_snapshot(
     require_new_trigger_news: bool = False,
     market_quality_passed: bool = True,
     require_market_quality: bool = False,
+    macro_entry_allowed: bool = True,
+    macro_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an explicit, auditable gate for research-only virtual entries."""
 
@@ -1305,6 +1320,17 @@ def virtual_entry_gate_snapshot(
             "detail": "新闻、技术与资金盘口加权评分",
         },
         {
+            "key": "macro_entry_policy",
+            "label": "宏观准入",
+            "passed": bool(macro_entry_allowed),
+            "current": str(dict(macro_policy or {}).get("label") or "正常环境"),
+            "required": "当前方向允许新增仓位",
+            "detail": str(
+                dict(macro_policy or {}).get("blocked_reason")
+                or "宏观状态通过提高门槛与仓位系数控制风险"
+            ),
+        },
+        {
             "key": "market_flow_conflict",
             "label": "盘口冲突",
             "passed": not bool(market_flow_hard_conflict),
@@ -1338,7 +1364,7 @@ def virtual_entry_gate_snapshot(
     signal_confirmed = all(bool(item["passed"]) for item in checks[:-1])
     entry_ready = signal_confirmed and bool(checks[-1]["passed"])
     return {
-        "version": "research_entry_quality_v2",
+        "version": "research_entry_quality_v3",
         "execution_mode": "virtual_prediction_only",
         "real_order_enabled": False,
         "direction": "short" if direction == "short" else "long",
@@ -1354,6 +1380,7 @@ def virtual_entry_gate_snapshot(
         "reference_price": round(float(entry_price), 12) if entry_price > 0 else None,
         "checked_at": checked_at_text,
         "checks": checks,
+        "macro_policy": dict(macro_policy or {}),
         "note": "仅生成预测记录，不会调用模拟盘或实盘下单接口。",
     }
 
@@ -1377,6 +1404,12 @@ def prediction_entry_gate_snapshot(
     market_flow = dict(market_flow) if isinstance(market_flow, Mapping) else {}
     signal_scores = evidence.get("signal_scores")
     signal_scores = dict(signal_scores) if isinstance(signal_scores, Mapping) else {}
+    market_environment = evidence.get("market_environment")
+    market_environment = (
+        dict(market_environment) if isinstance(market_environment, Mapping) else {}
+    )
+    macro_policy = market_environment.get("entry_policy")
+    macro_policy = dict(macro_policy) if isinstance(macro_policy, Mapping) else {}
     news_score = float(
         prediction.signal_news_score
         if prediction.signal_news_score is not None
@@ -1411,6 +1444,8 @@ def prediction_entry_gate_snapshot(
         ),
         market_quality_passed=bool((evidence.get("market_quality") or {}).get("passed", True)),
         require_market_quality=bool(evidence.get("require_market_quality_for_prediction", False)),
+        macro_entry_allowed=bool(macro_policy.get("entry_allowed", True)),
+        macro_policy=macro_policy,
     )
 
 
@@ -4240,6 +4275,8 @@ def signal_readiness_snapshot(
     market_flow: Mapping[str, Any],
     market_flow_weight: float,
     minimum_market_flow_quality: float,
+    macro_entry_allowed: bool = True,
+    macro_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify a virtual signal for research or shadow observation only."""
 
@@ -4256,6 +4293,7 @@ def signal_readiness_snapshot(
         "indicator_policy_passed": bool(matched),
         "indicator_strength": indicator_score >= minimum_indicator_score,
         "combined_score": combined_score >= minimum_combined_score,
+        "macro_entry_policy": bool(macro_entry_allowed),
         "market_quality": bool(market_quality.get("passed")),
         "market_flow_available": not flow_required or flow_available,
         "market_flow_freshness": not flow_required or flow_fresh,
@@ -4274,6 +4312,7 @@ def signal_readiness_snapshot(
         "indicator_policy_passed": "技术指标策略组未达到确认门槛",
         "indicator_strength": "技术强度未达到准入线",
         "combined_score": "组合评分未达到准入线",
+        "macro_entry_policy": "宏观状态暂停当前方向新增仓位",
         "market_quality": "实时行情或预测因子质量不足",
         "market_flow_available": "资金盘口缺少可验证的方向数据",
         "market_flow_freshness": "资金盘口方向数据已经过期",
@@ -4290,6 +4329,7 @@ def signal_readiness_snapshot(
         ],
         "minimum_indicator_score": minimum_indicator_score,
         "minimum_combined_score": minimum_combined_score,
+        "macro_policy": dict(macro_policy or {}),
         "estimated_cost_bps": estimated_cost_bps,
         "safety_margin_bps": safety_margin_bps,
         "required_gross_edge_bps": round(required_gross_edge, 8),
@@ -8370,9 +8410,20 @@ def _scan_opportunities(
         technical_confirmed = bool(
             policy_matched and indicator_score >= minimum_indicator_score
         )
+        macro_entry_policy = dict(market_environment.get("entry_policy") or {})
+        macro_threshold_delta = max(
+            0.0, float(macro_entry_policy.get("threshold_delta") or 0)
+        )
+        effective_minimum_combined_score = min(
+            100.0, minimum_combined_score + macro_threshold_delta
+        )
+        macro_entry_allowed = bool(
+            macro_entry_policy.get("entry_allowed", True)
+        )
         signal_confirmed = bool(
             technical_confirmed
-            and combined_score >= minimum_combined_score
+            and combined_score >= effective_minimum_combined_score
+            and macro_entry_allowed
             and bool(gate_summary["passed"])
             and (
                 not require_new_news
@@ -8391,7 +8442,7 @@ def _scan_opportunities(
             indicator_score=indicator_score,
             minimum_indicator_score=minimum_indicator_score,
             combined_score=combined_score,
-            minimum_combined_score=minimum_combined_score,
+            minimum_combined_score=effective_minimum_combined_score,
             market_flow_hard_conflict=decision_hard_conflict,
             entry_price=entry_price,
             checked_at=now,
@@ -8399,6 +8450,8 @@ def _scan_opportunities(
             require_new_trigger_news=require_new_news,
             market_quality_passed=decision_market_quality_passed,
             require_market_quality=require_market_quality,
+            macro_entry_allowed=macro_entry_allowed,
+            macro_policy=macro_entry_policy,
         )
         max_holding_seconds = (
             _TIMEFRAME_SECONDS[timeframe] * prediction_max_holding_bars
@@ -8418,14 +8471,18 @@ def _scan_opportunities(
             market_quality=decision_market_quality,
             calibration=calibrations[candidate["direction"]],
             minimum_indicator_score=minimum_indicator_score,
-            minimum_combined_score=minimum_combined_score,
+            minimum_combined_score=effective_minimum_combined_score,
             safety_margin_bps=float(config["live_safety_margin_bps"]),
             market_flow=market_flow,
             market_flow_weight=float(score_weights["market_flow"]),
             minimum_market_flow_quality=float(
                 config["minimum_market_flow_quality"]
             ),
+            macro_entry_allowed=macro_entry_allowed,
+            macro_policy=macro_entry_policy,
         )
+        readiness["base_minimum_combined_score"] = minimum_combined_score
+        readiness["macro_threshold_delta"] = macro_threshold_delta
         if readiness["status"] == "shadow_ready":
             shadow_ready += 1
         reference_price_time_ms = int(market.get("ts") or 0)
@@ -8533,6 +8590,9 @@ def _scan_opportunities(
             ),
             "macro_market_snapshot": macro_snapshot,
             "market_environment": market_environment,
+            "macro_entry_policy": macro_entry_policy,
+            "base_minimum_combined_score": minimum_combined_score,
+            "effective_minimum_combined_score": effective_minimum_combined_score,
             "risk_metrics": risk_metrics,
             "risk_plan": risk_plan,
             "max_holding": {
