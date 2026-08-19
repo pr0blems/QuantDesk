@@ -1503,6 +1503,254 @@ class OpportunityGateDecision(Base):
     )
 
 
+class AiMonitorPredictionFact(Base):
+    """Flat, query-oriented projection of one prediction lifecycle."""
+
+    __tablename__ = "ai_monitor_prediction_facts"
+    __table_args__ = (
+        UniqueConstraint(
+            "prediction_id", name="uq_ai_monitor_prediction_facts_prediction"
+        ),
+        Index(
+            "ix_ai_monitor_prediction_facts_user_signal",
+            "user_id",
+            "signal_at",
+        ),
+        Index(
+            "ix_ai_monitor_prediction_facts_user_status_signal",
+            "user_id",
+            "prediction_status",
+            "signal_at",
+        ),
+        Index(
+            "ix_ai_monitor_prediction_facts_user_direction_result_signal",
+            "user_id",
+            "direction",
+            "net_result",
+            "signal_at",
+        ),
+        Index(
+            "ix_ai_monitor_prediction_facts_user_symbol_signal",
+            "user_id",
+            "symbol",
+            "signal_at",
+        ),
+        {
+            "comment": "Flattened prediction facts for paged analytics and reconciliation",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    prediction_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("ai_monitor_predictions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    opportunity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("ai_monitor_opportunities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    opportunity_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    prediction_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    result: Mapped[str | None] = mapped_column(String(16))
+    net_result: Mapped[str | None] = mapped_column(String(16))
+    market_session: Mapped[str] = mapped_column(
+        String(16), default="unknown", nullable=False
+    )
+    quote_quality: Mapped[str] = mapped_column(
+        String(16), default="unknown", nullable=False
+    )
+    event_risk: Mapped[str] = mapped_column(
+        String(16), default="unknown", nullable=False
+    )
+    data_coverage: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    news_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    technical_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    market_context_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    option_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    gex_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    institutional_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    market_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    combined_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    price_source: Mapped[str] = mapped_column(
+        String(16), default="binance", nullable=False
+    )
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    gross_return_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    net_return_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    mfe_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    mae_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    estimated_cost_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    exit_reason: Mapped[str | None] = mapped_column(String(32))
+    weights_version: Mapped[str] = mapped_column(
+        String(32), default="unknown", nullable=False
+    )
+    feature_version: Mapped[str] = mapped_column(
+        String(32), default="unknown", nullable=False
+    )
+    decision_version: Mapped[str] = mapped_column(
+        String(32), default="unknown", nullable=False
+    )
+    settlement_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    readiness_status: Mapped[str] = mapped_column(
+        String(24), default="research_only", nullable=False
+    )
+    calibration_sample_count: Mapped[int] = mapped_column(
+        BigInteger, default=0, nullable=False
+    )
+    expected_gross_edge_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    expected_edge_lower_bound_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8)
+    )
+    snapshot_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    invalid_reason: Mapped[str | None] = mapped_column(String(96))
+    signal_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    exit_at: Mapped[datetime | None] = mapped_column(DateTime)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime)
+    source_updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class AiMonitorOpportunityCurrent(Base):
+    """One compact latest-state row per active mapped instrument and user."""
+
+    __tablename__ = "ai_monitor_opportunity_current"
+    __table_args__ = (
+        UniqueConstraint(
+            "opportunity_id", name="uq_ai_monitor_opportunity_current_opportunity"
+        ),
+        UniqueConstraint(
+            "user_id",
+            "contract_symbol",
+            name="uq_ai_monitor_opportunity_current_user_contract",
+        ),
+        Index(
+            "ix_ai_monitor_opportunity_current_user_state_time",
+            "user_id",
+            "lifecycle_status",
+            "discovered_at",
+        ),
+        {
+            "comment": "Latest compact state for active AI opportunities",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("ai_monitor_opportunities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    prediction_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("ai_monitor_predictions.id", ondelete="SET NULL")
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    lifecycle_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    opportunity_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    prediction_status: Mapped[str | None] = mapped_column(String(16))
+    primary_blocker: Mapped[str | None] = mapped_column(String(191))
+    news_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    technical_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    market_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    combined_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    data_coverage: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    price_source: Mapped[str] = mapped_column(
+        String(16), default="binance", nullable=False
+    )
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    current_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    discovered_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    score_updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    row_version: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class AiMonitorScoreHistory(Base):
+    """Downsampled domain scores used by opportunity trend charts."""
+
+    __tablename__ = "ai_monitor_score_history"
+    __table_args__ = (
+        UniqueConstraint(
+            "opportunity_id",
+            "sampled_at",
+            name="uq_ai_monitor_score_history_opportunity_sample",
+        ),
+        UniqueConstraint(
+            "gate_decision_id", name="uq_ai_monitor_score_history_gate_decision"
+        ),
+        Index(
+            "ix_ai_monitor_score_history_opportunity_time",
+            "opportunity_id",
+            "sampled_at",
+        ),
+        {
+            "comment": "Five-minute opportunity score projection for charting",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("ai_monitor_opportunities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    gate_decision_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("opportunity_gate_decisions.id", ondelete="SET NULL")
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    gate_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    primary_blocker: Mapped[str | None] = mapped_column(String(191))
+    news_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    technical_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    market_context_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    option_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    gex_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    institutional_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    market_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    combined_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    data_coverage: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    feature_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    weights_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+
 class AiMonitorReplayRun(Base):
     """An isolated, point-in-time historical replay execution."""
 

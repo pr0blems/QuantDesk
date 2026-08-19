@@ -21,6 +21,11 @@ class AiMonitorDashboard extends HTMLElement {
       news: [],
       runs: [],
       opportunities: [],
+      opportunityCache: { current: [], history: [] },
+      opportunityPages: { current: 1, history: 1 },
+      opportunityPageSize: 20,
+      opportunityPagination: { page: 1, page_size: 20, total: 0, total_pages: 1 },
+      opportunityPaginationByTab: {},
       opportunityAnalytics: null,
       predictionFilters: {
         dateFrom: "",
@@ -95,6 +100,9 @@ class AiMonitorDashboard extends HTMLElement {
     this.scoreTrendFocus = null;
     this.scoreTrendOpportunity = null;
     this.predictionAnalyticsAbortController = null;
+    this.opportunitiesAbortController = null;
+    this.newsScrollAnimationFrame = null;
+    this.newsScrollLastTick = 0;
     this.updateStreamAbort = null;
     this.updateStreamRetryTimer = null;
     this.updateStreamRefreshTimer = null;
@@ -120,7 +128,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260818-42">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260819-46">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -462,6 +470,11 @@ class AiMonitorDashboard extends HTMLElement {
     this.qa("[data-opportunity-status]").forEach((button) => button.addEventListener("click", () => this.setOpportunityStatusFilter(button.dataset.opportunityStatus)));
     const opportunityList = this.q("#opportunity-list");
     opportunityList.addEventListener("click", (event) => {
+      const pageButton = event.target.closest("[data-opportunity-page]");
+      if (pageButton && !pageButton.disabled) {
+        this.setOpportunityPage(Number(pageButton.dataset.opportunityPage));
+        return;
+      }
       const detailButton = event.composedPath().find((node) => node?.matches?.("[data-toggle-opportunity-details]"));
       if (!detailButton) return;
       event.preventDefault();
@@ -582,7 +595,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.timers.push(window.setInterval(() => this.tickClock(), 1000));
     this.timers.push(window.setInterval(() => this.loadMarketContext(), 30000));
     this.timers.push(window.setInterval(() => this.loadLiveState(), 60000));
-    this.timers.push(window.setInterval(() => this.autoScrollNews(), 80));
+    this.startNewsAutoScroll();
   }
 
   pause() {
@@ -597,6 +610,13 @@ class AiMonitorDashboard extends HTMLElement {
     this.updateStreamAbort = null;
     this.predictionAnalyticsAbortController?.abort();
     this.predictionAnalyticsAbortController = null;
+    this.opportunitiesAbortController?.abort();
+    this.opportunitiesAbortController = null;
+    if (this.newsScrollAnimationFrame != null) {
+      window.cancelAnimationFrame(this.newsScrollAnimationFrame);
+      this.newsScrollAnimationFrame = null;
+    }
+    this.newsScrollLastTick = 0;
     this.updateStreamScopes.clear();
     this.state.updateStreamStatus = "idle";
   }
@@ -719,6 +739,10 @@ class AiMonitorDashboard extends HTMLElement {
     this.state.fullLoadLoading = true;
     this.q("#ai-refresh").disabled = true;
     try {
+      // Opportunity/history and analytics queries are independent from the
+      // header/config payloads.  Start the active view immediately so a slow
+      // news/config request cannot leave the primary workspace empty.
+      const viewRequest = this.loadView(this.state.view);
       const [overview, news, indicators, symbols, macroMarket, scorePolicy, liveCopy] = await Promise.all([
         this.api("/overview"),
         this.api("/news?limit=160"),
@@ -742,7 +766,7 @@ class AiMonitorDashboard extends HTMLElement {
       this.renderMacroMarket();
       this.renderNews();
       this.renderConfig();
-      await this.loadView(this.state.view);
+      await viewRequest;
       this.state.lastSuccessfulRefreshAt = new Date().toISOString();
       this.state.lastRefreshError = "";
       this.renderSignalHealth();
@@ -1063,11 +1087,12 @@ class AiMonitorDashboard extends HTMLElement {
         <div><dt>回撤上限</dt><dd>${this.number(risk.max_drawdown_pct)}%</dd></div>
         <div><dt>信号时效</dt><dd>${this.number(risk.signal_max_age_seconds)} 秒</dd></div>
         <div><dt>最低组合分</dt><dd>${this.number(risk.minimum_combined_score)}</dd></div>
+        <div><dt>允许开仓时段</dt><dd>${risk.regular_session_only !== false ? "仅美股常规盘" : "不限时段"}</dd></div>
         <div><dt>允许方向</dt><dd>${risk.allow_long !== false ? "多" : ""}${risk.allow_long !== false && risk.allow_short !== false ? " / " : ""}${risk.allow_short !== false ? "空" : ""}</dd></div>
       </dl>
     </section>` : "";
     const isolation = `<section class="live-copy-isolation"><span>ISOLATED SIGNAL SOURCE</span><strong>不读取、不启停、不改写实盘交易页的其他策略</strong><p>本执行域只消费“发现机会”信号，并维护独立的账户记录、部署状态、幂等订单键和风控快照。Binance API 凭据及交易所总权益仍属于同一用户账户。</p></section>`;
-    const guarantees = `<section class="live-copy-guarantees"><strong>执行边界</strong><ul><li>只接收开启后生成、入场条件全部通过的本页新信号</li><li>普通实盘策略暂停、启用或修改，不影响这里的跟单开关</li><li>同一预测使用唯一订单键，重复刷新不会重复开仓</li><li>成交后必须建立交易所止损与止盈；保护失败会平仓并停机</li><li>关闭跟单只停止新开仓，不会擅自平掉已有持仓</li></ul></section>`;
+    const guarantees = `<section class="live-copy-guarantees"><strong>执行边界</strong><ul><li>只接收开启后生成、入场条件全部通过的本页新信号</li><li>第一阶段仅在美股常规交易时段允许新开仓；交易、盈亏和结算价格均以 Binance 映射合约为准</li><li>Finnhub、Unusual Whales、新闻、期权/GEX 与暗池只参与辅助评分和风控，不作为执行价格</li><li>普通实盘策略暂停、启用或修改，不影响这里的跟单开关</li><li>同一预测使用唯一订单键，重复刷新不会重复开仓</li><li>成交后必须建立交易所止损与止盈；保护失败会平仓并停机</li><li>关闭跟单只停止新开仓，不会擅自平掉已有持仓</li></ul></section>`;
     if (status.enabled) {
       target.innerHTML = `<div class="live-copy-danger"><span>REAL FUNDS ACTIVE</span><strong>发现机会独立跟单已开启</strong><p>仅本页满足准入条件的新 AI 信号会自动提交 Binance 订单。</p></div>${isolation}${riskMarkup}${guarantees}<form class="live-copy-form" data-live-copy-mode="disable"><input type="hidden" name="account_id" value="${this.escape(account?.id || "")}"><div class="live-copy-disable-note">停止后不再开新仓；本执行域已有仓位的止损、止盈和退出管理继续运行。</div><button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>停止独立实盘跟单</button></form>`;
       return;
@@ -1556,8 +1581,28 @@ class AiMonitorDashboard extends HTMLElement {
     throw new Error("新闻分析等待超时，请到分析记录查看任务状态");
   }
 
+  startNewsAutoScroll() {
+    if (this.newsScrollAnimationFrame != null) return;
+    const step = (timestamp) => {
+      this.newsScrollAnimationFrame = null;
+      if (!this.state.running) return;
+      if (timestamp - this.newsScrollLastTick >= 80) {
+        this.newsScrollLastTick = timestamp;
+        this.autoScrollNews();
+      }
+      this.newsScrollAnimationFrame = window.requestAnimationFrame(step);
+    };
+    this.newsScrollAnimationFrame = window.requestAnimationFrame(step);
+  }
+
   autoScrollNews() {
-    if (!this.state.running || this.state.view !== "news" || this.scrollPaused) return;
+    if (
+      !this.state.running
+      || document.visibilityState !== "visible"
+      || this.state.view !== "news"
+      || this.scrollPaused
+      || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+    ) return;
     const target = this.q("#news-stream");
     if (!target || target.scrollHeight <= target.clientHeight + 2) return;
     target.scrollTop += 1;
@@ -1971,7 +2016,7 @@ class AiMonitorDashboard extends HTMLElement {
     }
   }
 
-  async loadOpportunities({ showLoading = false } = {}) {
+  async _loadOpportunitiesLegacy({ showLoading = false } = {}) {
     const tab = this.state.opportunityTab;
     if (this.state.opportunitiesLoading && this.state.opportunityLoadingTab === tab) return;
     const requestId = ++this.state.opportunityRequestId;
@@ -2062,6 +2107,79 @@ class AiMonitorDashboard extends HTMLElement {
     }
   }
 
+  async loadOpportunities({ showLoading = false } = {}) {
+    const tab = this.state.opportunityTab;
+    this.opportunitiesAbortController?.abort();
+    const controller = new AbortController();
+    this.opportunitiesAbortController = controller;
+    const requestId = ++this.state.opportunityRequestId;
+    const target = this.q("#opportunity-list");
+    this.state.opportunitiesLoading = true;
+    this.state.opportunityLoadingTab = tab;
+    target.classList.add("is-refreshing");
+    target.setAttribute("aria-busy", "true");
+    if (showLoading && !(this.state.opportunityCache[tab] || []).length) {
+      target.innerHTML = '<div class="empty-state opportunity-empty"><strong>正在读取机会…</strong></div>';
+    }
+    try {
+      const params = new URLSearchParams({
+        scope: tab,
+        limit: String(this.state.opportunityPageSize),
+        page: String(this.state.opportunityPages[tab] || 1),
+      });
+      const data = await this.api(`/opportunities?${params}`, { signal: controller.signal });
+      if (requestId !== this.state.opportunityRequestId || tab !== this.state.opportunityTab) return;
+      const sorted = [...(data.items || [])].sort((left, right) => {
+        const leftTime = this.parseDate(left.discovered_at).getTime();
+        const rightTime = this.parseDate(right.discovered_at).getTime();
+        const delta = (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+        return delta || String(right.id || "").localeCompare(String(left.id || ""));
+      }).map((item) => ({ ...item, outcome: null }));
+      this.state.opportunities = sorted;
+      this.state.opportunityCache[tab] = sorted;
+      this.state.opportunityPagination = data.pagination || {
+        page: 1,
+        page_size: this.state.opportunityPageSize,
+        total: sorted.length,
+        total_pages: 1,
+      };
+      this.state.opportunityPaginationByTab[tab] = this.state.opportunityPagination;
+      this.state.opportunityPages[tab] = Number(this.state.opportunityPagination.page || 1);
+      const directions = data.direction_counts || { long: 0, short: 0 };
+      if (tab === "current") this.state.opportunityDirectionCounts = directions;
+      else this.state.historyOpportunityDirectionCounts = directions;
+      if (tab === "history") {
+        this.state.historyOpportunitySettlementCounts = data.settlement_counts || { total: 0, pending: 0, unavailable: 0 };
+      }
+      this.state.opportunityStatusCounts = sorted.reduce((counts, item) => {
+        const status = this.virtualEntryState(item, this.virtualEntryGate(item)).tone;
+        counts.all += 1;
+        if (Object.prototype.hasOwnProperty.call(counts, status)) counts[status] += 1;
+        return counts;
+      }, { all: 0, candidate: 0, ready: 0, triggered: 0, blocked: 0, data_error: 0 });
+      this.renderOpportunityDirectionCounts();
+      this.renderOpportunityStatusCounts();
+      this.renderOpportunities();
+      this.renderSignalHealth();
+      this.state.opportunitiesLoadedTab = tab;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      if (requestId !== this.state.opportunityRequestId) return;
+      this.showBanner(error.message || "发现机会读取失败", "error");
+      if (!(this.state.opportunityCache[tab] || []).length) {
+        target.innerHTML = '<div class="empty-state opportunity-empty"><strong>机会读取失败</strong><span>页面会保留并自动重试。</span></div>';
+      }
+    } finally {
+      if (requestId === this.state.opportunityRequestId) {
+        this.state.opportunitiesLoading = false;
+        this.state.opportunityLoadingTab = "";
+        if (this.opportunitiesAbortController === controller) this.opportunitiesAbortController = null;
+        target.classList.remove("is-refreshing");
+        target.removeAttribute("aria-busy");
+      }
+    }
+  }
+
   renderOpportunityDirectionCounts() {
     const groups = [
       ["#current-direction-counts", this.state.opportunityDirectionCounts, "当前机会"],
@@ -2087,7 +2205,24 @@ class AiMonitorDashboard extends HTMLElement {
       button.setAttribute("aria-selected", String(active));
     });
     this.q("#opportunity-status-tabs").classList.toggle("hidden", tab === "history");
-    this.loadOpportunities({ showLoading: true });
+    this.state.opportunities = this.state.opportunityCache[tab] || [];
+    this.state.opportunityPagination = this.state.opportunityPaginationByTab[tab] || {
+      page: this.state.opportunityPages[tab] || 1,
+      page_size: this.state.opportunityPageSize,
+      total: 0,
+      total_pages: 1,
+    };
+    this.renderOpportunities();
+    this.loadOpportunities({ showLoading: !this.state.opportunities.length });
+  }
+
+  setOpportunityPage(page) {
+    const tab = this.state.opportunityTab;
+    const totalPages = Number(this.state.opportunityPagination?.total_pages || 1);
+    const nextPage = Math.min(totalPages, Math.max(1, Number(page) || 1));
+    if (nextPage === Number(this.state.opportunityPages[tab] || 1)) return;
+    this.state.opportunityPages[tab] = nextPage;
+    this.loadOpportunities();
   }
 
   setOpportunityStatusFilter(status) {
@@ -2825,6 +2960,32 @@ class AiMonitorDashboard extends HTMLElement {
     }
   }
 
+  opportunityPaginationMarkup() {
+    const pagination = this.state.opportunityPagination || {};
+    const page = Math.max(1, Number(pagination.page) || 1);
+    const pageSize = Math.max(1, Number(pagination.page_size) || this.state.opportunityPageSize);
+    const total = Math.max(0, Number(pagination.total) || 0);
+    const totalPages = Math.max(1, Number(pagination.total_pages) || Math.ceil(total / pageSize) || 1);
+    if (totalPages <= 1 && total <= pageSize) return "";
+    const entries = [];
+    const values = totalPages <= 7
+      ? Array.from({ length: totalPages }, (_unused, index) => index + 1)
+      : [...new Set([1, page - 1, page, page + 1, totalPages].filter((value) => value >= 1 && value <= totalPages))].sort((left, right) => left - right);
+    values.forEach((value, index) => {
+      if (index && value - values[index - 1] > 1) entries.push("ellipsis");
+      entries.push(value);
+    });
+    return `<nav class="prediction-pagination opportunity-pagination" aria-label="机会列表分页">
+      <span>共 <strong>${this.number(total)}</strong> 条 · 每页 ${this.number(pageSize)} 条</span>
+      <div>
+        <button type="button" data-opportunity-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        ${entries.map((entry) => entry === "ellipsis" ? '<i aria-hidden="true">…</i>' : `<button type="button" class="${entry === page ? "active" : ""}" data-opportunity-page="${entry}" ${entry === page ? 'aria-current="page" disabled' : ""}>${entry}</button>`).join("")}
+        <button type="button" data-opportunity-page="${page + 1}" ${page >= totalPages ? "disabled" : ""}>下一页</button>
+      </div>
+      <small>第 ${this.number(page)} / ${this.number(totalPages)} 页</small>
+    </nav>`;
+  }
+
   renderOpportunities() {
     const target = this.q("#opportunity-list");
     const historicalTab = this.state.opportunityTab === "history";
@@ -2839,7 +3000,8 @@ class AiMonitorDashboard extends HTMLElement {
         : statusFilter !== "all"
         ? `<div class="empty-state opportunity-empty"><strong>当前没有“${statusLabel}”机会</strong><span>可切换其他状态，或等待下一轮机会扫描。</span></div>`
         : '<div class="empty-state opportunity-empty"><strong>尚未发现当前有效的美股候选</strong><span>系统会按新闻回看范围、置信度和关联股票继续扫描。</span></div>';
-      if (target.innerHTML !== emptyMarkup) target.innerHTML = emptyMarkup;
+      const emptyWithPagination = emptyMarkup + this.opportunityPaginationMarkup();
+      if (target.innerHTML !== emptyWithPagination) target.innerHTML = emptyWithPagination;
       return;
     }
     const waitingSettlementCount = visibleOpportunities.filter((item) => item.prediction_status === "pending").length;
@@ -3133,7 +3295,7 @@ class AiMonitorDashboard extends HTMLElement {
         <footer data-patch-key="footer"><span>发现 ${this.formatDate(item.discovered_at)}</span><span>评分更新 ${this.formatDate(scoreUpdatedAt)}</span><span>有效至 ${this.formatDate(item.expires_at)}</span><em>${historicalTab ? `历史机会 · ${outcomeLabel}` : entryState.tone === "blocked" ? `已阻断 · ${this.escape(entryState.detail)}` : entryState.tone === "data_error" ? `数据异常 · ${this.escape(entryState.detail)}` : shadowReady ? "影子候选 · 仍不执行交易" : confirmed ? `研究预测 · ${(readiness.failed_reasons || ["未通过影子准入"]).slice(0, 1).join("")}` : item.status === "candidate" ? marketAvailable ? "等待策略组与评分确认" : "新闻候选 · 暂无技术行情" : "历史机会"}</em></footer>
       </article>`;
     }).join("");
-    this.patchOpportunityCards(target, markup);
+    this.patchOpportunityCards(target, markup + this.opportunityPaginationMarkup());
   }
 
   openAiConclusion(opportunityId, trigger) {
@@ -4068,6 +4230,7 @@ class AiMonitorDashboard extends HTMLElement {
         event_risk: filters.eventRisk,
         exit_reason: filters.exitReason,
         include_readiness: "false",
+        include_ablation: "false",
       });
       if (filters.dateFrom) params.set("date_from", filters.dateFrom);
       if (filters.dateTo) params.set("date_to", filters.dateTo);
@@ -4315,6 +4478,11 @@ class AiMonitorDashboard extends HTMLElement {
   renderMarketAblation(ablation) {
     const target = this.q("#market-ablation");
     if (!target) return;
+    if (ablation?.status === "deferred") {
+      target.className = "market-ablation hidden";
+      target.innerHTML = "";
+      return;
+    }
     const variants = Array.isArray(ablation?.variants) ? ablation.variants : [];
     if (!ablation || ablation.status === "unavailable" || !variants.length) {
       target.className = "market-ablation unavailable";

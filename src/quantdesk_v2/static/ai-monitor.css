@@ -635,6 +635,9 @@ button:disabled { cursor: wait; opacity: .55; }
 .opportunity-status-tabs button[data-opportunity-status="waiting"] b { color: var(--ai-gold); }
 .opportunity-status-tabs button[data-opportunity-status="failed"] b { color: var(--ai-red); }
 .opportunity-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 5px; padding: 6px; }
+.opportunity-list.is-refreshing { position: relative; }
+.opportunity-list.is-refreshing::before { content: "数据更新中"; position: fixed; right: 18px; bottom: 18px; z-index: 30; padding: 6px 10px; border: 1px solid var(--ai-line-strong); color: var(--ai-brand); background: rgba(13, 16, 13, .92); font: 700 11px/1.2 Consolas, monospace; letter-spacing: .08em; box-shadow: 0 6px 24px rgba(0, 0, 0, .28); }
+.opportunity-pagination { grid-column: 1 / -1; width: 100%; }
 .opportunity-empty { grid-column: 1 / -1; }
 .settlement-guide { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 18px; padding: 9px 12px; border: 1px solid rgba(173, 156, 255, .34); background: linear-gradient(90deg, rgba(173, 156, 255, .07), transparent 55%), #10130f; box-shadow: inset 3px 0 0 var(--ai-brand); }
 .settlement-guide > div { min-width: 0; }
@@ -1292,7 +1295,8 @@ button:disabled { cursor: wait; opacity: .55; }
 .ai-fundamental-empty strong { color: var(--ai-text); font-size: 18px; }
 .ai-fundamental-empty span { color: var(--ai-dim); font-size: 12px; }
 
-.analytics-control-grid { display: grid; grid-template-columns: minmax(640px, 1.35fr) minmax(520px, .9fr); border-bottom: 1px solid var(--ai-line); background: var(--ai-line); gap: 1px; }
+.analytics-control-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, .9fr); border-bottom: 1px solid var(--ai-line); background: var(--ai-line); gap: 1px; }
+.analytics-control-grid > * { min-width: 0; }
 .analytics-filters { background: #10130f; }
 .analytics-filters > header { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 14px; border-bottom: 1px solid var(--ai-line); }
 .analytics-filters > header div { display: grid; gap: 2px; }
@@ -1315,7 +1319,7 @@ button:disabled { cursor: wait; opacity: .55; }
 .analytics-cost-config > header strong { color: var(--ai-text); font-size: 15px; }
 .analytics-cost-config > header small { color: var(--ai-dim); font-size: 11px; }
 .analytics-cost-config > header > span { color: var(--ai-green); font-size: 11px; text-align: right; white-space: nowrap; }
-.analytics-cost-grid { display: grid; grid-template-columns: repeat(3, minmax(118px, 1fr)) auto; gap: 8px; padding: 11px 14px; }
+.analytics-cost-grid { display: grid; grid-template-columns: repeat(3, minmax(92px, 1fr)) auto; gap: 8px; padding: 11px 14px; }
 .analytics-cost-grid > label { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 7px; row-gap: 5px; color: var(--ai-muted); }
 .analytics-cost-grid > label.disabled { opacity: .5; }
 .analytics-cost-grid > label > input[type="checkbox"] { width: 15px; height: 15px; margin: 0; accent-color: var(--ai-green); }
@@ -1512,7 +1516,7 @@ td.negative { color: var(--ai-red); }
   .opportunity-list { grid-template-columns: minmax(0, 1fr); }
   .analytics-control-grid { grid-template-columns: minmax(0, 1fr); }
   .analytics-filter-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
-  .analytics-cost-grid { grid-template-columns: repeat(3, minmax(118px, 1fr)) auto; }
+  .analytics-cost-grid { grid-template-columns: repeat(3, minmax(92px, 1fr)) auto; }
   .analytics-filter-actions { align-items: end; justify-content: flex-end; }
   .analytics-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .adaptive-exit-policy > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2108,6 +2112,27 @@ td.negative { color: var(--ai-red); }
 .cross-venue-basis.opening_gap_watch.forecast-up .basis-direction b { color: var(--ai-green); }
 .cross-venue-basis.opening_gap_watch.forecast-neutral .basis-direction b { color: var(--ai-gold); }
 .cross-venue-basis.reference_unavailable > strong, .cross-venue-basis.execution_unavailable > strong { border-left-color: var(--ai-red); color: var(--ai-red); }
+
+/* The basis panel is rendered inside a two-column opportunity grid.  Its
+   responsive breakpoints must therefore follow the card's inline size, not
+   the browser viewport.  Keep this block after the base declaration so the
+   compact tracks win in the cascade. */
+@container (max-width: 760px) {
+  .cross-venue-basis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cross-venue-basis > strong,
+  .cross-venue-basis > small { grid-column: span 3; }
+  .cross-venue-basis .basis-direction { grid-column: span 2; }
+  .cross-venue-basis > small {
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
+@container (max-width: 520px) {
+  .cross-venue-basis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cross-venue-basis > strong,
+  .cross-venue-basis > small,
+  .cross-venue-basis .basis-direction { grid-column: span 2; }
+}
 .ai-conclusion-refresh-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-bottom: 12px; border: 1px solid var(--ai-line); background: var(--ai-line); }
 .ai-conclusion-refresh-meta article { display: grid; align-content: center; min-width: 0; min-height: 68px; padding: 10px 12px; background: #101510; }
 .ai-conclusion-refresh-meta span { color: var(--ai-muted); font-size: 10px; }
@@ -2131,6 +2156,17 @@ td.negative { color: var(--ai-red); }
 .opportunity-feature-disabled strong { color: var(--ai-brand); white-space: nowrap; }
 
 @media (max-width: 760px) {
+  .ai-module-nav button,
+  .ai-module-nav .ai-nav-root,
+  .ai-subnav-group .ai-nav-child {
+    grid-template-columns: minmax(104px, 1fr);
+  }
+  .ai-module-nav button strong,
+  .ai-module-nav button small {
+    min-width: 0;
+    white-space: nowrap;
+    writing-mode: horizontal-tb;
+  }
   .ai-head-actions > .live-copy-toggle { min-width: 146px; }
   .ai-head-actions > .uw-usage-toggle { min-width: 146px; }
   .ai-head-actions > .market-data-toggle { min-width: 146px; }

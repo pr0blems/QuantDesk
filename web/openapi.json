@@ -6998,6 +6998,32 @@
           },
           {
             "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": "legacy",
+              "enum": [
+                "legacy",
+                "current",
+                "history"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "include_expired",
             "required": false,
             "schema": {
@@ -7487,6 +7513,16 @@
             "schema": {
               "default": false,
               "title": "Include Readiness",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_ablation",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Ablation",
               "type": "boolean"
             }
           }

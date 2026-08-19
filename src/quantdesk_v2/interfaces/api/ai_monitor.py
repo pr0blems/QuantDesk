@@ -22,6 +22,7 @@ from starlette.responses import StreamingResponse
 
 from ... import ai_monitor, historical_replay, live_engine, news_ai
 from ...ai_model_config import global_ai_model_configured
+from ...ai_monitor_read_models import read_models_available
 from ...database import get_db
 from ...dependencies import bearer, get_current_user, require_admin_write
 from ...finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
@@ -30,6 +31,7 @@ from ...models import (
     AdminSetting,
     AiMonitorConfig,
     AiMonitorOpportunity,
+    AiMonitorOpportunityCurrent,
     AiMonitorPrediction,
     AiMonitorReplayRun,
     AiMonitorRun,
@@ -813,6 +815,7 @@ def _ai_monitor_live_config(*, enabled: bool) -> dict[str, Any]:
         "ai_monitor_live_signal_max_age_seconds": 300,
         "ai_monitor_live_min_combined_score": 70.0,
         "ai_monitor_live_require_entry_ready": True,
+        "ai_monitor_live_regular_session_only": True,
         "ai_monitor_live_allow_long": True,
         "ai_monitor_live_allow_short": True,
         "position_mode": "one_way",
@@ -980,6 +983,9 @@ def _live_copy_account_out(
             "minimum_combined_score": float(
                 config.get("ai_monitor_live_min_combined_score", 70)
             ),
+            "regular_session_only": bool(
+                config.get("ai_monitor_live_regular_session_only", True)
+            ),
             "allow_long": bool(config.get("ai_monitor_live_allow_long", True)),
             "allow_short": bool(config.get("ai_monitor_live_allow_short", True)),
         },
@@ -1039,6 +1045,9 @@ def _live_copy_out(
                 ),
                 "minimum_combined_score": float(
                     preview["ai_monitor_live_min_combined_score"]
+                ),
+                "regular_session_only": bool(
+                    preview["ai_monitor_live_regular_session_only"]
                 ),
                 "allow_long": bool(preview["ai_monitor_live_allow_long"]),
                 "allow_short": bool(preview["ai_monitor_live_allow_short"]),
@@ -1399,6 +1408,90 @@ def _stable_opportunity_contract(
     }
 
 
+def _compact_opportunity_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the card payload without repeating heavyweight scan internals.
+
+    Opportunity evidence keeps up to 96 score snapshots.  Older snapshots may
+    contain the complete quote/order-book feature document, which made the
+    20-card endpoint return tens of megabytes.  Cards and their trend dialog
+    only consume the scalar score and depth series below; detail endpoints keep
+    the original database evidence unchanged.
+    """
+
+    compact = dict(evidence)
+    raw_history = evidence.get("score_history")
+    if not isinstance(raw_history, list):
+        compact["score_history"] = []
+        return compact
+
+    scalar_keys = (
+        "calculated_at",
+        "news",
+        "technical",
+        "market_flow",
+        "option_flow",
+        "gex",
+        "institutional",
+        "institutional_flow",
+        "macro",
+        "macro_context",
+        "combined",
+        "score",
+        "main_force_ratio",
+        "active_buy_ratio",
+        "book_imbalance",
+        "book_imbalance_5",
+        "bid_depth_notional",
+        "ask_depth_notional",
+        "bid_depth_notional_5",
+        "ask_depth_notional_5",
+        "bid_depth_change_30s_pct",
+        "ask_depth_change_30s_pct",
+        "data_quality",
+    )
+    component_keys = (
+        "news",
+        "technical",
+        "market_flow",
+        "option_flow",
+        "gex",
+        "institutional",
+        "macro",
+    )
+    flow_keys = (
+        "score",
+        "main_force_ratio",
+        "active_buy_ratio",
+        "book_imbalance",
+        "book_imbalance_5",
+        "bid_depth_notional",
+        "ask_depth_notional",
+        "bid_depth_notional_5",
+        "ask_depth_notional_5",
+        "bid_depth_change_30s_pct",
+        "ask_depth_change_30s_pct",
+        "data_quality",
+    )
+    history: list[dict[str, Any]] = []
+    for raw_point in raw_history[-96:]:
+        if not isinstance(raw_point, Mapping):
+            continue
+        point = {key: raw_point[key] for key in scalar_keys if key in raw_point}
+        components = raw_point.get("components")
+        if isinstance(components, Mapping):
+            point["components"] = {
+                key: components[key] for key in component_keys if key in components
+            }
+        flow = raw_point.get("market_flow_snapshot")
+        if isinstance(flow, Mapping):
+            point["market_flow_snapshot"] = {
+                key: flow[key] for key in flow_keys if key in flow
+            }
+        history.append(point)
+    compact["score_history"] = history
+    return compact
+
+
 def _opportunity_out(
     item: AiMonitorOpportunity,
     prediction: AiMonitorPrediction | None = None,
@@ -1519,7 +1612,7 @@ def _opportunity_out(
         "combined_score": combined_score,
         "matched_indicator_keys": list(item.matched_indicator_keys_json or []),
         "news_ids": list(item.news_ids_json or []),
-        "evidence": contract_evidence,
+        "evidence": _compact_opportunity_evidence(contract_evidence),
         "prediction_status": prediction.status if prediction is not None else None,
         "prediction_settlement": _prediction_settlement_out(prediction),
         "prediction_result": prediction.result if prediction is not None else None,
@@ -2581,44 +2674,267 @@ def monitor_symbols(
     return {"items": items, "count": len(items)}
 
 
+def _current_opportunity_projection_page(
+    db: Session,
+    *,
+    user_id: int,
+    limit: int,
+    page: int,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Return a compact, pre-paged current view when migration 0059 is active.
+
+    An empty projection falls back to the source query while active source rows
+    still exist. This makes the API safe during the migration/backfill window.
+    """
+
+    if not read_models_available(db):
+        return None
+    base_conditions = (
+        AiMonitorOpportunityCurrent.user_id == user_id,
+        AiMonitorOpportunityCurrent.expires_at > now,
+    )
+    total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(AiMonitorOpportunityCurrent)
+            .where(*base_conditions)
+        )
+        or 0
+    )
+    if total == 0:
+        source_active = int(
+            db.scalar(
+                select(func.count())
+                .select_from(AiMonitorOpportunity)
+                .where(
+                    AiMonitorOpportunity.user_id == user_id,
+                    AiMonitorOpportunity.status.in_(("candidate", "discovered")),
+                    AiMonitorOpportunity.expires_at > now,
+                )
+            )
+            or 0
+        )
+        if source_active:
+            return None
+
+    total_pages = max(1, (total + limit - 1) // limit)
+    current_page = min(page, total_pages)
+    projections = list(
+        db.scalars(
+            select(AiMonitorOpportunityCurrent)
+            .where(*base_conditions)
+            .order_by(
+                AiMonitorOpportunityCurrent.discovered_at.desc(),
+                AiMonitorOpportunityCurrent.opportunity_id.desc(),
+            )
+            .offset((current_page - 1) * limit)
+            .limit(limit)
+        ).all()
+    )
+    opportunity_ids = [item.opportunity_id for item in projections]
+    prediction_ids = [
+        item.prediction_id for item in projections if item.prediction_id is not None
+    ]
+    opportunities_by_id = (
+        {
+            item.id: item
+            for item in db.scalars(
+                select(AiMonitorOpportunity).where(
+                    AiMonitorOpportunity.id.in_(opportunity_ids)
+                )
+            ).all()
+        }
+        if opportunity_ids
+        else {}
+    )
+    predictions_by_id = (
+        {
+            item.id: item
+            for item in db.scalars(
+                select(AiMonitorPrediction).where(
+                    AiMonitorPrediction.id.in_(prediction_ids)
+                )
+            ).all()
+        }
+        if prediction_ids
+        else {}
+    )
+    rows = [
+        (
+            opportunities_by_id[item.opportunity_id],
+            predictions_by_id.get(item.prediction_id),
+        )
+        for item in projections
+        if item.opportunity_id in opportunities_by_id
+    ]
+    direction_counts = {
+        str(direction): int(count)
+        for direction, count in db.execute(
+            select(
+                AiMonitorOpportunityCurrent.direction,
+                func.count(AiMonitorOpportunityCurrent.id),
+            )
+            .where(*base_conditions)
+            .group_by(AiMonitorOpportunityCurrent.direction)
+        ).all()
+    }
+    prediction_counts = {
+        str(status): int(count)
+        for status, count in db.execute(
+            select(
+                AiMonitorOpportunityCurrent.prediction_status,
+                func.count(AiMonitorOpportunityCurrent.id),
+            )
+            .where(*base_conditions)
+            .group_by(AiMonitorOpportunityCurrent.prediction_status)
+        ).all()
+        if status is not None
+    }
+    return {
+        "rows": rows,
+        "direction_counts": {
+            "long": direction_counts.get("long", 0),
+            "short": direction_counts.get("short", 0),
+        },
+        "settlement_counts": {
+            "total": total,
+            "pending": prediction_counts.get("pending", 0),
+            "unavailable": prediction_counts.get("unavailable", 0),
+        },
+        "pagination": {
+            "page": current_page,
+            "page_size": limit,
+            "total": total,
+            "total_pages": total_pages,
+            "has_previous": current_page > 1,
+            "has_next": current_page < total_pages,
+        },
+    }
+
+
 @router.get("/opportunities")
 def opportunities(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     limit: int = Query(default=100, ge=1, le=300),
+    page: int = Query(default=1, ge=1),
+    scope: Literal["legacy", "current", "history"] = Query(default="legacy"),
     include_expired: bool = False,
 ) -> dict[str, Any]:
-    statement = select(AiMonitorOpportunity).where(AiMonitorOpportunity.user_id == user.id)
-    if not include_expired:
-        statement = statement.where(
-            AiMonitorOpportunity.status.in_(("candidate", "discovered")),
-            AiMonitorOpportunity.expires_at > utcnow(),
+    now = utcnow()
+    projection_page = (
+        _current_opportunity_projection_page(
+            db,
+            user_id=user.id,
+            limit=limit,
+            page=page,
+            now=now,
         )
-    statement = statement.order_by(
-        AiMonitorOpportunity.discovered_at.desc(),
-        AiMonitorOpportunity.id.desc(),
+        if scope == "current"
+        else None
     )
-    items = db.scalars(statement.limit(300 if not include_expired else limit)).all()
-    if not include_expired:
-        unique: dict[str, AiMonitorOpportunity] = {}
-        for item in items:
-            instrument = (item.contract_symbol or item.symbol).strip().upper()
-            unique.setdefault(instrument, item)
-        items = list(unique.values())[:limit]
-    prediction_by_opportunity_id = (
-        {
-            prediction.opportunity_id: prediction
-            for prediction in db.scalars(
-                select(AiMonitorPrediction).where(
-                    AiMonitorPrediction.user_id == user.id,
-                    AiMonitorPrediction.opportunity_id.in_([item.id for item in items]),
-                )
-            ).all()
+    if projection_page is not None:
+        rows = list(projection_page["rows"])
+    elif scope == "history":
+        statement = (
+            select(AiMonitorOpportunity, AiMonitorPrediction)
+            .join(
+                AiMonitorPrediction,
+                AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id,
+            )
+            .where(
+                AiMonitorOpportunity.user_id == user.id,
+                AiMonitorPrediction.user_id == user.id,
+                AiMonitorPrediction.status.in_(("pending", "unavailable")),
+            )
+        )
+    elif projection_page is None:
+        statement = (
+            select(AiMonitorOpportunity, AiMonitorPrediction)
+            .outerjoin(
+                AiMonitorPrediction,
+                AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id,
+            )
+            .where(AiMonitorOpportunity.user_id == user.id)
+        )
+        if scope == "current" or not include_expired:
+            statement = statement.where(
+                AiMonitorOpportunity.status.in_(("candidate", "discovered")),
+                AiMonitorOpportunity.expires_at > now,
+            )
+    if projection_page is None:
+        statement = statement.order_by(
+            AiMonitorOpportunity.discovered_at.desc(),
+            AiMonitorOpportunity.id.desc(),
+        )
+        if scope == "legacy":
+            rows = list(
+                db.execute(
+                    statement.limit(300 if not include_expired else limit)
+                ).all()
+            )
+        else:
+            rows = list(db.execute(statement).all())
+
+    if scope == "current" and projection_page is None:
+        unique_rows: dict[str, tuple[AiMonitorOpportunity, AiMonitorPrediction | None]] = {}
+        for opportunity, prediction in rows:
+            if prediction is not None and prediction.status == "completed":
+                continue
+            instrument = (opportunity.contract_symbol or opportunity.symbol).strip().upper()
+            unique_rows.setdefault(instrument, (opportunity, prediction))
+        rows = list(unique_rows.values())
+    elif scope == "legacy" and not include_expired:
+        unique_rows = {}
+        for opportunity, prediction in rows:
+            instrument = (opportunity.contract_symbol or opportunity.symbol).strip().upper()
+            unique_rows.setdefault(instrument, (opportunity, prediction))
+        rows = list(unique_rows.values())[:limit]
+
+    direction_counts = (
+        dict(projection_page["direction_counts"])
+        if projection_page is not None
+        else {
+            "long": sum(opportunity.direction == "long" for opportunity, _ in rows),
+            "short": sum(opportunity.direction == "short" for opportunity, _ in rows),
         }
-        if items
-        else {}
     )
+    settlement_counts = (
+        dict(projection_page["settlement_counts"])
+        if projection_page is not None
+        else {
+            "total": len(rows),
+            "pending": sum(
+                prediction is not None and prediction.status == "pending"
+                for _opportunity, prediction in rows
+            ),
+            "unavailable": sum(
+                prediction is not None and prediction.status == "unavailable"
+                for _opportunity, prediction in rows
+            ),
+        }
+    )
+    if scope == "legacy":
+        page_rows = rows
+        current_page = 1
+        total_pages = 1
+    elif projection_page is not None:
+        page_rows = rows
+        current_page = int(projection_page["pagination"]["page"])
+        total_pages = int(projection_page["pagination"]["total_pages"])
+    else:
+        total_pages = max(1, (len(rows) + limit - 1) // limit)
+        current_page = min(page, total_pages)
+        page_start = (current_page - 1) * limit
+        page_rows = rows[page_start : page_start + limit]
+    items = [opportunity for opportunity, _prediction in page_rows]
+    prediction_by_opportunity_id = {
+        prediction.opportunity_id: prediction
+        for _opportunity, prediction in page_rows
+        if prediction is not None
+    }
     snapshot_by_opportunity_id = (
         {
             snapshot.opportunity_id: snapshot
@@ -2655,8 +2971,8 @@ def opportunities(
             db,
             [item.symbol for item in items],
         )
-    response_now = utcnow()
-    return {
+    response_now = now
+    response = {
         "items": [
             _opportunity_out(
                 item,
@@ -2675,7 +2991,7 @@ def opportunities(
                 # only genuinely inactive/expired rows use their immutable
                 # signal-time market snapshot.
                 use_frozen=bool(
-                    include_expired
+                    (include_expired or scope == "history")
                     and (
                         item.status not in {"candidate", "discovered"}
                         or item.expires_at <= response_now
@@ -2683,8 +2999,27 @@ def opportunities(
                 ),
             )
             for item in items
-        ]
+        ],
+        "direction_counts": direction_counts,
+        "settlement_counts": settlement_counts,
     }
+    if scope != "legacy":
+        response["pagination"] = (
+            dict(projection_page["pagination"])
+            if projection_page is not None
+            else {
+                "page": current_page,
+                "page_size": limit,
+                "total": len(rows),
+                "total_pages": total_pages,
+                "has_previous": current_page > 1,
+                "has_next": current_page < total_pages,
+            }
+        )
+    response["query_mode"] = (
+        "current_read_model" if projection_page is not None else "source_fallback"
+    )
+    return response
 
 
 @router.get("/opportunities/{opportunity_id}/news")
@@ -3239,6 +3574,7 @@ def opportunity_analytics(
     event_risk: Literal["all", "clear", "warning", "blocked"] = Query(default="all"),
     exit_reason: str = Query(default="all", max_length=64),
     include_readiness: bool = Query(default=False),
+    include_ablation: bool = Query(default=False),
 ) -> dict[str, Any]:
     if date_from is not None and date_to is not None and date_from > date_to:
         raise HTTPException(
@@ -3250,6 +3586,33 @@ def opportunity_analytics(
         date_to,
         timezone_offset_minutes,
     )
+    if not include_ablation:
+        projected = ai_monitor.historical_opportunity_fact_analytics(
+            db,
+            user.id,
+            limit=limit,
+            page=page,
+            date_from=date_from_utc,
+            date_to=date_to_utc,
+            timezone_offset_minutes=timezone_offset_minutes,
+            symbol=symbol,
+            news_score_min=news_score_min,
+            indicator_score_min=indicator_score_min,
+            combined_score_min=combined_score_min,
+            option_flow_score_min=option_flow_score_min,
+            gex_score_min=gex_score_min,
+            min_data_coverage=min_data_coverage,
+            feature_version=feature_version,
+            decision_version=decision_version,
+            direction=direction,
+            market_session=market_session,
+            quote_quality=quote_quality,
+            event_risk=event_risk,
+            exit_reason=exit_reason,
+            include_readiness=include_readiness,
+        )
+        if projected is not None:
+            return projected
     repository = MonitorRepository(
         request.app.state.database_engine,
         request.app.state.settings.monitor_symbols_config,
@@ -3278,6 +3641,7 @@ def opportunity_analytics(
         event_risk=event_risk,
         exit_reason=exit_reason,
         include_readiness=include_readiness,
+        include_ablation=include_ablation,
     )
     return result
 

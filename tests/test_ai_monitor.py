@@ -2515,7 +2515,9 @@ def test_opportunities_are_ordered_by_signal_time_descending() -> None:
     assert "AiMonitorOpportunity.combined_score.desc()" not in endpoint
     assert "AiMonitorOpportunity.updated_at.desc()" not in endpoint
     assert "prediction_by_opportunity_id" in endpoint
-    assert "AiMonitorPrediction.opportunity_id.in_" in endpoint
+    assert "AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id" in endpoint
+    assert 'scope: Literal["legacy", "current", "history"]' in endpoint
+    assert '"pagination"' in endpoint
     assert "live_tickers.get((item.contract_symbol or \"\").upper())" in endpoint
     assert '"prediction_entry_price"' in api
     assert '"prediction_combined_score"' in api

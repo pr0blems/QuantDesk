@@ -5454,6 +5454,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                page?: number;
+                scope?: "legacy" | "current" | "history";
                 include_expired?: boolean;
             };
             header?: never;
@@ -5639,6 +5641,7 @@ export interface operations {
                 event_risk?: "all" | "clear" | "warning" | "blocked";
                 exit_reason?: string;
                 include_readiness?: boolean;
+                include_ablation?: boolean;
             };
             header?: never;
             path?: never;

@@ -25,6 +25,7 @@ def _account(*, enabled: bool = True) -> dict:
             "ai_monitor_live_copy_enabled_at": "2026-08-17T09:59:00+00:00",
             "ai_monitor_live_signal_max_age_seconds": 300,
             "ai_monitor_live_min_combined_score": 70,
+            "ai_monitor_live_regular_session_only": False,
             "risk_per_trade_pct": 0.5,
             "position_size_pct": 2,
             "leverage": 10,
@@ -130,6 +131,42 @@ def test_ai_monitor_live_signal_fails_closed_when_disabled_or_gate_not_ready(
 
     monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [_prediction_row(entry_ready=False)])
     assert live_engine._ai_monitor_signal(_account(), "AAPLUSDT")[0] == 0
+
+
+def test_ai_monitor_live_signal_only_enters_during_us_regular_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 17, 10, 1, tzinfo=UTC).timestamp()
+    monkeypatch.setattr(live_engine.time, "time", lambda: now)
+    monkeypatch.setattr(
+        live_engine.store,
+        "query",
+        lambda *_args, **_kwargs: [_prediction_row()],
+    )
+    account = _account()
+    account["config_json"]["ai_monitor_live_regular_session_only"] = True
+
+    monkeypatch.setattr(
+        live_engine.macro_market,
+        "us_market_session",
+        lambda _now: {"key": "premarket"},
+    )
+    assert live_engine._ai_monitor_signal(account, "AAPLUSDT", price=102)[0] == 0
+
+    monkeypatch.setattr(
+        live_engine.macro_market,
+        "us_market_session",
+        lambda _now: {"key": "regular"},
+    )
+    direction, _atr, _basis, _signal_time, evidence = live_engine._ai_monitor_signal(
+        account,
+        "AAPLUSDT",
+        price=102,
+    )
+    assert direction == 1
+    assert evidence["execution_venue"] == "binance_usdm"
+    assert evidence["execution_price_source"] == "binance"
+    assert evidence["regular_session_only"] is True
 
 
 def test_ai_monitor_live_signal_honors_independent_direction_switches(
@@ -243,4 +280,6 @@ def test_ai_monitor_live_copy_ui_requires_modal_confirmation() -> None:
     assert '"existing_positions_closed": False' in api
     assert "发现机会独立实盘跟单" in frontend
     assert "不读取、不启停、不改写实盘交易页的其他策略" in frontend
+    assert "仅在美股常规交易时段允许新开仓" in frontend
+    assert "交易、盈亏和结算价格均以 Binance 映射合约为准" in frontend
     assert 'href="/next/#/live"' not in frontend

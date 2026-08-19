@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from . import macro_market
 from . import market_store as store
 from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
@@ -145,6 +146,11 @@ def _ai_monitor_signal(
     config = config if isinstance(config, dict) else {}
     if not bool(config.get("ai_monitor_live_copy_enabled")):
         return 0, None, [], None, {}
+    if bool(config.get("ai_monitor_live_regular_session_only", True)):
+        execution_now = datetime.fromtimestamp(time.time(), tz=UTC)
+        session_key = str(macro_market.us_market_session(execution_now).get("key") or "closed")
+        if session_key != "regular":
+            return 0, None, [], None, {}
     enabled_at = _utc_seconds(config.get("ai_monitor_live_copy_enabled_at"))
     if enabled_at is None:
         return 0, None, [], None, {}
@@ -244,6 +250,11 @@ def _ai_monitor_signal(
     }
     signal_evidence = {
         "source": "ai_monitor_live_copy_v1",
+        "execution_venue": "binance_usdm",
+        "execution_price_source": "binance",
+        "regular_session_only": bool(
+            config.get("ai_monitor_live_regular_session_only", True)
+        ),
         "score": combined_score,
         "valid_until": valid_until,
         "prediction_public_id": row.get("prediction_public_id"),

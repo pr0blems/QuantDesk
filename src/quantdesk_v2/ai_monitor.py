@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
@@ -22,11 +23,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import macro_market
 from .ai_model_config import global_ai_model_configured
+from .ai_monitor_read_models import read_models_available, refresh_ai_monitor_read_models
 from .models import (
     AdminSetting,
     AiMonitorConfig,
     AiMonitorOpportunity,
     AiMonitorPrediction,
+    AiMonitorPredictionFact,
     AiMonitorRun,
     CompanyProfile,
     FinnhubQuoteSnapshot,
@@ -4739,6 +4742,51 @@ def summarize_historical_opportunities(items: Sequence[Mapping[str, Any]]) -> di
     }
 
 
+def _compact_historical_outcome(
+    row: Mapping[str, Any],
+    current_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the fields required by list summaries without replaying market evidence."""
+
+    actual_exit_at = row.get("exit_at") or row["due_at"]
+    gross_return = float(row.get("directional_return_bps") or 0)
+    cost_breakdown = prediction_cost_breakdown(
+        row["predicted_at"],
+        actual_exit_at,
+        current_config,
+    )
+    net_outcome = prediction_net_outcome(
+        gross_return,
+        float(cost_breakdown["total_cost_bps"]),
+    )
+    return {
+        "direction": row["direction"],
+        "technical_confirmed": True,
+        "result": str(net_outcome["net_result"]),
+        "directional_return_bps": float(
+            net_outcome["net_directional_return_bps"]
+        ),
+        "gross_directional_return_bps": gross_return,
+        "estimated_cost_bps": float(cost_breakdown["total_cost_bps"]),
+        "fee_cost_bps": float(cost_breakdown["fee_cost_bps"]),
+        "slippage_cost_bps": float(cost_breakdown["slippage_cost_bps"]),
+        "funding_cost_bps": float(cost_breakdown["funding_cost_bps"]),
+        "max_favorable_bps": (
+            float(row["max_favorable_bps"])
+            if row.get("max_favorable_bps") is not None
+            else None
+        ),
+        "max_adverse_bps": (
+            float(row["max_adverse_bps"])
+            if row.get("max_adverse_bps") is not None
+            else None
+        ),
+        "readiness_status": row.get("readiness_status"),
+        "exit_reason": row.get("exit_reason") or "legacy_horizon_close",
+        "exit_detail": None,
+    }
+
+
 def settleable_historical_outcomes(
     items: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -5590,6 +5638,407 @@ def frozen_gate_rejection_summary(
     }
 
 
+def _prediction_fact_read_model_current(db: Session, user_id: int) -> bool:
+    """Verify that the disposable fact projection covers the source ledger."""
+
+    if not read_models_available(db):
+        return False
+    source_count, source_updated_at = db.execute(
+        select(
+            func.count(AiMonitorPrediction.id),
+            func.max(AiMonitorPrediction.updated_at),
+        ).where(AiMonitorPrediction.user_id == user_id)
+    ).one()
+    fact_count, projected_source_updated_at = db.execute(
+        select(
+            func.count(AiMonitorPredictionFact.id),
+            func.max(AiMonitorPredictionFact.source_updated_at),
+        ).where(AiMonitorPredictionFact.user_id == user_id)
+    ).one()
+    if int(source_count or 0) != int(fact_count or 0):
+        return False
+    if source_updated_at is None:
+        return True
+    return projected_source_updated_at == source_updated_at
+
+
+def _prediction_fact_outcome(
+    fact: AiMonitorPredictionFact,
+    current_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the analytics contract without replaying source evidence JSON."""
+
+    actual_exit_at = fact.exit_at or fact.due_at
+    gross_return = float(fact.gross_return_bps or 0)
+    cost_breakdown = prediction_cost_breakdown(
+        fact.signal_at,
+        actual_exit_at,
+        current_config,
+    )
+    estimated_cost = float(cost_breakdown["total_cost_bps"])
+    net_outcome = prediction_net_outcome(gross_return, estimated_cost)
+    net_return = float(net_outcome["net_directional_return_bps"])
+    coverage = float(fact.data_coverage) if fact.data_coverage is not None else None
+    option_flow_score = (
+        float(fact.option_flow_score) if fact.option_flow_score is not None else None
+    )
+    gex_score = float(fact.gex_score) if fact.gex_score is not None else None
+    institutional_score = (
+        float(fact.institutional_flow_score)
+        if fact.institutional_flow_score is not None
+        else None
+    )
+    feature_availability = {
+        "unusual_whales_enabled_at_signal": any(
+            value is not None
+            for value in (option_flow_score, gex_score, institutional_score)
+        ),
+        "snapshot_recorded": bool(fact.snapshot_complete),
+        "market_feature_linked": bool(fact.snapshot_complete),
+        "quote": {
+            "available": fact.quote_quality not in {"missing", "unknown"},
+            "nbbo_available": fact.quote_quality == "passed",
+            "quality": fact.quote_quality,
+            "source": "binance",
+            "reason": "binance_contract_snapshot",
+        },
+        "option_flow": {
+            "available": option_flow_score is not None,
+            "reason": "available" if option_flow_score is not None else "not_captured_at_signal",
+        },
+        "gex": {
+            "available": gex_score is not None,
+            "reason": "available" if gex_score is not None else "not_captured_at_signal",
+        },
+        "institutional_flow": {
+            "available": institutional_score is not None,
+            "reason": (
+                "available" if institutional_score is not None else "not_captured_at_signal"
+            ),
+        },
+    }
+    return {
+        "id": str(fact.opportunity_id),
+        "prediction_id": str(fact.prediction_id),
+        "symbol": fact.symbol,
+        "contract_symbol": fact.contract_symbol,
+        "direction": fact.direction,
+        "timeframe": fact.timeframe,
+        "technical_confirmed": True,
+        "api_version": OPPORTUNITY_API_VERSION,
+        "gate_summary": {
+            "execution_price_source": "binance",
+            "status": "historical",
+            "passed": True,
+            "blocking_reasons": [],
+        },
+        "score_components": {
+            "news": float(fact.news_score) if fact.news_score is not None else None,
+            "technical": (
+                float(fact.technical_score) if fact.technical_score is not None else None
+            ),
+            "market_flow": (
+                float(fact.market_flow_score)
+                if fact.market_flow_score is not None
+                else None
+            ),
+            "combined": (
+                float(fact.combined_score) if fact.combined_score is not None else None
+            ),
+        },
+        "quote": {
+            "source": "binance",
+            "market_session": fact.market_session,
+        },
+        "flow": {
+            "score": (
+                float(fact.market_flow_score)
+                if fact.market_flow_score is not None
+                else None
+            ),
+            "option_flow": {"score": option_flow_score},
+            "institutional_flow": {"score": institutional_score},
+        },
+        "gex": {"score": gex_score},
+        "data_quality": {
+            "coverage": coverage,
+            "quote_quality": fact.quote_quality,
+        },
+        "market_snapshot_source": "prediction_fact_read_model",
+        "point_in_time_replay": {"status": "projected"},
+        "version": {
+            "api": OPPORTUNITY_API_VERSION,
+            "feature": fact.feature_version,
+            "weights": fact.weights_version,
+            "decision": fact.decision_version,
+        },
+        "news_score": float(fact.news_score) if fact.news_score is not None else None,
+        "indicator_score": (
+            float(fact.technical_score) if fact.technical_score is not None else None
+        ),
+        "combined_score": (
+            float(fact.combined_score) if fact.combined_score is not None else None
+        ),
+        "option_flow_score": option_flow_score,
+        "gex_score": gex_score,
+        "institutional_score": institutional_score,
+        "market_session": fact.market_session,
+        "quote_quality": fact.quote_quality,
+        "event_risk": fact.event_risk,
+        "data_coverage_pct": coverage,
+        "feature_availability": feature_availability,
+        "price_source": "binance",
+        "entry_price": float(fact.entry_price) if fact.entry_price is not None else None,
+        "exit_price": float(fact.exit_price) if fact.exit_price is not None else None,
+        "settled_price_at": actual_exit_at,
+        "exit_reason": fact.exit_reason or "legacy_horizon_close",
+        "exit_detail": None,
+        "raw_return_bps": gross_return,
+        "gross_directional_return_bps": gross_return,
+        "estimated_cost_bps": estimated_cost,
+        "fee_cost_bps": float(cost_breakdown["fee_cost_bps"]),
+        "slippage_cost_bps": float(cost_breakdown["slippage_cost_bps"]),
+        "funding_cost_bps": float(cost_breakdown["funding_cost_bps"]),
+        "recorded_estimated_cost_bps": float(fact.estimated_cost_bps or 0),
+        "directional_return_bps": net_return,
+        "net_directional_return_bps": net_return,
+        "gross_result": fact.result,
+        "result": str(net_outcome["net_result"]),
+        "max_favorable_bps": float(fact.mfe_bps) if fact.mfe_bps is not None else None,
+        "max_adverse_bps": float(fact.mae_bps) if fact.mae_bps is not None else None,
+        "settlement_version": fact.settlement_version,
+        "readiness_status": fact.readiness_status,
+        "calibration_sample_count": int(fact.calibration_sample_count or 0),
+        "expected_gross_edge_bps": (
+            float(fact.expected_gross_edge_bps)
+            if fact.expected_gross_edge_bps is not None
+            else None
+        ),
+        "expected_edge_lower_bound_bps": (
+            float(fact.expected_edge_lower_bound_bps)
+            if fact.expected_edge_lower_bound_bps is not None
+            else None
+        ),
+        "signal_time": fact.signal_at,
+        "expires_at": fact.due_at,
+        "exit_at": actual_exit_at,
+        "max_holding_minutes": round(
+            max(0.0, (fact.due_at - fact.signal_at).total_seconds() / 60), 2
+        ),
+        "actual_holding_minutes": round(
+            max(0.0, (actual_exit_at - fact.signal_at).total_seconds() / 60), 2
+        ),
+        "max_holding_bars": max(
+            1,
+            round(
+                (fact.due_at - fact.signal_at).total_seconds()
+                / _TIMEFRAME_SECONDS.get(fact.timeframe, 3600)
+            ),
+        ),
+    }
+
+
+def historical_opportunity_fact_analytics(
+    db: Session,
+    user_id: int,
+    *,
+    limit: int,
+    page: int,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    timezone_offset_minutes: int,
+    symbol: str,
+    news_score_min: float,
+    indicator_score_min: float,
+    combined_score_min: float,
+    option_flow_score_min: float,
+    gex_score_min: float,
+    min_data_coverage: float,
+    feature_version: str,
+    decision_version: str,
+    direction: str,
+    market_session: str,
+    quote_quality: str,
+    event_risk: str,
+    exit_reason: str,
+    include_readiness: bool,
+) -> dict[str, Any] | None:
+    """Serve historical analytics from flat facts, or return None when stale."""
+
+    if not _prediction_fact_read_model_current(db, user_id):
+        return None
+    current_config = config_data(db.get(AiMonitorConfig, user_id))
+    local_date_offset = timedelta(minutes=timezone_offset_minutes)
+    normalized_symbol = str(symbol or "").strip().upper()
+    conditions = [
+        AiMonitorPredictionFact.user_id == user_id,
+        AiMonitorPredictionFact.news_score >= Decimal(str(news_score_min)),
+        AiMonitorPredictionFact.technical_score >= Decimal(str(indicator_score_min)),
+        AiMonitorPredictionFact.combined_score >= Decimal(str(combined_score_min)),
+    ]
+    if date_from is not None:
+        conditions.append(AiMonitorPredictionFact.signal_at >= date_from)
+    if date_to is not None:
+        conditions.append(AiMonitorPredictionFact.signal_at < date_to)
+    if normalized_symbol:
+        conditions.append(
+            or_(
+                func.upper(AiMonitorPredictionFact.symbol) == normalized_symbol,
+                func.upper(AiMonitorPredictionFact.contract_symbol) == normalized_symbol,
+            )
+        )
+    if direction in {"long", "short"}:
+        conditions.append(AiMonitorPredictionFact.direction == direction)
+    if option_flow_score_min > 0:
+        conditions.append(
+            AiMonitorPredictionFact.option_flow_score
+            >= Decimal(str(option_flow_score_min))
+        )
+    if gex_score_min > 0:
+        conditions.append(
+            AiMonitorPredictionFact.gex_score >= Decimal(str(gex_score_min))
+        )
+    if min_data_coverage > 0:
+        conditions.append(
+            AiMonitorPredictionFact.data_coverage
+            >= Decimal(str(min_data_coverage))
+        )
+    if feature_version:
+        conditions.append(AiMonitorPredictionFact.feature_version == feature_version)
+    if decision_version:
+        conditions.append(AiMonitorPredictionFact.decision_version == decision_version)
+    if market_session != "all":
+        conditions.append(AiMonitorPredictionFact.market_session == market_session)
+    if quote_quality != "all":
+        conditions.append(AiMonitorPredictionFact.quote_quality == quote_quality)
+    if event_risk != "all":
+        conditions.append(AiMonitorPredictionFact.event_risk == event_risk)
+    if exit_reason != "all":
+        conditions.append(
+            func.lower(AiMonitorPredictionFact.exit_reason).contains(exit_reason.lower())
+        )
+    completed_conditions = [
+        *conditions,
+        AiMonitorPredictionFact.prediction_status == "completed",
+        AiMonitorPredictionFact.settlement_version == PREDICTION_SETTLEMENT_VERSION,
+        AiMonitorPredictionFact.result.is_not(None),
+        AiMonitorPredictionFact.entry_price.is_not(None),
+        AiMonitorPredictionFact.exit_price.is_not(None),
+    ]
+    facts = list(
+        db.scalars(
+            select(AiMonitorPredictionFact)
+            .where(*completed_conditions)
+            .order_by(
+                AiMonitorPredictionFact.signal_at.desc(),
+                AiMonitorPredictionFact.prediction_id.desc(),
+            )
+        ).all()
+    )
+    outcomes = [_prediction_fact_outcome(fact, current_config) for fact in facts]
+    summary = summarize_historical_opportunities(outcomes)
+    exit_reason_counts: dict[str, int] = {}
+    for outcome in outcomes:
+        key = str(outcome.get("exit_reason") or "unknown")
+        exit_reason_counts[key] = exit_reason_counts.get(key, 0) + 1
+    status_counts = {
+        str(status): int(count)
+        for status, count in db.execute(
+            select(
+                AiMonitorPredictionFact.prediction_status,
+                func.count(AiMonitorPredictionFact.id),
+            )
+            .where(*conditions)
+            .group_by(AiMonitorPredictionFact.prediction_status)
+        ).all()
+    }
+    legacy_completed_count = int(
+        db.scalar(
+            select(func.count(AiMonitorPredictionFact.id)).where(
+                *conditions,
+                AiMonitorPredictionFact.prediction_status == "completed",
+                AiMonitorPredictionFact.settlement_version
+                != PREDICTION_SETTLEMENT_VERSION,
+            )
+        )
+        or 0
+    )
+    summary.update(
+        {
+            "exit_reason_counts": exit_reason_counts,
+            "settlement_policy_version": PREDICTION_SETTLEMENT_VERSION,
+            "discarded_unavailable_count": status_counts.get("unavailable", 0),
+            "pending_count": status_counts.get("pending", 0),
+            "total_prediction_count": sum(status_counts.values()),
+            "excluded_legacy_settlement_count": legacy_completed_count,
+        }
+    )
+    page_size = max(1, int(limit))
+    total_items = len(outcomes)
+    total_pages = max(1, (total_items + page_size - 1) // page_size)
+    current_page = min(max(1, int(page)), total_pages)
+    page_start = (current_page - 1) * page_size
+    active_cost_settings = prediction_cost_settings(current_config)
+    result: dict[str, Any] = {
+        "summary": summary,
+        "ablation": {
+            "schema_version": "frozen_market_ablation.v1",
+            "status": "deferred",
+            "method": "separate_read_model",
+            "total_settled_count": total_items,
+            "variants": [],
+            "gate_rejections": {},
+        },
+        "items": outcomes[page_start : page_start + page_size],
+        "pagination": {
+            "page": current_page,
+            "page_size": page_size,
+            "total": total_items,
+            "total_pages": total_pages,
+            "has_previous": current_page > 1,
+            "has_next": current_page < total_pages,
+        },
+        "cost_config": {
+            **active_cost_settings,
+            "example_one_hour_total_bps": prediction_estimated_cost_bps(
+                datetime(2026, 1, 1),
+                datetime(2026, 1, 1) + timedelta(hours=1),
+                current_config,
+            ),
+        },
+        "filters": {
+            "date_from": (
+                (date_from + local_date_offset).date().isoformat() if date_from else None
+            ),
+            "date_to": (
+                (date_to + local_date_offset - timedelta(days=1)).date().isoformat()
+                if date_to
+                else None
+            ),
+            "timezone_offset_minutes": timezone_offset_minutes,
+            "symbol": normalized_symbol,
+            "news_score_min": float(news_score_min),
+            "indicator_score_min": float(indicator_score_min),
+            "combined_score_min": float(combined_score_min),
+            "option_flow_score_min": float(option_flow_score_min),
+            "gex_score_min": float(gex_score_min),
+            "min_data_coverage": float(min_data_coverage),
+            "feature_version": feature_version,
+            "decision_version": decision_version,
+            "direction": direction,
+            "market_session": market_session,
+            "quote_quality": quote_quality,
+            "event_risk": event_risk,
+            "exit_reason": exit_reason,
+        },
+        "query_mode": "prediction_fact_read_model",
+        "note": "按 Binance 映射合约入场、退出及结算价格统计；外部行情只作为特征证据。",
+    }
+    if include_readiness:
+        result["readiness"] = strategy_readiness_report(db, user_id, current_config)
+    return result
+
+
 def historical_opportunity_analytics(
     db: Session,
     _repository: MonitorRepository,
@@ -5615,6 +6064,7 @@ def historical_opportunity_analytics(
     event_risk: str = "all",
     exit_reason: str = "all",
     include_readiness: bool = True,
+    include_ablation: bool = True,
 ) -> dict[str, Any]:
     """Summarize completed virtual predictions without re-settling opportunities."""
 
@@ -5649,6 +6099,66 @@ def historical_opportunity_analytics(
         )
     if direction in {"long", "short"}:
         conditions.append(AiMonitorPrediction.direction == direction)
+    conditions.append(
+        AiMonitorPrediction.confidence_score >= Decimal(str(combined_score_min))
+    )
+    requires_evidence_scan = bool(
+        include_ablation
+        or option_flow_score_min > 0
+        or gex_score_min > 0
+        or min_data_coverage > 0
+        or feature_version
+        or decision_version
+        or market_session != "all"
+        or quote_quality != "all"
+        or event_risk != "all"
+        or exit_reason != "all"
+    )
+    completed_conditions = [
+        *conditions,
+        AiMonitorPrediction.status == "completed",
+        AiMonitorPrediction.settlement_version == PREDICTION_SETTLEMENT_VERSION,
+        AiMonitorPrediction.result.is_not(None),
+        AiMonitorPrediction.entry_price.is_not(None),
+        AiMonitorPrediction.exit_price.is_not(None),
+    ]
+    compact_rows: list[Mapping[str, Any]] = []
+    page_size = max(1, int(limit))
+    requested_page = max(1, int(page))
+    total_items: int | None = None
+    if not requires_evidence_scan:
+        compact_statement = (
+            select(
+                AiMonitorPrediction.id.label("prediction_id"),
+                AiMonitorPrediction.direction,
+                AiMonitorPrediction.directional_return_bps,
+                AiMonitorPrediction.predicted_at,
+                AiMonitorPrediction.exit_at,
+                AiMonitorPrediction.due_at,
+                AiMonitorPrediction.max_favorable_bps,
+                AiMonitorPrediction.max_adverse_bps,
+                AiMonitorPrediction.readiness_status,
+                AiMonitorPrediction.exit_reason,
+            )
+            .join(
+                AiMonitorOpportunity,
+                AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
+            )
+            .where(*completed_conditions)
+            .order_by(
+                AiMonitorPrediction.predicted_at.desc(),
+                AiMonitorPrediction.id.desc(),
+            )
+        )
+        compact_rows = list(db.execute(compact_statement).mappings().all())
+        total_items = len(compact_rows)
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+        current_page = min(requested_page, total_pages)
+        page_start = (current_page - 1) * page_size
+        page_prediction_ids = [
+            int(row["prediction_id"])
+            for row in compact_rows[page_start : page_start + page_size]
+        ]
     statement = (
         select(
             AiMonitorPrediction,
@@ -5664,16 +6174,207 @@ def historical_opportunity_analytics(
             OpportunityMarketSnapshot.opportunity_id == AiMonitorOpportunity.id,
         )
         .where(
-            *conditions,
-            AiMonitorPrediction.status == "completed",
-            AiMonitorPrediction.settlement_version == PREDICTION_SETTLEMENT_VERSION,
-            AiMonitorPrediction.result.is_not(None),
-            AiMonitorPrediction.entry_price.is_not(None),
-            AiMonitorPrediction.exit_price.is_not(None),
+            *completed_conditions,
         )
         .order_by(AiMonitorPrediction.predicted_at.desc(), AiMonitorPrediction.id.desc())
     )
-    rows = db.execute(statement).all()
+    if not requires_evidence_scan:
+        if not page_prediction_ids:
+            rows = []
+        else:
+            evidence_keys = (
+                "settlement",
+                "market_flow",
+                "quote",
+                "gex",
+                "gate_summary",
+                "score_components",
+                "signal_scores",
+                "data_quality",
+                "version",
+                "market_environment",
+                "score_snapshot",
+                "risk_events",
+                "max_holding",
+                "unusual_whales_policy",
+            )
+            page_statement = (
+                select(
+                    AiMonitorPrediction.id.label("prediction_id"),
+                    AiMonitorPrediction.public_id.label("prediction_public_id"),
+                    AiMonitorPrediction.symbol,
+                    AiMonitorPrediction.contract_symbol,
+                    AiMonitorPrediction.direction,
+                    AiMonitorPrediction.timeframe,
+                    AiMonitorPrediction.signal_news_score,
+                    AiMonitorPrediction.signal_indicator_score,
+                    AiMonitorPrediction.confidence_score,
+                    AiMonitorPrediction.entry_price,
+                    AiMonitorPrediction.exit_price,
+                    AiMonitorPrediction.predicted_at,
+                    AiMonitorPrediction.exit_at,
+                    AiMonitorPrediction.due_at,
+                    AiMonitorPrediction.raw_return_bps,
+                    AiMonitorPrediction.directional_return_bps,
+                    AiMonitorPrediction.estimated_cost_bps,
+                    AiMonitorPrediction.max_favorable_bps,
+                    AiMonitorPrediction.max_adverse_bps,
+                    AiMonitorPrediction.result,
+                    AiMonitorPrediction.settlement_version,
+                    AiMonitorPrediction.readiness_status,
+                    AiMonitorPrediction.calibration_sample_count,
+                    AiMonitorPrediction.expected_gross_edge_bps,
+                    AiMonitorPrediction.expected_edge_lower_bound_bps,
+                    AiMonitorPrediction.exit_reason,
+                    AiMonitorOpportunity.id.label("opportunity_id"),
+                    AiMonitorOpportunity.public_id.label("opportunity_public_id"),
+                    AiMonitorOpportunity.news_score.label("opportunity_news_score"),
+                    AiMonitorOpportunity.indicator_score.label(
+                        "opportunity_indicator_score"
+                    ),
+                    OpportunityMarketSnapshot.id.label("snapshot_id"),
+                    OpportunityMarketSnapshot.market_feature_snapshot_id.label(
+                        "snapshot_feature_id"
+                    ),
+                    OpportunityMarketSnapshot.feature_version.label(
+                        "snapshot_feature_version"
+                    ),
+                    OpportunityMarketSnapshot.weights_version.label(
+                        "snapshot_weights_version"
+                    ),
+                    OpportunityMarketSnapshot.decision_version.label(
+                        "snapshot_decision_version"
+                    ),
+                    OpportunityMarketSnapshot.quote_snapshot_json.label(
+                        "snapshot_quote"
+                    ),
+                    OpportunityMarketSnapshot.option_flow_snapshot_json.label(
+                        "snapshot_option_flow"
+                    ),
+                    OpportunityMarketSnapshot.gex_snapshot_json.label(
+                        "snapshot_gex"
+                    ),
+                    OpportunityMarketSnapshot.institutional_flow_snapshot_json.label(
+                        "snapshot_institutional_flow"
+                    ),
+                    OpportunityMarketSnapshot.risk_gate_snapshot_json.label(
+                        "snapshot_risk_gate"
+                    ),
+                    OpportunityMarketSnapshot.score_components_json.label(
+                        "snapshot_score_components"
+                    ),
+                    OpportunityMarketSnapshot.data_quality_json.label(
+                        "snapshot_data_quality"
+                    ),
+                    OpportunityMarketSnapshot.macro_snapshot_json.label(
+                        "snapshot_macro"
+                    ),
+                    OpportunityMarketSnapshot.captured_at.label("snapshot_captured_at"),
+                    *[
+                        func.json_extract(
+                            AiMonitorPrediction.evidence_json,
+                            f"$.{key}",
+                        ).label(f"evidence_{key}")
+                        for key in evidence_keys
+                    ],
+                )
+                .join(
+                    AiMonitorOpportunity,
+                    AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
+                )
+                .outerjoin(
+                    OpportunityMarketSnapshot,
+                    OpportunityMarketSnapshot.opportunity_id
+                    == AiMonitorOpportunity.id,
+                )
+                .where(AiMonitorPrediction.id.in_(page_prediction_ids))
+                .order_by(
+                    AiMonitorPrediction.predicted_at.desc(),
+                    AiMonitorPrediction.id.desc(),
+                )
+            )
+            page_rows = list(db.execute(page_statement).mappings().all())
+
+            def decoded_json(value: Any, fallback: Any) -> Any:
+                if value is None:
+                    return fallback
+                if isinstance(value, (dict, list)):
+                    return value
+                try:
+                    return json.loads(str(value))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return fallback
+
+            rows = []
+            for row in page_rows:
+                evidence = {
+                    key: decoded_json(row.get(f"evidence_{key}"), None)
+                    for key in evidence_keys
+                    if row.get(f"evidence_{key}") is not None
+                }
+                prediction = SimpleNamespace(
+                    id=row["prediction_id"],
+                    public_id=row["prediction_public_id"],
+                    symbol=row["symbol"],
+                    contract_symbol=row["contract_symbol"],
+                    direction=row["direction"],
+                    timeframe=row["timeframe"],
+                    signal_news_score=row["signal_news_score"],
+                    signal_indicator_score=row["signal_indicator_score"],
+                    confidence_score=row["confidence_score"],
+                    entry_price=row["entry_price"],
+                    exit_price=row["exit_price"],
+                    predicted_at=row["predicted_at"],
+                    exit_at=row["exit_at"],
+                    due_at=row["due_at"],
+                    raw_return_bps=row["raw_return_bps"],
+                    directional_return_bps=row["directional_return_bps"],
+                    estimated_cost_bps=row["estimated_cost_bps"],
+                    max_favorable_bps=row["max_favorable_bps"],
+                    max_adverse_bps=row["max_adverse_bps"],
+                    result=row["result"],
+                    settlement_version=row["settlement_version"],
+                    readiness_status=row["readiness_status"],
+                    calibration_sample_count=row["calibration_sample_count"],
+                    expected_gross_edge_bps=row["expected_gross_edge_bps"],
+                    expected_edge_lower_bound_bps=row[
+                        "expected_edge_lower_bound_bps"
+                    ],
+                    exit_reason=row["exit_reason"],
+                    evidence_json=evidence,
+                )
+                opportunity = SimpleNamespace(
+                    id=row["opportunity_id"],
+                    public_id=row["opportunity_public_id"],
+                    news_score=row["opportunity_news_score"],
+                    indicator_score=row["opportunity_indicator_score"],
+                )
+                market_snapshot = (
+                    SimpleNamespace(
+                        id=row["snapshot_id"],
+                        opportunity_id=row["opportunity_id"],
+                        market_feature_snapshot_id=row["snapshot_feature_id"],
+                        feature_version=row["snapshot_feature_version"],
+                        weights_version=row["snapshot_weights_version"],
+                        decision_version=row["snapshot_decision_version"],
+                        quote_snapshot_json=row["snapshot_quote"],
+                        option_flow_snapshot_json=row["snapshot_option_flow"],
+                        gex_snapshot_json=row["snapshot_gex"],
+                        institutional_flow_snapshot_json=row[
+                            "snapshot_institutional_flow"
+                        ],
+                        risk_gate_snapshot_json=row["snapshot_risk_gate"],
+                        score_components_json=row["snapshot_score_components"],
+                        data_quality_json=row["snapshot_data_quality"],
+                        macro_snapshot_json=row["snapshot_macro"],
+                        captured_at=row["snapshot_captured_at"],
+                    )
+                    if row["snapshot_id"] is not None
+                    else None
+                )
+                rows.append((prediction, opportunity, market_snapshot))
+    else:
+        rows = db.execute(statement).all()
     finnhub_quote_index = _historical_finnhub_quote_index(db, rows)
     opportunity_ids = sorted(
         {
@@ -5694,7 +6395,7 @@ def historical_opportunity_analytics(
                 )
             ).all()
         )
-        if opportunity_ids
+        if opportunity_ids and requires_evidence_scan
         else []
     )
     decisions_by_opportunity: dict[int, list[OpportunityGateDecision]] = {}
@@ -6126,8 +6827,6 @@ def historical_opportunity_analytics(
         outcome_exit_reason = str(
             outcome.get("exit_detail") or outcome.get("exit_reason") or "unknown"
         ).lower()
-        if float(outcome["combined_score"]) < combined_score_min:
-            continue
         if option_flow_score_min > 0 and (
             option_flow_score is None or option_flow_score < option_flow_score_min
         ):
@@ -6185,9 +6884,17 @@ def historical_opportunity_analytics(
         or 0
     )
     status_counts = {str(status): int(count) for status, count in status_rows}
-    summary = summarize_historical_opportunities(outcomes)
+    summary_outcomes = (
+        [
+            _compact_historical_outcome(row, current_config)
+            for row in compact_rows
+        ]
+        if not requires_evidence_scan
+        else outcomes
+    )
+    summary = summarize_historical_opportunities(summary_outcomes)
     exit_reason_counts: dict[str, int] = {}
-    for outcome in outcomes:
+    for outcome in summary_outcomes:
         exit_key = str(outcome.get("exit_detail") or outcome.get("exit_reason") or "unknown")
         exit_reason_counts[exit_key] = exit_reason_counts.get(exit_key, 0) + 1
     summary["exit_reason_counts"] = exit_reason_counts
@@ -6196,7 +6903,18 @@ def historical_opportunity_analytics(
     summary["pending_count"] = status_counts.get("pending", 0)
     summary["total_prediction_count"] = sum(status_counts.values())
     summary["excluded_legacy_settlement_count"] = legacy_completed_count
-    ablation = frozen_market_ablation_summary(outcomes)
+    ablation = (
+        frozen_market_ablation_summary(summary_outcomes)
+        if include_ablation
+        else {
+            "schema_version": "frozen_market_ablation.v1",
+            "status": "deferred",
+            "method": "separate_read_model",
+            "total_settled_count": len(summary_outcomes),
+            "variants": [],
+            "gate_rejections": {},
+        }
+    )
     gate_rejection_conditions = [
         OpportunityGateDecision.user_id == user_id,
         OpportunityGateDecision.gate_status == "blocked",
@@ -6225,37 +6943,40 @@ def historical_opportunity_analytics(
         gate_rejection_conditions.append(
             OpportunityGateDecision.decision_version == decision_version
         )
-    observed_gate_rejection_count = int(
-        db.scalar(
-            select(func.count(OpportunityGateDecision.id)).where(
-                *gate_rejection_conditions
+    if include_ablation:
+        observed_gate_rejection_count = int(
+            db.scalar(
+                select(func.count(OpportunityGateDecision.id)).where(
+                    *gate_rejection_conditions
+                )
+            )
+            or 0
+        )
+        observed_gate_rejections = list(
+            db.scalars(
+                select(OpportunityGateDecision)
+                .where(*gate_rejection_conditions)
+                .order_by(
+                    OpportunityGateDecision.decision_at.desc(),
+                    OpportunityGateDecision.id.desc(),
+                )
+                .limit(5000)
+            ).all()
+        )
+        ablation["gate_rejections"]["observed_gate_decisions"] = (
+            frozen_gate_rejection_summary(
+                observed_gate_rejections,
+                total_count=observed_gate_rejection_count,
             )
         )
-        or 0
-    )
-    observed_gate_rejections = list(
-        db.scalars(
-            select(OpportunityGateDecision)
-            .where(*gate_rejection_conditions)
-            .order_by(
-                OpportunityGateDecision.decision_at.desc(),
-                OpportunityGateDecision.id.desc(),
-            )
-            .limit(5000)
-        ).all()
-    )
-    ablation["gate_rejections"]["observed_gate_decisions"] = (
-        frozen_gate_rejection_summary(
-            observed_gate_rejections,
-            total_count=observed_gate_rejection_count,
-        )
-    )
-    page_size = max(1, int(limit))
-    total_items = len(outcomes)
-    total_pages = max(1, (total_items + page_size - 1) // page_size)
-    current_page = min(max(1, int(page)), total_pages)
-    page_start = (current_page - 1) * page_size
-    page_items = outcomes[page_start : page_start + page_size]
+    if requires_evidence_scan:
+        total_items = len(outcomes)
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+        current_page = min(requested_page, total_pages)
+        page_start = (current_page - 1) * page_size
+        page_items = outcomes[page_start : page_start + page_size]
+    else:
+        page_items = outcomes
     result = {
         "summary": summary,
         "ablation": ablation,
@@ -6303,6 +7024,7 @@ def historical_opportunity_analytics(
             "event_risk": event_risk,
             "exit_reason": exit_reason,
         },
+        "query_mode": "evidence_scan" if requires_evidence_scan else "paged",
         "note": "直接统计已经完成结算的预测；命中率和净收益按右侧当前启用的手续费、滑点与资金成本动态重算，不会执行任何交易。",
     }
     if include_readiness:
@@ -8089,6 +8811,12 @@ def execute_opportunity_run(
             run.started_at = utcnow()
             config = config_data(db.get(AiMonitorConfig, run.user_id))
             summary = _scan_opportunities(db, engine, run, config, symbols_config)
+            summary["read_models"] = refresh_ai_monitor_read_models(
+                db,
+                user_id=run.user_id,
+                prediction_limit=1000,
+                score_limit=5000,
+            )
             run.summary_json = summary
             run.status = "partial" if summary["failed_symbols"] else "completed"
             run.completed_at = utcnow()
@@ -8211,7 +8939,13 @@ def _worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
             with factory() as db:
                 recover_stale_runs(db)
                 reopen_legacy_prediction_settlements(db)
-                settle_due_predictions(db, repository)
+                settlement = settle_due_predictions(db, repository)
+                if settlement["completed"] or settlement["unavailable"]:
+                    refresh_ai_monitor_read_models(
+                        db,
+                        prediction_limit=1000,
+                        score_limit=5000,
+                    )
                 db.commit()
                 user_ids = list(
                     db.scalars(
