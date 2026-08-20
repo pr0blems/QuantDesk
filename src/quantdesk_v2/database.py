@@ -30,6 +30,10 @@ def build_engine(
         "read_timeout": max(1, int(read_timeout)),
         "write_timeout": max(1, int(write_timeout)),
         "charset": "utf8mb4",
+        # All persisted application datetimes are UTC-naive.  Pin every pooled
+        # MySQL session to UTC so CURRENT_TIMESTAMP cannot silently mix the
+        # host timezone into expiry checks, heartbeats, or execution audits.
+        "init_command": "SET time_zone = '+00:00'",
     }
     if settings.db_ssl_required:
         ssl_options: dict[str, Any] = {

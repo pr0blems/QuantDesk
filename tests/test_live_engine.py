@@ -104,14 +104,178 @@ def test_hedge_open_and_protection_are_bound_to_long_side(
         price=100.0,
         atr=None,
         signal_time=123,
+        signal_key_suffix="manual:11111111-1111-4111-8111-111111111111",
     )
 
     assert market["side"] == "BUY"
     assert market["position_side"] == "LONG"
     assert market["reduce_only"] is False
+    assert market["signal_key"].endswith(
+        "manual:11111111-1111-4111-8111-111111111111"
+    )
     assert protection["side"] == "SELL"
     assert protection["position_side"] == "LONG"
     assert protection["quantity"] == market["quantity"]
+    assert protection["signal_key_suffix"] == (
+        "manual:11111111-1111-4111-8111-111111111111"
+    )
+
+
+def test_fixed_copy_total_amount_is_the_live_sizing_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+    account = _account()
+    account["config_json"].update(
+        {
+            "position_size_basis": "copy_total_amount",
+            "copy_total_amount": 200,
+        }
+    )
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(live_engine, "_exit_levels", lambda *_: (90.0, 110.0))
+    monkeypatch.setattr(
+        live_engine,
+        "atr_risk_position_size",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(allowed=False),
+    )
+
+    live_engine._open_position(
+        account,
+        "key",
+        "secret",
+        SimpleNamespace(
+            available_balance=Decimal("1000"),
+            wallet_balance=Decimal("1000"),
+            unrealized_pnl=Decimal("100"),
+            positions=(),
+        ),
+        symbol="AAPLUSDT",
+        direction=1,
+        price=100.0,
+        atr=None,
+        signal_time=123,
+    )
+
+    assert captured["equity"] == Decimal("200")
+    assert captured["available_balance"] == Decimal("40.0")
+
+
+def test_fixed_copy_total_amount_never_exceeds_real_collateral() -> None:
+    capital = live_engine._position_sizing_capital(
+        {
+            "position_size_basis": "copy_total_amount",
+            "copy_total_amount": 5_000,
+        },
+        wallet=Decimal("1_000"),
+        equity=Decimal("800"),
+    )
+
+    assert capital.basis == "copy_total_amount"
+    assert capital.configured_total_amount == Decimal("5000")
+    assert capital.effective_equity == Decimal("800")
+    assert capital.margin_equity == Decimal("800")
+
+
+def test_missing_position_size_basis_preserves_account_equity_behavior() -> None:
+    capital = live_engine._position_sizing_capital(
+        {},
+        wallet=Decimal("1_000"),
+        equity=Decimal("1_100"),
+    )
+
+    assert capital.basis == "account_equity"
+    assert capital.configured_total_amount is None
+    assert capital.effective_equity == Decimal("1100")
+    assert capital.margin_equity == Decimal("1000")
+
+
+def test_zero_exchange_liquidation_floor_is_safe_only_for_protected_long() -> None:
+    assert live_engine._exchange_liquidation_is_safe(
+        entry_price=100,
+        stop_price=Decimal("95"),
+        liquidation_price=0,
+        direction=1,
+        min_buffer_pct=0.01,
+    )
+    assert not live_engine._exchange_liquidation_is_safe(
+        entry_price=100,
+        stop_price=Decimal("105"),
+        liquidation_price=0,
+        direction=-1,
+        min_buffer_pct=0.01,
+    )
+    assert not live_engine._exchange_liquidation_is_safe(
+        entry_price=100,
+        stop_price=Decimal("95"),
+        liquidation_price=None,
+        direction=1,
+        min_buffer_pct=0.01,
+    )
+
+
+def test_post_fill_zero_long_liquidation_price_keeps_protected_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[str] = []
+    failed: list[str] = []
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(live_engine, "_exit_levels", lambda *_: (90.0, 110.0))
+    monkeypatch.setattr(
+        live_engine,
+        "_place_market",
+        lambda *_args, **_kwargs: {"status": "FILLED", "avgPrice": "100"},
+    )
+    monkeypatch.setattr(live_engine, "_place_protection", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        live_engine,
+        "_account_service",
+        SimpleNamespace(
+            account=lambda *_args, **_kwargs: SimpleNamespace(
+                positions=(
+                    {
+                        "symbol": "AAPLUSDT",
+                        "position_side": "LONG",
+                        "side": "long",
+                        "amt": 1,
+                        "entry_price": 100,
+                        "liquidation_price": 0,
+                    },
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_close_position",
+        lambda *_args, **_kwargs: closed.append("closed") or True,
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_fail_account",
+        lambda _account, reason: failed.append(reason),
+    )
+    monkeypatch.setattr(live_engine.store, "execute", lambda *_args, **_kwargs: 1)
+
+    opened = live_engine._open_position(
+        _account(),
+        "key",
+        "secret",
+        SimpleNamespace(
+            available_balance=Decimal("1000"),
+            wallet_balance=Decimal("1000"),
+            positions=(),
+        ),
+        symbol="AAPLUSDT",
+        direction=1,
+        price=100.0,
+        atr=None,
+        signal_time=123,
+    )
+
+    assert opened is True
+    assert closed == []
+    assert failed == []
 
 
 def test_hedge_close_only_uses_the_strategy_managed_quantity(

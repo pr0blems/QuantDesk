@@ -673,6 +673,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/ai-monitor/live-copy/manual-follow": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Manual Follow Live Copy
+         * @description Execute one explicitly confirmed opportunity through the live risk engine.
+         */
+        post: operations["manual_follow_live_copy_api_v2_ai_monitor_live_copy_manual_follow_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/ai-monitor/market-context": {
         parameters: {
             query?: never;
@@ -2741,6 +2761,11 @@ export interface components {
              */
             allow_short: boolean;
             /**
+             * Copy Total Amount
+             * @default 1000
+             */
+            copy_total_amount: number;
+            /**
              * Daily Loss Limit Pct
              * @default 2
              */
@@ -2782,6 +2807,12 @@ export interface components {
              */
             position_mode: "one_way" | "hedge";
             /**
+             * Position Size Basis
+             * @default account_equity
+             * @enum {string}
+             */
+            position_size_basis: "account_equity" | "copy_total_amount";
+            /**
              * Position Size Pct
              * @default 2
              */
@@ -2804,23 +2835,39 @@ export interface components {
         };
         /**
          * AiMonitorLiveCopyUpdate
-         * @description Explicitly enable or stop routing new AI-monitor signals to live trading.
+         * @description Enable or stop routing new AI-monitor signals to live trading.
          */
         AiMonitorLiveCopyUpdate: {
             /** Account Id */
             account_id?: string | null;
+            /** Enabled */
+            enabled: boolean;
+        };
+        /**
+         * AiMonitorManualFollowRequest
+         * @description Explicit confirmation for one exact AI-monitor opportunity.
+         */
+        AiMonitorManualFollowRequest: {
+            /** Account Id */
+            account_id: string;
             /**
              * Acknowledge Real Funds
              * @default false
              */
             acknowledge_real_funds: boolean;
+            /** Expected Contract Symbol */
+            expected_contract_symbol: string;
             /**
-             * Confirmation Name
-             * @default
+             * Expected Direction
+             * @enum {string}
              */
-            confirmation_name: string;
-            /** Enabled */
-            enabled: boolean;
+            expected_direction: "long" | "short";
+            /** Manual Attempt Id */
+            manual_attempt_id: string;
+            /** Opportunity Id */
+            opportunity_id: string;
+            /** Prediction Id */
+            prediction_id?: string | null;
         };
         /** AiMonitorNewsAnalyzeRequest */
         AiMonitorNewsAnalyzeRequest: {
@@ -5332,6 +5379,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["AiMonitorLiveCopyConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    manual_follow_live_copy_api_v2_ai_monitor_live_copy_manual_follow_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiMonitorManualFollowRequest"];
             };
         };
         responses: {

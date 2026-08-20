@@ -1060,6 +1060,13 @@
             "title": "Allow Short",
             "type": "boolean"
           },
+          "copy_total_amount": {
+            "default": 1000.0,
+            "maximum": 1000000000.0,
+            "minimum": 1.0,
+            "title": "Copy Total Amount",
+            "type": "number"
+          },
           "daily_loss_limit_pct": {
             "default": 2.0,
             "maximum": 20.0,
@@ -1118,6 +1125,15 @@
             "title": "Position Mode",
             "type": "string"
           },
+          "position_size_basis": {
+            "default": "account_equity",
+            "enum": [
+              "account_equity",
+              "copy_total_amount"
+            ],
+            "title": "Position Size Basis",
+            "type": "string"
+          },
           "position_size_pct": {
             "default": 2.0,
             "maximum": 20.0,
@@ -1152,7 +1168,7 @@
       },
       "AiMonitorLiveCopyUpdate": {
         "additionalProperties": false,
-        "description": "Explicitly enable or stop routing new AI-monitor signals to live trading.",
+        "description": "Enable or stop routing new AI-monitor signals to live trading.",
         "properties": {
           "account_id": {
             "anyOf": [
@@ -1167,17 +1183,6 @@
             ],
             "title": "Account Id"
           },
-          "acknowledge_real_funds": {
-            "default": false,
-            "title": "Acknowledge Real Funds",
-            "type": "boolean"
-          },
-          "confirmation_name": {
-            "default": "",
-            "maxLength": 100,
-            "title": "Confirmation Name",
-            "type": "string"
-          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -1187,6 +1192,73 @@
           "enabled"
         ],
         "title": "AiMonitorLiveCopyUpdate",
+        "type": "object"
+      },
+      "AiMonitorManualFollowRequest": {
+        "additionalProperties": false,
+        "description": "Explicit confirmation for one exact AI-monitor opportunity.",
+        "properties": {
+          "account_id": {
+            "maxLength": 36,
+            "minLength": 36,
+            "title": "Account Id",
+            "type": "string"
+          },
+          "acknowledge_real_funds": {
+            "default": false,
+            "title": "Acknowledge Real Funds",
+            "type": "boolean"
+          },
+          "expected_contract_symbol": {
+            "maxLength": 32,
+            "minLength": 4,
+            "pattern": "^[A-Za-z0-9]+$",
+            "title": "Expected Contract Symbol",
+            "type": "string"
+          },
+          "expected_direction": {
+            "enum": [
+              "long",
+              "short"
+            ],
+            "title": "Expected Direction",
+            "type": "string"
+          },
+          "manual_attempt_id": {
+            "maxLength": 36,
+            "minLength": 36,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "title": "Manual Attempt Id",
+            "type": "string"
+          },
+          "opportunity_id": {
+            "maxLength": 36,
+            "minLength": 36,
+            "title": "Opportunity Id",
+            "type": "string"
+          },
+          "prediction_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prediction Id"
+          }
+        },
+        "required": [
+          "account_id",
+          "opportunity_id",
+          "manual_attempt_id",
+          "expected_contract_symbol",
+          "expected_direction"
+        ],
+        "title": "AiMonitorManualFollowRequest",
         "type": "object"
       },
       "AiMonitorNewsAnalyzeRequest": {
@@ -6788,6 +6860,52 @@
           }
         ],
         "summary": "Update Live Copy Config"
+      }
+    },
+    "/api/v2/ai-monitor/live-copy/manual-follow": {
+      "post": {
+        "description": "Execute one explicitly confirmed opportunity through the live risk engine.",
+        "operationId": "manual_follow_live_copy_api_v2_ai_monitor_live_copy_manual_follow_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiMonitorManualFollowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Manual Follow Live Copy Api V2 Ai Monitor Live Copy Manual Follow Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Manual Follow Live Copy"
       }
     },
     "/api/v2/ai-monitor/market-context": {

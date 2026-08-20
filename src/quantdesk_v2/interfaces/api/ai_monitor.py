@@ -24,6 +24,7 @@ from starlette.responses import StreamingResponse
 from ... import ai_monitor, historical_replay, live_engine, macro_ai, news_ai, ws_depth
 from ...ai_model_config import global_ai_model_configured
 from ...ai_monitor_read_models import read_models_available
+from ...binance_client import BinanceAccountClientError
 from ...database import get_db
 from ...dependencies import bearer, get_current_user, require_admin_write
 from ...finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
@@ -64,6 +65,7 @@ from ...schemas import (
     AiMonitorFinnhubUsageUpdate,
     AiMonitorLiveCopyConfigUpdate,
     AiMonitorLiveCopyUpdate,
+    AiMonitorManualFollowRequest,
     AiMonitorNewsAnalyzeRequest,
     AiMonitorNewsSystemPromptUpdate,
     AiMonitorReplayRequest,
@@ -85,6 +87,8 @@ _AI_MONITOR_LIVE_RISK_DEFAULTS: dict[str, Any] = {
     "leverage": 10,
     "risk_max_leverage": 10,
     "max_positions": 10,
+    "position_size_basis": "account_equity",
+    "copy_total_amount": 1_000.0,
     "position_size_pct": 2.0,
     "max_margin_per_trade_pct": 2.0,
     "margin_cap": 0.2,
@@ -96,6 +100,31 @@ _AI_MONITOR_LIVE_RISK_DEFAULTS: dict[str, Any] = {
     "max_ticker_age_seconds": 120,
     "max_signal_age_seconds": 300,
     "block_high_risk_products": True,
+}
+_MANUAL_FOLLOW_MESSAGES = {
+    "filled_and_protected": "订单已成交，交易所止损与止盈已建立。",
+    "already_filled": "本次确认已经执行过，没有重复提交同一笔订单。重新打开确认框可发起新的手动跟买。",
+    "order_already_exists": "该信号已有订单正在处理或对账，本次未重复下单。",
+    "live_copy_inactive": "独立实盘跟单未处于运行状态，请先开启并确认账户状态。",
+    "engine_unavailable": "实盘执行器当前不可用，请稍后重试。",
+    "portfolio_margin_unsupported": "当前 Binance 账户类型不受支持，执行器已安全停机。",
+    "position_mode_changed": "Binance 持仓模式与跟单配置不一致，执行器已安全停机。",
+    "symbol_not_enabled": "该合约不在当前独立跟单品种范围内。",
+    "symbol_already_open": "该合约已有持仓，为避免叠加风险，本次未下单。",
+    "max_positions_reached": "已达到最大同时持仓数量，本次未下单。",
+    "risk_review_required": "账户存在未纳管持仓或保护单异常，需要先完成风险复核。",
+    "loss_limit_reached": "账户日内亏损或回撤限制已触发，本次未下单。",
+    "filled_audit_pending": "上一笔成交审计尚未完成，本次未下单。",
+    "ticker_unavailable": "该合约没有可用的 Binance 实时价格，本次未下单。",
+    "ticker_stale": "Binance 行情已过期，本次未下单。",
+    "symbol_risk_blocked": "该合约未通过当前品种风险准入，本次未下单。",
+    "signal_not_eligible": "该信号已变化、未满足准入或不再允许跟单，本次未下单。",
+    "signal_stale": "该信号已经过期，本次未下单。",
+    "order_not_submitted": "仓位计算或下单前风控未通过，没有提交订单。",
+    "order_status_uncertain": "订单状态暂无法确认，执行器已停止重复提交，请先完成对账。",
+    "exchange_rejected": "Binance 拒绝或取消了该订单，本次没有重复提交。",
+    "execution_failed_closed": "订单提交后的安全校验未通过，执行器已按失败关闭并停止。",
+    "direction_invalid": "信号方向无效，本次未下单。",
 }
 
 
@@ -971,6 +1000,13 @@ def _live_copy_account_out(
             ),
             "leverage": int(config.get("leverage", 1)),
             "max_positions": int(config.get("max_positions", 1)),
+            "position_size_basis": (
+                str(config.get("position_size_basis"))
+                if config.get("position_size_basis")
+                in {"account_equity", "copy_total_amount"}
+                else "account_equity"
+            ),
+            "copy_total_amount": float(config.get("copy_total_amount", 1_000)),
             "position_size_pct": float(config.get("position_size_pct", 2)),
             "risk_per_trade_pct": float(config.get("risk_per_trade_pct", 0.5)),
             "max_total_risk_pct": float(config.get("max_total_risk_pct", 4)),
@@ -1034,6 +1070,8 @@ def _live_copy_out(
                 "position_mode": str(preview["position_mode"]),
                 "leverage": int(preview["leverage"]),
                 "max_positions": int(preview["max_positions"]),
+                "position_size_basis": str(preview["position_size_basis"]),
+                "copy_total_amount": float(preview["copy_total_amount"]),
                 "position_size_pct": float(preview["position_size_pct"]),
                 "risk_per_trade_pct": float(preview["risk_per_trade_pct"]),
                 "max_total_risk_pct": float(preview["max_total_risk_pct"]),
@@ -1644,6 +1682,7 @@ def _opportunity_out(
         "matched_indicator_keys": list(item.matched_indicator_keys_json or []),
         "news_ids": list(item.news_ids_json or []),
         "evidence": _compact_opportunity_evidence(contract_evidence),
+        "prediction_id": prediction.public_id if prediction is not None else None,
         "prediction_status": prediction.status if prediction is not None else None,
         "prediction_settlement": _prediction_settlement_out(prediction),
         "prediction_result": prediction.result if prediction is not None else None,
@@ -2040,6 +2079,144 @@ def get_live_copy_status(
     return _live_copy_out(db, request, user)
 
 
+@router.post("/live-copy/manual-follow")
+def manual_follow_live_copy(
+    payload: AiMonitorManualFollowRequest,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Execute one explicitly confirmed opportunity through the live risk engine."""
+
+    _require_expected_user(request, user)
+    if not payload.acknowledge_real_funds:
+        raise HTTPException(status_code=409, detail="请确认本操作会使用真实资金")
+    account = _ai_monitor_live_account(db, user.id)
+    if account is None or account.public_id != payload.account_id:
+        raise HTTPException(status_code=409, detail="实盘跟单账户已变化，请刷新后重试")
+    account_config = dict(account.config_json or {})
+    if (
+        account.status != "active"
+        or not bool(account_config.get("ai_monitor_live_copy_enabled"))
+    ):
+        raise HTTPException(status_code=409, detail="请先开启独立实盘跟单")
+
+    opportunity = db.scalar(
+        select(AiMonitorOpportunity).where(
+            AiMonitorOpportunity.user_id == user.id,
+            AiMonitorOpportunity.public_id == payload.opportunity_id,
+        )
+    )
+    if opportunity is None:
+        raise HTTPException(status_code=404, detail="机会已更新，请刷新后重试")
+    prediction = None
+    if payload.prediction_id is not None:
+        prediction = db.scalar(
+            select(AiMonitorPrediction).where(
+                AiMonitorPrediction.user_id == user.id,
+                AiMonitorPrediction.opportunity_id == opportunity.id,
+                AiMonitorPrediction.public_id == payload.prediction_id,
+            )
+        )
+        if prediction is None:
+            raise HTTPException(status_code=404, detail="预测已更新，请刷新后重试")
+    if opportunity.status not in {"candidate", "discovered"} or (
+        prediction is not None and prediction.status != "pending"
+    ):
+        raise HTTPException(status_code=409, detail="该机会已经结束，请刷新后重试")
+    actual_symbol = str(
+        prediction.contract_symbol if prediction is not None else opportunity.contract_symbol
+    ).upper()
+    actual_direction = str(
+        prediction.direction if prediction is not None else opportunity.direction
+    ).lower()
+    if (
+        actual_symbol != payload.expected_contract_symbol
+        or actual_direction != payload.expected_direction
+    ):
+        raise HTTPException(status_code=409, detail="信号方向或合约已变化，请刷新后重试")
+
+    request_id = payload.manual_attempt_id
+    _audit(
+        db,
+        request,
+        user.id,
+        "ai_monitor.live_copy.manual_follow_requested",
+        request_id,
+        {
+            "account_id": account.public_id,
+            "opportunity_id": opportunity.public_id,
+            "prediction_id": prediction.public_id if prediction is not None else None,
+            "manual_attempt_id": payload.manual_attempt_id,
+            "contract_symbol": actual_symbol,
+            "direction": actual_direction,
+            "acknowledge_real_funds": True,
+        },
+    )
+    # The request audit must be durable before any exchange-side write begins.
+    db.commit()
+
+    try:
+        result = live_engine.execute_ai_monitor_manual_follow(
+            user_id=user.id,
+            live_account_id=account.id,
+            opportunity_public_id=opportunity.public_id,
+            prediction_public_id=(prediction.public_id if prediction is not None else None),
+            manual_attempt_id=payload.manual_attempt_id,
+            expected_symbol=actual_symbol,
+            expected_direction=actual_direction,
+        )
+    except (BinanceAccountClientError, SecurityError, RuntimeError) as exc:
+        result = {
+            "status": "blocked",
+            "reason": "engine_unavailable",
+            "symbol": actual_symbol,
+            "direction": actual_direction,
+            "intent": None,
+            "error_category": type(exc).__name__,
+        }
+
+    reason = str(result.get("reason") or "execution_failed_closed")
+    message = _MANUAL_FOLLOW_MESSAGES.get(
+        reason,
+        "手动跟单未完成，执行器没有继续重复提交。",
+    )
+    audit_warning = False
+    try:
+        _audit(
+            db,
+            request,
+            user.id,
+            "ai_monitor.live_copy.manual_follow_result",
+            request_id,
+            {
+                "account_id": account.public_id,
+                "opportunity_id": opportunity.public_id,
+                "prediction_id": prediction.public_id if prediction is not None else None,
+                "manual_attempt_id": payload.manual_attempt_id,
+                "contract_symbol": actual_symbol,
+                "direction": actual_direction,
+                "status": result.get("status"),
+                "reason": reason,
+                "intent_id": (result.get("intent") or {}).get("id"),
+            },
+        )
+        db.commit()
+    except SQLAlchemyError:
+        # Never turn a confirmed exchange result into an HTTP failure merely
+        # because this secondary API audit row could not be persisted.  The
+        # live_order_intent remains the authoritative execution ledger.
+        db.rollback()
+        audit_warning = True
+        message += " 操作审计暂未写入，请立即核对订单记录。"
+    return {
+        "request_id": request_id,
+        "message": message,
+        "audit_warning": audit_warning,
+        **result,
+    }
+
+
 @router.put("/live-copy/config")
 def update_live_copy_config(
     payload: AiMonitorLiveCopyConfigUpdate,
@@ -2073,6 +2250,8 @@ def update_live_copy_config(
         "leverage": payload.leverage,
         "risk_max_leverage": payload.leverage,
         "max_positions": payload.max_positions,
+        "position_size_basis": payload.position_size_basis,
+        "copy_total_amount": payload.copy_total_amount,
         "position_size_pct": payload.position_size_pct,
         "max_margin_per_trade_pct": payload.position_size_pct,
         "risk_per_trade_pct": payload.risk_per_trade_pct,
@@ -2093,6 +2272,8 @@ def update_live_copy_config(
         "leverage",
         "risk_max_leverage",
         "max_positions",
+        "position_size_basis",
+        "copy_total_amount",
         "position_size_pct",
         "max_margin_per_trade_pct",
         "margin_cap",
@@ -2112,6 +2293,8 @@ def update_live_copy_config(
         **dict(deployment.runtime_state_json or {}),
         "execution_scope": _AI_MONITOR_LIVE_SCOPE,
         "position_mode": payload.position_mode,
+        "position_size_basis": payload.position_size_basis,
+        "copy_total_amount": payload.copy_total_amount,
     }
 
     resumed_after_mode_fix = bool(
@@ -2137,6 +2320,8 @@ def update_live_copy_config(
             "position_mode": payload.position_mode,
             "leverage": payload.leverage,
             "max_positions": payload.max_positions,
+            "position_size_basis": payload.position_size_basis,
+            "copy_total_amount": payload.copy_total_amount,
             "minimum_combined_score": payload.minimum_combined_score,
             "allow_long": payload.allow_long,
             "allow_short": payload.allow_short,
@@ -2176,11 +2361,6 @@ def update_live_copy_status(
             raise HTTPException(status_code=409, detail="请先配置 Binance API 凭据")
         if not _binance_trade_permission_requested(locked_user):
             raise HTTPException(status_code=409, detail="Binance API 未申请 TRADE 权限")
-        if (
-            payload.confirmation_name != _AI_MONITOR_LIVE_ACCOUNT_NAME
-            or not payload.acknowledge_real_funds
-        ):
-            raise HTTPException(status_code=409, detail="实盘资金确认不匹配")
         if not tradfi_symbols():
             raise HTTPException(status_code=503, detail="Binance TradFi 交易品种池为空")
         account, deployment = _ensure_ai_monitor_live_account(db, locked_user)

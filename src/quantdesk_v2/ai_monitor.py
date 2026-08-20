@@ -78,6 +78,10 @@ PREDICTION_TRAILING_TRIGGER_BPS = 50.0
 PREDICTION_TRAILING_GIVEBACK_BPS = 30.0
 PREDICTION_FOLLOW_THROUGH_BARS = 3
 PREDICTION_FOLLOW_THROUGH_LOSS_BPS = -15.0
+PREDICTION_SCORE_EXIT_BAR_MS = 15 * 60 * 1_000
+PREDICTION_SCORE_EXIT_MIN_HOLD_MS = 30 * 60 * 1_000
+PREDICTION_SCORE_EXIT_CONFIRMATION_BARS = 2
+PREDICTION_SCORE_EXIT_POLICY_VERSION = "two_closed_bar_hysteresis_v2"
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
 OPPORTUNITY_DECISION_VERSION = "binance_primary_v4"
@@ -1229,9 +1233,13 @@ def refresh_pending_prediction_scores(
         )
         evidence["latest_live_score"] = snapshot
         evidence["score_exit_policy"] = {
-            "version": "two_scan_hysteresis_v1",
+            "version": PREDICTION_SCORE_EXIT_POLICY_VERSION,
             "direction_reversal_points": 1,
-            "score_breakdown_points": 2,
+            "score_breakdown_points": PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
+            "score_breakdown_bars": PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
+            "confirmation_unit": "closed_15m_bar",
+            "bar_interval_minutes": PREDICTION_SCORE_EXIT_BAR_MS // 60_000,
+            "minimum_hold_minutes": PREDICTION_SCORE_EXIT_MIN_HOLD_MS // 60_000,
             "combined_hysteresis_points": 5.0,
             "news_policy": {
                 "minimum_confidence": minimum_confidence,
@@ -1954,7 +1962,7 @@ def prediction_price_barrier_exit(
     if stop_price <= 0 or target_price <= 0:
         return None
     normalized_direction = "short" if direction == "short" else "long"
-    normalized: list[tuple[int, float, float, float]] = []
+    normalized: list[tuple[int, int, float, float, float]] = []
     for candle in candles:
         try:
             open_time = int(candle.get("open_time") or 0)
@@ -1973,8 +1981,12 @@ def prediction_price_barrier_exit(
             continue
         if open_price <= 0 or high_price <= 0 or low_price <= 0:
             continue
-        normalized.append((open_time, open_price, high_price, low_price))
-    for open_time, open_price, high_price, low_price in sorted(normalized):
+        normalized.append(
+            (open_time, close_time, open_price, high_price, low_price)
+        )
+    for open_time, close_time, open_price, high_price, low_price in sorted(
+        normalized
+    ):
         if normalized_direction == "short":
             if open_price >= stop_price:
                 return {
@@ -2188,9 +2200,10 @@ def prediction_score_exit_signal(
 ) -> dict[str, Any] | None:
     """Detect a confirmed score breakdown or directional reversal.
 
-    A score weakening exit needs two consecutive scans below a five-point
-    hysteresis band.  A directional reversal exits immediately.  This keeps a
-    single noisy refresh from closing the virtual position.
+    Poll frequency is not market evidence.  Score weakening therefore needs
+    two distinct closed 15-minute evidence buckets below the hysteresis band,
+    plus a 30-minute minimum hold.  Direction reversal remains immediate when
+    it is backed by a post-entry observation.
     """
 
     source = evidence or {}
@@ -2238,6 +2251,12 @@ def prediction_score_exit_signal(
             )
         except (TypeError, ValueError):
             reference_price_time_ms = None
+        evidence_time_ms = reference_price_time_ms or observed_ms
+        if not (start_ms <= evidence_time_ms <= end_ms):
+            continue
+        closed_bar_time_ms = (
+            evidence_time_ms // PREDICTION_SCORE_EXIT_BAR_MS
+        ) * PREDICTION_SCORE_EXIT_BAR_MS
         observations.append(
             {
                 "calculated_at": str(calculated_at),
@@ -2247,16 +2266,21 @@ def prediction_score_exit_signal(
                 "technical": technical,
                 "reference_price": reference_price,
                 "reference_price_time_ms": reference_price_time_ms,
+                "closed_bar_time_ms": closed_bar_time_ms,
             }
         )
     observations.sort(key=lambda item: item["price_time_ms"])
     if not observations:
         return None
-    consecutive_low_scores = 0
     for observation in observations:
         if (
             observation["direction"] in {"long", "short"}
             and observation["direction"] != direction
+            and max(
+                int(observation["price_time_ms"]),
+                int(observation["reference_price_time_ms"] or 0),
+            )
+            > start_ms
         ):
             return {
                 **observation,
@@ -2264,17 +2288,48 @@ def prediction_score_exit_signal(
                 "exit_threshold": exit_threshold,
                 "confirmation_points": 1,
             }
-        consecutive_low_scores = (
-            consecutive_low_scores + 1
-            if observation["combined"] < exit_threshold
-            else 0
-        )
-        if consecutive_low_scores >= 2:
+
+    # Keep only the latest calculation for each closed market bar.  Repeated
+    # scheduler scans inside one bar can update the audit trail, but must never
+    # count as independent confirmation points.
+    latest_by_closed_bar: dict[int, dict[str, Any]] = {}
+    for observation in observations:
+        closed_bar_time_ms = int(observation["closed_bar_time_ms"])
+        if closed_bar_time_ms <= start_ms:
+            continue
+        latest_by_closed_bar[closed_bar_time_ms] = observation
+    bar_observations = [
+        latest_by_closed_bar[key] for key in sorted(latest_by_closed_bar)
+    ]
+    ignored_duplicate_points = len(observations) - len(bar_observations)
+    consecutive_low_scores: list[dict[str, Any]] = []
+    not_before_ms = start_ms + PREDICTION_SCORE_EXIT_MIN_HOLD_MS
+    for observation in bar_observations:
+        if observation["combined"] < exit_threshold:
+            consecutive_low_scores.append(observation)
+        else:
+            consecutive_low_scores = []
+        if (
+            len(consecutive_low_scores) >= PREDICTION_SCORE_EXIT_CONFIRMATION_BARS
+            and int(observation["price_time_ms"]) >= not_before_ms
+        ):
+            confirmations = consecutive_low_scores[
+                -PREDICTION_SCORE_EXIT_CONFIRMATION_BARS:
+            ]
             return {
                 **observation,
                 "reason": "score_breakdown",
                 "exit_threshold": exit_threshold,
-                "confirmation_points": 2,
+                "confirmation_points": PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
+                "confirmation_unit": "closed_15m_bar",
+                "confirmation_bar_times_ms": [
+                    int(item["closed_bar_time_ms"]) for item in confirmations
+                ],
+                "confirmation_scores": [
+                    float(item["combined"]) for item in confirmations
+                ],
+                "minimum_hold_ms": PREDICTION_SCORE_EXIT_MIN_HOLD_MS,
+                "ignored_duplicate_points": max(0, ignored_duplicate_points),
             }
     return None
 
@@ -7367,6 +7422,7 @@ def settle_due_predictions(
         item.settlement_version = PREDICTION_SETTLEMENT_VERSION
         evidence["settlement"] = {
             "version": PREDICTION_SETTLEMENT_VERSION,
+            "score_exit_policy_version": PREDICTION_SCORE_EXIT_POLICY_VERSION,
             "exit_reason": exit_reason,
             "exit_subreason": exit_decision.get("exit_subreason"),
             "exit_at": exit_at.replace(tzinfo=UTC).isoformat(),
@@ -7389,6 +7445,14 @@ def settle_due_predictions(
                         "technical",
                         "exit_threshold",
                         "confirmation_points",
+                        "confirmation_unit",
+                        "confirmation_bar_times_ms",
+                        "confirmation_scores",
+                        "minimum_hold_ms",
+                        "ignored_duplicate_points",
+                        "calculated_at",
+                        "closed_bar_time_ms",
+                        "reference_price_time_ms",
                     )
                     if exit_decision.get(key) is not None
                 }

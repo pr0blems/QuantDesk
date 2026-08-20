@@ -13,6 +13,7 @@ import json
 import math
 import threading
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -54,6 +55,7 @@ _trading_client: BinanceUsdMTradingClient | None = None
 _started = False
 _start_lock = threading.Lock()
 _reconcile_lock = threading.Lock()
+_execution_locks: dict[int, threading.Lock] = {}
 _last_reconciled_at: dict[int, float] = {}
 _reconciliation_failed: set[int] = set()
 _RECONCILE_INTERVAL_SECONDS = 60.0
@@ -61,6 +63,16 @@ _position_mode_cache: dict[int, tuple[str, float]] = {}
 _POSITION_MODE_TTL_SECONDS = 600.0
 _account_backoff: dict[int, tuple[float, int]] = {}
 _MAX_ACCOUNT_BACKOFF_SECONDS = 300.0
+
+
+@dataclass(frozen=True, slots=True)
+class _PositionSizingCapital:
+    """Normalized capital bases used by the live order sizing path."""
+
+    basis: str
+    configured_total_amount: Decimal | None
+    effective_equity: Decimal
+    margin_equity: Decimal
 
 
 def configure(
@@ -77,6 +89,18 @@ def configure(
         _reconciliation_failed.clear()
         _position_mode_cache.clear()
         _account_backoff.clear()
+        _execution_locks.clear()
+
+
+def _account_execution_lock(account_id: int) -> threading.Lock:
+    """Serialize manual and scheduled entry decisions for one live account."""
+
+    with _reconcile_lock:
+        lock = _execution_locks.get(account_id)
+        if lock is None:
+            lock = threading.Lock()
+            _execution_locks[account_id] = lock
+        return lock
 
 
 def start() -> None:
@@ -134,8 +158,10 @@ def _ai_monitor_signal(
     symbol: str,
     *,
     price: float | None = None,
+    prediction_public_id: str | None = None,
+    opportunity_public_id: str | None = None,
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
-    """Return the newest eligible post-opt-in AI prediction as a live signal.
+    """Return an automatic prediction or one manually selected opportunity.
 
     This read path never writes or places an order.  The normal live executor
     remains responsible for signal freshness, account limits, position sizing,
@@ -155,26 +181,68 @@ def _ai_monitor_signal(
     if enabled_at is None:
         return 0, None, [], None, {}
     enabled_datetime = datetime.fromtimestamp(enabled_at, tz=UTC).replace(tzinfo=None)
-    rows = store.query(
-        """SELECT p.public_id AS prediction_public_id,
-                  o.public_id AS opportunity_public_id,
-                  p.direction,p.timeframe,p.confidence_score,p.entry_price,
-                  p.evidence_json,p.predicted_at,p.due_at,o.expires_at
-           FROM ai_monitor_predictions p
-           JOIN ai_monitor_opportunities o
-             ON o.id=p.opportunity_id AND o.user_id=p.user_id
-           WHERE p.user_id=? AND p.contract_symbol=? AND p.status='pending'
-             AND o.status IN ('candidate','discovered')
-             AND o.expires_at>CURRENT_TIMESTAMP AND p.predicted_at>=?
-           ORDER BY p.predicted_at DESC,p.id DESC LIMIT 1""",
-        (account["user_id"], symbol, enabled_datetime),
-    )
+    if prediction_public_id is not None and opportunity_public_id is None:
+        return 0, None, [], None, {}
+    manual_selection = opportunity_public_id is not None
+    query_now = datetime.fromtimestamp(time.time(), tz=UTC).replace(tzinfo=None)
+    if manual_selection and prediction_public_id is not None:
+        rows = store.query(
+            """SELECT p.public_id AS prediction_public_id,
+                      o.public_id AS opportunity_public_id,
+                      p.direction,p.timeframe,p.confidence_score,p.entry_price,
+                      p.evidence_json,p.predicted_at,p.due_at,o.expires_at
+               FROM ai_monitor_predictions p
+               JOIN ai_monitor_opportunities o
+                 ON o.id=p.opportunity_id AND o.user_id=p.user_id
+               WHERE p.user_id=? AND p.contract_symbol=? AND p.status='pending'
+                  AND p.public_id=? AND o.public_id=?
+                  AND o.status IN ('candidate','discovered')
+                ORDER BY p.predicted_at DESC,p.id DESC LIMIT 1""",
+            (
+                account["user_id"],
+                symbol,
+                prediction_public_id,
+                opportunity_public_id,
+            ),
+        )
+    elif manual_selection:
+        rows = store.query(
+            """SELECT NULL AS prediction_public_id,
+                      o.public_id AS opportunity_public_id,
+                      o.direction,o.timeframe,o.combined_score AS confidence_score,
+                      NULL AS entry_price,o.evidence_json,
+                      o.discovered_at AS predicted_at,
+                      o.expires_at AS due_at,o.expires_at
+               FROM ai_monitor_opportunities o
+               WHERE o.user_id=? AND o.contract_symbol=? AND o.public_id=?
+                 AND o.status IN ('candidate','discovered')
+               ORDER BY o.discovered_at DESC,o.id DESC LIMIT 1""",
+            (account["user_id"], symbol, opportunity_public_id),
+        )
+    else:
+        rows = store.query(
+            """SELECT p.public_id AS prediction_public_id,
+                      o.public_id AS opportunity_public_id,
+                      p.direction,p.timeframe,p.confidence_score,p.entry_price,
+                      p.evidence_json,p.predicted_at,p.due_at,o.expires_at
+               FROM ai_monitor_predictions p
+               JOIN ai_monitor_opportunities o
+                 ON o.id=p.opportunity_id AND o.user_id=p.user_id
+                WHERE p.user_id=? AND p.contract_symbol=? AND p.status='pending'
+                  AND o.status IN ('candidate','discovered')
+                  AND o.expires_at>? AND p.predicted_at>=?
+                ORDER BY p.predicted_at DESC,p.id DESC LIMIT 1""",
+            (account["user_id"], symbol, query_now, enabled_datetime),
+        )
     if not rows:
         return 0, None, [], None, {}
     row = dict(rows[0])
     evidence = _json_object(row.get("evidence_json"))
     gate = evidence.get("virtual_entry_gate")
-    if not isinstance(gate, dict) or gate.get("entry_ready") is not True:
+    if not isinstance(gate, dict):
+        return 0, None, [], None, {}
+    entry_ready = gate.get("entry_ready") is True
+    if not entry_ready and not manual_selection:
         return 0, None, [], None, {}
     direction_name = str(row.get("direction") or "").lower()
     direction = 1 if direction_name == "long" else -1 if direction_name == "short" else 0
@@ -213,7 +281,9 @@ def _ai_monitor_signal(
         float(config.get("ai_monitor_live_min_combined_score", 70.0)),
         float(readiness.get("minimum_combined_score", 0.0) or 0.0),
     )
-    if not math.isfinite(combined_score) or combined_score < minimum_score:
+    if not math.isfinite(combined_score) or (
+        combined_score < minimum_score and not manual_selection
+    ):
         return 0, None, [], None, {}
     predicted_at = _utc_seconds(row.get("predicted_at"))
     due_at = _utc_seconds(row.get("due_at"))
@@ -225,7 +295,7 @@ def _ai_monitor_signal(
         min(int(config.get("ai_monitor_live_signal_max_age_seconds", 300)), 1800),
     )
     valid_until = min(predicted_at + maximum_age, due_at, expires_at)
-    if time.time() > valid_until:
+    if time.time() > valid_until and not manual_selection:
         return 0, None, [], None, {}
     risk_plan = evidence.get("risk_plan")
     if not isinstance(risk_plan, dict):
@@ -288,6 +358,11 @@ def _ai_monitor_signal(
         "opportunity_public_id": row.get("opportunity_public_id"),
         "predicted_at": predicted_at,
         "enabled_at": enabled_at,
+        "manual_selection": manual_selection,
+        "manual_gate_override": bool(
+            manual_selection
+            and (not entry_ready or combined_score < minimum_score)
+        ),
         "entry_gate": gate,
         "risk_plan": risk_plan,
         "risk_proposal": risk_proposal,
@@ -295,12 +370,17 @@ def _ai_monitor_signal(
     }
     basis = [
         "信号来源：AI 发现机会",
-        f"预测：{row.get('prediction_public_id')}",
         f"机会：{row.get('opportunity_public_id')}",
         f"方向：{'做多' if direction > 0 else '做空'}",
         f"组合评分：{combined_score:.1f}",
-        "准入：全部入场条件已满足",
+        (
+            "准入：人工确认覆盖研究门槛"
+            if manual_selection and (not entry_ready or combined_score < minimum_score)
+            else "准入：全部入场条件已满足"
+        ),
     ]
+    if row.get("prediction_public_id"):
+        basis.insert(1, f"预测：{row['prediction_public_id']}")
     return direction, atr, basis, int(predicted_at), signal_evidence
 
 
@@ -514,7 +594,7 @@ def _create_intent(
                public_id,user_id,live_account_id,deployment_id,signal_key,client_order_id,
                symbol,action,side,position_side,order_type,quantity,status,request_json,
                strategy_signal_id,entry_basis_json,created_at,updated_at
-           ) VALUES(UUID(),?,?,?,?,?,?,?,?,?,?,?,'created',?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""",
+           ) VALUES(UUID(),?,?,?,?,?,?,?,?,?,?,?,'created',?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP())""",
         (
             account["user_id"],
             account["id"],
@@ -557,8 +637,8 @@ def _update_intent(
     store.execute(
         """UPDATE live_order_intents
            SET status=?,binance_order_id=COALESCE(?,binance_order_id),response_json=?,
-               error_code=?,submitted_at=COALESCE(submitted_at,CURRENT_TIMESTAMP),
-               updated_at=CURRENT_TIMESTAMP
+               error_code=?,submitted_at=COALESCE(submitted_at,UTC_TIMESTAMP()),
+               updated_at=UTC_TIMESTAMP()
            WHERE id=? AND user_id=?""",
         (
             status,
@@ -574,12 +654,12 @@ def _update_intent(
 def _fail_account(account: dict[str, Any], code: str) -> None:
     store.execute(
         """UPDATE live_trading_accounts
-           SET status='error',last_error_code=?,updated_at=CURRENT_TIMESTAMP
+           SET status='error',last_error_code=?,updated_at=UTC_TIMESTAMP()
            WHERE id=? AND user_id=?""",
         (code[:64], account["id"], account["user_id"]),
     )
     store.execute(
-        """UPDATE strategy_deployments SET status='error',last_error_code=?,updated_at=CURRENT_TIMESTAMP
+        """UPDATE strategy_deployments SET status='error',last_error_code=?,updated_at=UTC_TIMESTAMP()
            WHERE id=? AND user_id=?""",
         (code[:64], account["deployment_id"], account["user_id"]),
     )
@@ -1015,6 +1095,7 @@ def _place_protection(
     signal_time: int,
     stop: Decimal,
     target: Decimal,
+    signal_key_suffix: str = "",
 ) -> bool:
     if _trading_client is None:
         return False
@@ -1036,6 +1117,8 @@ def _place_protection(
         order_type = protection.order_type.value
         trigger = protection.trigger_price
         signal_key = plan.signal_key(account["deployment_id"], protection.action)
+        if signal_key_suffix:
+            signal_key = f"{signal_key}:{signal_key_suffix}"
         intent = _create_intent(
             account,
             signal_key=signal_key,
@@ -1383,6 +1466,90 @@ def _current_initial_margin(
     return total
 
 
+def _position_sizing_capital(
+    config: dict[str, Any],
+    *,
+    wallet: Decimal,
+    equity: Decimal,
+) -> _PositionSizingCapital:
+    """Resolve the configured sizing base while respecting real collateral.
+
+    Missing configuration preserves the legacy account-equity behavior.  A fixed
+    copy amount can only reduce the sizing base: it is capped by the account's
+    non-negative wallet/equity collateral before any risk percentage is applied.
+    """
+
+    basis = str(config.get("position_size_basis") or "account_equity")
+    if not wallet.is_finite() or not equity.is_finite():
+        return _PositionSizingCapital(basis, None, Decimal(0), Decimal(0))
+    account_margin_equity = max(Decimal(0), min(wallet, equity))
+    if basis == "account_equity":
+        return _PositionSizingCapital(
+            basis,
+            None,
+            equity,
+            account_margin_equity,
+        )
+    if basis != "copy_total_amount":
+        return _PositionSizingCapital(basis, None, Decimal(0), Decimal(0))
+    try:
+        configured_total = Decimal(str(config.get("copy_total_amount")))
+    except (InvalidOperation, TypeError, ValueError):
+        configured_total = Decimal(0)
+    if not configured_total.is_finite() or configured_total <= 0:
+        return _PositionSizingCapital(basis, None, Decimal(0), Decimal(0))
+    effective_total = min(configured_total, account_margin_equity)
+    return _PositionSizingCapital(
+        basis,
+        configured_total,
+        effective_total,
+        effective_total,
+    )
+
+
+def _exchange_liquidation_is_safe(
+    *,
+    entry_price: float,
+    stop_price: Decimal | float,
+    liquidation_price: Decimal | float | int | str | None,
+    direction: int,
+    min_buffer_pct: float,
+) -> bool:
+    """Validate the exchange liquidation boundary without rejecting a valid zero.
+
+    Binance USD-M Position Information V3 can return ``liquidationPrice: "0"``
+    for a non-zero long position.  A zero long liquidation floor is below every
+    valid positive protective stop, so it is safer than the requested stop.
+    Missing values, negative values, and zero for short positions remain
+    fail-closed because they cannot prove that the stop precedes liquidation.
+    """
+
+    if liquidation_price is None:
+        return False
+    try:
+        liquidation = Decimal(str(liquidation_price))
+        entry = Decimal(str(entry_price))
+        stop = Decimal(str(stop_price))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if not liquidation.is_finite() or not entry.is_finite() or not stop.is_finite():
+        return False
+    if liquidation < 0 or entry <= 0 or stop <= 0:
+        return False
+    if liquidation == 0:
+        return direction > 0 and stop < entry
+    try:
+        return liquidation_stop_safety(
+            entry_price=entry,
+            stop_price=stop,
+            liquidation_price=liquidation,
+            direction=direction,
+            min_buffer_pct=min_buffer_pct,
+        ).safe
+    except (TypeError, ValueError):
+        return False
+
+
 def _has_unmanaged_exposure(
     positions: dict[tuple[str, str], dict[str, Any]],
     managed: dict[tuple[str, str], dict[str, Any]],
@@ -1509,7 +1676,7 @@ def _persist_risk_review(
     state = _json_object(account.get("runtime_state_json"))
     _apply_risk_review_state(state, warnings)
     store.execute(
-        """UPDATE strategy_deployments SET runtime_state_json=?,updated_at=CURRENT_TIMESTAMP
+        """UPDATE strategy_deployments SET runtime_state_json=?,updated_at=UTC_TIMESTAMP()
            WHERE id=? AND user_id=?""",
         (json.dumps(state, ensure_ascii=False), account["deployment_id"], account["user_id"]),
     )
@@ -1562,7 +1729,7 @@ def _entry_loss_guard(
     if review_warnings is not None:
         _apply_risk_review_state(state, review_warnings)
     store.execute(
-        """UPDATE strategy_deployments SET runtime_state_json=?,updated_at=CURRENT_TIMESTAMP
+        """UPDATE strategy_deployments SET runtime_state_json=?,updated_at=UTC_TIMESTAMP()
            WHERE id=? AND user_id=?""",
         (json.dumps(state, ensure_ascii=False), account["deployment_id"], account["user_id"]),
     )
@@ -1785,20 +1952,21 @@ def _open_position(
     current_open_risk: Decimal = Decimal(0),
     basis: list[str] | None = None,
     signal_evidence: dict[str, Any] | None = None,
-) -> None:
+    signal_key_suffix: str = "",
+) -> bool:
     if _trading_client is None:
-        return
+        return False
     config = account["config_json"]
     policy = policy_from_config(config)
     strategy_snapshot = account.get("strategy_snapshot_json") or {}
     if strategy_snapshot.get("strategy_kind") == "full_strategy":
         proposal = (signal_evidence or {}).get("risk_proposal")
         if not isinstance(proposal, dict):
-            return
+            return False
         try:
             policy = tighten_policy_with_strategy(policy, proposal)
         except ValueError:
-            return
+            return False
     position_mode = str(config.get("position_mode") or "one_way")
     position_side = _strategy_position_side(position_mode, direction)
     requested_leverage = max(1, min(int(config.get("leverage", 3)), 20))
@@ -1810,7 +1978,7 @@ def _open_position(
         signal_evidence,
     )
     if preview_stop is None or preview_target is None:
-        return
+        return False
     stop_distance = abs(Decimal(str(price)) - Decimal(str(preview_stop)))
     leverage = leverage_for_stop_distance(
         entry_price=price,
@@ -1822,7 +1990,11 @@ def _open_position(
     available = Decimal(str(snapshot.available_balance))
     wallet = Decimal(str(snapshot.wallet_balance))
     equity = wallet + Decimal(str(getattr(snapshot, "unrealized_pnl", 0)))
-    margin_equity = max(Decimal(0), min(wallet, equity))
+    sizing_capital = _position_sizing_capital(
+        config,
+        wallet=wallet,
+        equity=equity,
+    )
     current_margin = _current_initial_margin(
         snapshot.positions,
         fallback_leverage=leverage,
@@ -1831,12 +2003,13 @@ def _open_position(
         available,
         max(
             Decimal(0),
-            margin_equity * Decimal(str(config.get("margin_cap", 0.20)))
+            sizing_capital.margin_equity
+            * Decimal(str(config.get("margin_cap", 0.20)))
             - current_margin,
         ),
     )
     sizing = atr_risk_position_size(
-        equity=equity,
+        equity=sizing_capital.effective_equity,
         available_balance=remaining_margin,
         entry_price=price,
         stop_distance=stop_distance,
@@ -1847,18 +2020,20 @@ def _open_position(
         policy=policy,
     )
     if not sizing.allowed:
-        return
+        return False
     leverage = sizing.effective_leverage
     try:
         quantity = rules.quantity(sizing.quantity)
     except ValueError:
-        return
+        return False
     if quantity * Decimal(str(price)) < rules.min_notional:
-        return
+        return False
     requested_margin = quantity * Decimal(str(price)) / Decimal(leverage)
     side = "BUY" if direction > 0 else "SELL"
     close_side = "SELL" if direction > 0 else "BUY"
     signal_key = f"live:{account['deployment_id']}:{symbol}:{signal_time}:open:{direction}"
+    if signal_key_suffix:
+        signal_key = f"{signal_key}:{signal_key_suffix}"
     entry_basis, strategy_signal_id = build_entry_basis_snapshot(
         account,
         mode="live",
@@ -1873,6 +2048,17 @@ def _open_position(
         target=preview_target,
         leverage=leverage,
         margin=float(requested_margin),
+    )
+    entry_basis["execution"].update(
+        {
+            "position_size_basis": sizing_capital.basis,
+            "configured_copy_total_amount": (
+                float(sizing_capital.configured_total_amount)
+                if sizing_capital.configured_total_amount is not None
+                else None
+            ),
+            "effective_sizing_capital": float(sizing_capital.effective_equity),
+        }
     )
     response = _place_market(
         account,
@@ -1890,7 +2076,7 @@ def _open_position(
         entry_basis=entry_basis,
     )
     if response is None:
-        return
+        return False
     try:
         entry = float(response.get("avgPrice") or 0)
     except (TypeError, ValueError):
@@ -1927,6 +2113,7 @@ def _open_position(
             signal_time=signal_time,
             stop=rules.price(Decimal(str(preview_stop))),
             target=rules.price(Decimal(str(preview_target))),
+            signal_key_suffix=signal_key_suffix,
         )
         _close_position(
             account,
@@ -1936,7 +2123,7 @@ def _open_position(
             "entry_price_unverified",
         )
         _fail_account(account, "entry_price_unverified")
-        return
+        return False
     stop_raw, target_raw = _signal_exit_levels(
         entry,
         direction,
@@ -1953,7 +2140,7 @@ def _open_position(
             "missing_protection",
         )
         _fail_account(account, "missing_protection")
-        return
+        return False
     stop = rules.price(Decimal(str(stop_raw)))
     target = rules.price(Decimal(str(target_raw)))
     # Protection is the first action after the fill price is known. Account
@@ -1969,6 +2156,7 @@ def _open_position(
         signal_time=signal_time,
         stop=stop,
         target=target,
+        signal_key_suffix=signal_key_suffix,
     ):
         _close_position(
             account,
@@ -1978,7 +2166,7 @@ def _open_position(
             "protection_failed",
         )
         _fail_account(account, "protection_failed")
-        return
+        return False
     entry_basis["execution"].update(
         {
             "entry_price": entry,
@@ -1988,7 +2176,7 @@ def _open_position(
         }
     )
     store.execute(
-        """UPDATE live_order_intents SET entry_basis_json=?,updated_at=CURRENT_TIMESTAMP
+        """UPDATE live_order_intents SET entry_basis_json=?,updated_at=UTC_TIMESTAMP()
            WHERE user_id=? AND live_account_id=? AND signal_key=? AND action='open'""",
         (
             json.dumps(entry_basis, ensure_ascii=False),
@@ -2012,7 +2200,7 @@ def _open_position(
             "position_state_unverified",
         )
         _fail_account(account, "position_state_unverified")
-        return
+        return False
     refreshed_position = None
     if refreshed is not None:
         refreshed_position = next(
@@ -2032,21 +2220,15 @@ def _open_position(
             "position_state_unverified",
         )
         _fail_account(account, "position_state_unverified")
-        return
+        return False
     liquidation_price = refreshed_position.get("liquidation_price")
-    if not liquidation_price:
-        safety_ok = False
-    else:
-        try:
-            safety_ok = liquidation_stop_safety(
-                entry_price=entry,
-                stop_price=float(stop),
-                liquidation_price=liquidation_price,
-                direction=direction,
-                min_buffer_pct=policy.liquidation_buffer_pct,
-            ).safe
-        except (TypeError, ValueError):
-            safety_ok = False
+    safety_ok = _exchange_liquidation_is_safe(
+        entry_price=entry,
+        stop_price=stop,
+        liquidation_price=liquidation_price,
+        direction=direction,
+        min_buffer_pct=policy.liquidation_buffer_pct,
+    )
     if not safety_ok:
         _close_position(
             account,
@@ -2056,16 +2238,322 @@ def _open_position(
             "liquidation_buffer_unsafe",
         )
         _fail_account(account, "liquidation_buffer_unsafe")
-        return
+        return False
     store.execute(
         """UPDATE strategy_signals SET status='executed'
            WHERE deployment_id=? AND user_id=? AND symbol=? AND signal_bar_time=?
              AND status='approved'""",
         (account["deployment_id"], account["user_id"], symbol, signal_time),
     )
+    return True
 
 
-def _tick_account(account: dict[str, Any]) -> None:
+def _manual_intent(account: dict[str, Any], signal_key: str) -> dict[str, Any] | None:
+    rows = store.query(
+        """SELECT public_id,status,error_code,quantity,created_at,updated_at
+           FROM live_order_intents
+           WHERE user_id=? AND live_account_id=? AND signal_key=? AND action='open'
+           LIMIT 1""",
+        (account["user_id"], account["id"], signal_key),
+    )
+    return dict(rows[0]) if rows else None
+
+
+def _manual_follow_result(
+    *,
+    status: str,
+    reason: str,
+    symbol: str,
+    direction: str,
+    intent: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "reason": reason,
+        "symbol": symbol,
+        "direction": direction,
+        "intent": (
+            {
+                "id": intent.get("public_id"),
+                "status": intent.get("status"),
+                "quantity": (
+                    float(intent["quantity"])
+                    if intent.get("quantity") is not None
+                    else None
+                ),
+            }
+            if intent is not None
+            else None
+        ),
+    }
+
+
+def execute_ai_monitor_manual_follow(
+    *,
+    user_id: int,
+    live_account_id: int,
+    opportunity_public_id: str,
+    prediction_public_id: str | None,
+    manual_attempt_id: str,
+    expected_symbol: str,
+    expected_direction: str,
+) -> dict[str, Any]:
+    """Attempt one exact AI prediction through the existing fail-closed executor.
+
+    This path deliberately does not manage or reverse existing positions.  It is
+    new-entry only and applies the same account, market, loss, sizing,
+    idempotency, fill-verification and protection checks as scheduled entries.
+    """
+
+    symbol = str(expected_symbol or "").upper()
+    direction_name = str(expected_direction or "").lower()
+    if direction_name not in {"long", "short"}:
+        return _manual_follow_result(
+            status="blocked",
+            reason="direction_invalid",
+            symbol=symbol,
+            direction=direction_name,
+        )
+    with _account_execution_lock(int(live_account_id)):
+        accounts = [
+            item
+            for item in _active_accounts(int(live_account_id))
+            if int(item.get("user_id") or 0) == int(user_id)
+        ]
+        if len(accounts) != 1:
+            return _manual_follow_result(
+                status="blocked",
+                reason="live_copy_inactive",
+                symbol=symbol,
+                direction=direction_name,
+            )
+        account = accounts[0]
+        config = account["config_json"]
+        if (
+            str(config.get("execution_scope") or "") != "ai_monitor"
+            or str(config.get("signal_source") or "") != "ai_monitor"
+            or not bool(config.get("ai_monitor_live_copy_enabled"))
+        ):
+            return _manual_follow_result(
+                status="blocked",
+                reason="live_copy_inactive",
+                symbol=symbol,
+                direction=direction_name,
+            )
+        if symbol not in _strategy_universe(config):
+            return _manual_follow_result(
+                status="blocked",
+                reason="symbol_not_enabled",
+                symbol=symbol,
+                direction=direction_name,
+            )
+        if _account_service is None or _trading_client is None:
+            return _manual_follow_result(
+                status="blocked",
+                reason="engine_unavailable",
+                symbol=symbol,
+                direction=direction_name,
+            )
+
+        api_key, api_secret = _credentials(account)
+        snapshot = _account_service.account(api_key, api_secret, force_refresh=True)
+        if snapshot.account_type != "UM_FUTURE":
+            _fail_account(account, "portfolio_margin_unsupported")
+            return _manual_follow_result(
+                status="blocked",
+                reason="portfolio_margin_unsupported",
+                symbol=symbol,
+                direction=direction_name,
+            )
+        configured_mode = str(config.get("position_mode") or "one_way")
+        if _cached_position_mode(account, api_key, api_secret) != configured_mode:
+            _fail_account(account, "position_mode_changed")
+            return _manual_follow_result(
+                status="blocked",
+                reason="position_mode_changed",
+                symbol=symbol,
+                direction=direction_name,
+            )
+
+        market_state_changed = _reconcile_intents(account, api_key, api_secret)
+        if market_state_changed:
+            snapshot = _account_service.account(api_key, api_secret, force_refresh=True)
+        positions = {_position_key(item): item for item in snapshot.positions}
+        occupied_symbols = {key[0] for key in positions}
+        if symbol in occupied_symbols:
+            return _manual_follow_result(
+                status="blocked",
+                reason="symbol_already_open",
+                symbol=symbol,
+                direction=direction_name,
+            )
+        max_positions = max(1, min(int(config.get("max_positions", 1)), 20))
+        if len(positions) >= max_positions:
+            return _manual_follow_result(
+                status="blocked",
+                reason="max_positions_reached",
+                symbol=symbol,
+                direction=direction_name,
+            )
+
+        managed = _managed_positions(account)
+        protection_counts = _protection_counts(account, managed)
+        review_warnings = _risk_review_warnings(positions, managed, protection_counts)
+        policy = policy_from_config(config)
+        stop_prices = _current_stop_prices(account, managed)
+        open_risk = _current_open_risk(
+            snapshot,
+            managed,
+            stop_prices,
+            exit_cost_bps=policy.round_trip_cost_bps,
+        )
+        if not _entry_loss_guard(
+            account,
+            snapshot,
+            policy,
+            review_warnings=review_warnings,
+        ):
+            return _manual_follow_result(
+                status="blocked",
+                reason=("risk_review_required" if review_warnings else "loss_limit_reached"),
+                symbol=symbol,
+                direction=direction_name,
+            )
+        if account.get("_local_audit_pending", False):
+            return _manual_follow_result(
+                status="blocked",
+                reason="filled_audit_pending",
+                symbol=symbol,
+                direction=direction_name,
+            )
+
+        ticker_rows = store.query(
+            "SELECT symbol,price,ts FROM ticker WHERE symbol=? AND price IS NOT NULL LIMIT 1",
+            (symbol,),
+        )
+        if not ticker_rows:
+            return _manual_follow_result(
+                status="blocked",
+                reason="ticker_unavailable",
+                symbol=symbol,
+                direction=direction_name,
+            )
+        ticker = dict(ticker_rows[0])
+        try:
+            price = float(ticker["price"])
+            ticker_fresh = market_data_freshness(
+                ticker["ts"],
+                max_age_seconds=policy.max_ticker_age_seconds,
+            ).fresh
+        except (KeyError, TypeError, ValueError):
+            ticker_fresh = False
+            price = 0.0
+        if not ticker_fresh or not math.isfinite(price) or price <= 0:
+            return _manual_follow_result(
+                status="blocked",
+                reason="ticker_stale",
+                symbol=symbol,
+                direction=direction_name,
+            )
+        admission = symbol_admission(symbol, sorted(occupied_symbols), policy=policy)
+        if not admission.allowed:
+            return _manual_follow_result(
+                status="blocked",
+                reason="symbol_risk_blocked",
+                symbol=symbol,
+                direction=direction_name,
+            )
+
+        direction, atr, basis, signal_time, signal_evidence = _ai_monitor_signal(
+            account,
+            symbol,
+            price=price,
+            prediction_public_id=prediction_public_id,
+            opportunity_public_id=opportunity_public_id,
+        )
+        expected_direction_value = 1 if direction_name == "long" else -1
+        if direction != expected_direction_value or signal_time is None:
+            return _manual_follow_result(
+                status="blocked",
+                reason="signal_not_eligible",
+                symbol=symbol,
+                direction=direction_name,
+            )
+        signal_key_suffix = f"manual:{manual_attempt_id}"
+        signal_key = (
+            f"live:{account['deployment_id']}:{symbol}:{signal_time}:open:{direction}:"
+            f"{signal_key_suffix}"
+        )
+        existing = _manual_intent(account, signal_key)
+        if existing is not None:
+            existing_status = str(existing.get("status") or "unknown")
+            if existing_status == "filled":
+                status = "duplicate"
+                reason = "already_filled"
+            elif existing_status in {"created", "submitted", "unknown"}:
+                status = "pending"
+                reason = "order_already_exists"
+            else:
+                status = "blocked"
+                reason = "exchange_rejected"
+            return _manual_follow_result(
+                status=status,
+                reason=reason,
+                symbol=symbol,
+                direction=direction_name,
+                intent=existing,
+            )
+
+        opened = _open_position(
+            account,
+            api_key,
+            api_secret,
+            snapshot,
+            symbol=symbol,
+            direction=direction,
+            price=price,
+            atr=atr,
+            signal_time=signal_time,
+            current_open_risk=open_risk,
+            basis=basis,
+            signal_evidence={
+                **signal_evidence,
+                "manual_follow": True,
+                "manual_attempt_id": manual_attempt_id,
+            },
+            signal_key_suffix=signal_key_suffix,
+        )
+        intent = _manual_intent(account, signal_key)
+        if opened:
+            return _manual_follow_result(
+                status="filled",
+                reason="filled_and_protected",
+                symbol=symbol,
+                direction=direction_name,
+                intent=intent,
+            )
+        if intent is None:
+            reason = "order_not_submitted"
+            status = "blocked"
+        elif str(intent.get("status") or "") in {"created", "submitted", "unknown"}:
+            reason = "order_status_uncertain"
+            status = "pending"
+        elif str(intent.get("status") or "") in {"rejected", "canceled"}:
+            reason = "exchange_rejected"
+            status = "blocked"
+        else:
+            reason = "execution_failed_closed"
+            status = "blocked"
+        return _manual_follow_result(
+            status=status,
+            reason=reason,
+            symbol=symbol,
+            direction=direction_name,
+            intent=intent,
+        )
+
+
+def _tick_account_unlocked(account: dict[str, Any]) -> None:
     if _account_service is None or _trading_client is None:
         raise RuntimeError("live engine is not configured")
     api_key, api_secret = _credentials(account)
@@ -2259,7 +2747,7 @@ def _tick_account(account: dict[str, Any]) -> None:
             break
     store.execute(
         """UPDATE live_trading_accounts
-           SET last_tick_at=CURRENT_TIMESTAMP,last_error_code=?,updated_at=CURRENT_TIMESTAMP
+           SET last_tick_at=UTC_TIMESTAMP(),last_error_code=?,updated_at=UTC_TIMESTAMP()
            WHERE id=? AND user_id=? AND status='active'""",
         (
             (
@@ -2273,6 +2761,11 @@ def _tick_account(account: dict[str, Any]) -> None:
             account["user_id"],
         ),
     )
+
+
+def _tick_account(account: dict[str, Any]) -> None:
+    with _account_execution_lock(int(account["id"])):
+        _tick_account_unlocked(account)
 
 
 def _recover_account(account: dict[str, Any]) -> None:
@@ -2364,7 +2857,7 @@ def tick(account_id: int | None = None) -> None:
                 _record_account_backoff(account_id_value, exc.category)
                 store.execute(
                     """UPDATE live_trading_accounts
-                       SET last_error_code=?,updated_at=CURRENT_TIMESTAMP
+                       SET last_error_code=?,updated_at=UTC_TIMESTAMP()
                        WHERE id=? AND user_id=?""",
                     (exc.category[:64], account["id"], account["user_id"]),
                 )

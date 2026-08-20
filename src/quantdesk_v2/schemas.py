@@ -366,14 +366,39 @@ class AiMonitorFinnhubUsageUpdate(BaseModel):
 
 
 class AiMonitorLiveCopyUpdate(BaseModel):
-    """Explicitly enable or stop routing new AI-monitor signals to live trading."""
+    """Enable or stop routing new AI-monitor signals to live trading."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     enabled: bool
     account_id: str | None = Field(default=None, min_length=36, max_length=36)
-    confirmation_name: str = Field(default="", max_length=100)
+
+
+class AiMonitorManualFollowRequest(BaseModel):
+    """Explicit confirmation for one exact AI-monitor opportunity."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    account_id: str = Field(min_length=36, max_length=36)
+    opportunity_id: str = Field(min_length=36, max_length=36)
+    prediction_id: str | None = Field(default=None, min_length=36, max_length=36)
+    manual_attempt_id: str = Field(
+        min_length=36,
+        max_length=36,
+        pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+    )
+    expected_contract_symbol: str = Field(
+        min_length=4,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9]+$",
+    )
+    expected_direction: Literal["long", "short"]
     acknowledge_real_funds: bool = False
+
+    @field_validator("expected_contract_symbol")
+    @classmethod
+    def normalize_contract_symbol(cls, value: str) -> str:
+        return value.upper()
 
 
 class AiMonitorLiveCopyConfigUpdate(BaseModel):
@@ -385,6 +410,10 @@ class AiMonitorLiveCopyConfigUpdate(BaseModel):
     position_mode: Literal["one_way", "hedge"] = "one_way"
     leverage: int = Field(default=10, ge=1, le=20)
     max_positions: int = Field(default=10, ge=1, le=20)
+    position_size_basis: Literal["account_equity", "copy_total_amount"] = (
+        "account_equity"
+    )
+    copy_total_amount: float = Field(default=1_000.0, ge=1.0, le=1_000_000_000.0)
     position_size_pct: float = Field(default=2.0, ge=0.1, le=20.0)
     risk_per_trade_pct: float = Field(default=0.5, ge=0.1, le=5.0)
     max_total_risk_pct: float = Field(default=4.0, ge=0.5, le=50.0)

@@ -15,6 +15,9 @@ class AiMonitorDashboard extends HTMLElement {
       liveCopyError: "",
       liveCopyLoading: false,
       liveCopyConfigLoading: false,
+      manualFollowOpportunityId: "",
+      manualFollowAttemptId: "",
+      manualFollowLoading: false,
       uwToggleLoading: false,
       finnhubToggleLoading: false,
       indicators: [],
@@ -140,7 +143,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260819-49">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260820-50">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -196,6 +199,16 @@ class AiMonitorDashboard extends HTMLElement {
               <button type="button" data-live-copy-config-close aria-label="关闭实盘跟单配置">×</button>
             </header>
             <div id="live-copy-config-body" class="live-copy-body"><div class="live-copy-loading">正在读取独立实盘风险参数…</div></div>
+          </section>
+        </div>
+        <div id="manual-follow-modal" class="live-copy-modal hidden" aria-hidden="true">
+          <button class="live-copy-backdrop" type="button" data-manual-follow-close aria-label="关闭立即跟买确认"></button>
+          <section class="live-copy-dialog manual-follow-dialog" role="dialog" aria-modal="true" aria-labelledby="manual-follow-title" tabindex="-1">
+            <header>
+              <div><span>MANUAL LIVE COPY</span><h2 id="manual-follow-title">立即跟买</h2><p>只执行当前选中的一条机会；提交前后仍由统一实盘风控和 Binance 账户状态决定是否下单。</p></div>
+              <button type="button" data-manual-follow-close aria-label="关闭立即跟买确认">×</button>
+            </header>
+            <div id="manual-follow-body" class="live-copy-body"><div class="live-copy-loading">正在读取当前信号与实盘配置…</div></div>
           </section>
         </div>
         <section id="macro-market-panel" class="macro-market-panel" aria-label="美股宏观大盘环境">
@@ -465,8 +478,14 @@ class AiMonitorDashboard extends HTMLElement {
     this.q("#live-copy-config-button").addEventListener("click", () => this.openLiveCopyConfigModal());
     this.qa("[data-live-copy-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyModal()));
     this.qa("[data-live-copy-config-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyConfigModal()));
+    this.qa("[data-manual-follow-close]").forEach((button) => button.addEventListener("click", () => this.closeManualFollowModal()));
     this.q("#live-copy-body").addEventListener("submit", (event) => this.submitLiveCopy(event));
     this.q("#live-copy-config-body").addEventListener("submit", (event) => this.submitLiveCopyConfig(event));
+    this.q("#manual-follow-body").addEventListener("submit", (event) => this.submitManualFollow(event));
+    this.q("#live-copy-config-body").addEventListener("change", (event) => {
+      if (!event.target.closest('[name="position_size_basis"]')) return;
+      this.syncLiveCopyPositionSizing(event.target.closest("form"));
+    });
     this.q("#live-copy-body").addEventListener("click", (event) => {
       if (!event.target.closest("[data-live-copy-retry]")) return;
       this.state.liveCopyError = "";
@@ -528,6 +547,11 @@ class AiMonitorDashboard extends HTMLElement {
       this.toggleOpportunityDetails(detailButton);
     }, true);
     opportunityList.addEventListener("click", (event) => {
+      const manualFollowButton = event.target.closest("[data-manual-follow]");
+      if (manualFollowButton && !manualFollowButton.disabled) {
+        this.openManualFollowModal(manualFollowButton.dataset.manualFollow);
+        return;
+      }
       const orderBookButton = event.target.closest("[data-order-book]");
       if (orderBookButton) {
         this.openOrderBook(orderBookButton.dataset.orderBook, orderBookButton);
@@ -605,7 +629,9 @@ class AiMonitorDashboard extends HTMLElement {
     });
     this.shadowRoot.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if (!this.q("#macro-impact-modal").classList.contains("hidden")) {
+      if (!this.q("#manual-follow-modal").classList.contains("hidden")) {
+        this.closeManualFollowModal();
+      } else if (!this.q("#macro-impact-modal").classList.contains("hidden")) {
         this.closeMacroImpact();
       } else if (!this.q("#order-book-modal").classList.contains("hidden")) {
         this.closeOrderBook();
@@ -990,12 +1016,14 @@ class AiMonitorDashboard extends HTMLElement {
       this.renderLiveCopyToggle();
       this.renderLiveCopyModal();
       this.renderLiveCopyConfigModal();
+      this.renderManualFollowModal();
       return this.state.liveCopy;
     } catch (error) {
       this.state.liveCopyError = error.message || "实盘跟单状态读取失败";
       this.renderLiveCopyToggle();
       this.renderLiveCopyModal();
       this.renderLiveCopyConfigModal();
+      this.renderManualFollowModal();
       if (!quiet) this.showBanner(error.message || "实盘跟单状态读取失败", "error");
       return null;
     }
@@ -1031,6 +1059,130 @@ class AiMonitorDashboard extends HTMLElement {
     const modal = this.q("#live-copy-config-modal");
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
+  }
+
+  openManualFollowModal(opportunityId) {
+    const item = this.state.opportunities.find((opportunity) => String(opportunity.id) === String(opportunityId));
+    if (!item || !["long", "short"].includes(String(item.direction)) || this.state.opportunityTab !== "current") {
+      this.showBanner("该机会已经更新，请刷新后重试。", "error");
+      return;
+    }
+    this.state.manualFollowOpportunityId = String(item.id);
+    this.state.manualFollowAttemptId = globalThis.crypto.randomUUID();
+    this.renderManualFollowModal();
+    const modal = this.q("#manual-follow-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    requestAnimationFrame(() => modal.querySelector(".manual-follow-dialog")?.focus({ preventScroll: true }));
+    if (!this.state.liveCopyLoading) void this.loadLiveCopyStatus({ quiet: true });
+  }
+
+  closeManualFollowModal() {
+    if (this.state.manualFollowLoading) return;
+    const modal = this.q("#manual-follow-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    this.state.manualFollowOpportunityId = "";
+    this.state.manualFollowAttemptId = "";
+  }
+
+  renderManualFollowModal() {
+    const target = this.q("#manual-follow-body");
+    if (!target) return;
+    const item = this.state.opportunities.find((opportunity) => String(opportunity.id) === this.state.manualFollowOpportunityId);
+    if (!item) {
+      target.innerHTML = '<div class="live-copy-loading">请选择一条当前有效机会。</div>';
+      return;
+    }
+    const status = this.state.liveCopy;
+    if (!status) {
+      target.innerHTML = this.state.liveCopyError
+        ? `<div class="live-copy-loading"><strong>实盘状态读取失败</strong><p>${this.escape(this.state.liveCopyError)}</p></div>`
+        : '<div class="live-copy-loading">正在读取当前信号与实盘配置…</div>';
+      return;
+    }
+    const account = status.account || {};
+    const risk = account.risk || {};
+    const direction = item.direction === "short" ? "short" : "long";
+    const directionLabel = direction === "short" ? "做空（开 SHORT 仓）" : "做多（开 LONG 仓）";
+    const capitalLabel = risk.position_size_basis === "copy_total_amount"
+      ? `固定跟单总金额 ${this.number(risk.copy_total_amount)} USDT`
+      : "Binance 账户权益";
+    const entryState = this.virtualEntryState(item, this.virtualEntryGate(item));
+    const manualOverride = !["ready", "triggered"].includes(entryState.tone);
+    const accountRunnable = status.enabled === true && account.status === "active" && Boolean(account.id);
+    const runnable = accountRunnable;
+    const unavailable = accountRunnable ? "" : `<div class="live-copy-config-alert"><strong>当前不能提交手动跟单</strong><p>${status.requested_enabled ? "独立执行域已安全停机，请先处理账户错误并恢复运行。" : "请先开启页面顶部的独立实盘跟单，并完成真实资金确认。"}</p></div>`;
+    target.innerHTML = `${unavailable}
+      <section class="manual-follow-summary ${direction}">
+        <span>${item.prediction_id ? "EXACT PREDICTION" : "EXACT OPPORTUNITY"} · ONE ORDER MAX</span>
+        <strong>${this.escape(item.symbol)} / ${this.escape(item.contract_symbol)} · ${directionLabel}</strong>
+        <p>${item.prediction_id ? `预测 ${this.escape(item.prediction_id)}` : `待评估机会 ${this.escape(item.id)}`}。${manualOverride ? "本次手动操作会覆盖研究准入门槛；" : ""}后端仍会重新校验方向、账户状态、仓位、损失限制与 Binance 行情，任何硬风控不通过都会拒绝下单。</p>
+      </section>
+      <dl class="manual-follow-risk">
+        <div><dt>资金基准</dt><dd>${this.escape(capitalLabel)}</dd></div>
+        <div><dt>单笔名义仓位</dt><dd>${this.number(risk.position_size_pct)}%</dd></div>
+        <div><dt>杠杆上限</dt><dd>${this.number(risk.leverage)}x</dd></div>
+        <div><dt>保护</dt><dd>成交后立即设置止损 / 止盈</dd></div>
+        <div><dt>研究状态</dt><dd>${manualOverride ? `${this.escape(entryState.label)} · 人工覆盖准入` : this.escape(entryState.label)}</dd></div>
+      </dl>
+      <form class="live-copy-form manual-follow-form" data-manual-follow-form>
+        <input type="hidden" name="account_id" value="${this.escape(account.id || "")}">
+        <input type="hidden" name="opportunity_id" value="${this.escape(item.id)}">
+        <input type="hidden" name="prediction_id" value="${this.escape(item.prediction_id || "")}">
+        <input type="hidden" name="manual_attempt_id" value="${this.escape(this.state.manualFollowAttemptId)}">
+        <input type="hidden" name="expected_contract_symbol" value="${this.escape(item.contract_symbol)}">
+        <input type="hidden" name="expected_direction" value="${direction}">
+        <label class="live-copy-ack"><input name="acknowledge_real_funds" type="checkbox" required ${this.state.manualFollowLoading ? "disabled" : ""}><span>我确认这会按当前信号方向提交真实 Binance 合约市价单，可能产生真实资金损失。${direction === "short" ? " 当前信号会开空仓，不是买入现货。" : ""}</span></label>
+        <button class="danger" type="submit" ${!runnable || this.state.manualFollowLoading ? "disabled" : ""}>${this.state.manualFollowLoading ? "正在校验并提交…" : `确认${direction === "short" ? "开空" : "跟买"}`}</button>
+      </form>`;
+  }
+
+  async submitManualFollow(event) {
+    const form = event.target.closest("[data-manual-follow-form]");
+    if (!form) return;
+    event.preventDefault();
+    if (this.state.manualFollowLoading) return;
+    const data = new FormData(form);
+    const item = this.state.opportunities.find((opportunity) => String(opportunity.id) === String(data.get("opportunity_id") || ""));
+    if (!item || !["long", "short"].includes(String(item.direction))) {
+      this.showBanner("该机会已经更新，请刷新后重试。", "error");
+      this.renderManualFollowModal();
+      this.renderOpportunities();
+      return;
+    }
+    if (data.get("acknowledge_real_funds") !== "on") {
+      this.showBanner("请先确认本次操作会使用真实资金。", "error");
+      return;
+    }
+    const payload = {
+      account_id: String(data.get("account_id") || ""),
+      opportunity_id: String(data.get("opportunity_id") || ""),
+      prediction_id: String(data.get("prediction_id") || "") || null,
+      manual_attempt_id: String(data.get("manual_attempt_id") || ""),
+      expected_contract_symbol: String(data.get("expected_contract_symbol") || ""),
+      expected_direction: String(data.get("expected_direction") || ""),
+      acknowledge_real_funds: true,
+    };
+    this.state.manualFollowLoading = true;
+    this.renderManualFollowModal();
+    this.renderOpportunities();
+    try {
+      const result = await this.api("/live-copy/manual-follow", { method: "POST", body: JSON.stringify(payload) });
+      const successful = ["filled", "duplicate"].includes(String(result.status || ""));
+      this.showBanner(result.message || (successful ? "手动跟单已处理。" : "手动跟单未执行。"), successful ? "success" : "error");
+      if (successful) {
+        this.state.manualFollowLoading = false;
+        this.closeManualFollowModal();
+      }
+      await Promise.all([this.loadLiveCopyStatus({ quiet: true }), this.loadOpportunities()]);
+    } catch (error) {
+      this.showBanner(error.message || "手动跟单请求失败", "error");
+    } finally {
+      this.state.manualFollowLoading = false;
+      this.renderManualFollowModal();
+      this.renderOpportunities();
+    }
   }
 
   openMacroImpact() {
@@ -1131,6 +1283,7 @@ class AiMonitorDashboard extends HTMLElement {
     }
     const account = status.account || {};
     const risk = account.risk || {};
+    const positionSizeBasis = risk.position_size_basis === "copy_total_amount" ? "copy_total_amount" : "account_equity";
     const modeMismatch = account.last_error_code === "position_mode_changed";
     const modeWarning = modeMismatch
       ? `<div class="live-copy-config-alert"><strong>当前未下单的直接原因：持仓模式不一致</strong><p>独立账户已启用，但 Binance 实际为双向持仓；当前配置缺少对应模式，因此执行器已安全停机且没有提交任何订单。这里已建议“对冲 / 双向持仓”，保存后会重新校验。</p></div>`
@@ -1148,12 +1301,14 @@ class AiMonitorDashboard extends HTMLElement {
           <label><span>Binance 持仓模式</span><select name="position_mode"><option value="one_way" ${risk.position_mode === "one_way" ? "selected" : ""}>单向持仓</option><option value="hedge" ${risk.position_mode === "hedge" ? "selected" : ""}>对冲 / 双向持仓</option></select><small>必须与交易所账户实际模式一致</small></label>
           <label><span>杠杆上限</span><input name="leverage" type="number" min="1" max="20" step="1" value="${this.escape(risk.leverage ?? 10)}"><small>最高 20x；实际仓位仍受风险预算约束</small></label>
           <label><span>最大同时持仓</span><input name="max_positions" type="number" min="1" max="20" step="1" value="${this.escape(risk.max_positions ?? 10)}"><small>仅本独立执行域</small></label>
-          <label><span>单笔名义仓位</span><input name="position_size_pct" type="number" min="0.1" max="20" step="0.1" value="${this.escape(risk.position_size_pct ?? 2)}"><small>占账户权益 %</small></label>
+          <label><span>开仓资金基准</span><select name="position_size_basis"><option value="account_equity" ${positionSizeBasis === "account_equity" ? "selected" : ""}>账户权益</option><option value="copy_total_amount" ${positionSizeBasis === "copy_total_amount" ? "selected" : ""}>固定跟单总金额</option></select><small>决定仓位与风险百分比的计算基数</small></label>
+          <label data-copy-total-amount-field><span>跟单总金额（USDT）</span><input name="copy_total_amount" type="number" min="1" max="1000000000" step="0.01" value="${this.escape(risk.copy_total_amount ?? 1000)}"><small>仅固定总金额模式生效；不会突破真实可用余额</small></label>
+          <label><span>单笔名义仓位</span><input name="position_size_pct" type="number" min="0.1" max="20" step="0.1" value="${this.escape(risk.position_size_pct ?? 2)}"><small data-capital-basis-help="single">占账户权益 %</small></label>
         </div></fieldset>
         <fieldset><legend>风险边界</legend><div class="live-copy-config-grid">
-          <label><span>单笔风险上限</span><input name="risk_per_trade_pct" type="number" min="0.1" max="5" step="0.1" value="${this.escape(risk.risk_per_trade_pct ?? 0.5)}"><small>占账户权益 %</small></label>
-          <label><span>总风险上限</span><input name="max_total_risk_pct" type="number" min="0.5" max="50" step="0.1" value="${this.escape(risk.max_total_risk_pct ?? 4)}"><small>全部独立跟单仓位合计 %</small></label>
-          <label><span>保证金占用上限</span><input name="margin_cap_pct" type="number" min="1" max="100" step="0.1" value="${this.escape(risk.margin_cap_pct ?? 20)}"><small>占账户权益 %</small></label>
+          <label><span>单笔风险上限</span><input name="risk_per_trade_pct" type="number" min="0.1" max="5" step="0.1" value="${this.escape(risk.risk_per_trade_pct ?? 0.5)}"><small data-capital-basis-help="single">占账户权益 %</small></label>
+          <label><span>总风险上限</span><input name="max_total_risk_pct" type="number" min="0.5" max="50" step="0.1" value="${this.escape(risk.max_total_risk_pct ?? 4)}"><small data-capital-basis-help="total">全部独立跟单仓位合计，占账户权益 %</small></label>
+          <label><span>保证金占用上限</span><input name="margin_cap_pct" type="number" min="1" max="100" step="0.1" value="${this.escape(risk.margin_cap_pct ?? 20)}"><small data-capital-basis-help="single">占账户权益 %</small></label>
           <label><span>单日亏损上限</span><input name="daily_loss_limit_pct" type="number" min="0.5" max="20" step="0.1" value="${this.escape(risk.daily_loss_limit_pct ?? 2)}"><small>触发后停止新开仓</small></label>
           <label><span>最大回撤上限</span><input name="max_drawdown_pct" type="number" min="1" max="50" step="0.1" value="${this.escape(risk.max_drawdown_pct ?? 6)}"><small>触发后安全停机</small></label>
           <label><span>往返成本估计</span><input name="round_trip_cost_bps" type="number" min="0" max="500" step="0.1" value="${this.escape(risk.round_trip_cost_bps ?? 16)}"><small>手续费 + 滑点，bps</small></label>
@@ -1165,6 +1320,26 @@ class AiMonitorDashboard extends HTMLElement {
         </div></fieldset>
         <div class="live-copy-config-actions"><span>保存不会开启当前已关闭的实盘跟单。</span><button type="submit" ${this.state.liveCopyConfigLoading ? "disabled" : ""}>${this.state.liveCopyConfigLoading ? "保存中…" : "保存实盘跟单配置"}</button></div>
       </form>`;
+    this.syncLiveCopyPositionSizing(target.querySelector("[data-live-copy-config-form]"));
+  }
+
+  syncLiveCopyPositionSizing(form) {
+    if (!form) return;
+    const select = form.querySelector('[name="position_size_basis"]');
+    const amount = form.querySelector('[name="copy_total_amount"]');
+    const amountField = form.querySelector("[data-copy-total-amount-field]");
+    const fixedAmount = select?.value === "copy_total_amount";
+    if (amount) {
+      amount.readOnly = !fixedAmount;
+      amount.setAttribute("aria-disabled", fixedAmount ? "false" : "true");
+    }
+    amountField?.classList.toggle("inactive", !fixedAmount);
+    form.querySelectorAll("[data-capital-basis-help]").forEach((help) => {
+      const base = fixedAmount ? "跟单总金额" : "账户权益";
+      help.textContent = help.dataset.capitalBasisHelp === "total"
+        ? `全部独立跟单仓位合计，占${base} %`
+        : `占${base} %`;
+    });
   }
 
   async submitLiveCopyConfig(event) {
@@ -1178,6 +1353,8 @@ class AiMonitorDashboard extends HTMLElement {
       position_mode: String(data.get("position_mode") || "one_way"),
       leverage: Number(data.get("leverage")),
       max_positions: Number(data.get("max_positions")),
+      position_size_basis: String(data.get("position_size_basis") || "account_equity"),
+      copy_total_amount: Number(data.get("copy_total_amount")),
       position_size_pct: Number(data.get("position_size_pct")),
       risk_per_trade_pct: Number(data.get("risk_per_trade_pct")),
       max_total_risk_pct: Number(data.get("max_total_risk_pct")),
@@ -1192,6 +1369,10 @@ class AiMonitorDashboard extends HTMLElement {
     };
     if (!payload.allow_long && !payload.allow_short) {
       this.showBanner("做多和做空不能同时关闭", "error");
+      return;
+    }
+    if (payload.position_size_basis === "copy_total_amount" && (!Number.isFinite(payload.copy_total_amount) || payload.copy_total_amount <= 0)) {
+      this.showBanner("跟单总金额必须大于 0 USDT", "error");
       return;
     }
     this.state.liveCopyConfigLoading = true;
@@ -1229,6 +1410,8 @@ class AiMonitorDashboard extends HTMLElement {
         <div><dt>持仓模式</dt><dd>${risk.position_mode === "hedge" ? "双向" : "单向"}</dd></div>
         <div><dt>杠杆上限</dt><dd>${this.number(risk.leverage)}x</dd></div>
         <div><dt>最大持仓</dt><dd>${this.number(risk.max_positions)} 个</dd></div>
+        <div><dt>开仓资金基准</dt><dd>${risk.position_size_basis === "copy_total_amount" ? "固定总金额" : "账户权益"}</dd></div>
+        ${risk.position_size_basis === "copy_total_amount" ? `<div><dt>跟单总金额</dt><dd>${this.number(risk.copy_total_amount)} USDT</dd></div>` : ""}
         <div><dt>单笔仓位</dt><dd>${this.number(risk.position_size_pct)}%</dd></div>
         <div><dt>单笔风险</dt><dd>${this.number(risk.risk_per_trade_pct)}%</dd></div>
         <div><dt>总风险上限</dt><dd>${this.number(risk.max_total_risk_pct)}%</dd></div>
@@ -1250,12 +1433,9 @@ class AiMonitorDashboard extends HTMLElement {
     const blockerMarkup = blockers.length
       ? `<section class="live-copy-blockers"><strong>独立执行域尚缺少必要条件</strong>${blockers.map((item) => `<span>× ${this.escape(item)}</span>`).join("")}</section>`
       : "";
-    const confirmationName = String(status.confirmation_name || account?.name || "AI发现机会独立跟单");
     const enableForm = status.ready_to_enable
       ? `<form class="live-copy-form" data-live-copy-mode="enable">
           <input type="hidden" name="account_id" value="${this.escape(account?.id || "")}">
-          <label><span>输入“${this.escape(confirmationName)}”确认</span><input name="confirmation_name" autocomplete="off" required placeholder="请输入 ${this.escape(confirmationName)}"></label>
-          <label class="live-copy-ack"><input name="acknowledge_real_funds" type="checkbox" required><span>我确认本页 AI 信号会通过独立执行域自动提交真实 Binance 订单，可能产生真实资金损失。</span></label>
           <button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>确认开启独立实盘跟单</button>
         </form>`
       : "";
@@ -1273,14 +1453,10 @@ class AiMonitorDashboard extends HTMLElement {
       ? {
           enabled: true,
           account_id: String(data.get("account_id") || "") || null,
-          confirmation_name: String(data.get("confirmation_name") || ""),
-          acknowledge_real_funds: data.get("acknowledge_real_funds") === "on",
         }
       : {
           enabled: false,
           account_id: String(data.get("account_id") || "") || null,
-          confirmation_name: "",
-          acknowledge_real_funds: false,
         };
     this.state.liveCopyLoading = true;
     this.renderLiveCopyToggle();
@@ -3470,6 +3646,9 @@ class AiMonitorDashboard extends HTMLElement {
       const displayedIndicatorScore = Number(this.firstValue(item.indicator_score, item.score_components?.technical));
       const entryGate = this.virtualEntryGate(item);
       const entryState = this.virtualEntryState(item, entryGate);
+      const manualFollowControl = !historicalTab && ["long", "short"].includes(String(item.direction))
+        ? `<button class="manual-follow-trigger" type="button" data-manual-follow="${this.escape(item.id)}" ${this.state.manualFollowLoading ? "disabled" : ""} title="按当前${item.direction === "short" ? "做空" : "做多"}方向提交一次真实 Binance 合约订单；待评估机会将由人工确认覆盖研究准入门槛">${this.state.manualFollowLoading && this.state.manualFollowOpportunityId === String(item.id) ? "提交中…" : "立即跟买"}</button>`
+        : "";
       const signalGateChecks = (entryGate.checks || []).filter((check) => check.key !== "entry_price");
       const passedGateCount = signalGateChecks.filter((check) => check.passed).length;
       const entryGateChecks = signalGateChecks.map((check) => {
@@ -3649,7 +3828,7 @@ class AiMonitorDashboard extends HTMLElement {
         ${virtualEntryPanel}
         ${macroReference}
         ${this.opportunityFeatureMarkup(item)}
-        <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}" data-patch-key="core-metrics"><span><em>新闻评分</em><b>${Number.isFinite(displayedNewsScore) ? displayedNewsScore.toFixed(1) : "无数据"}</b><small>${newsTrigger.version ? `${Number(newsTrigger.new_news_ids?.length || 0)} 条新事件 · 记忆 ${Number(newsTrigger.memory_window_hours || 168)}h` : "旧版记录"}</small></span><span><em>指标强度</em><b>${Number.isFinite(displayedIndicatorScore) ? displayedIndicatorScore.toFixed(1) : "无数据"}</b><small>${matchedCount} 项同向 · ${availableCount}/${requiredCount} 可用</small></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b><small>${this.escape(marketQualityText)}</small></span><span><em>信号状态</em><b>${this.escape(entryState.label)}</b><small>${this.escape(entryState.detail)}</small></span>${outcomeMetric}</div>
+        <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}" data-patch-key="core-metrics"><span><em>新闻评分</em><b>${Number.isFinite(displayedNewsScore) ? displayedNewsScore.toFixed(1) : "无数据"}</b><small>${newsTrigger.version ? `${Number(newsTrigger.new_news_ids?.length || 0)} 条新事件 · 记忆 ${Number(newsTrigger.memory_window_hours || 168)}h` : "旧版记录"}</small></span><span><em>指标强度</em><b>${Number.isFinite(displayedIndicatorScore) ? displayedIndicatorScore.toFixed(1) : "无数据"}</b><small>${matchedCount} 项同向 · ${availableCount}/${requiredCount} 可用</small></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b><small>${this.escape(marketQualityText)}</small></span><span class="opportunity-signal-status"><em>信号状态</em><b>${this.escape(entryState.label)}</b><small>${this.escape(entryState.detail)}</small>${manualFollowControl}</span>${outcomeMetric}</div>
         ${positionPanel || signalSummaryPanel}
         ${settlementPanel}
         <div class="evidence-chips" data-patch-key="indicator-evidence">${indicators}${indicatorRemainder}</div>

@@ -1488,6 +1488,32 @@ def test_prediction_exit_uses_first_barrier_and_same_bar_is_conservative() -> No
     assert conflict["same_bar_conflict"] is True
 
 
+def test_prediction_exit_uses_the_barrier_hit_candles_own_close_time() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    result = prediction_price_barrier_exit(
+        [
+            {"open_time": start, "open": 100, "high": 104.5, "low": 99},
+            {
+                "open_time": start + interval,
+                "open": 101,
+                "high": 102,
+                "low": 100,
+            },
+        ],
+        100,
+        "long",
+        {"stop_loss_price": 98, "take_profit_price": 104},
+        start,
+        start + interval * 2,
+        timeframe_ms=interval,
+    )
+
+    assert result is not None
+    assert result["reason"] == "take_profit"
+    assert result["price_time_ms"] == start + interval
+
+
 def test_prediction_exit_ignores_a_candle_that_has_not_closed_at_boundary() -> None:
     start = 1_800_000_000_000
     interval = 900_000
@@ -1675,19 +1701,19 @@ def test_hard_cap_never_reuses_a_pre_entry_candle() -> None:
     assert result is None
 
 
-def test_prediction_score_exit_requires_hysteresis_or_direction_reversal() -> None:
+def test_prediction_score_exit_requires_distinct_closed_bars_or_direction_reversal() -> None:
     start = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
     evidence = {
         "live_readiness": {"minimum_combined_score": 70},
         "live_score_history": [
             {"calculated_at": start.isoformat(), "combined": 72, "direction": "long"},
             {
-                "calculated_at": (start + timedelta(minutes=5)).isoformat(),
+                "calculated_at": (start + timedelta(minutes=15)).isoformat(),
                 "combined": 64,
                 "direction": "long",
             },
             {
-                "calculated_at": (start + timedelta(minutes=10)).isoformat(),
+                "calculated_at": (start + timedelta(minutes=30)).isoformat(),
                 "combined": 63,
                 "direction": "long",
             },
@@ -1697,7 +1723,7 @@ def test_prediction_score_exit_requires_hysteresis_or_direction_reversal() -> No
         evidence,
         "long",
         start_ms=int(start.timestamp() * 1000),
-        end_ms=int((start + timedelta(minutes=15)).timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=30)).timestamp() * 1000),
     )
     reversal = prediction_score_exit_signal(
         {
@@ -1716,6 +1742,12 @@ def test_prediction_score_exit_requires_hysteresis_or_direction_reversal() -> No
 
     assert result is not None and result["reason"] == "score_breakdown"
     assert result["confirmation_points"] == 2
+    assert result["confirmation_unit"] == "closed_15m_bar"
+    assert result["confirmation_scores"] == [64.0, 63.0]
+    assert result["confirmation_bar_times_ms"] == [
+        int((start + timedelta(minutes=15)).timestamp() * 1000),
+        int((start + timedelta(minutes=30)).timestamp() * 1000),
+    ]
     assert reversal is not None and reversal["reason"] == "score_reversal"
 
     recovered_later = prediction_score_exit_signal(
@@ -1723,17 +1755,17 @@ def test_prediction_score_exit_requires_hysteresis_or_direction_reversal() -> No
             "live_readiness": {"minimum_combined_score": 70},
             "live_score_history": [
                 {
-                    "calculated_at": (start + timedelta(minutes=1)).isoformat(),
+                    "calculated_at": (start + timedelta(minutes=15)).isoformat(),
                     "combined": 64,
                     "direction": "long",
                 },
                 {
-                    "calculated_at": (start + timedelta(minutes=2)).isoformat(),
+                    "calculated_at": (start + timedelta(minutes=30)).isoformat(),
                     "combined": 63,
                     "direction": "long",
                 },
                 {
-                    "calculated_at": (start + timedelta(minutes=3)).isoformat(),
+                    "calculated_at": (start + timedelta(minutes=45)).isoformat(),
                     "combined": 80,
                     "direction": "long",
                 },
@@ -1741,12 +1773,93 @@ def test_prediction_score_exit_requires_hysteresis_or_direction_reversal() -> No
         },
         "long",
         start_ms=int(start.timestamp() * 1000),
-        end_ms=int((start + timedelta(minutes=15)).timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=45)).timestamp() * 1000),
     )
     assert recovered_later is not None
     assert recovered_later["reason"] == "score_breakdown"
     assert recovered_later["price_time_ms"] == int(
-        (start + timedelta(minutes=2)).timestamp() * 1000
+        (start + timedelta(minutes=30)).timestamp() * 1000
+    )
+
+
+def test_prediction_score_exit_ignores_repeated_scans_in_one_closed_bar() -> None:
+    start = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
+    evidence = {
+        "live_readiness": {"minimum_combined_score": 70},
+        "live_score_history": [
+            {
+                "calculated_at": (start + timedelta(minutes=30, seconds=5)).isoformat(),
+                "combined": 61.4318,
+                "direction": "long",
+            },
+            {
+                "calculated_at": (start + timedelta(minutes=30, seconds=25)).isoformat(),
+                "combined": 61.4318,
+                "direction": "long",
+            },
+            {
+                "calculated_at": (start + timedelta(minutes=31)).isoformat(),
+                "combined": 60.0,
+                "direction": "long",
+            },
+        ],
+    }
+
+    result = prediction_score_exit_signal(
+        evidence,
+        "long",
+        start_ms=int(start.timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=45)).timestamp() * 1000),
+    )
+
+    assert result is None
+
+
+def test_prediction_score_exit_waits_for_minimum_hold_after_two_closed_bars() -> None:
+    start = datetime(2026, 8, 12, 8, 7, tzinfo=UTC)
+    observations = [
+        {
+            "calculated_at": (start + timedelta(minutes=8)).isoformat(),
+            "combined": 64,
+            "direction": "long",
+        },
+        {
+            "calculated_at": (start + timedelta(minutes=23)).isoformat(),
+            "combined": 63,
+            "direction": "long",
+        },
+    ]
+    before_warmup = prediction_score_exit_signal(
+        {
+            "live_readiness": {"minimum_combined_score": 70},
+            "live_score_history": observations,
+        },
+        "long",
+        start_ms=int(start.timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=24)).timestamp() * 1000),
+    )
+    after_warmup = prediction_score_exit_signal(
+        {
+            "live_readiness": {"minimum_combined_score": 70},
+            "live_score_history": [
+                *observations,
+                {
+                    "calculated_at": (start + timedelta(minutes=31)).isoformat(),
+                    "combined": 62,
+                    "direction": "long",
+                },
+            ],
+        },
+        "long",
+        start_ms=int(start.timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=31)).timestamp() * 1000),
+    )
+
+    assert before_warmup is None
+    assert after_warmup is not None
+    assert after_warmup["reason"] == "score_breakdown"
+    assert after_warmup["price_time_ms"] == int(
+        (start + timedelta(minutes=31)).timestamp() * 1000
     )
 
 
@@ -1938,6 +2051,10 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
     assert settled.max_favorable_bps == Decimal("200.0")
     assert settled.max_adverse_bps == Decimal("0.0")
     assert settled.settlement_version == "adaptive_guard_cost_v4"
+    assert (
+        settled.evidence_json["settlement"]["score_exit_policy_version"]
+        == "two_closed_bar_hysteresis_v2"
+    )
     assert settled.exit_reason == "max_holding_time"
     assert settled.exit_at.timestamp() == pytest.approx(due_at.timestamp(), abs=0.001)
     assert missing.status == "pending"
@@ -2621,7 +2738,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260819-75"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260820-81"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -2631,7 +2748,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260819-75"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260820-81"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
