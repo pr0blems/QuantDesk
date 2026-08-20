@@ -57,6 +57,14 @@ class News(Base):
     __tablename__ = "news"
     __table_args__ = (
         Index("ix_news_ts", "ts"),
+        Index("ix_news_source_ts", "source", "ts"),
+        Index(
+            "ix_news_translation_pending",
+            "lang",
+            "title_zh",
+            "ts",
+            mysql_length={"title_zh": 1},
+        ),
         Index("ix_news_ai_pending_ts", "ai_analyzed_at", "ts"),
         Index(
             "ix_news_ai_claim_pending",
@@ -331,6 +339,12 @@ class NewsAiAnalysisRecord(Base):
             "ix_news_ai_analysis_records_news",
             "news_id",
             "analyzed_at",
+        ),
+        Index(
+            "ix_news_ai_analysis_records_user_time",
+            "user_id",
+            "analyzed_at",
+            "id",
         ),
         {
             "comment": "美股新闻 AI 一周滚动研判记忆与判断变化记录",
@@ -830,6 +844,7 @@ class AiMonitorRun(Base):
         ),
         Index("ix_ai_monitor_runs_user_created", "user_id", "created_at"),
         Index("ix_ai_monitor_runs_user_status", "user_id", "status", "updated_at"),
+        Index("ix_ai_monitor_runs_recovery", "status", "updated_at"),
         {
             "comment": "AI 监控新闻分析与机会发现的用户级执行记录",
             "mysql_engine": "InnoDB",
@@ -926,6 +941,12 @@ class AiMonitorOpportunity(Base):
             "combined_score",
         ),
         Index("ix_ai_monitor_opportunities_user_created", "user_id", "created_at"),
+        Index(
+            "ix_ai_monitor_opportunities_user_discovered",
+            "user_id",
+            "discovered_at",
+            "id",
+        ),
         {
             "comment": "由 AI 新闻与用户配置指标共同确认的美股机会",
             "mysql_engine": "InnoDB",
@@ -1051,6 +1072,12 @@ class AiMonitorPrediction(Base):
             "due_at",
         ),
         Index("ix_ai_monitor_predictions_user_predicted", "user_id", "predicted_at"),
+        Index(
+            "ix_ai_monitor_predictions_user_updated",
+            "user_id",
+            "updated_at",
+            "id",
+        ),
         {
             "comment": "AI 监控机会生成的虚拟预测及到期结果，不产生任何交易订单",
             "mysql_engine": "InnoDB",
