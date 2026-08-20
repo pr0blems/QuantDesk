@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 from ... import ai_monitor, historical_replay, live_engine, macro_ai, news_ai, ws_depth
 from ...ai_model_config import global_ai_model_configured
@@ -73,7 +73,7 @@ from ...schemas import (
     AiMonitorScorePolicyUpdate,
     AiMonitorUnusualWhalesUsageUpdate,
 )
-from ...security import SecurityError, decode_access_token
+from ...security import CredentialCipher, SecurityError, decode_access_token
 
 router = APIRouter(prefix="/ai-monitor")
 
@@ -1023,6 +1023,228 @@ def _live_copy_account_out(
             "allow_long": bool(config.get("ai_monitor_live_allow_long", True)),
             "allow_short": bool(config.get("ai_monitor_live_allow_short", True)),
         },
+    }
+
+
+def _manual_follow_evidence(value: Any) -> dict[str, Any]:
+    basis = dict(value) if isinstance(value, Mapping) else {}
+    signal = basis.get("signal")
+    signal = dict(signal) if isinstance(signal, Mapping) else {}
+    evidence = signal.get("evidence")
+    return dict(evidence) if isinstance(evidence, Mapping) else {}
+
+
+def _number_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _manual_close_reason(intent: Mapping[str, Any] | None) -> str | None:
+    if intent is None:
+        return None
+    request_json = intent.get("request_json")
+    if isinstance(request_json, Mapping) and request_json.get("reason"):
+        return str(request_json["reason"])
+    signal_key = str(intent.get("signal_key") or "")
+    marker = ":close:"
+    if marker in signal_key:
+        suffix = signal_key.split(marker, 1)[1]
+        reason, separator, minute = suffix.rpartition(":")
+        if separator and minute.isdigit() and reason:
+            return reason
+    if "reconciled-close" in signal_key:
+        return "exchange_position_absent"
+    return None
+
+
+def _manual_follow_history_out(
+    intents: Sequence[Mapping[str, Any]],
+    *,
+    positions: Sequence[Mapping[str, Any]] = (),
+    income_records: Sequence[Any] = (),
+    generated_at: datetime,
+    history_status: str,
+    history_error: str | None = None,
+    history_start_at: datetime | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Combine the local execution ledger with Binance's authoritative PnL."""
+
+    ordered = sorted(intents, key=lambda item: int(item.get("id") or 0))
+    manual_opens: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
+    for intent in ordered:
+        evidence = _manual_follow_evidence(intent.get("entry_basis_json"))
+        if intent.get("action") == "open" and evidence.get("manual_follow") is True:
+            manual_opens.append((intent, evidence))
+    manual_opens = manual_opens[-limit:]
+    current_positions = {
+        (
+            str(item.get("symbol") or "").upper(),
+            str(item.get("position_side") or "BOTH").upper(),
+        ): item
+        for item in positions
+    }
+
+    records: list[dict[str, Any]] = []
+    for opened, evidence in manual_opens:
+        open_id = int(opened.get("id") or 0)
+        symbol = str(opened.get("symbol") or "").upper()
+        position_side = str(opened.get("position_side") or "BOTH").upper()
+        attempt_id = str(evidence.get("manual_attempt_id") or "")
+        closed: Mapping[str, Any] | None = None
+        for candidate in ordered:
+            if (
+                int(candidate.get("id") or 0) <= open_id
+                or candidate.get("action") != "close"
+                or str(candidate.get("symbol") or "").upper() != symbol
+                or str(candidate.get("position_side") or "BOTH").upper()
+                != position_side
+            ):
+                continue
+            candidate_evidence = _manual_follow_evidence(
+                candidate.get("entry_basis_json")
+            )
+            candidate_request = candidate.get("request_json")
+            same_open = bool(
+                isinstance(candidate_request, Mapping)
+                and int(candidate_request.get("open_intent_id") or 0) == open_id
+            )
+            same_attempt = bool(
+                attempt_id
+                and str(candidate_evidence.get("manual_attempt_id") or "")
+                == attempt_id
+            )
+            if same_open or same_attempt:
+                closed = candidate
+                break
+
+        opened_at = _utc_out(opened.get("submitted_at") or opened.get("created_at"))
+        closed_at = (
+            _utc_out(closed.get("submitted_at") or closed.get("created_at"))
+            if closed is not None
+            else None
+        )
+        position = current_positions.get((symbol, position_side))
+        status = "closed" if closed is not None else "open" if position else "reconciling"
+        basis = opened.get("entry_basis_json")
+        basis = dict(basis) if isinstance(basis, Mapping) else {}
+        execution = basis.get("execution")
+        execution = dict(execution) if isinstance(execution, Mapping) else {}
+        response_json = opened.get("response_json")
+        response_json = (
+            dict(response_json) if isinstance(response_json, Mapping) else {}
+        )
+        close_response = closed.get("response_json") if closed is not None else {}
+        close_response = (
+            dict(close_response) if isinstance(close_response, Mapping) else {}
+        )
+
+        realized = Decimal("0")
+        commission = Decimal("0")
+        funding = Decimal("0")
+        income_available = history_status in {"available", "partial"} and bool(
+            opened_at is not None
+            and (history_start_at is None or opened_at >= history_start_at)
+        )
+        if opened_at is not None and income_available:
+            start_ms = int(opened_at.timestamp() * 1_000) - 5_000
+            end_ms = int((closed_at or generated_at).timestamp() * 1_000) + 5_000
+            for income in income_records:
+                if str(getattr(income, "symbol", "") or "").upper() != symbol:
+                    continue
+                income_time = int(getattr(income, "time_ms", 0) or 0)
+                if not start_ms <= income_time <= end_ms:
+                    continue
+                amount = Decimal(str(getattr(income, "income", 0) or 0))
+                income_type = str(getattr(income, "income_type", "") or "").upper()
+                if income_type == "REALIZED_PNL":
+                    realized += amount
+                elif income_type == "COMMISSION":
+                    commission += amount
+                elif income_type == "FUNDING_FEE":
+                    funding += amount
+
+        unrealized_value = (
+            _number_or_none(position.get("upnl")) if position is not None else 0.0
+        )
+        unrealized = Decimal(str(unrealized_value or 0))
+        net = realized + commission + funding + unrealized
+        entry_price = _number_or_none(execution.get("entry_price"))
+        if entry_price is None:
+            entry_price = _number_or_none(
+                response_json.get("avgPrice") or response_json.get("price")
+            )
+        exit_price = _number_or_none(
+            close_response.get("avgPrice") or close_response.get("price")
+        )
+        records.append(
+            {
+                "id": str(opened.get("public_id") or open_id),
+                "manual_attempt_id": attempt_id or None,
+                "symbol": symbol,
+                "direction": "short" if position_side == "SHORT" else "long",
+                "position_side": position_side,
+                "status": status,
+                "quantity": _number_or_none(opened.get("quantity")),
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "mark_price": (
+                    _number_or_none(position.get("mark_price"))
+                    if position is not None
+                    else None
+                ),
+                "opened_at": opened_at,
+                "closed_at": closed_at,
+                "close_reason": _manual_close_reason(closed),
+                "pnl_status": history_status if income_available else "unavailable",
+                "realized_pnl": float(realized) if income_available else None,
+                "commission": float(commission) if income_available else None,
+                "funding": float(funding) if income_available else None,
+                "unrealized_pnl": float(unrealized) if position is not None else 0.0,
+                "net_pnl": float(net) if income_available else None,
+            }
+        )
+
+    records.reverse()
+    available_records = [item for item in records if item["net_pnl"] is not None]
+    closed_records = [item for item in records if item["status"] == "closed"]
+    closed_available = [item for item in closed_records if item["net_pnl"] is not None]
+    wins = sum(1 for item in closed_available if float(item["net_pnl"]) > 0)
+    losses = sum(1 for item in closed_available if float(item["net_pnl"]) < 0)
+    realized_pnl = sum(float(item["realized_pnl"] or 0) for item in available_records)
+    commission = sum(float(item["commission"] or 0) for item in available_records)
+    funding = sum(float(item["funding"] or 0) for item in available_records)
+    unrealized_pnl = sum(
+        float(item["unrealized_pnl"] or 0)
+        for item in records
+        if item["status"] == "open"
+    )
+    net_pnl = sum(float(item["net_pnl"] or 0) for item in available_records)
+    return {
+        "generated_at": generated_at,
+        "history_status": history_status,
+        "history_error": history_error,
+        "summary": {
+            "total": len(records),
+            "open_count": sum(1 for item in records if item["status"] == "open"),
+            "closed_count": len(closed_records),
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": (
+                round(wins / len(closed_available) * 100, 2)
+                if closed_available
+                else None
+            ),
+            "realized_pnl": round(realized_pnl, 8),
+            "commission": round(commission, 8),
+            "funding": round(funding, 8),
+            "unrealized_pnl": round(unrealized_pnl, 8),
+            "net_pnl": round(net_pnl, 8),
+        },
+        "records": records,
     }
 
 
@@ -2074,6 +2296,138 @@ def get_live_copy_status(
     """Return a secret-free, fail-closed view of AI-monitor live following."""
 
     return _live_copy_out(db, request, user)
+
+
+@router.get("/live-copy/history")
+def get_live_copy_history(
+    request: Request,
+    response: Response,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    """Return manual-follow executions with PnL from Binance income history."""
+
+    response.headers["Cache-Control"] = "private, no-store"
+    generated_at = datetime.now(UTC)
+    account = _ai_monitor_live_account(db, user.id)
+    if account is None:
+        return _manual_follow_history_out(
+            (),
+            generated_at=generated_at,
+            history_status="not_configured",
+            limit=limit,
+        )
+    rows = list(
+        db.scalars(
+            select(LiveOrderIntent)
+            .where(
+                LiveOrderIntent.user_id == user.id,
+                LiveOrderIntent.live_account_id == account.id,
+                LiveOrderIntent.action.in_(("open", "close")),
+                LiveOrderIntent.status == "filled",
+            )
+            .order_by(LiveOrderIntent.id.desc())
+            .limit(2_000)
+        )
+    )
+    intents = [
+        {
+            "id": item.id,
+            "public_id": item.public_id,
+            "symbol": item.symbol,
+            "action": item.action,
+            "side": item.side,
+            "position_side": item.position_side,
+            "quantity": item.quantity,
+            "signal_key": item.signal_key,
+            "request_json": dict(item.request_json or {}),
+            "entry_basis_json": dict(item.entry_basis_json or {}),
+            "response_json": dict(item.response_json or {}),
+            "submitted_at": item.submitted_at,
+            "created_at": item.created_at,
+        }
+        for item in rows
+    ]
+    manual_open_times = [
+        _utc_out(item["submitted_at"] or item["created_at"])
+        for item in intents
+        if item["action"] == "open"
+        and _manual_follow_evidence(item["entry_basis_json"]).get("manual_follow") is True
+    ]
+    manual_open_times = [item for item in manual_open_times if item is not None]
+    if not manual_open_times:
+        return _manual_follow_history_out(
+            intents,
+            generated_at=generated_at,
+            history_status="available",
+            limit=limit,
+        )
+
+    encrypted_key = user.binance_api_key_encrypted
+    encrypted_secret = user.binance_api_secret_encrypted
+    credentials_configured = bool(user.binance_credentials_configured)
+    # Do not retain a MySQL transaction while waiting for Binance.
+    db.rollback()
+    if not credentials_configured:
+        return _manual_follow_history_out(
+            intents,
+            generated_at=generated_at,
+            history_status="not_configured",
+            limit=limit,
+        )
+
+    cipher = CredentialCipher(
+        request.app.state.settings.credential_master_key.get_secret_value()
+    )
+    try:
+        api_key = cipher.decrypt(encrypted_key or "")
+        api_secret = cipher.decrypt(encrypted_secret or "")
+    except SecurityError:
+        return _manual_follow_history_out(
+            intents,
+            generated_at=generated_at,
+            history_status="request_failed",
+            history_error="credential_error",
+            limit=limit,
+        )
+
+    service = request.app.state.binance_service
+    try:
+        snapshot = service.account(api_key, api_secret)
+        earliest = min(manual_open_times)
+        retention_start = generated_at - timedelta(days=30)
+        start_at = max(earliest - timedelta(minutes=1), retention_start)
+        history = service.income_history(
+            api_key,
+            api_secret,
+            account_type=snapshot.account_type,
+            start_time_ms=int(start_at.timestamp() * 1_000),
+            end_time_ms=int(generated_at.timestamp() * 1_000),
+        )
+    except BinanceAccountClientError as exc:
+        return _manual_follow_history_out(
+            intents,
+            generated_at=generated_at,
+            history_status="request_failed",
+            history_error=exc.category,
+            limit=limit,
+        )
+
+    history_status = (
+        "available"
+        if history.complete and min(manual_open_times) >= retention_start
+        else "partial"
+    )
+    return _manual_follow_history_out(
+        intents,
+        positions=snapshot.positions,
+        income_records=history.records,
+        generated_at=generated_at,
+        history_status=history_status,
+        history_start_at=start_at,
+        limit=limit,
+    )
 
 
 @router.post("/live-copy/manual-follow")

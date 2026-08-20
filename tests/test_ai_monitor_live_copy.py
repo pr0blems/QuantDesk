@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from quantdesk_v2 import live_engine
+from quantdesk_v2.interfaces.api import ai_monitor as ai_monitor_api
 from quantdesk_v2.schemas import (
     AiMonitorLiveCopyConfigUpdate,
     AiMonitorLiveCopyUpdate,
@@ -109,6 +110,74 @@ def test_manual_follow_schema_binds_one_exact_signal_and_normalizes_symbol() -> 
             acknowledge_real_funds=True,
             unexpected=True,
         )
+
+
+def test_manual_follow_history_uses_binance_realized_and_unrealized_pnl() -> None:
+    opened_at = datetime(2026, 8, 20, 15, 3, 33, tzinfo=UTC)
+    closed_at = datetime(2026, 8, 20, 15, 14, 56, tzinfo=UTC)
+    basis = {
+        "execution": {"entry_price": 185.63},
+        "signal": {
+            "evidence": {
+                "manual_follow": True,
+                "manual_attempt_id": "11111111-1111-4111-8111-111111111111",
+            }
+        },
+    }
+    intents = [
+        {
+            "id": 17,
+            "public_id": "open-txn",
+            "symbol": "TXNUSDT",
+            "action": "open",
+            "position_side": "LONG",
+            "quantity": Decimal("0.33"),
+            "entry_basis_json": basis,
+            "response_json": {"avgPrice": "185.63"},
+            "submitted_at": opened_at,
+            "created_at": opened_at,
+        },
+        {
+            "id": 20,
+            "public_id": "close-txn",
+            "symbol": "TXNUSDT",
+            "action": "close",
+            "position_side": "LONG",
+            "signal_key": "live:1:TXNUSDT:LONG:close:position_state_unverified:123",
+            "entry_basis_json": basis,
+            "response_json": {"avgPrice": "184.64"},
+            "submitted_at": closed_at,
+            "created_at": closed_at,
+        },
+    ]
+    income = (
+        SimpleNamespace(
+            symbol="TXNUSDT",
+            income_type="REALIZED_PNL",
+            income=Decimal("-0.328"),
+            time_ms=int(closed_at.timestamp() * 1_000),
+        ),
+        SimpleNamespace(
+            symbol="TXNUSDT",
+            income_type="COMMISSION",
+            income=Decimal("-0.0707792"),
+            time_ms=int(closed_at.timestamp() * 1_000),
+        ),
+    )
+
+    result = ai_monitor_api._manual_follow_history_out(
+        intents,
+        income_records=income,
+        generated_at=datetime(2026, 8, 20, 16, tzinfo=UTC),
+        history_status="available",
+    )
+
+    assert result["summary"]["total"] == 1
+    assert result["summary"]["closed_count"] == 1
+    assert result["summary"]["losses"] == 1
+    assert result["summary"]["net_pnl"] == pytest.approx(-0.3987792)
+    assert result["records"][0]["close_reason"] == "position_state_unverified"
+    assert result["records"][0]["exit_price"] == pytest.approx(184.64)
 
 
 def test_live_copy_config_validates_direction_and_risk_boundaries() -> None:
@@ -571,6 +640,8 @@ def test_ai_monitor_live_copy_ui_enables_with_one_confirmation_button() -> None:
     assert 'id="live-copy-modal"' in frontend
     assert 'id="live-copy-config-button"' in frontend
     assert 'id="live-copy-config-modal"' in frontend
+    assert 'id="live-copy-history-button"' in frontend
+    assert 'id="live-copy-history-modal"' in frontend
     assert 'aria-busy="true"' in frontend
     assert "button.disabled = false" in frontend
     assert "void this.loadLiveCopyStatus" in frontend
@@ -583,6 +654,8 @@ def test_ai_monitor_live_copy_ui_enables_with_one_confirmation_button() -> None:
     assert '@router.put("/live-copy")' in api
     assert "payload.confirmation_name" not in api
     assert '@router.put("/live-copy/config")' in api
+    assert '@router.get("/live-copy/history")' in api
+    assert "income_history" in api
     assert "ai_monitor_live_allow_short" in api
     assert '"position_size_basis": payload.position_size_basis' in api
     assert '"copy_total_amount": payload.copy_total_amount' in api

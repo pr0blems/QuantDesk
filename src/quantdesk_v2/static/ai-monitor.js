@@ -15,6 +15,9 @@ class AiMonitorDashboard extends HTMLElement {
       liveCopyError: "",
       liveCopyLoading: false,
       liveCopyConfigLoading: false,
+      liveCopyHistory: null,
+      liveCopyHistoryLoading: false,
+      liveCopyHistoryError: "",
       manualFollowOpportunityId: "",
       manualFollowAttemptId: "",
       manualFollowLoading: false,
@@ -143,7 +146,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260820-50">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260820-51">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -159,6 +162,7 @@ class AiMonitorDashboard extends HTMLElement {
               <span><b>实盘跟单</b><small>读取中</small></span>
             </button>
             <button id="live-copy-config-button" class="live-copy-config-button" type="button">跟单配置</button>
+            <button id="live-copy-history-button" class="live-copy-config-button live-copy-history-button" type="button">跟单记录</button>
             <button id="uw-usage-toggle" class="uw-usage-toggle loading" type="button" aria-pressed="false" disabled>
               <span class="uw-toggle-track" aria-hidden="true"><i></i></span>
               <span><b>Unusual Whales</b><small>读取中</small></span>
@@ -199,6 +203,16 @@ class AiMonitorDashboard extends HTMLElement {
               <button type="button" data-live-copy-config-close aria-label="关闭实盘跟单配置">×</button>
             </header>
             <div id="live-copy-config-body" class="live-copy-body"><div class="live-copy-loading">正在读取独立实盘风险参数…</div></div>
+          </section>
+        </div>
+        <div id="live-copy-history-modal" class="live-copy-modal hidden" aria-hidden="true">
+          <button class="live-copy-backdrop" type="button" data-live-copy-history-close aria-label="关闭跟单记录"></button>
+          <section class="live-copy-dialog live-copy-history-dialog" role="dialog" aria-modal="true" aria-labelledby="live-copy-history-title" tabindex="-1">
+            <header>
+              <div><span>MANUAL COPY LEDGER</span><h2 id="live-copy-history-title">跟单记录</h2><p>本地订单台账与 Binance 收益流水合并统计；已实现盈亏、手续费、资金费与当前浮动盈亏。</p></div>
+              <button type="button" data-live-copy-history-close aria-label="关闭跟单记录">×</button>
+            </header>
+            <div id="live-copy-history-body" class="live-copy-body"><div class="live-copy-loading">正在读取真实成交与收益流水…</div></div>
           </section>
         </div>
         <div id="manual-follow-modal" class="live-copy-modal hidden" aria-hidden="true">
@@ -476,11 +490,16 @@ class AiMonitorDashboard extends HTMLElement {
       this.openLiveCopyModal();
     });
     this.q("#live-copy-config-button").addEventListener("click", () => this.openLiveCopyConfigModal());
+    this.q("#live-copy-history-button").addEventListener("click", () => this.openLiveCopyHistoryModal());
     this.qa("[data-live-copy-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyModal()));
     this.qa("[data-live-copy-config-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyConfigModal()));
+    this.qa("[data-live-copy-history-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyHistoryModal()));
     this.qa("[data-manual-follow-close]").forEach((button) => button.addEventListener("click", () => this.closeManualFollowModal()));
     this.q("#live-copy-body").addEventListener("submit", (event) => this.submitLiveCopy(event));
     this.q("#live-copy-config-body").addEventListener("submit", (event) => this.submitLiveCopyConfig(event));
+    this.q("#live-copy-history-body").addEventListener("click", (event) => {
+      if (event.target.closest("[data-live-copy-history-refresh]")) void this.loadLiveCopyHistory();
+    });
     this.q("#manual-follow-body").addEventListener("submit", (event) => this.submitManualFollow(event));
     this.q("#live-copy-config-body").addEventListener("change", (event) => {
       if (!event.target.closest('[name="position_size_basis"]')) return;
@@ -1059,6 +1078,90 @@ class AiMonitorDashboard extends HTMLElement {
     const modal = this.q("#live-copy-config-modal");
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
+  }
+
+  openLiveCopyHistoryModal() {
+    const modal = this.q("#live-copy-history-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    this.renderLiveCopyHistoryModal();
+    requestAnimationFrame(() => modal.querySelector(".live-copy-history-dialog")?.focus({ preventScroll: true }));
+    void this.loadLiveCopyHistory();
+  }
+
+  closeLiveCopyHistoryModal() {
+    const modal = this.q("#live-copy-history-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  async loadLiveCopyHistory() {
+    if (this.state.liveCopyHistoryLoading) return;
+    this.state.liveCopyHistoryLoading = true;
+    this.state.liveCopyHistoryError = "";
+    this.renderLiveCopyHistoryModal();
+    try {
+      this.state.liveCopyHistory = await this.api("/live-copy/history?limit=50");
+    } catch (error) {
+      this.state.liveCopyHistoryError = error.message || "跟单记录读取失败";
+    } finally {
+      this.state.liveCopyHistoryLoading = false;
+      this.renderLiveCopyHistoryModal();
+    }
+  }
+
+  renderLiveCopyHistoryModal() {
+    const target = this.q("#live-copy-history-body");
+    if (!target) return;
+    const data = this.state.liveCopyHistory;
+    if (!data || (this.state.liveCopyHistoryLoading && !data)) {
+      target.innerHTML = this.state.liveCopyHistoryError
+        ? `<div class="live-copy-loading"><strong>跟单记录读取失败</strong><p>${this.escape(this.state.liveCopyHistoryError)}</p><button type="button" data-live-copy-history-refresh>重新读取</button></div>`
+        : '<div class="live-copy-loading">正在读取真实成交与收益流水…</div>';
+      return;
+    }
+    const summary = data.summary || {};
+    const records = Array.isArray(data.records) ? data.records : [];
+    const pnl = (value, digits = 4) => {
+      const numeric = Number(value);
+      if (value == null || !Number.isFinite(numeric)) return "--";
+      return `${numeric > 0 ? "+" : ""}${numeric.toFixed(digits)} USDT`;
+    };
+    const tone = (value) => Number(value) > 0 ? "positive" : Number(value) < 0 ? "negative" : "flat";
+    const statusLabel = { open: "持仓中", closed: "已结束", reconciling: "对账中" };
+    const reasonLabel = {
+      position_state_unverified: "旧版执行器状态误判（已修复）",
+      protection_missing: "旧版保护单校验退出",
+      liquidation_buffer_unsafe: "旧版强平缓冲退出",
+      max_holding_bars: "旧版持仓时限退出",
+      strategy_reversal: "旧版反向信号退出",
+      exchange_position_absent: "交易所仓位已结束",
+    };
+    const availability = data.history_status === "available"
+      ? "Binance 收益流水完整"
+      : data.history_status === "partial"
+      ? "只统计 Binance 可查询时段"
+      : `收益流水暂不可用${data.history_error ? ` · ${this.escape(data.history_error)}` : ""}`;
+    const rows = records.map((item) => `<tr>
+      <td><strong>${this.escape(item.symbol || "--")}</strong><small>${item.direction === "short" ? "做空" : "做多"} · ${this.escape(item.position_side || "--")}</small></td>
+      <td>${this.formatDate(item.opened_at)}<small>${item.closed_at ? `结束 ${this.formatDate(item.closed_at)}` : "仍在 Binance 持仓"}</small></td>
+      <td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}<small>${item.exit_price == null ? `现价 ${item.mark_price == null ? "--" : this.escape(this.compactNumber(item.mark_price))}` : `退出 ${this.escape(this.compactNumber(item.exit_price))}`}</small></td>
+      <td class="${tone(item.realized_pnl)}">${pnl(item.realized_pnl)}<small>手续费 ${pnl(item.commission)}</small></td>
+      <td class="${tone(item.unrealized_pnl)}">${pnl(item.unrealized_pnl)}<small>资金费 ${pnl(item.funding)}</small></td>
+      <td class="${tone(item.net_pnl)}"><strong>${pnl(item.net_pnl)}</strong><small>${this.escape(reasonLabel[item.close_reason] || item.close_reason || "手动持有，不自动结束")}</small></td>
+      <td><b class="live-copy-record-status ${this.escape(item.status || "")}">${this.escape(statusLabel[item.status] || item.status || "--")}</b></td>
+    </tr>`).join("");
+    target.innerHTML = `
+      <section class="live-copy-history-note"><strong>手动跟单不会再被后台策略自动结束</strong><span>交易所原生止损 / 止盈仍然有效；你也可以在 Binance 主动平仓。系统只对账，不再因反向信号、持仓时长或状态字段缺失提交市价平仓。</span></section>
+      <section class="live-copy-history-summary">
+        <article><span>累计净盈亏</span><strong class="${tone(summary.net_pnl)}">${pnl(summary.net_pnl)}</strong><small>已实现 + 浮盈亏 + 手续费 + 资金费</small></article>
+        <article><span>已实现盈亏</span><strong class="${tone(summary.realized_pnl)}">${pnl(summary.realized_pnl)}</strong><small>Binance REALIZED_PNL</small></article>
+        <article><span>当前浮动盈亏</span><strong class="${tone(summary.unrealized_pnl)}">${pnl(summary.unrealized_pnl)}</strong><small>${this.number(summary.open_count || 0)} 笔持仓中</small></article>
+        <article><span>胜率</span><strong>${summary.win_rate_pct == null ? "--" : `${this.number(summary.win_rate_pct)}%`}</strong><small>${this.number(summary.wins || 0)} 胜 / ${this.number(summary.losses || 0)} 负</small></article>
+        <article><span>手续费</span><strong class="${tone(summary.commission)}">${pnl(summary.commission)}</strong><small>按 Binance 流水计入净收益</small></article>
+      </section>
+      <div class="live-copy-history-toolbar"><span>${this.escape(availability)} · 共 ${this.number(summary.total || 0)} 笔</span><button type="button" data-live-copy-history-refresh ${this.state.liveCopyHistoryLoading ? "disabled" : ""}>${this.state.liveCopyHistoryLoading ? "刷新中…" : "刷新记录"}</button></div>
+      <div class="live-copy-history-table-wrap"><table class="live-copy-history-table"><thead><tr><th>合约</th><th>时间</th><th>价格</th><th>已实现 / 手续费</th><th>浮盈亏 / 资金费</th><th>净盈亏 / 结束原因</th><th>状态</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="live-copy-history-empty">还没有手动跟单成交记录</td></tr>'}</tbody></table></div>`;
   }
 
   openManualFollowModal(opportunityId) {

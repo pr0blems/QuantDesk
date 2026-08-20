@@ -1595,6 +1595,21 @@ def _is_grandfathered_open(opened: dict[str, Any]) -> bool:
     )
 
 
+def _is_manual_follow_open(opened: dict[str, Any]) -> bool:
+    """Return whether the managed position came from an explicit manual follow.
+
+    Manual follows are user-controlled positions.  The exchange-native stop and
+    take-profit orders created at entry remain active, but the background signal
+    executor must never submit a market close for metadata gaps, holding time, or
+    later strategy reversals.
+    """
+
+    basis = _json_object(opened.get("entry_basis_json"))
+    signal = _json_object(basis.get("signal"))
+    evidence = _json_object(signal.get("evidence"))
+    return evidence.get("manual_follow") is True
+
+
 def _risk_review_warnings(
     positions: dict[tuple[str, str], dict[str, Any]],
     managed: dict[tuple[str, str], dict[str, Any]],
@@ -1911,6 +1926,12 @@ def _close_position(
     position_side = str(position.get("position_side") or "BOTH").upper()
     managed = _managed_open(account, symbol, position_side)
     if managed is None:
+        return False
+    if _is_manual_follow_open(managed):
+        # Defense in depth: even if a caller misses the lifecycle guard, an
+        # explicitly confirmed manual position cannot be turned into an
+        # executor-originated market close. Exchange stop/TP orders and an
+        # exchange-side/user close are reconciled without entering this path.
         return False
     if _pending_market_intent(account, symbol, position_side, "close"):
         return False
@@ -2691,6 +2712,11 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
         if position is None:
             _cancel_protection(account, api_key, api_secret, symbol, position_side)
             _record_reconciled_close(account, managed[key])
+            continue
+        if _is_manual_follow_open(managed[key]):
+            # Manual positions remain under the user's control.  Reconciliation
+            # above still observes an exchange-side close, while native stop/TP
+            # protection remains on Binance until the position is gone.
             continue
         side = 1 if position_side == "LONG" or position["side"] == "long" else -1
         if not _is_grandfathered_open(managed[key]):

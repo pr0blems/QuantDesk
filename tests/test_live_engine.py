@@ -689,6 +689,131 @@ def test_historical_position_is_review_only_and_never_opened_or_fail_closed(
     assert account_update[0] == "risk_review_required"
 
 
+def test_manual_follow_position_is_never_closed_by_background_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    position = {
+        "symbol": "TSMUSDT",
+        "position_side": "LONG",
+        "side": "long",
+        "amt": Decimal("0.21"),
+        "entry_price": None,
+        "liquidation_price": None,
+        "notional": Decimal("87"),
+        "leverage": 10,
+    }
+    manual_open = {
+        "id": 21,
+        "symbol": "TSMUSDT",
+        "position_side": "LONG",
+        "side": "BUY",
+        "quantity": Decimal("0.21"),
+        "created_at": "2020-01-01 00:00:00",
+        "entry_basis_json": {
+            "schema_version": 2,
+            "availability": "captured",
+            "mode": "live",
+            "signal": {
+                "evidence": {
+                    "manual_follow": True,
+                    "manual_attempt_id": "11111111-1111-4111-8111-111111111111",
+                }
+            },
+        },
+    }
+    snapshot = SimpleNamespace(
+        account_type="UM_FUTURE",
+        available_balance=Decimal("1000"),
+        wallet_balance=Decimal("1000"),
+        unrealized_pnl=Decimal("0"),
+        positions=(position,),
+    )
+    account = _account()
+    account["config_json"]["max_holding_bars"] = 1
+    account["runtime_state_json"] = {}
+
+    monkeypatch.setattr(
+        live_engine,
+        "_account_service",
+        SimpleNamespace(account=lambda *_args, **_kwargs: snapshot),
+    )
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(live_engine, "_credentials", lambda *_args: ("key", "secret"))
+    monkeypatch.setattr(live_engine, "_cached_position_mode", lambda *_args: "hedge")
+    monkeypatch.setattr(live_engine, "_reconcile_intents", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(live_engine, "_execution_timeframe_seconds", lambda *_args: 1)
+    monkeypatch.setattr(live_engine, "_strategy_universe", lambda *_args: ["TSMUSDT"])
+    monkeypatch.setattr(
+        live_engine,
+        "_managed_positions",
+        lambda *_args: {("TSMUSDT", "LONG"): manual_open},
+    )
+    monkeypatch.setattr(live_engine, "_protection_counts", lambda *_args: {})
+    monkeypatch.setattr(live_engine, "_current_stop_prices", lambda *_args: {})
+    monkeypatch.setattr(live_engine, "_cancel_orphan_protections", lambda *_args: None)
+    monkeypatch.setattr(live_engine, "_risk_review_warnings", lambda *_args: [])
+    monkeypatch.setattr(live_engine, "_current_open_risk", lambda *_args, **_kwargs: Decimal("0"))
+    monkeypatch.setattr(live_engine, "_entry_loss_guard", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        live_engine,
+        "_close_position",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("manual follow must not be auto-closed")
+        ),
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_fail_account",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("manual follow metadata must not fail the account")
+        ),
+    )
+    monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(live_engine.store, "execute", lambda *_args, **_kwargs: 1)
+
+    live_engine._tick_account_unlocked(account)
+
+
+def test_close_position_refuses_manual_follow_even_if_called_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manual_open = {
+        "id": 21,
+        "entry_basis_json": {
+            "signal": {
+                "evidence": {
+                    "manual_follow": True,
+                    "manual_attempt_id": "11111111-1111-4111-8111-111111111111",
+                }
+            }
+        },
+    }
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(live_engine, "_managed_open", lambda *_args: manual_open)
+    monkeypatch.setattr(
+        live_engine,
+        "_place_market",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("manual follow must never reach market close submission")
+        ),
+    )
+
+    closed = live_engine._close_position(
+        _account(),
+        "key",
+        "secret",
+        {
+            "symbol": "TSMUSDT",
+            "position_side": "LONG",
+            "side": "long",
+            "amt": Decimal("0.21"),
+        },
+        "strategy_reversal",
+    )
+
+    assert closed is False
+
+
 @pytest.mark.parametrize("schema_version", [1, 2])
 def test_captured_live_entry_basis_versions_do_not_require_risk_review(
     schema_version: int,
