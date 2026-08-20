@@ -66,6 +66,7 @@ STRATEGY_EVENT_SIGNAL_MODE = "strategy_event_v2"
 LEGACY_ENTRY_SCORE = 60.0
 LEGACY_TREND_MA_PERIOD = 150
 PAPER_MAX_FUTURE_TICKER_SKEW_SECONDS = 15
+ENTRY_BASIS_SCHEMA_VERSION = 2
 
 _lock = threading.RLock()
 
@@ -1244,7 +1245,7 @@ def build_entry_basis_snapshot(
 
     score = signal_evidence.get("score")
     snapshot = {
-        "schema_version": 2,
+        "schema_version": ENTRY_BASIS_SCHEMA_VERSION,
         "availability": "captured",
         "mode": mode,
         "captured_at": int(time.time()),

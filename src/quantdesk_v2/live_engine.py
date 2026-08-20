@@ -41,7 +41,12 @@ from .live_risk import (
     total_open_risk,
 )
 from .market_config import tradfi_symbols
-from .paper_engine import _exit_levels, _strategy_signal, build_entry_basis_snapshot
+from .paper_engine import (
+    ENTRY_BASIS_SCHEMA_VERSION,
+    _exit_levels,
+    _strategy_signal,
+    build_entry_basis_snapshot,
+)
 from .security import CredentialCipher, SecurityError
 from .strategy_evaluator import (
     StrategyEvaluationError,
@@ -1580,8 +1585,11 @@ def _is_grandfathered_open(opened: dict[str, Any]) -> bool:
     """
 
     basis = _json_object(opened.get("entry_basis_json"))
+    schema_version = basis.get("schema_version")
     return not (
-        basis.get("schema_version") == 1
+        isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and schema_version in {1, ENTRY_BASIS_SCHEMA_VERSION}
         and basis.get("availability") == "captured"
         and basis.get("mode") == "live"
     )

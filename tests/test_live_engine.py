@@ -606,6 +606,53 @@ def test_historical_position_is_review_only_and_never_opened_or_fail_closed(
     assert account_update[0] == "risk_review_required"
 
 
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_captured_live_entry_basis_versions_do_not_require_risk_review(
+    schema_version: int,
+) -> None:
+    positions = {
+        ("TXNUSDT", "LONG"): {
+            "symbol": "TXNUSDT",
+            "position_side": "LONG",
+            "amt": Decimal("0.33"),
+        }
+    }
+    managed = {
+        ("TXNUSDT", "LONG"): {
+            "id": 17,
+            "symbol": "TXNUSDT",
+            "position_side": "LONG",
+            "quantity": Decimal("0.33"),
+            "entry_basis_json": {
+                "schema_version": schema_version,
+                "availability": "captured",
+                "mode": "live",
+            },
+        }
+    }
+
+    assert live_engine._risk_review_warnings(
+        positions,
+        managed,
+        {("TXNUSDT", "LONG"): 2},
+    ) == []
+
+
+@pytest.mark.parametrize("schema_version", [True, 0, 3, "2"])
+def test_unknown_or_malformed_entry_basis_version_stays_review_only(
+    schema_version: object,
+) -> None:
+    assert live_engine._is_grandfathered_open(
+        {
+            "entry_basis_json": {
+                "schema_version": schema_version,
+                "availability": "captured",
+                "mode": "live",
+            }
+        }
+    )
+
+
 def test_rate_limit_backoff_grows_and_is_capped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
