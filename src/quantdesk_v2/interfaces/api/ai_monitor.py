@@ -116,10 +116,7 @@ _MANUAL_FOLLOW_MESSAGES = {
     "loss_limit_reached": "账户日内亏损或回撤限制已触发，本次未下单。",
     "filled_audit_pending": "上一笔成交审计尚未完成，本次未下单。",
     "ticker_unavailable": "该合约没有可用的 Binance 实时价格，本次未下单。",
-    "ticker_stale": "Binance 行情已过期，本次未下单。",
     "symbol_risk_blocked": "该合约未通过当前品种风险准入，本次未下单。",
-    "signal_not_eligible": "该信号已变化、未满足准入或不再允许跟单，本次未下单。",
-    "signal_stale": "该信号已经过期，本次未下单。",
     "order_not_submitted": "仓位计算或下单前风控未通过，没有提交订单。",
     "order_status_uncertain": "订单状态暂无法确认，执行器已停止重复提交，请先完成对账。",
     "exchange_rejected": "Binance 拒绝或取消了该订单，本次没有重复提交。",
@@ -2120,10 +2117,6 @@ def manual_follow_live_copy(
         )
         if prediction is None:
             raise HTTPException(status_code=404, detail="预测已更新，请刷新后重试")
-    if opportunity.status not in {"candidate", "discovered"} or (
-        prediction is not None and prediction.status != "pending"
-    ):
-        raise HTTPException(status_code=409, detail="该机会已经结束，请刷新后重试")
     actual_symbol = str(
         prediction.contract_symbol if prediction is not None else opportunity.contract_symbol
     ).upper()
@@ -2165,6 +2158,19 @@ def manual_follow_live_copy(
             manual_attempt_id=payload.manual_attempt_id,
             expected_symbol=actual_symbol,
             expected_direction=actual_direction,
+            selected_at=(
+                prediction.predicted_at if prediction is not None else opportunity.discovered_at
+            ),
+            selected_evidence=(
+                dict(prediction.evidence_json or {})
+                if prediction is not None
+                else dict(opportunity.evidence_json or {})
+            ),
+            selected_score=float(
+                prediction.confidence_score
+                if prediction is not None
+                else opportunity.combined_score
+            ),
         )
     except (BinanceAccountClientError, SecurityError, RuntimeError) as exc:
         result = {

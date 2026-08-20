@@ -140,6 +140,20 @@ class BinanceUsdMTradingClient:
             raise BinanceAccountClientError("unsupported_symbol")
         return rule
 
+    def ticker_price(self, symbol: str) -> Decimal:
+        """Return a fresh Binance USD-M last price for an explicit manual order."""
+
+        normalized = self._symbol(symbol)
+        payload = self._object(
+            self._public(f"/fapi/v1/ticker/price?symbol={normalized}")
+        )
+        if str(payload.get("symbol") or "").upper() != normalized:
+            raise BinanceAccountClientError("invalid_response")
+        try:
+            return self._positive_decimal(payload.get("price"))
+        except (TypeError, ValueError):
+            raise BinanceAccountClientError("invalid_response") from None
+
     def position_mode(self, api_key: str, api_secret: str) -> Literal["one_way", "hedge"]:
         payload = self._signed("GET", "/fapi/v1/positionSide/dual", api_key, api_secret)
         if not isinstance(payload, dict) or not isinstance(payload.get("dualSidePosition"), bool):

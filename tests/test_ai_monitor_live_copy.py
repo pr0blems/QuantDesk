@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -303,11 +304,14 @@ def test_manual_follow_is_idempotent_per_confirmation_but_allows_a_new_confirmat
         available_balance=1_000,
         unrealized_pnl=0,
     )
-    selected: dict = {}
     monkeypatch.setattr(live_engine, "_active_accounts", lambda *_args: [account])
     monkeypatch.setattr(live_engine, "_strategy_universe", lambda *_args: ["AAPLUSDT"])
     monkeypatch.setattr(live_engine, "_account_service", SimpleNamespace(account=lambda *_args, **_kwargs: snapshot))
-    monkeypatch.setattr(live_engine, "_trading_client", object())
+    monkeypatch.setattr(
+        live_engine,
+        "_trading_client",
+        SimpleNamespace(ticker_price=lambda _symbol: Decimal("100")),
+    )
     monkeypatch.setattr(live_engine, "_credentials", lambda *_args: ("key", "secret"))
     monkeypatch.setattr(live_engine, "_cached_position_mode", lambda *_args: "hedge")
     monkeypatch.setattr(live_engine, "_reconcile_intents", lambda *_args, **_kwargs: False)
@@ -323,14 +327,11 @@ def test_manual_follow_is_idempotent_per_confirmation_but_allows_a_new_confirmat
     )
     monkeypatch.setattr(live_engine, "_entry_loss_guard", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        live_engine.store,
-        "query",
-        lambda *_args, **_kwargs: [{"symbol": "AAPLUSDT", "price": 100, "ts": 1}],
-    )
-    monkeypatch.setattr(
         live_engine,
         "market_data_freshness",
-        lambda *_args, **_kwargs: SimpleNamespace(fresh=True),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("manual follow must not inspect cached ticker freshness")
+        ),
     )
     monkeypatch.setattr(
         live_engine,
@@ -338,11 +339,13 @@ def test_manual_follow_is_idempotent_per_confirmation_but_allows_a_new_confirmat
         lambda *_args, **_kwargs: SimpleNamespace(allowed=True),
     )
 
-    def signal(*_args, **kwargs):
-        selected.update(kwargs)
-        return 1, 1.0, ["manual"], 123, {"source": "ai_monitor_live_copy_v1"}
-
-    monkeypatch.setattr(live_engine, "_ai_monitor_signal", signal)
+    monkeypatch.setattr(
+        live_engine,
+        "_ai_monitor_signal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("manual follow must not run automatic signal admission")
+        ),
+    )
     monkeypatch.setattr(
         live_engine,
         "_signal_is_fresh",
@@ -379,12 +382,13 @@ def test_manual_follow_is_idempotent_per_confirmation_but_allows_a_new_confirmat
         manual_attempt_id="11111111-1111-4111-8111-111111111111",
         expected_symbol="AAPLUSDT",
         expected_direction="long",
+        selected_at=datetime(2026, 8, 17, 10, 0, tzinfo=UTC),
+        selected_evidence={"risk_plan": {"stop_loss_pct": 1.5, "take_profit_pct": 3}},
+        selected_score=25,
     )
 
     assert result["status"] == "duplicate"
     assert result["intent"]["id"] == "intent-public-id"
-    assert selected["prediction_public_id"] == "prediction-public-id"
-    assert selected["opportunity_public_id"] == "opportunity-public-id"
     assert intent_keys[-1].endswith(
         "manual:11111111-1111-4111-8111-111111111111"
     )
@@ -404,6 +408,9 @@ def test_manual_follow_is_idempotent_per_confirmation_but_allows_a_new_confirmat
         manual_attempt_id="22222222-2222-4222-8222-222222222222",
         expected_symbol="AAPLUSDT",
         expected_direction="long",
+        selected_at=datetime(2026, 8, 17, 10, 0, tzinfo=UTC),
+        selected_evidence={"risk_plan": {"stop_loss_pct": 1.5, "take_profit_pct": 3}},
+        selected_score=25,
     )
 
     assert retried["status"] == "filled"
@@ -413,6 +420,9 @@ def test_manual_follow_is_idempotent_per_confirmation_but_allows_a_new_confirmat
     assert opened["signal_evidence"]["manual_attempt_id"] == (
         "22222222-2222-4222-8222-222222222222"
     )
+    assert opened["signal_evidence"]["manual_signal_override"] is True
+    assert opened["signal_evidence"]["execution_price_source"] == "binance_live_ticker"
+    assert "ticker_cache_freshness" in opened["signal_evidence"]["automatic_checks_bypassed"]
 
 
 def test_ai_monitor_live_signal_fails_closed_when_disabled_or_gate_not_ready(
@@ -606,6 +616,9 @@ def test_manual_follow_ui_and_api_require_second_real_funds_confirmation() -> No
     assert '@router.post("/live-copy/manual-follow")' in api
     assert "if not payload.acknowledge_real_funds" in api
     assert "execute_ai_monitor_manual_follow" in api
+    assert "直接使用 Binance 即时合约价格开仓" in frontend
+    assert "正在提交 Binance" in frontend
+    assert "opportunity.status not in" not in api
     assert "交易、盈亏和结算价格均以 Binance 映射合约为准" in frontend
     assert 'name="position_size_basis"' in frontend
     assert 'value="copy_total_amount"' in frontend

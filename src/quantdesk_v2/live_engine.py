@@ -2259,6 +2259,108 @@ def _manual_intent(account: dict[str, Any], signal_key: str) -> dict[str, Any] |
     return dict(rows[0]) if rows else None
 
 
+def _manual_follow_signal_context(
+    account: dict[str, Any],
+    *,
+    symbol: str,
+    direction_name: str,
+    price: float,
+    opportunity_public_id: str,
+    prediction_public_id: str | None,
+    selected_at: Any,
+    selected_evidence: dict[str, Any] | None,
+    selected_score: float | None,
+) -> tuple[int, float | None, list[str], int, dict[str, Any]]:
+    """Build execution metadata without re-running automatic signal admission."""
+
+    config = account.get("config_json")
+    config = config if isinstance(config, dict) else {}
+    direction = 1 if direction_name == "long" else -1
+    evidence = dict(selected_evidence or {})
+    risk_plan = evidence.get("risk_plan")
+    risk_plan = risk_plan if isinstance(risk_plan, dict) else {}
+
+    def percentage(value: Any, fallback: float, maximum: float) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            parsed = fallback
+        return parsed if math.isfinite(parsed) and 0 < parsed <= maximum else fallback
+
+    stop_loss_pct = percentage(
+        risk_plan.get("stop_loss_pct"),
+        percentage(config.get("stop_loss_pct"), 1.5, 20.0),
+        20.0,
+    )
+    take_profit_pct = percentage(
+        risk_plan.get("take_profit_pct"),
+        percentage(config.get("take_profit_pct"), 3.0, 50.0),
+        50.0,
+    )
+    atr_pct = percentage(risk_plan.get("atr_pct"), 0.0, 20.0)
+    atr = price * atr_pct / 100 if atr_pct > 0 else None
+    max_leverage = max(
+        1,
+        min(
+            int(config.get("leverage", 1)),
+            int(config.get("risk_max_leverage", config.get("leverage", 1))),
+            20,
+        ),
+    )
+    selected_seconds = _utc_seconds(selected_at)
+    if selected_seconds is None:
+        stable_selection = f"{opportunity_public_id}:{prediction_public_id or ''}"
+        selected_seconds = float(
+            int(hashlib.sha256(stable_selection.encode("utf-8")).hexdigest()[:8], 16)
+        )
+    signal_time = int(selected_seconds)
+    risk_proposal = {
+        "stop_distance": price * stop_loss_pct / 100,
+        "take_profit_distance": price * take_profit_pct / 100,
+        "risk_per_trade_pct": float(config.get("risk_per_trade_pct", 0.5)),
+        "max_margin_pct": float(
+            config.get("max_margin_per_trade_pct", config.get("position_size_pct", 2.0))
+        ),
+        "max_leverage": max_leverage,
+    }
+    execution_evidence = {
+        "source": "ai_monitor_manual_follow_v1",
+        "execution_venue": "binance_usdm",
+        "execution_price_source": "binance_live_ticker",
+        "contract_symbol": symbol,
+        "manual_selection": True,
+        "manual_signal_override": True,
+        "opportunity_public_id": opportunity_public_id,
+        "prediction_public_id": prediction_public_id,
+        "selected_at": selected_seconds,
+        "score": selected_score,
+        "risk_plan": {
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
+            "atr_pct": atr_pct if atr is not None else None,
+        },
+        "risk_proposal": risk_proposal,
+        "automatic_checks_bypassed": [
+            "ticker_cache_freshness",
+            "prediction_status",
+            "signal_age",
+            "research_gate",
+            "score_gate",
+            "market_session",
+        ],
+    }
+    basis = [
+        "执行方式：人工确认立即跟单",
+        f"机会：{opportunity_public_id}",
+        f"方向：{'做多' if direction > 0 else '做空'}",
+        "价格：Binance 即时合约行情",
+        "准入：人工指令覆盖自动信号判断",
+    ]
+    if prediction_public_id:
+        basis.insert(1, f"预测：{prediction_public_id}")
+    return direction, atr, basis, signal_time, execution_evidence
+
+
 def _manual_follow_result(
     *,
     status: str,
@@ -2297,12 +2399,16 @@ def execute_ai_monitor_manual_follow(
     manual_attempt_id: str,
     expected_symbol: str,
     expected_direction: str,
+    selected_at: Any,
+    selected_evidence: dict[str, Any] | None,
+    selected_score: float | None,
 ) -> dict[str, Any]:
-    """Attempt one exact AI prediction through the existing fail-closed executor.
+    """Execute one explicit manual instruction through the live order writer.
 
     This path deliberately does not manage or reverse existing positions.  It is
-    new-entry only and applies the same account, market, loss, sizing,
-    idempotency, fill-verification and protection checks as scheduled entries.
+    new-entry only. Automatic ticker-cache freshness, prediction-state, score,
+    age and session admission are bypassed; exchange state, loss limits, sizing,
+    idempotency, fill verification and protection remain enforced.
     """
 
     symbol = str(expected_symbol or "").upper()
@@ -2427,31 +2533,19 @@ def execute_ai_monitor_manual_follow(
                 direction=direction_name,
             )
 
-        ticker_rows = store.query(
-            "SELECT symbol,price,ts FROM ticker WHERE symbol=? AND price IS NOT NULL LIMIT 1",
-            (symbol,),
-        )
-        if not ticker_rows:
+        try:
+            price = float(_trading_client.ticker_price(symbol))
+        except (BinanceAccountClientError, TypeError, ValueError, OverflowError):
             return _manual_follow_result(
                 status="blocked",
                 reason="ticker_unavailable",
                 symbol=symbol,
                 direction=direction_name,
             )
-        ticker = dict(ticker_rows[0])
-        try:
-            price = float(ticker["price"])
-            ticker_fresh = market_data_freshness(
-                ticker["ts"],
-                max_age_seconds=policy.max_ticker_age_seconds,
-            ).fresh
-        except (KeyError, TypeError, ValueError):
-            ticker_fresh = False
-            price = 0.0
-        if not ticker_fresh or not math.isfinite(price) or price <= 0:
+        if not math.isfinite(price) or price <= 0:
             return _manual_follow_result(
                 status="blocked",
-                reason="ticker_stale",
+                reason="ticker_unavailable",
                 symbol=symbol,
                 direction=direction_name,
             )
@@ -2464,21 +2558,17 @@ def execute_ai_monitor_manual_follow(
                 direction=direction_name,
             )
 
-        direction, atr, basis, signal_time, signal_evidence = _ai_monitor_signal(
+        direction, atr, basis, signal_time, signal_evidence = _manual_follow_signal_context(
             account,
-            symbol,
+            symbol=symbol,
+            direction_name=direction_name,
             price=price,
-            prediction_public_id=prediction_public_id,
             opportunity_public_id=opportunity_public_id,
+            prediction_public_id=prediction_public_id,
+            selected_at=selected_at,
+            selected_evidence=selected_evidence,
+            selected_score=selected_score,
         )
-        expected_direction_value = 1 if direction_name == "long" else -1
-        if direction != expected_direction_value or signal_time is None:
-            return _manual_follow_result(
-                status="blocked",
-                reason="signal_not_eligible",
-                symbol=symbol,
-                direction=direction_name,
-            )
         signal_key_suffix = f"manual:{manual_attempt_id}"
         signal_key = (
             f"live:{account['deployment_id']}:{symbol}:{signal_time}:open:{direction}:"

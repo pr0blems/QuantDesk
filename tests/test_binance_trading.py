@@ -76,6 +76,23 @@ def test_symbol_rules_round_down_and_market_order_is_signed() -> None:
     assert "api-secret" not in url
 
 
+def test_ticker_price_reads_current_binance_price_without_credentials() -> None:
+    captured: list[tuple[str, str, dict[str, str]]] = []
+
+    def transport(method: str, url: str, headers: dict[str, str], _timeout: float):
+        captured.append((method, url, headers))
+        return 200, b'{"symbol":"TXNUSDT","price":"217.42","time":1787241600000}'
+
+    client = BinanceUsdMTradingClient("https://fapi.binance.com", transport=transport)
+
+    assert client.ticker_price("txnusdt") == Decimal("217.42")
+    method, url, headers = captured[0]
+    assert method == "GET"
+    assert urlsplit(url).path == "/fapi/v1/ticker/price"
+    assert parse_qs(urlsplit(url).query) == {"symbol": ["TXNUSDT"]}
+    assert "X-MBX-APIKEY" not in headers
+
+
 def test_close_trigger_is_exchange_side_mark_price_protection() -> None:
     captured: list[str] = []
 

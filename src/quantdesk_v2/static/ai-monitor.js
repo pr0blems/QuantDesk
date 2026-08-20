@@ -1117,7 +1117,7 @@ class AiMonitorDashboard extends HTMLElement {
       <section class="manual-follow-summary ${direction}">
         <span>${item.prediction_id ? "EXACT PREDICTION" : "EXACT OPPORTUNITY"} · ONE ORDER MAX</span>
         <strong>${this.escape(item.symbol)} / ${this.escape(item.contract_symbol)} · ${directionLabel}</strong>
-        <p>${item.prediction_id ? `预测 ${this.escape(item.prediction_id)}` : `待评估机会 ${this.escape(item.id)}`}。${manualOverride ? "本次手动操作会覆盖研究准入门槛；" : ""}后端仍会重新校验方向、账户状态、仓位、损失限制与 Binance 行情，任何硬风控不通过都会拒绝下单。</p>
+        <p>${item.prediction_id ? `预测 ${this.escape(item.prediction_id)}` : `待评估机会 ${this.escape(item.id)}`}。人工确认后直接使用 Binance 即时合约价格开仓，不再检查行情缓存时效、预测状态、信号期限、评分、交易时段或研究准入；账户权限、已有仓位、资金与交易所规则仍会校验。</p>
       </section>
       <dl class="manual-follow-risk">
         <div><dt>资金基准</dt><dd>${this.escape(capitalLabel)}</dd></div>
@@ -1134,7 +1134,7 @@ class AiMonitorDashboard extends HTMLElement {
         <input type="hidden" name="expected_contract_symbol" value="${this.escape(item.contract_symbol)}">
         <input type="hidden" name="expected_direction" value="${direction}">
         <label class="live-copy-ack"><input name="acknowledge_real_funds" type="checkbox" required ${this.state.manualFollowLoading ? "disabled" : ""}><span>我确认这会按当前信号方向提交真实 Binance 合约市价单，可能产生真实资金损失。${direction === "short" ? " 当前信号会开空仓，不是买入现货。" : ""}</span></label>
-        <button class="danger" type="submit" ${!runnable || this.state.manualFollowLoading ? "disabled" : ""}>${this.state.manualFollowLoading ? "正在校验并提交…" : `确认${direction === "short" ? "开空" : "跟买"}`}</button>
+        <button class="danger" type="submit" ${!runnable || this.state.manualFollowLoading ? "disabled" : ""}>${this.state.manualFollowLoading ? "正在提交 Binance…" : `确认${direction === "short" ? "开空" : "跟买"}`}</button>
       </form>`;
   }
 
