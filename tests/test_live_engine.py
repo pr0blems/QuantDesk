@@ -278,6 +278,89 @@ def test_post_fill_zero_long_liquidation_price_keeps_protected_position(
     assert failed == []
 
 
+def test_periodic_tick_keeps_protected_long_with_zero_liquidation_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    position = {
+        "symbol": "TXNUSDT",
+        "position_side": "LONG",
+        "side": "long",
+        "amt": 0.33,
+        "entry_price": 100,
+        "liquidation_price": 0,
+    }
+    snapshot = SimpleNamespace(
+        account_type="UM_FUTURE",
+        available_balance=Decimal("900"),
+        wallet_balance=Decimal("1000"),
+        unrealized_pnl=Decimal("0"),
+        positions=(position,),
+    )
+    managed = {
+        ("TXNUSDT", "LONG"): {
+            "id": 17,
+            "symbol": "TXNUSDT",
+            "position_side": "LONG",
+            "side": "BUY",
+            "quantity": Decimal("0.33"),
+            "entry_basis_json": {
+                "schema_version": 2,
+                "availability": "captured",
+                "mode": "live",
+            },
+        }
+    }
+    account = _account()
+    account["runtime_state_json"] = {}
+    account["strategy_snapshot_json"] = {}
+    closed: list[str] = []
+    failed: list[str] = []
+
+    monkeypatch.setattr(live_engine, "_account_service", SimpleNamespace(account=lambda *_args, **_kwargs: snapshot))
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(live_engine, "_credentials", lambda *_args: ("key", "secret"))
+    monkeypatch.setattr(live_engine, "_execution_timeframe_seconds", lambda *_args: 3600)
+    monkeypatch.setattr(live_engine, "_cached_position_mode", lambda *_args: "hedge")
+    monkeypatch.setattr(live_engine, "_reconcile_intents", lambda *_args: False)
+    monkeypatch.setattr(live_engine, "_strategy_universe", lambda *_args: ["TXNUSDT"])
+    monkeypatch.setattr(live_engine, "_managed_positions", lambda *_args: managed)
+    monkeypatch.setattr(live_engine, "_cancel_orphan_protections", lambda *_args: None)
+    monkeypatch.setattr(
+        live_engine,
+        "_protection_counts",
+        lambda *_args: {("TXNUSDT", "LONG"): 2},
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_current_stop_prices",
+        lambda *_args: {("TXNUSDT", "LONG"): 95.0},
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_execution_signal",
+        lambda *_args, **_kwargs: (0, None, [], None, {}),
+    )
+    monkeypatch.setattr(live_engine, "_current_open_risk", lambda *_args, **_kwargs: Decimal("0"))
+    monkeypatch.setattr(live_engine, "_entry_loss_guard", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        live_engine,
+        "_close_position",
+        lambda *_args, **_kwargs: closed.append(str(_args[-1])) or True,
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_fail_account",
+        lambda _account, reason: failed.append(reason),
+    )
+    monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(live_engine.store, "execute", lambda *_args, **_kwargs: 1)
+
+    live_engine._tick_account(account)
+
+    assert closed == []
+    assert failed == []
+
+
 def test_hedge_close_only_uses_the_strategy_managed_quantity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

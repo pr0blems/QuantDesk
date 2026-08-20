@@ -2701,7 +2701,7 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
             stop_price = stop_prices.get(key)
             liquidation_price = position.get("liquidation_price")
             entry_price = position.get("entry_price")
-            if not stop_price or not liquidation_price or not entry_price:
+            if not stop_price or liquidation_price is None or not entry_price:
                 _close_position(
                     account,
                     api_key,
@@ -2711,17 +2711,13 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                 )
                 _fail_account(account, "position_state_unverified")
                 return
-            try:
-                safety = liquidation_stop_safety(
-                    entry_price=entry_price,
-                    stop_price=stop_price,
-                    liquidation_price=liquidation_price,
-                    direction=side,
-                    min_buffer_pct=policy.liquidation_buffer_pct,
-                )
-            except (TypeError, ValueError):
-                safety = None
-            if safety is None or not safety.safe:
+            if not _exchange_liquidation_is_safe(
+                entry_price=entry_price,
+                stop_price=stop_price,
+                liquidation_price=liquidation_price,
+                direction=side,
+                min_buffer_pct=policy.liquidation_buffer_pct,
+            ):
                 _close_position(
                     account,
                     api_key,
