@@ -41,6 +41,7 @@ from .live_risk import (
     total_open_risk,
 )
 from .market_config import tradfi_symbols
+from .market_microstructure import order_book_gate_snapshot
 from .paper_engine import (
     ENTRY_BASIS_SCHEMA_VERSION,
     _exit_levels,
@@ -158,6 +159,30 @@ def _utc_seconds(value: Any) -> float | None:
     return None
 
 
+def _current_order_book_gate(symbol: str, direction: str) -> dict[str, Any]:
+    """Load and evaluate the latest Binance book immediately before auto entry."""
+
+    try:
+        rows = store.query(
+            """SELECT symbol,bid_depth_notional,ask_depth_notional,
+                      bid_depth_notional_5,ask_depth_notional_5,
+                      book_imbalance,book_imbalance_5,depth_levels,
+                      bid_level_count,ask_level_count,spread_bps,
+                      bid_depth_change_5s_pct,ask_depth_change_5s_pct,
+                      bid_depth_change_30s_pct,ask_depth_change_30s_pct,
+                      imbalance_change_5s,ts
+               FROM market_microstructure WHERE symbol=? LIMIT 1""",
+            (str(symbol or "").upper(),),
+        )
+    except Exception:
+        rows = []
+    return order_book_gate_snapshot(
+        dict(rows[0]) if rows else {},
+        direction=direction,
+        now_seconds=int(time.time()),
+    )
+
+
 def _ai_monitor_signal(
     account: dict[str, Any],
     symbol: str,
@@ -257,6 +282,11 @@ def _ai_monitor_signal(
         return 0, None, [], None, {}
     if direction < 0 and not bool(config.get("ai_monitor_live_allow_short", True)):
         return 0, None, [], None, {}
+    execution_order_book: dict[str, Any] | None = None
+    if not manual_selection:
+        execution_order_book = _current_order_book_gate(symbol, direction_name)
+        if not bool(execution_order_book.get("passed")):
+            return 0, None, [], None, {}
     market_environment = evidence.get("market_environment")
     market_environment = (
         market_environment if isinstance(market_environment, dict) else {}
@@ -369,6 +399,7 @@ def _ai_monitor_signal(
             and (not entry_ready or combined_score < minimum_score)
         ),
         "entry_gate": gate,
+        "execution_order_book": execution_order_book,
         "risk_plan": risk_plan,
         "risk_proposal": risk_proposal,
         "macro_policy": macro_policy,

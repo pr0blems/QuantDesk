@@ -48,6 +48,7 @@ from quantdesk_v2.ai_monitor import (
     settle_due_predictions,
     settleable_historical_outcomes,
     signal_readiness_snapshot,
+    stable_gate_summary,
     strongest_candidate_per_symbol,
     summarize_historical_opportunities,
     virtual_entry_gate_snapshot,
@@ -67,6 +68,7 @@ from quantdesk_v2.interfaces.api.ai_monitor import (
     _stable_opportunity_contract,
     _utc_out,
 )
+from quantdesk_v2.market_microstructure import order_book_gate_snapshot
 from quantdesk_v2.models import (
     AiMonitorOpportunity,
     AiMonitorPrediction,
@@ -2414,10 +2416,116 @@ def test_market_flow_snapshot_combines_real_inputs_and_blocks_opposite_direction
     assert bullish["depth_status"] == "fresh"
     assert bullish["depth_age_seconds"] == 0
     assert bullish["depth_unavailable_reason"] is None
+    assert bullish["order_book_gate"]["passed"] is True
+    assert bullish["order_book_confirms_direction"] is True
     assert bullish["data_quality"] >= 0.5
     assert bullish["bid_level_count"] == 100
     assert bullish["sources"]["order_count"] == "visible_price_levels_proxy"
     assert bearish["hard_conflict"] is True
+    assert bearish["order_book_gate"]["direction_conflict"] is True
+
+
+def test_order_book_gate_tolerates_bounded_clock_skew_and_only_vetoes_conflicts() -> None:
+    now_seconds = 1_800_000_000
+    depth = {
+        "ts": now_seconds + 8,
+        "bid_depth_notional": 1_000,
+        "ask_depth_notional": 900,
+        "book_imbalance": 0.05263158,
+        "book_imbalance_5": 0.08,
+        "bid_level_count": 100,
+        "ask_level_count": 100,
+        "spread_bps": 2.5,
+        "imbalance_change_5s": 0.01,
+    }
+
+    neutral = order_book_gate_snapshot(
+        depth,
+        direction="long",
+        now_seconds=now_seconds,
+    )
+    conflict = order_book_gate_snapshot(
+        {**depth, "book_imbalance": -0.4, "book_imbalance_5": -0.5},
+        direction="long",
+        now_seconds=now_seconds,
+    )
+    one_sided_wall = order_book_gate_snapshot(
+        {**depth, "book_imbalance": 0.1, "book_imbalance_5": -0.7},
+        direction="long",
+        now_seconds=now_seconds,
+    )
+
+    assert neutral["snapshot_status"] == "fresh"
+    assert neutral["age_seconds"] == 0
+    assert neutral["clock_skew_seconds"] == 8
+    assert neutral["passed"] is True
+    assert neutral["confirms_direction"] is False
+    assert conflict["quality_passed"] is True
+    assert conflict["direction_conflict"] is True
+    assert conflict["passed"] is False
+    assert conflict["reason"] == "BINANCE_ORDER_BOOK_DIRECTION_CONFLICT"
+    assert one_sided_wall["directional_pressure"] < -0.2
+    assert one_sided_wall["direction_conflict"] is False
+    assert one_sided_wall["passed"] is True
+
+
+def test_market_flow_snapshot_keeps_depth_with_bounded_future_clock_skew() -> None:
+    now = datetime(2026, 8, 11, 8, 0, tzinfo=UTC)
+    snapshot = market_flow_snapshot(
+        {
+            "depth": {
+                "TESTUSDT": {
+                    "ts": int(now.timestamp()) + 8,
+                    "bid_depth_notional": 120,
+                    "ask_depth_notional": 100,
+                    "book_imbalance": 0.09,
+                    "book_imbalance_5": 0.12,
+                    "bid_level_count": 100,
+                    "ask_level_count": 100,
+                    "spread_bps": 1.2,
+                }
+            }
+        },
+        symbol="TEST",
+        contract_symbol="TESTUSDT",
+        direction="long",
+        now=now,
+    )
+
+    assert snapshot["depth_status"] == "fresh"
+    assert snapshot["depth_age_seconds"] == 0
+    assert snapshot["bid_depth_notional"] == 120
+    assert snapshot["order_book_quality_passed"] is True
+
+
+def test_stable_gate_blocks_an_unusable_execution_order_book() -> None:
+    now = datetime(2026, 8, 11, 8, 0, tzinfo=UTC)
+    result = stable_gate_summary(
+        {
+            "checks": {
+                "price_available": True,
+                "ticker_fresh": True,
+                "kline_fresh": True,
+                "feature_quality": True,
+            },
+            "data_status": "live",
+        },
+        {
+            "hard_conflict": False,
+            "order_book_gate": {
+                "quality_passed": False,
+                "direction_clear": False,
+                "reason": "BINANCE_ORDER_BOOK_STALE",
+            },
+        },
+        evaluated_at=now,
+        policy_mode="record",
+    )
+
+    assert result["passed"] is False
+    assert result["decision_checks"]["order_book_usable"] is False
+    assert "BINANCE_ORDER_BOOK_NOT_USABLE" in result["blocking_reasons"]
+    assert result["execution_safety_gate_applied"] is True
 
 
 def test_market_flow_snapshot_explains_stale_binance_depth() -> None:

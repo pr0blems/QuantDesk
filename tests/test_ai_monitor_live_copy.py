@@ -68,6 +68,23 @@ def _prediction_row(*, entry_ready: bool = True, direction: str = "long") -> dic
     }
 
 
+@pytest.fixture(autouse=True)
+def _fresh_order_book_for_live_signal_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        live_engine,
+        "_current_order_book_gate",
+        lambda *_args, **_kwargs: {
+            "status": "passed",
+            "passed": True,
+            "quality_passed": True,
+            "direction_clear": True,
+            "direction_conflict": False,
+        },
+    )
+
+
 def test_live_copy_schema_requires_explicit_true_only_at_endpoint_boundary() -> None:
     disabled = AiMonitorLiveCopyUpdate(enabled=False)
 
@@ -264,6 +281,44 @@ def test_ai_monitor_live_signal_applies_frozen_macro_position_multiplier(
     assert evidence["risk_proposal"]["risk_per_trade_pct"] == pytest.approx(0.125)
     assert evidence["risk_proposal"]["max_margin_pct"] == pytest.approx(0.5)
     assert evidence["risk_proposal"]["macro_position_multiplier"] == 0.25
+
+
+def test_ai_monitor_auto_signal_rechecks_current_book_but_manual_follow_bypasses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 17, 10, 1, tzinfo=UTC).timestamp()
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(live_engine.time, "time", lambda: now)
+    monkeypatch.setattr(
+        live_engine.store,
+        "query",
+        lambda *_args, **_kwargs: [_prediction_row()],
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_current_order_book_gate",
+        lambda symbol, direction: calls.append((symbol, direction))
+        or {
+            "status": "direction_conflict",
+            "passed": False,
+            "quality_passed": True,
+            "direction_clear": False,
+            "direction_conflict": True,
+        },
+    )
+
+    assert live_engine._ai_monitor_signal(_account(), "AAPLUSDT", price=102)[0] == 0
+    manual = live_engine._ai_monitor_signal(
+        _account(),
+        "AAPLUSDT",
+        price=102,
+        prediction_public_id="prediction-public-id",
+        opportunity_public_id="opportunity-public-id",
+    )
+
+    assert manual[0] == 1
+    assert manual[4]["execution_order_book"] is None
+    assert calls == [("AAPLUSDT", "long")]
 
 
 def test_ai_monitor_manual_signal_query_is_bound_to_clicked_prediction(

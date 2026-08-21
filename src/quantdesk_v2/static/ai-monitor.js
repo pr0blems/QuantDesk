@@ -3292,7 +3292,7 @@ class AiMonitorDashboard extends HTMLElement {
       || evidence.event_gate?.blocked === true
       || evidence.halt?.active === true
       || snapshot.riskEvents.some((event) => event?.blocked === true || ["critical", "blocked"].includes(String(event?.risk_level || event?.severity || "").toLowerCase()));
-    const hardFailedKeys = new Set(["market_quality", "market_flow_conflict", "quote_freshness", "quote_spread", "halt", "risk_event", "event_gate", "price_available", "ticker_fresh", "kline_fresh", "feature_quality", "quote_fresh", "spread_acceptable", "quote_sane", "not_halted", "data_coverage", "event_window_clear", "directional_conflict_clear"]);
+    const hardFailedKeys = new Set(["market_quality", "market_flow_conflict", "order_book_quality", "order_book_direction", "order_book_usable", "quote_freshness", "quote_spread", "halt", "risk_event", "event_gate", "price_available", "ticker_fresh", "kline_fresh", "feature_quality", "quote_fresh", "spread_acceptable", "quote_sane", "not_halted", "data_coverage", "event_window_clear", "directional_conflict_clear"]);
     const hardGateFailure = (gate?.checks || []).some((check) => !check.passed && hardFailedKeys.has(check.key));
     const stableGateBlocked = String(item?.gate_summary?.status || "").toLowerCase() === "blocked" || item?.gate_summary?.passed === false && Array.isArray(item?.gate_summary?.blocking_reasons) && item.gate_summary.blocking_reasons.length > 0;
     if (hardRiskBlock || hardGateFailure || stableGateBlocked) return "blocked";

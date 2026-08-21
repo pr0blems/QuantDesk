@@ -28,6 +28,7 @@ from .ai_monitor_read_models import (
     read_models_available,
     refresh_ai_monitor_read_models,
 )
+from .market_microstructure import order_book_gate_snapshot
 from .models import (
     AdminSetting,
     AiMonitorConfig,
@@ -1336,10 +1337,14 @@ def virtual_entry_gate_snapshot(
     require_market_quality: bool = False,
     macro_entry_allowed: bool = True,
     macro_policy: Mapping[str, Any] | None = None,
+    order_book_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an explicit, auditable gate for research-only virtual entries."""
 
     checked_at_text = checked_at.isoformat() if isinstance(checked_at, datetime) else str(checked_at)
+    frozen_order_book = (
+        dict(order_book_gate) if isinstance(order_book_gate, Mapping) else {}
+    )
     checks = [
         *(
             [
@@ -1423,6 +1428,28 @@ def virtual_entry_gate_snapshot(
             if require_market_quality
             else []
         ),
+        *(
+            [
+                {
+                    "key": "order_book_quality",
+                    "label": "实时盘口质量",
+                    "passed": bool(frozen_order_book.get("quality_passed")),
+                    "current": str(frozen_order_book.get("status") or "missing"),
+                    "required": "fresh / complete / spread-safe",
+                    "detail": "Binance 当前合约盘口必须新鲜、档位完整且点差可接受",
+                },
+                {
+                    "key": "order_book_direction",
+                    "label": "实时盘口方向",
+                    "passed": bool(frozen_order_book.get("direction_clear")),
+                    "current": frozen_order_book.get("directional_pressure"),
+                    "required": "> -0.20",
+                    "detail": "盘口只作为强冲突否决，不单独产生买卖信号",
+                },
+            ]
+            if frozen_order_book
+            else []
+        ),
         {
             "key": "entry_price",
             "label": "入场价格",
@@ -1435,7 +1462,7 @@ def virtual_entry_gate_snapshot(
     signal_confirmed = all(bool(item["passed"]) for item in checks[:-1])
     entry_ready = signal_confirmed and bool(checks[-1]["passed"])
     return {
-        "version": "research_entry_quality_v3",
+        "version": "research_entry_quality_v4",
         "execution_mode": "virtual_prediction_only",
         "real_order_enabled": False,
         "direction": "short" if direction == "short" else "long",
@@ -1452,6 +1479,7 @@ def virtual_entry_gate_snapshot(
         "checked_at": checked_at_text,
         "checks": checks,
         "macro_policy": dict(macro_policy or {}),
+        "order_book_gate": frozen_order_book or None,
         "note": "仅生成预测记录，不会调用模拟盘或实盘下单接口。",
     }
 
@@ -1517,6 +1545,11 @@ def prediction_entry_gate_snapshot(
         require_market_quality=bool(evidence.get("require_market_quality_for_prediction", False)),
         macro_entry_allowed=bool(macro_policy.get("entry_allowed", True)),
         macro_policy=macro_policy,
+        order_book_gate=(
+            dict(market_flow.get("order_book_gate") or {})
+            if isinstance(market_flow.get("order_book_gate"), Mapping)
+            else None
+        ),
     )
 
 
@@ -4040,6 +4073,12 @@ def stable_gate_summary(
         if policy_mode in {"disabled", "record", "score", "gate"}
         else "record"
     )
+    order_book_gate = market_flow.get("order_book_gate")
+    order_book_gate = (
+        dict(order_book_gate) if isinstance(order_book_gate, Mapping) else {}
+    )
+    if order_book_gate:
+        checks["order_book_usable"] = bool(order_book_gate.get("quality_passed"))
     checks["directional_conflict_clear"] = not bool(market_flow.get("hard_conflict"))
     failure_codes = {
         "price_available": "QUOTE_PRICE_MISSING",
@@ -4054,6 +4093,7 @@ def stable_gate_summary(
         "data_coverage": "MARKET_DATA_COVERAGE_LOW",
         "event_window_clear": "HIGH_IMPACT_EVENT_WINDOW",
         "source_price_consistent": "REFERENCE_SOURCE_DIVERGENCE_HIGH",
+        "order_book_usable": "BINANCE_ORDER_BOOK_NOT_USABLE",
         "directional_conflict_clear": "MARKET_FLOW_DIRECTION_CONFLICT",
     }
     def failed_codes(values: Mapping[str, bool]) -> list[str]:
@@ -4073,6 +4113,7 @@ def stable_gate_summary(
         "ticker_fresh",
         "kline_fresh",
         "feature_quality",
+        "order_book_usable",
     }
     # Binance is the execution and valuation venue for mapped contracts.
     # Finnhub/UW cash-market quotes are cross-venue references: in record and
@@ -4140,11 +4181,11 @@ def stable_gate_summary(
         ),
         "policy_mode": normalized_mode,
         "hard_gate_applied": normalized_mode == "gate",
-        "execution_safety_gate_applied": False,
+        "execution_safety_gate_applied": bool(order_book_gate),
         "execution_price_source": "binance",
         "reference_quote_role": "observe_and_score",
         "evaluated_at": evaluated_at.isoformat(),
-        "decision_version": f"binance_primary_{normalized_mode}_v2",
+        "decision_version": f"binance_primary_{normalized_mode}_v3",
     }
 
 
@@ -4571,25 +4612,24 @@ def market_flow_snapshot(
     now_seconds = int(now.replace(tzinfo=UTC).timestamp())
     now_ms = now_seconds * 1_000
 
-    depth_ts = int(depth.get("ts") or 0)
-    depth_age_seconds = now_seconds - depth_ts if depth_ts else None
-    depth_fresh = (
-        0 <= depth_age_seconds <= 30 if depth_age_seconds is not None else False
+    order_book_gate = order_book_gate_snapshot(
+        raw_depth,
+        direction=direction,
+        now_seconds=now_seconds,
     )
+    depth_ts = int(raw_depth.get("ts") or 0)
+    depth_age_seconds = order_book_gate.get("age_seconds")
+    depth_status = str(order_book_gate.get("snapshot_status") or "missing")
+    depth_fresh = depth_status == "fresh"
     if not raw_depth:
-        depth_status = "missing"
         depth_unavailable_reason = "BINANCE_DEPTH_SNAPSHOT_MISSING"
     elif not depth_ts:
-        depth_status = "invalid"
         depth_unavailable_reason = "BINANCE_DEPTH_TIMESTAMP_MISSING"
-    elif depth_age_seconds is not None and depth_age_seconds < 0:
-        depth_status = "invalid"
+    elif depth_status == "invalid":
         depth_unavailable_reason = "BINANCE_DEPTH_CLOCK_SKEW"
     elif not depth_fresh:
-        depth_status = "stale"
         depth_unavailable_reason = "BINANCE_DEPTH_SNAPSHOT_STALE"
     else:
-        depth_status = "fresh"
         depth_unavailable_reason = None
     if not depth_fresh:
         depth = {}
@@ -4683,17 +4723,20 @@ def market_flow_snapshot(
         else 0.0
     )
     data_quality = max(0.0, min(1.0, available_quality))
-    hard_conflict = bool(
+    legacy_flow_conflict = bool(
         main_force_ratio is not None
         and len(components) >= 2
         and directional_score < 35
+    )
+    hard_conflict = bool(
+        legacy_flow_conflict or order_book_gate.get("direction_conflict")
     )
     confirms_direction = bool(main_force_ratio is not None and directional_score >= 55)
     directional_data_available = main_force_ratio is not None
     flow_fresh = directional_data_available and (depth_fresh or positioning_fresh)
 
     return {
-        "version": "market_flow_proxy_v1",
+        "version": "market_flow_proxy_v2",
         "score": round(max(0.0, min(100.0, flow_score)), 4),
         "directional_score": round(directional_score, 4),
         "data_quality": round(data_quality, 4),
@@ -4707,7 +4750,14 @@ def market_flow_snapshot(
         "depth_age_seconds": depth_age_seconds,
         "depth_freshness_limit_seconds": 30,
         "depth_unavailable_reason": depth_unavailable_reason,
+        "order_book_gate": order_book_gate,
+        "order_book_quality_passed": bool(order_book_gate.get("quality_passed")),
+        "order_book_direction_clear": bool(order_book_gate.get("direction_clear")),
+        "order_book_confirms_direction": bool(
+            order_book_gate.get("confirms_direction")
+        ),
         "confirms_direction": confirms_direction,
+        "legacy_flow_conflict": legacy_flow_conflict,
         "hard_conflict": hard_conflict,
         "main_force_ratio": round(main_force_ratio, 6)
         if main_force_ratio is not None
@@ -8676,6 +8726,11 @@ def _scan_opportunities(
             require_market_quality=require_market_quality,
             macro_entry_allowed=macro_entry_allowed,
             macro_policy=macro_entry_policy,
+            order_book_gate=(
+                dict(market_flow.get("order_book_gate") or {})
+                if isinstance(market_flow.get("order_book_gate"), Mapping)
+                else None
+            ),
         )
         max_holding_seconds = (
             _TIMEFRAME_SECONDS[timeframe] * prediction_max_holding_bars
