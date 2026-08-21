@@ -5099,14 +5099,28 @@ class AiMonitorDashboard extends HTMLElement {
   predictionFeatureCells(item) {
     const feature = this.predictionFeatureSnapshot(item);
     const sessionLabel = ({ premarket: "盘前", regular: "盘中", postmarket: "盘后", closed: "休市", unknown: "时段未知" })[feature.session] || feature.session;
-    const quoteLabel = ({ passed: "NBBO 已通过", partial: "现货价快照（非盘口）", blocked: "行情阻断", missing: "行情缺失" })[feature.quoteQuality];
+    const quoteReason = String(feature.availability?.quote?.reason || "");
+    const quoteLabel = feature.quoteQuality === "passed"
+      ? "参考 NBBO 已通过"
+      : feature.quoteQuality === "partial" && quoteReason === "reference_quote_stale"
+      ? "参考盘口已过期"
+      : feature.quoteQuality === "partial"
+      ? "现货价快照（非盘口）"
+      : feature.quoteQuality === "blocked"
+      ? "参考行情异常"
+      : "参考行情缺失";
     const reasonLabel = (reason) => ({
+      available: "已采集",
+      stale: "信号时已过期",
+      channel_disabled: "采集通道关闭",
       uw_disabled_at_signal: "采集关闭",
       legacy_snapshot_missing: "历史未冻结",
       market_feature_not_linked: "信号时无快照",
       not_captured_at_signal: "信号时无数据",
       finnhub_last_trade_only: "Finnhub 现货快照",
       last_trade_only: "仅现货价",
+      reference_quote_stale: "参考盘口已过期",
+      reference_quote_blocked: "参考行情异常",
       no_signal_time_quote: "信号时无行情",
     })[String(reason || "")] || "未采集";
     const optionReason = reasonLabel(feature.availability?.option_flow?.reason);

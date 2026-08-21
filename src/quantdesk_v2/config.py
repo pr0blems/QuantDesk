@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     external_news_ws_poll_seconds: float = 2.0
 
     monitor_symbols_config: Path = Path("config/tradfi_symbols.json")
+    # Development/API-only instances can share a production database without
+    # competing with the deployed AI Monitor scheduler. Keep production
+    # behavior enabled by default; local operators can explicitly disable only
+    # this worker with AI_MONITOR_BACKGROUND_WORKERS_ENABLED=false.
+    ai_monitor_background_workers_enabled: bool = True
 
     @property
     def database_url_value(self) -> str:

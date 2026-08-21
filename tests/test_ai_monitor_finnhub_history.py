@@ -77,7 +77,8 @@ def test_prediction_analytics_explains_partial_and_missing_domains() -> None:
     )
 
     assert '<option value="partial">仅现货价快照</option>' in component
-    assert 'partial: "现货价快照（非盘口）"' in component
+    assert '? "现货价快照（非盘口）"' in component
+    assert 'reference_quote_stale: "参考盘口已过期"' in component
     assert 'uw_disabled_at_signal: "采集关闭"' in component
     assert 'legacy_snapshot_missing: "历史未冻结"' in component
     assert 'market_feature_not_linked: "信号时无快照"' in component

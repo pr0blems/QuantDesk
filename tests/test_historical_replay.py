@@ -219,7 +219,7 @@ def test_historical_exit_requires_two_consecutive_low_closed_bars() -> None:
     assert confirmed["price"] == 104
 
 
-def test_historical_exit_reversal_is_immediate_and_precedes_future_barrier() -> None:
+def test_historical_exit_reversal_requires_two_closed_bars_and_precedes_future_barrier() -> None:
     start = 1_800_000_000_000
     interval = 900_000
     decision = _historical_exit_decision(
@@ -234,8 +234,15 @@ def test_historical_exit_reversal_is_immediate_and_precedes_future_barrier() -> 
             {
                 "open_time": start + interval,
                 "open": 100.5,
-                "high": 106,
+                "high": 101.5,
                 "low": 100,
+                "close": 101,
+            },
+            {
+                "open_time": start + interval * 2,
+                "open": 101,
+                "high": 106,
+                "low": 100.5,
                 "close": 105,
             },
         ],
@@ -244,22 +251,27 @@ def test_historical_exit_reversal_is_immediate_and_precedes_future_barrier() -> 
                 "price_time_ms": start + interval,
                 "combined": 80,
                 "direction": "short",
+            },
+            {
+                "price_time_ms": start + interval * 2,
+                "combined": 79,
+                "direction": "short",
             }
         ],
         entry_price=100,
         direction="long",
         risk_plan={"stop_loss_price": 98, "take_profit_price": 104},
         start_ms=start,
-        due_ms=start + interval * 2,
+        due_ms=start + interval * 3,
         timeframe_ms=interval,
         exit_threshold=65,
     )
 
     assert decision is not None and decision["reason"] == "score_reversal"
-    assert decision["confirmation_points"] == 1
-    assert decision["price_time_ms"] == start + interval
-    assert decision["price"] == 100.5
-    assert decision["observed_bar_count"] == 1
+    assert decision["confirmation_points"] == 2
+    assert decision["price_time_ms"] == start + interval * 2
+    assert decision["price"] == 101
+    assert decision["observed_bar_count"] == 2
 
 
 def test_historical_score_observation_marks_only_confirmed_opposite_direction() -> None:
@@ -406,7 +418,7 @@ def test_historical_exit_keeps_stop_loss_over_same_bar_profit_guard() -> None:
     assert decision["price_time_ms"] == start + interval * 2
 
 
-def test_one_hour_replay_reaches_two_low_score_exit_on_closed_15m_bars(
+def test_one_hour_replay_ignores_low_score_noise_from_closed_15m_bars(
     monkeypatch,
 ) -> None:
     hour_ms = 3_600_000
@@ -539,12 +551,12 @@ def test_one_hour_replay_reaches_two_low_score_exit_on_closed_15m_bars(
     assert signal.due_at == datetime.fromtimestamp(
         (entry_at_ms + hour_ms) / 1_000, UTC
     ).replace(tzinfo=None)
-    assert outcome.settlement_json["exit_reason"] == "take_profit"
-    assert outcome.settlement_json["exit_subreason"] == "profit_lock"
+    assert outcome.settlement_json["exit_reason"] == "max_holding_time"
+    assert outcome.settlement_json["exit_subreason"] is None
     assert outcome.exit_at == datetime.fromtimestamp(
-        (entry_at_ms + quarter_hour_ms) / 1_000, UTC
+        (entry_at_ms + hour_ms) / 1_000, UTC
     ).replace(tzinfo=None)
-    assert round(float(outcome.exit_price), 4) == 100.1
+    assert round(float(outcome.exit_price), 4) == 100.4
     # The entry decision itself uses only the previously closed 1h signal bar.
     # Later values can belong to the next independent news event in this test.
     assert evaluated_signal_ends[0] == signal_open_ms

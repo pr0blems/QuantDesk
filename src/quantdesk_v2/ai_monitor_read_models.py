@@ -11,13 +11,14 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import func, inspect, or_, select
 from sqlalchemy.orm import Session
 
+from . import macro_market
 from .models import (
     AiMonitorOpportunity,
     AiMonitorOpportunityCurrent,
@@ -37,7 +38,9 @@ READ_MODEL_TABLES = frozenset(
     }
 )
 PROJECTION_FLUSH_BATCH_SIZE = 100
+PREDICTION_FACT_READ_BATCH_SIZE = 25
 SCORE_HISTORY_READ_BATCH_SIZE = 1000
+PREDICTION_FACT_PROJECTION_VERSION = "signal_features_v3"
 _availability_cache: dict[int, tuple[float, bool]] = {}
 _availability_lock = threading.Lock()
 
@@ -109,9 +112,112 @@ def _event_risk(value: Any) -> str:
     return "clear"
 
 
+def _feature_status(
+    payload: Mapping[str, Any] | None,
+    *,
+    channel_enabled: bool | None = None,
+) -> str:
+    value = _mapping(payload)
+    if channel_enabled is False:
+        return "channel_disabled"
+    if not value:
+        return "not_captured_at_signal"
+    if value.get("available") is False:
+        reason = str(
+            _first(
+                value.get("reason"),
+                _mapping(value.get("data_quality")).get("status"),
+                "unavailable",
+            )
+        ).strip().lower()
+        return reason[:32] or "unavailable"
+    if value.get("fresh") is False:
+        return "stale"
+    return "available"
+
+
+def _signal_session(signal_at: datetime | None, fallback: Any) -> str:
+    if signal_at is None:
+        return str(fallback or "unknown")[:16]
+    aware = signal_at if signal_at.tzinfo is not None else signal_at.replace(tzinfo=UTC)
+    return str(macro_market.us_market_session(aware).get("key") or fallback or "unknown")[:16]
+
+
+def _quote_projection(
+    quote_payload: Mapping[str, Any] | None,
+    *,
+    signal_at: datetime | None,
+    market_quality: Mapping[str, Any],
+) -> dict[str, Any]:
+    quote = _mapping(quote_payload)
+    bid = _decimal(quote.get("bid"))
+    ask = _decimal(quote.get("ask"))
+    last_price = _decimal(_first(quote.get("last_price"), quote.get("price")))
+    spread_bps = _decimal(quote.get("spread_bps"))
+    if spread_bps is None and bid is not None and ask is not None and bid > 0 and ask >= bid:
+        midpoint = (bid + ask) / Decimal("2")
+        if midpoint > 0:
+            spread_bps = (ask - bid) / midpoint * Decimal("10000")
+
+    # The snapshot records quote age at capture time. Prefer that immutable
+    # value over recomputing from a timezone-naive database timestamp; the
+    # latter made valid historical NBBO look hours stale after projection.
+    explicit_age_ms = _decimal(quote.get("quote_age_ms"))
+    quote_age_ms: int | None = (
+        max(0, int(explicit_age_ms)) if explicit_age_ms is not None else None
+    )
+    received_at_ms = _decimal(
+        _first(quote.get("quote_received_at_ms"), quote.get("received_at_ms"))
+    )
+    if quote_age_ms is None and received_at_ms is not None and signal_at is not None:
+        received = int(received_at_ms)
+        if 0 < received < 1_000_000_000_000:
+            received *= 1_000
+        aware = signal_at if signal_at.tzinfo is not None else signal_at.replace(tzinfo=UTC)
+        quote_age_ms = max(0, int(aware.timestamp() * 1_000) - received)
+
+    session = _signal_session(
+        signal_at,
+        _first(quote.get("market_session"), market_quality.get("market_session")),
+    )
+    default_max_age = 2_000 if session == "regular" else 10_000
+    maximum_age_ms = int(
+        _decimal(market_quality.get("maximum_quote_age_ms")) or default_max_age
+    )
+    maximum_spread_bps = _decimal(
+        market_quality.get("maximum_spread_bps")
+    ) or Decimal("80")
+    has_nbbo = bool(
+        bid is not None
+        and ask is not None
+        and bid > 0
+        and ask > 0
+        and ask >= bid
+    )
+    has_price = bool(last_price is not None or bid is not None or ask is not None)
+    if not has_price:
+        quality = "missing"
+    elif bid is not None and ask is not None and not has_nbbo:
+        quality = "blocked"
+    elif has_nbbo and spread_bps is not None and spread_bps > maximum_spread_bps:
+        quality = "blocked"
+    elif has_nbbo and quote_age_ms is not None and quote_age_ms <= maximum_age_ms:
+        quality = "passed"
+    else:
+        quality = "partial"
+    return {
+        "quality": quality,
+        "source": str(_first(quote.get("source"), quote.get("provider"), "unknown"))[:32],
+        "age_ms": quote_age_ms,
+        "spread_bps": spread_bps,
+        "market_session": session,
+    }
+
+
 def _projection_inputs(
     opportunity: AiMonitorOpportunity,
     prediction: AiMonitorPrediction | None,
+    snapshot: OpportunityMarketSnapshot | None = None,
 ) -> dict[str, Any]:
     opportunity_evidence = _mapping(opportunity.evidence_json)
     prediction_evidence = _mapping(prediction.evidence_json if prediction else {})
@@ -131,6 +237,25 @@ def _projection_inputs(
     option_flow = _mapping(flow.get("option_flow"))
     gex = _mapping(flow.get("gex"))
     institutional = _mapping(flow.get("institutional_flow"))
+    frozen_quote = _mapping(snapshot.quote_snapshot_json if snapshot is not None else {})
+    frozen_option_flow = _mapping(
+        snapshot.option_flow_snapshot_json if snapshot is not None else {}
+    )
+    frozen_gex = _mapping(snapshot.gex_snapshot_json if snapshot is not None else {})
+    frozen_institutional = _mapping(
+        snapshot.institutional_flow_snapshot_json if snapshot is not None else {}
+    )
+    option_flow = frozen_option_flow or option_flow
+    gex = frozen_gex or gex
+    institutional = frozen_institutional or institutional
+    signal_at = prediction.predicted_at if prediction is not None else opportunity.discovered_at
+    quote_projection = _quote_projection(
+        frozen_quote or _mapping(quality.get("quote")) or _mapping(evidence.get("quote")),
+        signal_at=signal_at,
+        market_quality=quality,
+    )
+    uw_policy = _mapping(evidence.get("unusual_whales_policy"))
+    channels = _mapping(uw_policy.get("channels"))
 
     coverage = _decimal(
         _first(
@@ -155,17 +280,20 @@ def _projection_inputs(
         "domains": domains,
         "gate": gate,
         "primary_blocker": primary_blocker,
-        "market_session": str(
-            _first(
-                quality.get("market_session"),
-                evidence.get("market_session"),
-                _mapping(market_environment.get("market_session")).get("key"),
-                "unknown",
-            )
-        )[:16],
-        "quote_quality": _quote_quality(
-            _first(quality.get("data_status"), data_quality.get("status"))
+        "market_session": quote_projection["market_session"],
+        "quote_quality": quote_projection["quality"],
+        "quote_source": quote_projection["source"],
+        "quote_age_ms": quote_projection["age_ms"],
+        "quote_spread_bps": quote_projection["spread_bps"],
+        "option_flow_status": _feature_status(
+            option_flow,
+            channel_enabled=channels.get("option_trades") if channels else None,
         ),
+        "gex_status": _feature_status(
+            gex,
+            channel_enabled=channels.get("gex") if channels else None,
+        ),
+        "institutional_flow_status": _feature_status(institutional),
         "event_risk": _event_risk(
             _first(
                 event_gate.get("risk_level"),
@@ -209,25 +337,18 @@ def refresh_prediction_facts(
     user_id: int | None = None,
     limit: int = 2000,
 ) -> int:
-    statement = (
-        select(AiMonitorPrediction, AiMonitorOpportunity, OpportunityMarketSnapshot)
-        .join(
-            AiMonitorOpportunity,
-            AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
-        )
-        .outerjoin(
-            OpportunityMarketSnapshot,
-            OpportunityMarketSnapshot.opportunity_id == AiMonitorOpportunity.id,
-        )
+    id_statement = (
+        select(AiMonitorPrediction.id, AiMonitorPrediction.updated_at)
         .order_by(AiMonitorPrediction.updated_at.desc(), AiMonitorPrediction.id.desc())
         .limit(max(1, min(int(limit), 10000)))
     )
     if user_id is not None:
-        statement = statement.where(AiMonitorPrediction.user_id == user_id)
-    rows = list(db.execute(statement).all())
-    if not rows:
+        id_statement = id_statement.where(AiMonitorPrediction.user_id == user_id)
+    prediction_rows = list(db.execute(id_statement).all())
+    prediction_ids = [row.id for row in prediction_rows]
+    if not prediction_ids:
         return 0
-    prediction_ids = [prediction.id for prediction, _opportunity, _snapshot in rows]
+
     existing = {
         fact.prediction_id: fact
         for fact in db.scalars(
@@ -238,11 +359,105 @@ def refresh_prediction_facts(
     }
     now = utcnow()
     changed = 0
-    for prediction, opportunity, snapshot in rows:
+
+    # Projection-version upgrades only need the immutable feature snapshot.
+    # Avoid re-reading the duplicated ~400 KB opportunity/prediction audit JSON
+    # when the authoritative prediction has not changed.
+    snapshot_only_ids = [
+        row.id
+        for row in prediction_rows
+        if (fact := existing.get(row.id)) is not None
+        and fact.source_updated_at >= row.updated_at
+        and fact.projection_version != PREDICTION_FACT_PROJECTION_VERSION
+    ]
+    for offset in range(0, len(snapshot_only_ids), PREDICTION_FACT_READ_BATCH_SIZE):
+        batch_ids = snapshot_only_ids[offset : offset + PREDICTION_FACT_READ_BATCH_SIZE]
+        snapshot_rows = db.execute(
+            select(
+                AiMonitorPrediction.id,
+                AiMonitorPrediction.predicted_at,
+                OpportunityMarketSnapshot.id,
+                OpportunityMarketSnapshot.quote_snapshot_json,
+                OpportunityMarketSnapshot.option_flow_snapshot_json,
+                OpportunityMarketSnapshot.gex_snapshot_json,
+                OpportunityMarketSnapshot.institutional_flow_snapshot_json,
+            )
+            .outerjoin(
+                OpportunityMarketSnapshot,
+                OpportunityMarketSnapshot.opportunity_id
+                == AiMonitorPrediction.opportunity_id,
+            )
+            .where(AiMonitorPrediction.id.in_(batch_ids))
+        ).all()
+        for row in snapshot_rows:
+            fact = existing[row[0]]
+            quote = _quote_projection(
+                _mapping(row[3]),
+                signal_at=row[1],
+                market_quality={},
+            )
+            fact.market_session = quote["market_session"]
+            fact.quote_quality = quote["quality"]
+            fact.quote_source = (
+                quote["source"] if quote["source"] != "unknown" else fact.quote_source
+            )
+            fact.quote_age_ms = quote["age_ms"]
+            fact.quote_spread_bps = quote["spread_bps"]
+            for field, payload in (
+                ("option_flow_status", row[4]),
+                ("gex_status", row[5]),
+                ("institutional_flow_status", row[6]),
+            ):
+                status = _feature_status(_mapping(payload))
+                current = str(getattr(fact, field) or "")
+                if status != "not_captured_at_signal" or not current:
+                    setattr(fact, field, status)
+            fact.snapshot_complete = row[2] is not None
+            fact.projection_version = PREDICTION_FACT_PROJECTION_VERSION
+            fact.updated_at = now
+            changed += 1
+        db.flush()
+
+    full_prediction_ids = [
+        row.id
+        for row in prediction_rows
+        if (fact := existing.get(row.id)) is None
+        or fact.source_updated_at < row.updated_at
+    ]
+
+    # Evidence and immutable market snapshots can contain large audit JSON.
+    # Fetch a bounded group at a time so a rebuild cannot turn into one giant
+    # result set that times out while MySQL is still writing it to the client.
+    def source_rows():
+        for offset in range(
+            0,
+            len(full_prediction_ids),
+            PREDICTION_FACT_READ_BATCH_SIZE,
+        ):
+            batch_ids = full_prediction_ids[
+                offset : offset + PREDICTION_FACT_READ_BATCH_SIZE
+            ]
+            statement = (
+                select(
+                    AiMonitorPrediction,
+                    AiMonitorOpportunity,
+                    OpportunityMarketSnapshot,
+                )
+                .join(
+                    AiMonitorOpportunity,
+                    AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
+                )
+                .outerjoin(
+                    OpportunityMarketSnapshot,
+                    OpportunityMarketSnapshot.opportunity_id == AiMonitorOpportunity.id,
+                )
+                .where(AiMonitorPrediction.id.in_(batch_ids))
+            )
+            yield from db.execute(statement).all()
+
+    for prediction, opportunity, snapshot in source_rows():
         fact = existing.get(prediction.id)
-        if fact is not None and fact.source_updated_at >= prediction.updated_at:
-            continue
-        projection = _projection_inputs(opportunity, prediction)
+        projection = _projection_inputs(opportunity, prediction, snapshot)
         snapshot_complete = snapshot is not None
         invalid_reason = None
         if prediction.entry_price is None:
@@ -264,6 +479,12 @@ def refresh_prediction_facts(
             "net_result": prediction.net_result,
             "market_session": projection["market_session"],
             "quote_quality": projection["quote_quality"],
+            "quote_source": projection["quote_source"],
+            "quote_age_ms": projection["quote_age_ms"],
+            "quote_spread_bps": projection["quote_spread_bps"],
+            "option_flow_status": projection["option_flow_status"],
+            "gex_status": projection["gex_status"],
+            "institutional_flow_status": projection["institutional_flow_status"],
             "event_risk": projection["event_risk"],
             "data_coverage": projection["data_coverage"],
             "news_score": _decimal(_first(prediction.signal_news_score, projection["news_score"])),
@@ -294,6 +515,7 @@ def refresh_prediction_facts(
             "expected_gross_edge_bps": prediction.expected_gross_edge_bps,
             "expected_edge_lower_bound_bps": prediction.expected_edge_lower_bound_bps,
             "snapshot_complete": snapshot_complete,
+            "projection_version": PREDICTION_FACT_PROJECTION_VERSION,
             "invalid_reason": invalid_reason,
             "signal_at": prediction.predicted_at,
             "due_at": prediction.due_at,

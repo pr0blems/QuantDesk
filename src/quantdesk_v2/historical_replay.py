@@ -982,14 +982,17 @@ def _historical_exit_decision(
     exit_threshold: float,
     estimated_cost_bps: float = 0.0,
     adaptive_exit_enabled: bool = False,
+    minimum_soft_exit_ms: int = 0,
+    score_confirmation_ms: int | None = None,
+    score_confirmation_bars: int = 2,
 ) -> dict[str, Any] | None:
     """Replay the live exit policy using only information known at each bar close.
 
     A profit guard frozen from prior closed bars is executable first. Price
     barriers are then evaluated before the score observed at the current bar's
-    close. Score reversals exit immediately, while weakening in the original
-    direction needs two consecutive observations below the frozen entry
-    threshold. The hard cap is considered last.
+    close. Score reversals and weakening both require native-timeframe closed
+    bars and respect the frozen minimum holding period. The hard cap is
+    considered last.
     """
 
     score_iterator = iter(score_observations)
@@ -997,8 +1000,12 @@ def _historical_exit_decision(
     score_history_exhausted = False
     normalized_direction = "short" if direction == "short" else "long"
     consecutive_low_scores = 0
+    consecutive_reversals = 0
     latest_score: dict[str, Any] | None = None
     observed_bar_count = 0
+    soft_exit_not_before_ms = start_ms + max(0, int(minimum_soft_exit_ms))
+    score_bar_ms = max(1, int(score_confirmation_ms or timeframe_ms))
+    required_confirmations = max(1, int(score_confirmation_bars))
     adaptive_exit = (
         ai_monitor.prediction_adaptive_path_exit(
             candles,
@@ -1008,6 +1015,7 @@ def _historical_exit_decision(
             due_ms,
             estimated_cost_bps=estimated_cost_bps,
             timeframe_ms=timeframe_ms,
+            minimum_soft_exit_ms=minimum_soft_exit_ms,
         )
         if adaptive_exit_enabled
         else None
@@ -1082,44 +1090,55 @@ def _historical_exit_decision(
         if score is not None:
             pending_score = None
             latest_score = score
-            observed_direction = str(score.get("direction") or normalized_direction)
-            if (
-                observed_direction in {"long", "short"}
-                and observed_direction != normalized_direction
-            ):
-                return {
-                    "reason": "score_reversal",
-                    "price": close_price,
-                    "price_time_ms": close_ms,
-                    "same_bar_conflict": False,
-                    "gap_execution": False,
-                    "confirmation_points": 1,
-                    "exit_threshold": exit_threshold,
-                    "observed_bar_count": observed_bar_count,
-                    "score_at_exit": latest_score,
-                }
-            try:
-                combined = float(score.get("combined"))
-            except (TypeError, ValueError):
-                consecutive_low_scores = 0
-            else:
-                consecutive_low_scores = (
-                    consecutive_low_scores + 1
-                    if combined < exit_threshold
-                    else 0
-                )
-                if consecutive_low_scores >= 2:
+            if close_ms % score_bar_ms == 0:
+                observed_direction = str(score.get("direction") or normalized_direction)
+                if (
+                    observed_direction in {"long", "short"}
+                    and observed_direction != normalized_direction
+                ):
+                    consecutive_reversals += 1
+                else:
+                    consecutive_reversals = 0
+                if (
+                    consecutive_reversals >= required_confirmations
+                    and close_ms >= soft_exit_not_before_ms
+                ):
                     return {
-                        "reason": "score_breakdown",
+                        "reason": "score_reversal",
                         "price": close_price,
                         "price_time_ms": close_ms,
                         "same_bar_conflict": False,
                         "gap_execution": False,
-                        "confirmation_points": 2,
+                        "confirmation_points": required_confirmations,
                         "exit_threshold": exit_threshold,
                         "observed_bar_count": observed_bar_count,
                         "score_at_exit": latest_score,
                     }
+                try:
+                    combined = float(score.get("combined"))
+                except (TypeError, ValueError):
+                    consecutive_low_scores = 0
+                else:
+                    consecutive_low_scores = (
+                        consecutive_low_scores + 1
+                        if combined < exit_threshold
+                        else 0
+                    )
+                    if (
+                        consecutive_low_scores >= required_confirmations
+                        and close_ms >= soft_exit_not_before_ms
+                    ):
+                        return {
+                            "reason": "score_breakdown",
+                            "price": close_price,
+                            "price_time_ms": close_ms,
+                            "same_bar_conflict": False,
+                            "gap_execution": False,
+                            "confirmation_points": required_confirmations,
+                            "exit_threshold": exit_threshold,
+                            "observed_bar_count": observed_bar_count,
+                            "score_at_exit": latest_score,
+                        }
 
         if adaptive_time_ms is not None and adaptive_time_ms <= close_ms:
             return {
@@ -1357,6 +1376,11 @@ def _replay_symbol(
             due_at,
             CONSERVATIVE_COST_MODEL,
         )
+        soft_exit_policy = ai_monitor.prediction_soft_exit_policy(
+            run.timeframe,
+            start_ms=entry_at_ms,
+            due_ms=due_at_ms,
+        )
         exit_decision = _historical_exit_decision(
             path,
             score_observation_stream(),
@@ -1369,6 +1393,9 @@ def _replay_symbol(
             exit_threshold=exit_threshold,
             estimated_cost_bps=guard_cost_estimate,
             adaptive_exit_enabled=True,
+            minimum_soft_exit_ms=int(soft_exit_policy["minimum_hold_ms"]),
+            score_confirmation_ms=int(soft_exit_policy["bar_ms"]),
+            score_confirmation_bars=int(soft_exit_policy["confirmation_bars"]),
         )
         if exit_decision is None:
             continue

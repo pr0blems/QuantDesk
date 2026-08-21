@@ -1597,6 +1597,20 @@ class AiMonitorPredictionFact(Base):
     quote_quality: Mapped[str] = mapped_column(
         String(16), default="unknown", nullable=False
     )
+    quote_source: Mapped[str] = mapped_column(
+        String(32), default="unknown", nullable=False
+    )
+    quote_age_ms: Mapped[int | None] = mapped_column(BigInteger)
+    quote_spread_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    option_flow_status: Mapped[str] = mapped_column(
+        String(32), default="not_captured_at_signal", nullable=False
+    )
+    gex_status: Mapped[str] = mapped_column(
+        String(32), default="not_captured_at_signal", nullable=False
+    )
+    institutional_flow_status: Mapped[str] = mapped_column(
+        String(32), default="not_captured_at_signal", nullable=False
+    )
     event_risk: Mapped[str] = mapped_column(
         String(16), default="unknown", nullable=False
     )
@@ -1641,6 +1655,9 @@ class AiMonitorPredictionFact(Base):
         Numeric(20, 8)
     )
     snapshot_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    projection_version: Mapped[str] = mapped_column(
+        String(32), default="signal_features_v3", nullable=False
+    )
     invalid_reason: Mapped[str | None] = mapped_column(String(96))
     signal_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

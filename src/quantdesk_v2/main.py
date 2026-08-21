@@ -231,11 +231,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 bool(_finnhub_runtime_config(database_engine).get("enabled", True))
             )
             market_engine.start()
-            ai_monitor.start(
-                database_engine,
-                runtime_settings.credential_master_key.get_secret_value(),
-                runtime_settings.monitor_symbols_config,
-            )
+            if runtime_settings.ai_monitor_background_workers_enabled:
+                ai_monitor.start(
+                    database_engine,
+                    runtime_settings.credential_master_key.get_secret_value(),
+                    runtime_settings.monitor_symbols_config,
+                )
             battle.start()
             underlying_quotes.start()
             live_engine.configure(

@@ -42,6 +42,7 @@ from quantdesk_v2.ai_monitor import (
     prediction_price_barrier_exit,
     prediction_score_exit_price,
     prediction_score_exit_signal,
+    prediction_soft_exit_policy,
     refresh_pending_prediction_scores,
     reopen_legacy_prediction_settlements,
     settle_due_predictions,
@@ -1701,7 +1702,7 @@ def test_hard_cap_never_reuses_a_pre_entry_candle() -> None:
     assert result is None
 
 
-def test_prediction_score_exit_requires_distinct_closed_bars_or_direction_reversal() -> None:
+def test_prediction_score_exit_requires_distinct_closed_bars_for_breakdown_and_reversal() -> None:
     start = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
     evidence = {
         "live_readiness": {"minimum_combined_score": 70},
@@ -1729,7 +1730,12 @@ def test_prediction_score_exit_requires_distinct_closed_bars_or_direction_revers
         {
             "live_score_history": [
                 {
-                    "calculated_at": (start + timedelta(minutes=5)).isoformat(),
+                    "calculated_at": (start + timedelta(minutes=15)).isoformat(),
+                    "combined": 80,
+                    "direction": "short",
+                },
+                {
+                    "calculated_at": (start + timedelta(minutes=30)).isoformat(),
                     "combined": 80,
                     "direction": "short",
                 }
@@ -1737,7 +1743,7 @@ def test_prediction_score_exit_requires_distinct_closed_bars_or_direction_revers
         },
         "long",
         start_ms=int(start.timestamp() * 1000),
-        end_ms=int((start + timedelta(minutes=15)).timestamp() * 1000),
+        end_ms=int((start + timedelta(minutes=30)).timestamp() * 1000),
     )
 
     assert result is not None and result["reason"] == "score_breakdown"
@@ -1749,6 +1755,7 @@ def test_prediction_score_exit_requires_distinct_closed_bars_or_direction_revers
         int((start + timedelta(minutes=30)).timestamp() * 1000),
     ]
     assert reversal is not None and reversal["reason"] == "score_reversal"
+    assert reversal["confirmation_points"] == 2
 
     recovered_later = prediction_score_exit_signal(
         {
@@ -1861,6 +1868,59 @@ def test_prediction_score_exit_waits_for_minimum_hold_after_two_closed_bars() ->
     assert after_warmup["price_time_ms"] == int(
         (start + timedelta(minutes=31)).timestamp() * 1000
     )
+
+
+def test_hourly_soft_exit_policy_waits_for_half_of_four_hour_horizon() -> None:
+    start = datetime(2026, 8, 21, 8, 0, tzinfo=UTC)
+    start_ms = int(start.timestamp() * 1000)
+    due_ms = int((start + timedelta(hours=4)).timestamp() * 1000)
+    policy = prediction_soft_exit_policy("1h", start_ms=start_ms, due_ms=due_ms)
+
+    assert policy["bar_ms"] == 60 * 60 * 1000
+    assert policy["minimum_hold_ms"] == 2 * 60 * 60 * 1000
+    assert policy["confirmation_unit"] == "closed_1h_bar"
+
+    evidence = {
+        "live_readiness": {"minimum_combined_score": 70},
+        "live_score_history": [
+            {
+                "calculated_at": (start + timedelta(hours=1)).isoformat(),
+                "combined": 64,
+                "direction": "short",
+            },
+            {
+                "calculated_at": (start + timedelta(hours=2)).isoformat(),
+                "combined": 63,
+                "direction": "short",
+            },
+        ],
+    }
+    before_minimum = prediction_score_exit_signal(
+        evidence,
+        "long",
+        start_ms=start_ms,
+        end_ms=int((start + timedelta(hours=1)).timestamp() * 1000),
+        confirmation_bar_ms=policy["bar_ms"],
+        minimum_hold_ms=policy["minimum_hold_ms"],
+        confirmation_bars=policy["confirmation_bars"],
+        confirmation_unit=policy["confirmation_unit"],
+    )
+    confirmed = prediction_score_exit_signal(
+        evidence,
+        "long",
+        start_ms=start_ms,
+        end_ms=int((start + timedelta(hours=2)).timestamp() * 1000),
+        confirmation_bar_ms=policy["bar_ms"],
+        minimum_hold_ms=policy["minimum_hold_ms"],
+        confirmation_bars=policy["confirmation_bars"],
+        confirmation_unit=policy["confirmation_unit"],
+    )
+
+    assert before_minimum is None
+    assert confirmed is not None
+    assert confirmed["reason"] == "score_reversal"
+    assert confirmed["confirmation_points"] == 2
+    assert confirmed["minimum_hold_ms"] == 2 * 60 * 60 * 1000
 
 
 def test_ai_monitor_prediction_cost_components_are_optional_and_configurable() -> None:
@@ -2050,10 +2110,10 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
     assert float(settled.net_directional_return_bps) == pytest.approx(183.96875)
     assert settled.max_favorable_bps == Decimal("200.0")
     assert settled.max_adverse_bps == Decimal("0.0")
-    assert settled.settlement_version == "adaptive_guard_cost_v4"
+    assert settled.settlement_version == "horizon_aligned_exit_v5"
     assert (
         settled.evidence_json["settlement"]["score_exit_policy_version"]
-        == "two_closed_bar_hysteresis_v2"
+        == "horizon_aligned_closed_bar_v3"
     )
     assert settled.exit_reason == "max_holding_time"
     assert settled.exit_at.timestamp() == pytest.approx(due_at.timestamp(), abs=0.001)

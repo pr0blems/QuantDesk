@@ -23,7 +23,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import macro_market
 from .ai_model_config import global_ai_model_configured
-from .ai_monitor_read_models import read_models_available, refresh_ai_monitor_read_models
+from .ai_monitor_read_models import (
+    PREDICTION_FACT_PROJECTION_VERSION,
+    read_models_available,
+    refresh_ai_monitor_read_models,
+)
 from .models import (
     AdminSetting,
     AiMonitorConfig,
@@ -68,10 +72,11 @@ PREDICTION_SETTLEMENT_RETRY_MINUTES = 5
 PREDICTION_SETTLEMENT_GRACE_HOURS = 6
 PREDICTION_SETTLEMENT_BACKFILL_DAYS = 7
 PREDICTION_SETTLEMENT_POLL_SECONDS = 20
+PREDICTION_SETTLEMENT_BATCH_SIZE = 25
 PREDICTION_FEE_BPS_PER_SIDE = 5.0
 PREDICTION_SLIPPAGE_BPS_PER_SIDE = 3.0
 PREDICTION_FUNDING_BPS_PER_8H = 1.0
-PREDICTION_SETTLEMENT_VERSION = "adaptive_guard_cost_v4"
+PREDICTION_SETTLEMENT_VERSION = "horizon_aligned_exit_v5"
 PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS = 20.0
 PREDICTION_PROFIT_PROTECTION_MIN_BPS = 20.0
 PREDICTION_TRAILING_TRIGGER_BPS = 50.0
@@ -81,7 +86,8 @@ PREDICTION_FOLLOW_THROUGH_LOSS_BPS = -15.0
 PREDICTION_SCORE_EXIT_BAR_MS = 15 * 60 * 1_000
 PREDICTION_SCORE_EXIT_MIN_HOLD_MS = 30 * 60 * 1_000
 PREDICTION_SCORE_EXIT_CONFIRMATION_BARS = 2
-PREDICTION_SCORE_EXIT_POLICY_VERSION = "two_closed_bar_hysteresis_v2"
+PREDICTION_SCORE_EXIT_POLICY_VERSION = "horizon_aligned_closed_bar_v3"
+PREDICTION_SOFT_EXIT_MIN_HORIZON_FRACTION = 0.5
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
 OPPORTUNITY_DECISION_VERSION = "binance_primary_v4"
@@ -89,6 +95,46 @@ OPPORTUNITY_API_VERSION = "ai_opportunity.v3"
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
 FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS = 15 * 60
+
+
+def prediction_soft_exit_policy(
+    timeframe: str,
+    *,
+    start_ms: int,
+    due_ms: int,
+) -> dict[str, Any]:
+    """Return the frozen, horizon-aligned policy for non-emergency exits.
+
+    A prediction evaluated on hourly bars must not be closed by a few
+    scheduler refreshes or 15-minute noise.  Soft exits therefore wait for at
+    least two native bars and half of the planned horizon.  The hard stop and
+    explicit risk/reward target remain independent price barriers.
+    """
+
+    native_bar_ms = max(
+        PREDICTION_SCORE_EXIT_BAR_MS,
+        int(_TIMEFRAME_SECONDS.get(str(timeframe), 15 * 60)) * 1_000,
+    )
+    planned_horizon_ms = max(native_bar_ms, int(due_ms) - int(start_ms))
+    minimum_hold_ms = min(
+        planned_horizon_ms,
+        max(
+            PREDICTION_SCORE_EXIT_MIN_HOLD_MS,
+            native_bar_ms * PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
+            int(
+                planned_horizon_ms
+                * PREDICTION_SOFT_EXIT_MIN_HORIZON_FRACTION
+            ),
+        ),
+    )
+    timeframe_label = str(timeframe or "15m").lower()
+    return {
+        "bar_ms": native_bar_ms,
+        "minimum_hold_ms": minimum_hold_ms,
+        "confirmation_bars": PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
+        "confirmation_unit": f"closed_{timeframe_label}_bar",
+        "planned_horizon_ms": planned_horizon_ms,
+    }
 DEFAULT_UNUSUAL_WHALES_THRESHOLDS: dict[str, float | int] = {
     "quote_age_regular_ms": 2_000,
     "quote_age_extended_ms": 10_000,
@@ -537,6 +583,8 @@ def unusual_whales_signal_policy(db: Session) -> dict[str, Any]:
     thresholds["min_data_coverage"] = max(
         0.0, min(1.0, float(thresholds["min_data_coverage"]))
     )
+    raw_channels = raw.get("channels")
+    channels = dict(raw_channels) if isinstance(raw_channels, Mapping) else {}
 
     raw_weights = raw.get("weights")
     raw_weights = dict(raw_weights) if isinstance(raw_weights, Mapping) else {}
@@ -559,6 +607,7 @@ def unusual_whales_signal_policy(db: Session) -> dict[str, Any]:
         "mode": mode,
         "effective_mode": effective_mode,
         "thresholds": thresholds,
+        "channels": {str(key): bool(value) for key, value in channels.items()},
         "weights": normalized_weights,
         "published_version": published_version,
         "policy_version": UNUSUAL_WHALES_SIGNAL_POLICY_VERSION,
@@ -1232,14 +1281,28 @@ def refresh_pending_prediction_scores(
             seed_snapshots=[frozen_seed],
         )
         evidence["latest_live_score"] = snapshot
+        policy_due_at = getattr(
+            prediction,
+            "due_at",
+            prediction.predicted_at
+            + timedelta(
+                seconds=_TIMEFRAME_SECONDS.get(prediction.timeframe, 15 * 60) * 4
+            ),
+        )
+        score_policy = prediction_soft_exit_policy(
+            prediction.timeframe,
+            start_ms=_datetime_ms(prediction.predicted_at),
+            due_ms=_datetime_ms(policy_due_at),
+        )
         evidence["score_exit_policy"] = {
             "version": PREDICTION_SCORE_EXIT_POLICY_VERSION,
-            "direction_reversal_points": 1,
-            "score_breakdown_points": PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
-            "score_breakdown_bars": PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
-            "confirmation_unit": "closed_15m_bar",
-            "bar_interval_minutes": PREDICTION_SCORE_EXIT_BAR_MS // 60_000,
-            "minimum_hold_minutes": PREDICTION_SCORE_EXIT_MIN_HOLD_MS // 60_000,
+            "direction_reversal_points": score_policy["confirmation_bars"],
+            "score_breakdown_points": score_policy["confirmation_bars"],
+            "score_breakdown_bars": score_policy["confirmation_bars"],
+            "confirmation_unit": score_policy["confirmation_unit"],
+            "bar_interval_minutes": score_policy["bar_ms"] // 60_000,
+            "minimum_hold_minutes": score_policy["minimum_hold_ms"] // 60_000,
+            "planned_horizon_minutes": score_policy["planned_horizon_ms"] // 60_000,
             "combined_hysteresis_points": 5.0,
             "news_policy": {
                 "minimum_confidence": minimum_confidence,
@@ -1511,7 +1574,7 @@ def virtual_risk_plan_snapshot(
             "maximum_favorable_bps": PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS,
             "directional_loss_bps": PREDICTION_FOLLOW_THROUGH_LOSS_BPS,
         },
-        "execution_policy": "adaptive_guard_then_barrier_score_exit_v4",
+        "execution_policy": "horizon_aligned_soft_exit_v5",
     }
 
 
@@ -2047,6 +2110,7 @@ def prediction_adaptive_path_exit(
     *,
     estimated_cost_bps: float = 0.0,
     timeframe_ms: int = 15 * 60 * 1_000,
+    minimum_soft_exit_ms: int = 0,
 ) -> dict[str, Any] | None:
     """Protect proven profit and cut a failed follow-through without look-ahead.
 
@@ -2083,6 +2147,7 @@ def prediction_adaptive_path_exit(
     peak_favorable_bps = 0.0
     protected_bps: float | None = None
     observed_bar_count = 0
+    soft_exit_not_before_ms = start_ms + max(0, int(minimum_soft_exit_ms))
     cost_floor_bps = max(
         PREDICTION_PROFIT_PROTECTION_MIN_BPS,
         max(0.0, float(estimated_cost_bps)) + 2.0,
@@ -2097,7 +2162,7 @@ def prediction_adaptive_path_exit(
     ) in sorted(normalized):
         # This stop was frozen from prior closed bars, so it is executable from
         # the current open without relying on the current candle's future path.
-        if protected_bps is not None:
+        if protected_bps is not None and open_time >= soft_exit_not_before_ms:
             protected_price = (
                 entry_price * (1 - protected_bps / 10_000.0)
                 if normalized_direction == "short"
@@ -2147,6 +2212,8 @@ def prediction_adaptive_path_exit(
             else (close_price / entry_price - 1.0) * 10_000.0
         )
         if (
+            close_time >= soft_exit_not_before_ms
+            and
             observed_bar_count >= PREDICTION_FOLLOW_THROUGH_BARS
             and peak_favorable_bps < PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS
             and close_directional_bps <= PREDICTION_FOLLOW_THROUGH_LOSS_BPS
@@ -2197,13 +2264,16 @@ def prediction_score_exit_signal(
     *,
     start_ms: int,
     end_ms: int,
+    confirmation_bar_ms: int = PREDICTION_SCORE_EXIT_BAR_MS,
+    minimum_hold_ms: int = PREDICTION_SCORE_EXIT_MIN_HOLD_MS,
+    confirmation_bars: int = PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
+    confirmation_unit: str = "closed_15m_bar",
 ) -> dict[str, Any] | None:
     """Detect a confirmed score breakdown or directional reversal.
 
-    Poll frequency is not market evidence.  Score weakening therefore needs
-    two distinct closed 15-minute evidence buckets below the hysteresis band,
-    plus a 30-minute minimum hold.  Direction reversal remains immediate when
-    it is backed by a post-entry observation.
+    Poll frequency is not market evidence.  Both score weakening and a
+    directional reversal therefore need distinct native-timeframe evidence
+    buckets and must respect the frozen minimum holding period.
     """
 
     source = evidence or {}
@@ -2255,8 +2325,8 @@ def prediction_score_exit_signal(
         if not (start_ms <= evidence_time_ms <= end_ms):
             continue
         closed_bar_time_ms = (
-            evidence_time_ms // PREDICTION_SCORE_EXIT_BAR_MS
-        ) * PREDICTION_SCORE_EXIT_BAR_MS
+            evidence_time_ms // max(1, int(confirmation_bar_ms))
+        ) * max(1, int(confirmation_bar_ms))
         observations.append(
             {
                 "calculated_at": str(calculated_at),
@@ -2272,23 +2342,6 @@ def prediction_score_exit_signal(
     observations.sort(key=lambda item: item["price_time_ms"])
     if not observations:
         return None
-    for observation in observations:
-        if (
-            observation["direction"] in {"long", "short"}
-            and observation["direction"] != direction
-            and max(
-                int(observation["price_time_ms"]),
-                int(observation["reference_price_time_ms"] or 0),
-            )
-            > start_ms
-        ):
-            return {
-                **observation,
-                "reason": "score_reversal",
-                "exit_threshold": exit_threshold,
-                "confirmation_points": 1,
-            }
-
     # Keep only the latest calculation for each closed market bar.  Repeated
     # scheduler scans inside one bar can update the audit trail, but must never
     # count as independent confirmation points.
@@ -2302,33 +2355,59 @@ def prediction_score_exit_signal(
         latest_by_closed_bar[key] for key in sorted(latest_by_closed_bar)
     ]
     ignored_duplicate_points = len(observations) - len(bar_observations)
+    required_confirmations = max(1, int(confirmation_bars))
+    not_before_ms = start_ms + max(0, int(minimum_hold_ms))
+    consecutive_reversals: list[dict[str, Any]] = []
+    for observation in bar_observations:
+        if (
+            observation["direction"] in {"long", "short"}
+            and observation["direction"] != direction
+        ):
+            consecutive_reversals.append(observation)
+        else:
+            consecutive_reversals = []
+        if (
+            len(consecutive_reversals) >= required_confirmations
+            and int(observation["price_time_ms"]) >= not_before_ms
+        ):
+            confirmations = consecutive_reversals[-required_confirmations:]
+            return {
+                **observation,
+                "reason": "score_reversal",
+                "exit_threshold": exit_threshold,
+                "confirmation_points": required_confirmations,
+                "confirmation_unit": confirmation_unit,
+                "confirmation_bar_times_ms": [
+                    int(item["closed_bar_time_ms"]) for item in confirmations
+                ],
+                "minimum_hold_ms": max(0, int(minimum_hold_ms)),
+                "ignored_duplicate_points": max(0, ignored_duplicate_points),
+            }
+
     consecutive_low_scores: list[dict[str, Any]] = []
-    not_before_ms = start_ms + PREDICTION_SCORE_EXIT_MIN_HOLD_MS
     for observation in bar_observations:
         if observation["combined"] < exit_threshold:
             consecutive_low_scores.append(observation)
         else:
             consecutive_low_scores = []
         if (
-            len(consecutive_low_scores) >= PREDICTION_SCORE_EXIT_CONFIRMATION_BARS
+            len(consecutive_low_scores) >= required_confirmations
             and int(observation["price_time_ms"]) >= not_before_ms
         ):
-            confirmations = consecutive_low_scores[
-                -PREDICTION_SCORE_EXIT_CONFIRMATION_BARS:
-            ]
+            confirmations = consecutive_low_scores[-required_confirmations:]
             return {
                 **observation,
                 "reason": "score_breakdown",
                 "exit_threshold": exit_threshold,
-                "confirmation_points": PREDICTION_SCORE_EXIT_CONFIRMATION_BARS,
-                "confirmation_unit": "closed_15m_bar",
+                "confirmation_points": required_confirmations,
+                "confirmation_unit": confirmation_unit,
                 "confirmation_bar_times_ms": [
                     int(item["closed_bar_time_ms"]) for item in confirmations
                 ],
                 "confirmation_scores": [
                     float(item["combined"]) for item in confirmations
                 ],
-                "minimum_hold_ms": PREDICTION_SCORE_EXIT_MIN_HOLD_MS,
+                "minimum_hold_ms": max(0, int(minimum_hold_ms)),
                 "ignored_duplicate_points": max(0, ignored_duplicate_points),
             }
     return None
@@ -5771,7 +5850,11 @@ def _prediction_fact_read_model_current(db: Session, user_id: int) -> bool:
         select(
             func.count(AiMonitorPredictionFact.id),
             func.max(AiMonitorPredictionFact.source_updated_at),
-        ).where(AiMonitorPredictionFact.user_id == user_id)
+        ).where(
+            AiMonitorPredictionFact.user_id == user_id,
+            AiMonitorPredictionFact.projection_version
+            == PREDICTION_FACT_PROJECTION_VERSION,
+        )
     ).one()
     if int(source_count or 0) != int(fact_count or 0):
         return False
@@ -5806,10 +5889,46 @@ def _prediction_fact_outcome(
         if fact.institutional_flow_score is not None
         else None
     )
+    option_status = str(
+        getattr(fact, "option_flow_status", "not_captured_at_signal")
+        or "not_captured_at_signal"
+    )
+    gex_status = str(
+        getattr(fact, "gex_status", "not_captured_at_signal")
+        or "not_captured_at_signal"
+    )
+    institutional_status = str(
+        getattr(
+            fact,
+            "institutional_flow_status",
+            "not_captured_at_signal",
+        )
+        or "not_captured_at_signal"
+    )
+    quote_age_ms = getattr(fact, "quote_age_ms", None)
+    quote_spread_bps = getattr(fact, "quote_spread_bps", None)
+    quote_reason = (
+        "available"
+        if fact.quote_quality == "passed"
+        else "reference_quote_stale"
+        if fact.quote_quality == "partial" and quote_age_ms is not None
+        else "last_trade_only"
+        if fact.quote_quality == "partial"
+        else "reference_quote_blocked"
+        if fact.quote_quality == "blocked"
+        else "no_signal_time_quote"
+    )
     feature_availability = {
         "unusual_whales_enabled_at_signal": any(
-            value is not None
-            for value in (option_flow_score, gex_score, institutional_score)
+            status
+            not in {
+                "channel_disabled",
+                "uw_disabled_at_signal",
+                "not_captured_at_signal",
+                "legacy_snapshot_missing",
+                "market_feature_not_linked",
+            }
+            for status in (option_status, gex_status, institutional_status)
         ),
         "snapshot_recorded": bool(fact.snapshot_complete),
         "market_feature_linked": bool(fact.snapshot_complete),
@@ -5817,22 +5936,20 @@ def _prediction_fact_outcome(
             "available": fact.quote_quality not in {"missing", "unknown"},
             "nbbo_available": fact.quote_quality == "passed",
             "quality": fact.quote_quality,
-            "source": "binance",
-            "reason": "binance_contract_snapshot",
+            "source": str(getattr(fact, "quote_source", "unknown") or "unknown"),
+            "reason": quote_reason,
         },
         "option_flow": {
-            "available": option_flow_score is not None,
-            "reason": "available" if option_flow_score is not None else "not_captured_at_signal",
+            "available": option_status == "available",
+            "reason": option_status,
         },
         "gex": {
-            "available": gex_score is not None,
-            "reason": "available" if gex_score is not None else "not_captured_at_signal",
+            "available": gex_status == "available",
+            "reason": gex_status,
         },
         "institutional_flow": {
-            "available": institutional_score is not None,
-            "reason": (
-                "available" if institutional_score is not None else "not_captured_at_signal"
-            ),
+            "available": institutional_status == "available",
+            "reason": institutional_status,
         },
     }
     return {
@@ -5865,8 +5982,12 @@ def _prediction_fact_outcome(
             ),
         },
         "quote": {
-            "source": "binance",
+            "source": str(getattr(fact, "quote_source", "unknown") or "unknown"),
             "market_session": fact.market_session,
+            "age_ms": int(quote_age_ms) if quote_age_ms is not None else None,
+            "spread_bps": (
+                float(quote_spread_bps) if quote_spread_bps is not None else None
+            ),
         },
         "flow": {
             "score": (
@@ -5874,10 +5995,16 @@ def _prediction_fact_outcome(
                 if fact.market_flow_score is not None
                 else None
             ),
-            "option_flow": {"score": option_flow_score},
-            "institutional_flow": {"score": institutional_score},
+            "option_flow": {
+                "score": option_flow_score,
+                "available": option_status == "available",
+            },
+            "institutional_flow": {
+                "score": institutional_score,
+                "available": institutional_status == "available",
+            },
         },
-        "gex": {"score": gex_score},
+        "gex": {"score": gex_score, "available": gex_status == "available"},
         "data_quality": {
             "coverage": coverage,
             "quote_quality": fact.quote_quality,
@@ -7180,7 +7307,7 @@ def settle_due_predictions(
             ),
         )
         .order_by(AiMonitorPrediction.due_at, AiMonitorPrediction.id)
-        .limit(500)
+        .limit(PREDICTION_SETTLEMENT_BATCH_SIZE)
     )
     if user_id is not None:
         statement = statement.where(AiMonitorPrediction.user_id == user_id)
@@ -7289,6 +7416,11 @@ def settle_due_predictions(
             observed_until,
             actual_cost_config,
         )
+        soft_exit_policy = prediction_soft_exit_policy(
+            getattr(item, "timeframe", "15m"),
+            start_ms=start_ms,
+            due_ms=_datetime_ms(item.due_at),
+        )
         barrier_exit = prediction_price_barrier_exit(
             candles,
             entry_price,
@@ -7304,12 +7436,17 @@ def settle_due_predictions(
             start_ms,
             observed_until_ms,
             estimated_cost_bps=guard_cost_estimate,
+            minimum_soft_exit_ms=int(soft_exit_policy["minimum_hold_ms"]),
         )
         score_signal = prediction_score_exit_signal(
             evidence,
             item.direction,
             start_ms=start_ms,
             end_ms=observed_until_ms,
+            confirmation_bar_ms=int(soft_exit_policy["bar_ms"]),
+            minimum_hold_ms=int(soft_exit_policy["minimum_hold_ms"]),
+            confirmation_bars=int(soft_exit_policy["confirmation_bars"]),
+            confirmation_unit=str(soft_exit_policy["confirmation_unit"]),
         )
         score_settlement = (
             prediction_score_exit_price(
@@ -7463,8 +7600,8 @@ def settle_due_predictions(
                 predicted_at, exit_at, actual_cost_config
             ),
             "policy": (
-                "frozen_profit_guard_then_price_barrier_then_confirmed_score_exit_"
-                "then_failed_follow_through_then_hard_time_cap"
+                "horizon_aligned_profit_guard_then_price_barrier_then_confirmed_"
+                "native_bar_score_exit_then_failed_follow_through_then_hard_time_cap"
             ),
         }
         item.evidence_json = evidence
@@ -7507,7 +7644,7 @@ def reopen_legacy_prediction_settlements(
     db: Session,
     *,
     user_id: int | None = None,
-    limit: int = 500,
+    limit: int = PREDICTION_SETTLEMENT_BATCH_SIZE,
 ) -> int:
     """Move old outcomes back to the current auditable exit lifecycle.
 
@@ -7527,7 +7664,7 @@ def reopen_legacy_prediction_settlements(
             ),
         )
         .order_by(AiMonitorPrediction.predicted_at, AiMonitorPrediction.id)
-        .limit(max(1, min(int(limit), 5000)))
+        .limit(max(1, min(int(limit), 250)))
     )
     if user_id is not None:
         statement = statement.where(AiMonitorPrediction.user_id == user_id)
@@ -7592,7 +7729,7 @@ def backfill_prediction_path_metrics(
             ),
         )
         .order_by(AiMonitorPrediction.predicted_at, AiMonitorPrediction.id)
-        .limit(500)
+        .limit(PREDICTION_SETTLEMENT_BATCH_SIZE)
     )
     if user_id is not None:
         statement = statement.where(AiMonitorPrediction.user_id == user_id)
@@ -8697,6 +8834,7 @@ def _scan_opportunities(
                 "mode": str(uw_signal_policy["mode"]),
                 "effective_mode": str(uw_signal_policy["effective_mode"]),
                 "thresholds": dict(uw_signal_policy["thresholds"]),
+                "channels": dict(uw_signal_policy.get("channels") or {}),
                 "weights": dict(uw_signal_policy["weights"]),
                 "published_version": int(uw_signal_policy["published_version"]),
                 "policy_version": str(uw_signal_policy["policy_version"]),

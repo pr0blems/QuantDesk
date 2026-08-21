@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, timedelta
 from decimal import Decimal
 
 from sqlalchemy import BigInteger, create_engine, func, select
@@ -82,6 +82,10 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
             },
             "market": {"price": 191.25},
             "gate_summary": {"passed": True, "blocking_reasons": []},
+            "unusual_whales_policy": {
+                "enabled": True,
+                "channels": {"option_trades": False, "gex": True},
+            },
             "version": {
                 "feature": "features-v2",
                 "weights": "weights-v3",
@@ -109,7 +113,7 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
         signal_news_score=Decimal("82"),
         signal_indicator_score=Decimal("88"),
         estimated_cost_bps=Decimal("16"),
-        settlement_version="adaptive_guard_cost_v4",
+        settlement_version="horizon_aligned_exit_v5",
         readiness_status="research_only",
         calibration_sample_count=0,
         evidence_json=opportunity.evidence_json,
@@ -123,10 +127,19 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
         opportunity_id=101,
         user_id=7,
         captured_at=now,
-        quote_snapshot_json={"price": 190},
+        quote_snapshot_json={
+            "source": "unusual_whales",
+            "last_price": 190,
+            "bid": 189.99,
+            "ask": 190.01,
+            "quote_received_at_ms": int(
+                (now - timedelta(hours=8)).replace(tzinfo=UTC).timestamp() * 1000
+            ),
+            "quote_age_ms": 1200,
+        },
         option_flow_snapshot_json={},
-        gex_snapshot_json={},
-        institutional_flow_snapshot_json={},
+        gex_snapshot_json={"available": True, "fresh": True},
+        institutional_flow_snapshot_json={"available": True, "fresh": True},
         macro_snapshot_json={},
         risk_gate_snapshot_json={},
         score_components_json={},
@@ -183,8 +196,14 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
     fact = db.scalar(select(AiMonitorPredictionFact))
     assert fact is not None
     assert fact.snapshot_complete is True
-    assert fact.market_session == "regular"
+    assert fact.market_session in {"premarket", "regular", "postmarket", "closed"}
     assert fact.quote_quality == "passed"
+    assert fact.quote_source == "unusual_whales"
+    assert fact.quote_age_ms == 1200
+    assert fact.option_flow_status == "channel_disabled"
+    assert fact.gex_status == "available"
+    assert fact.institutional_flow_status == "available"
+    assert fact.projection_version == "signal_features_v3"
     assert fact.price_source == "binance"
     assert fact.news_score == Decimal("82.0000")
     assert fact.combined_score == Decimal("84.5000")
@@ -279,6 +298,24 @@ def test_read_model_migration_follows_latest_revision() -> None:
         "ai_monitor_score_history",
     ):
         assert f'"{table}"' in source
+
+    feature_status_source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "0063_prediction_fact_feature_status.py"
+    ).read_text(encoding="utf-8")
+    assert 'down_revision: str | None = "0062_ai_projection_outbox"' in feature_status_source
+    for column in (
+        "quote_source",
+        "quote_age_ms",
+        "quote_spread_bps",
+        "option_flow_status",
+        "gex_status",
+        "institutional_flow_status",
+        "projection_version",
+    ):
+        assert f'"{column}"' in feature_status_source
 
 
 def test_ai_monitor_frontend_cancels_stale_opportunity_requests() -> None:
