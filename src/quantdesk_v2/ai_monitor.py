@@ -77,7 +77,8 @@ PREDICTION_SETTLEMENT_BATCH_SIZE = 25
 PREDICTION_FEE_BPS_PER_SIDE = 5.0
 PREDICTION_SLIPPAGE_BPS_PER_SIDE = 3.0
 PREDICTION_FUNDING_BPS_PER_8H = 1.0
-PREDICTION_SETTLEMENT_VERSION = "horizon_aligned_exit_v5"
+PREVIOUS_PREDICTION_SETTLEMENT_VERSION = "horizon_aligned_exit_v5"
+PREDICTION_SETTLEMENT_VERSION = "cost_consistent_exit_v6"
 PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS = 20.0
 PREDICTION_PROFIT_PROTECTION_MIN_BPS = 20.0
 PREDICTION_TRAILING_TRIGGER_BPS = 50.0
@@ -1588,7 +1589,8 @@ def virtual_risk_plan_snapshot(
         stop_loss_price = 0.0
         take_profit_price = 0.0
     return {
-        "version": "atr_risk_reward_guard_v3",
+        "version": "atr_risk_reward_guard_v4",
+        "settlement_version": PREDICTION_SETTLEMENT_VERSION,
         "method": "atr14_x_1_5" if volatility_risk > 0 else "timeframe_fallback",
         "timeframe": timeframe,
         "direction": normalized_direction,
@@ -1628,7 +1630,7 @@ def virtual_risk_plan_snapshot(
             "directional_loss_bps": PREDICTION_FOLLOW_THROUGH_LOSS_BPS,
             "minimum_hold_policy": "horizon_aligned",
         },
-        "execution_policy": "risk_unit_profit_guard_v6",
+        "execution_policy": "cost_consistent_risk_guard_v7",
     }
 
 
@@ -1760,11 +1762,20 @@ def backfill_prediction_risk_plans(db: Session, user_id: int) -> int:
         evidence = dict(item.evidence_json or {})
         if isinstance(evidence.get("risk_plan"), Mapping):
             continue
-        evidence["risk_plan"] = virtual_risk_plan_snapshot(
+        risk_plan = virtual_risk_plan_snapshot(
             entry_price=float(item.entry_price or 0),
             direction=item.direction,
             timeframe=item.timeframe,
         )
+        repair = evidence.get("settlement_repair")
+        repair = dict(repair) if isinstance(repair, Mapping) else {}
+        frozen_settlement_version = str(
+            repair.get("target_version")
+            or item.settlement_version
+            or PREVIOUS_PREDICTION_SETTLEMENT_VERSION
+        )
+        risk_plan["settlement_version"] = frozen_settlement_version
+        evidence["risk_plan"] = risk_plan
         item.evidence_json = evidence
         updated += 1
     return updated
@@ -1955,6 +1966,43 @@ def readiness_cost_config(config: Mapping[str, Any] | None = None) -> dict[str, 
         ),
         "forced_for_readiness": True,
     }
+
+
+def prediction_settlement_cost_config(
+    cost_model: Mapping[str, Any] | None,
+    *,
+    settlement_version: str,
+) -> dict[str, Any]:
+    """Return the frozen cost model, enforcing a floor for the current policy.
+
+    Older policy rows retain their original assumptions for auditability.  New
+    policy rows can never turn fees, slippage, or funding off: doing so made a
+    gross price hit look profitable in storage while readiness correctly showed
+    the same trade as a cost-adjusted loss.
+    """
+
+    frozen = dict(cost_model or {})
+    config = {
+        "prediction_fee_enabled": bool(frozen.get("fee_enabled", True)),
+        "prediction_fee_bps_per_side": float(
+            frozen.get("fee_bps_per_side", PREDICTION_FEE_BPS_PER_SIDE)
+        ),
+        "prediction_slippage_enabled": bool(
+            frozen.get("slippage_enabled", True)
+        ),
+        "prediction_slippage_bps_per_side": float(
+            frozen.get(
+                "slippage_bps_per_side", PREDICTION_SLIPPAGE_BPS_PER_SIDE
+            )
+        ),
+        "prediction_funding_enabled": bool(frozen.get("funding_enabled", True)),
+        "prediction_funding_bps_per_8h": float(
+            frozen.get("funding_bps_per_8h", PREDICTION_FUNDING_BPS_PER_8H)
+        ),
+    }
+    if settlement_version == PREDICTION_SETTLEMENT_VERSION:
+        return readiness_cost_config(config)
+    return config
 
 
 def prediction_cost_breakdown(
@@ -7536,39 +7584,34 @@ def settle_due_predictions(
         candles = candles_by_symbol.get(item.contract_symbol, [])
         evidence = dict(getattr(item, "evidence_json", None) or {})
         stored_risk_plan = evidence.get("risk_plan")
+        has_frozen_risk_plan = isinstance(stored_risk_plan, Mapping)
         risk_plan = (
             dict(stored_risk_plan)
-            if isinstance(stored_risk_plan, Mapping)
+            if has_frozen_risk_plan
             else virtual_risk_plan_snapshot(
                 entry_price=entry_price,
                 direction=item.direction,
                 timeframe=getattr(item, "timeframe", "15m"),
             )
         )
+        # A policy version belongs to the risk plan frozen at signal time.  Do
+        # not relabel an old pending signal merely because a newer worker later
+        # settles it.  Legacy rows without a frozen plan stay in the previous
+        # cohort and therefore cannot contaminate current readiness statistics.
+        settlement_version = str(
+            (
+                risk_plan.get("settlement_version")
+                or getattr(item, "settlement_version", None)
+            )
+            if has_frozen_risk_plan
+            else PREVIOUS_PREDICTION_SETTLEMENT_VERSION
+        )
+        risk_plan["settlement_version"] = settlement_version
         cost_model = evidence.get("cost_model")
-        cost_model = dict(cost_model) if isinstance(cost_model, Mapping) else {}
-        actual_cost_config = {
-            "prediction_fee_enabled": bool(cost_model.get("fee_enabled", True)),
-            "prediction_fee_bps_per_side": float(
-                cost_model.get("fee_bps_per_side", PREDICTION_FEE_BPS_PER_SIDE)
-            ),
-            "prediction_slippage_enabled": bool(
-                cost_model.get("slippage_enabled", True)
-            ),
-            "prediction_slippage_bps_per_side": float(
-                cost_model.get(
-                    "slippage_bps_per_side", PREDICTION_SLIPPAGE_BPS_PER_SIDE
-                )
-            ),
-            "prediction_funding_enabled": bool(
-                cost_model.get("funding_enabled", True)
-            ),
-            "prediction_funding_bps_per_8h": float(
-                cost_model.get(
-                    "funding_bps_per_8h", PREDICTION_FUNDING_BPS_PER_8H
-                )
-            ),
-        }
+        actual_cost_config = prediction_settlement_cost_config(
+            cost_model if isinstance(cost_model, Mapping) else None,
+            settlement_version=settlement_version,
+        )
         guard_cost_estimate = prediction_estimated_cost_bps(
             predicted_at,
             observed_until,
@@ -7731,9 +7774,9 @@ def settle_due_predictions(
             if path_metrics["max_adverse_bps"] is not None
             else None
         )
-        item.settlement_version = PREDICTION_SETTLEMENT_VERSION
+        item.settlement_version = settlement_version
         evidence["settlement"] = {
-            "version": PREDICTION_SETTLEMENT_VERSION,
+            "version": settlement_version,
             "score_exit_policy_version": PREDICTION_SCORE_EXIT_POLICY_VERSION,
             "exit_reason": exit_reason,
             "exit_subreason": exit_decision.get("exit_subreason"),
@@ -7821,22 +7864,19 @@ def reopen_legacy_prediction_settlements(
     user_id: int | None = None,
     limit: int = PREDICTION_SETTLEMENT_BATCH_SIZE,
 ) -> int:
-    """Move old outcomes back to the current auditable exit lifecycle.
+    """Reopen only unauditable horizon-close outcomes for reconstruction.
 
-    Legacy completed rows are deliberately removed from statistics first.  The
-    regular settlement worker then rebuilds them from historical candle paths
-    using profit protection, price barriers, score exits and the hard time cap.
+    A completed row from another frozen policy is valid historical evidence,
+    not a migration candidate.  Reopening every version mismatch used to
+    recalculate old signals with new code and then mix incompatible policies in
+    one cohort.
     """
 
     statement = (
         select(AiMonitorPrediction)
         .where(
             AiMonitorPrediction.status == "completed",
-            or_(
-                AiMonitorPrediction.exit_reason == "legacy_horizon_close",
-                AiMonitorPrediction.settlement_version
-                != PREDICTION_SETTLEMENT_VERSION,
-            ),
+            AiMonitorPrediction.exit_reason == "legacy_horizon_close",
         )
         .order_by(AiMonitorPrediction.predicted_at, AiMonitorPrediction.id)
         .limit(max(1, min(int(limit), 250)))
@@ -7857,11 +7897,18 @@ def reopen_legacy_prediction_settlements(
     )
     for item in items:
         evidence = dict(item.evidence_json or {})
+        stored_risk_plan = evidence.get("risk_plan")
+        if isinstance(stored_risk_plan, Mapping):
+            frozen_risk_plan = dict(stored_risk_plan)
+            frozen_risk_plan["settlement_version"] = (
+                PREVIOUS_PREDICTION_SETTLEMENT_VERSION
+            )
+            evidence["risk_plan"] = frozen_risk_plan
         evidence["settlement_repair"] = {
             "requested_at": repair_started_at.replace(tzinfo=UTC).isoformat(),
             "source_version": item.settlement_version,
             "source_exit_reason": item.exit_reason,
-            "target_version": PREDICTION_SETTLEMENT_VERSION,
+            "target_version": PREVIOUS_PREDICTION_SETTLEMENT_VERSION,
             "status": "pending_recalculation",
         }
         item.status = "pending"
@@ -7938,7 +7985,6 @@ def backfill_prediction_path_metrics(
             continue
         item.max_favorable_bps = Decimal(str(path_metrics["max_favorable_bps"]))
         item.max_adverse_bps = Decimal(str(path_metrics["max_adverse_bps"]))
-        item.settlement_version = PREDICTION_SETTLEMENT_VERSION
         item.updated_at = now
         completed += 1
     db.flush()

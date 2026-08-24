@@ -743,6 +743,31 @@ def _config_out(config: AiMonitorConfig | None) -> dict[str, Any]:
     return data
 
 
+def _strategy_live_readiness(db: Session, user_id: int) -> dict[str, Any]:
+    """Evaluate the current settlement cohort before any new real-fund entry."""
+
+    current_config = ai_monitor.config_data(db.get(AiMonitorConfig, user_id))
+    return ai_monitor.strategy_readiness_report(db, user_id, current_config)
+
+
+def _require_strategy_live_readiness(db: Session, user_id: int) -> dict[str, Any]:
+    """Fail closed when the cost-adjusted strategy has not passed research gates."""
+
+    readiness = _strategy_live_readiness(db, user_id)
+    if bool(readiness.get("quantitative_ready")):
+        return readiness
+    passed = int(readiness.get("passed_count") or 0)
+    total = int(readiness.get("total_count") or 0)
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "当前止盈止损策略尚未通过成本后量化准入，已禁止新增真实资金订单"
+            f"（通过 {passed}/{total} 项；策略版本 "
+            f"{ai_monitor.PREDICTION_SETTLEMENT_VERSION}）。"
+        ),
+    )
+
+
 def _score_policy_out(db: Session, *, can_edit: bool) -> dict[str, Any]:
     policy = ai_monitor.unusual_whales_signal_policy(db)
     setting = db.get(AdminSetting, ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY)
@@ -1311,6 +1336,7 @@ def _live_copy_out(
                 "allow_short": bool(preview["ai_monitor_live_allow_short"]),
             },
         }
+    strategy_readiness = _strategy_live_readiness(db, user.id)
     credentials_configured = bool(user.binance_credentials_configured)
     trade_permission_requested = _binance_trade_permission_requested(user)
     blockers: list[str] = []
@@ -1322,6 +1348,10 @@ def _live_copy_out(
         blockers.append("Binance TradFi 交易品种池为空")
     if unresolved_order_count > 0:
         blockers.append("存在状态未知的 Binance 订单，需先完成对账")
+    if not bool(strategy_readiness.get("quantitative_ready")):
+        blockers.append(
+            "当前止盈止损策略尚未通过成本后量化准入，禁止新增真实资金订单"
+        )
     requested_enabled = bool(selected["configured"])
     enabled = bool(
         requested_enabled
@@ -1341,6 +1371,14 @@ def _live_copy_out(
         "trade_permission_requested": trade_permission_requested,
         "ready_to_enable": not blockers,
         "blockers": blockers,
+        "strategy_readiness": {
+            "settlement_policy_version": ai_monitor.PREDICTION_SETTLEMENT_VERSION,
+            "quantitative_ready": bool(
+                strategy_readiness.get("quantitative_ready")
+            ),
+            "passed_count": int(strategy_readiness.get("passed_count") or 0),
+            "total_count": int(strategy_readiness.get("total_count") or 0),
+        },
         "account": selected,
         "accounts": [selected],
         "signal_policy": {
@@ -2451,6 +2489,7 @@ def manual_follow_live_copy(
         or not bool(account_config.get("ai_monitor_live_copy_enabled"))
     ):
         raise HTTPException(status_code=409, detail="请先开启独立实盘跟单")
+    _require_strategy_live_readiness(db, user.id)
 
     opportunity = db.scalar(
         select(AiMonitorOpportunity).where(
@@ -2661,6 +2700,7 @@ def update_live_copy_config(
         requested_enabled and account.last_error_code == "position_mode_changed"
     )
     if resumed_after_mode_fix:
+        _require_strategy_live_readiness(db, user.id)
         account.status = "active"
         account.last_error_code = None
         account.armed_at = utcnow()
@@ -2723,6 +2763,7 @@ def update_live_copy_status(
             raise HTTPException(status_code=409, detail="Binance API 未申请 TRADE 权限")
         if not tradfi_symbols():
             raise HTTPException(status_code=503, detail="Binance TradFi 交易品种池为空")
+        _require_strategy_live_readiness(db, user.id)
         account, deployment = _ensure_ai_monitor_live_account(db, locked_user)
         unresolved = db.scalar(
             select(func.count(LiveOrderIntent.id)).where(

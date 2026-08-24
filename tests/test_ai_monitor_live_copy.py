@@ -815,6 +815,31 @@ def test_ai_monitor_live_copy_ui_enables_with_one_confirmation_button() -> None:
     assert "仅在美股常规交易时段允许新开仓" in frontend
 
 
+def test_real_fund_entry_is_blocked_until_current_policy_is_quantitatively_ready(
+    monkeypatch,
+) -> None:
+    class Database:
+        def get(self, _model, _user_id):
+            return None
+
+    monkeypatch.setattr(
+        ai_monitor_api.ai_monitor,
+        "strategy_readiness_report",
+        lambda _db, _user_id, _config: {
+            "quantitative_ready": False,
+            "passed_count": 1,
+            "total_count": 8,
+        },
+    )
+
+    with pytest.raises(ai_monitor_api.HTTPException) as exc_info:
+        ai_monitor_api._require_strategy_live_readiness(Database(), 7)
+
+    assert exc_info.value.status_code == 409
+    assert "禁止新增真实资金订单" in str(exc_info.value.detail)
+    assert "cost_consistent_exit_v6" in str(exc_info.value.detail)
+
+
 def test_manual_follow_ui_and_api_require_second_real_funds_confirmation() -> None:
     frontend = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
     api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
@@ -834,6 +859,8 @@ def test_manual_follow_ui_and_api_require_second_real_funds_confirmation() -> No
     assert '@router.post("/live-copy/manual-follow")' in api
     assert "if not payload.acknowledge_real_funds" in api
     assert "execute_ai_monitor_manual_follow" in api
+    assert api.count("_require_strategy_live_readiness(db, user.id)") >= 2
+    assert "_require_strategy_live_readiness(db, user.id)" in api
     assert "直接使用 Binance 即时合约价格开仓" in frontend
     assert "正在提交 Binance" in frontend
     assert "opportunity.status not in" not in api

@@ -113,7 +113,7 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
         signal_news_score=Decimal("82"),
         signal_indicator_score=Decimal("88"),
         estimated_cost_bps=Decimal("16"),
-        settlement_version="horizon_aligned_exit_v5",
+        settlement_version="cost_consistent_exit_v6",
         readiness_status="research_only",
         calibration_sample_count=0,
         evidence_json=opportunity.evidence_json,

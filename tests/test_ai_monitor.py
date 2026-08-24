@@ -17,6 +17,7 @@ from quantdesk_v2.ai_monitor import (
     adaptive_exit_precedes,
     aggregate_news_candidates,
     append_score_history,
+    backfill_prediction_path_metrics,
     configured_indicator_policy,
     edge_calibration_summary,
     effective_opportunity_score_weights,
@@ -42,6 +43,7 @@ from quantdesk_v2.ai_monitor import (
     prediction_price_barrier_exit,
     prediction_score_exit_price,
     prediction_score_exit_signal,
+    prediction_settlement_cost_config,
     prediction_soft_exit_policy,
     refresh_pending_prediction_scores,
     reopen_legacy_prediction_settlements,
@@ -432,7 +434,10 @@ def test_prediction_settlement_metadata_monitors_exit_before_time_cap() -> None:
 
 
 def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None:
-    original_evidence = {"settlement": {"version": "path_cost_v2"}}
+    original_evidence = {
+        "risk_plan": {"version": "legacy_risk_guard"},
+        "settlement": {"version": "path_cost_v2"},
+    }
     item = SimpleNamespace(
         status="completed",
         result="win",
@@ -478,6 +483,10 @@ def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None
     assert item.exit_price is None
     assert item.exit_reason is None
     assert item.settlement_version == "repair_pending_v4"
+    assert (
+        item.evidence_json["risk_plan"]["settlement_version"]
+        == "horizon_aligned_exit_v5"
+    )
     assert item.evidence_json["settlement_repair"]["status"] == "pending_recalculation"
     assert database.flushed is True
     assert "FOR UPDATE SKIP LOCKED" in mysql_sql
@@ -487,7 +496,57 @@ def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None
     assert {"completed", "legacy_horizon_close"}.issubset(
         set(mysql_compiled.params.values())
     )
+    assert "cost_consistent_exit_v6" not in set(mysql_compiled.params.values())
     assert database.statement.get_execution_options()["populate_existing"] is True
+
+
+def test_path_metric_backfill_preserves_frozen_settlement_version() -> None:
+    predicted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
+    item = SimpleNamespace(
+        contract_symbol="AAPLUSDT",
+        predicted_at=predicted_at,
+        due_at=predicted_at + timedelta(hours=1),
+        entry_price=Decimal("100"),
+        direction="long",
+        settlement_version="horizon_aligned_exit_v5",
+        max_favorable_bps=None,
+        max_adverse_bps=None,
+        updated_at=predicted_at,
+    )
+
+    class Scalars:
+        def all(self):
+            return [item]
+
+    class Database:
+        flushed = False
+
+        def scalars(self, _statement):
+            return Scalars()
+
+        def flush(self):
+            self.flushed = True
+
+    class Repository:
+        def kline_range(self, _symbol, _timeframe, start_ms, _end_ms):
+            return [
+                {
+                    "open_time": start_ms + 15 * 60 * 1_000,
+                    "open": 100,
+                    "high": 102,
+                    "low": 99,
+                    "close": 101,
+                }
+            ]
+
+    database = Database()
+    result = backfill_prediction_path_metrics(database, Repository())
+
+    assert result == {"scanned": 1, "completed": 1, "unavailable": 0}
+    assert item.max_favorable_bps == Decimal("200.0")
+    assert item.max_adverse_bps == Decimal("-100.0")
+    assert item.settlement_version == "horizon_aligned_exit_v5"
+    assert database.flushed is True
 
 
 def test_ai_monitor_catalog_reuses_all_contract_research_indicators() -> None:
@@ -1585,8 +1644,9 @@ def test_new_risk_plan_uses_r_normalized_profit_protection() -> None:
         atr_pct=1,
     )
 
-    assert plan["version"] == "atr_risk_reward_guard_v3"
-    assert plan["execution_policy"] == "risk_unit_profit_guard_v6"
+    assert plan["version"] == "atr_risk_reward_guard_v4"
+    assert plan["settlement_version"] == "cost_consistent_exit_v6"
+    assert plan["execution_policy"] == "cost_consistent_risk_guard_v7"
     assert plan["stop_loss_pct"] == 1.5
     assert plan["take_profit_pct"] == 3.0
     assert plan["profit_protection"] == {
@@ -2051,6 +2111,36 @@ def test_ai_monitor_prediction_cost_components_are_optional_and_configurable() -
     assert breakdown["funding_cost_bps"] == 2
     assert breakdown["total_cost_bps"] == 7
     assert prediction_estimated_cost_bps(predicted_at, due_at, config) == 7
+
+
+def test_current_settlement_policy_cannot_disable_execution_costs() -> None:
+    disabled = {
+        "fee_enabled": False,
+        "fee_bps_per_side": 0,
+        "slippage_enabled": False,
+        "slippage_bps_per_side": 0,
+        "funding_enabled": False,
+        "funding_bps_per_8h": 0,
+    }
+
+    current = prediction_settlement_cost_config(
+        disabled,
+        settlement_version="cost_consistent_exit_v6",
+    )
+    legacy = prediction_settlement_cost_config(
+        disabled,
+        settlement_version="horizon_aligned_exit_v5",
+    )
+
+    assert current["prediction_fee_enabled"] is True
+    assert current["prediction_fee_bps_per_side"] == 5
+    assert current["prediction_slippage_enabled"] is True
+    assert current["prediction_slippage_bps_per_side"] == 3
+    assert current["prediction_funding_enabled"] is True
+    assert current["prediction_funding_bps_per_8h"] == 1
+    assert legacy["prediction_fee_enabled"] is False
+    assert legacy["prediction_slippage_enabled"] is False
+    assert legacy["prediction_funding_enabled"] is False
 
 
 def test_historical_opportunity_analytics_uses_expiry_price_and_summarizes_hits() -> None:
