@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import hmac
+import json
 import math
 import uuid
 from collections.abc import Mapping
@@ -29,13 +30,18 @@ from .models import (
 from .schemas import (
     StrategyAiApplyRequest,
     StrategyAiPreviewRequest,
+    StrategyCodeAiPreviewRequest,
+    StrategyCodeUpdateRequest,
+    StrategyCodeValidateRequest,
     StrategyCreateRequest,
     StrategyUpdateRequest,
 )
 from .security import CredentialCipher, SecurityError
 from .strategy_ai import (
     StrategyAiError,
+    generate_strategy_code_preview,
     generate_strategy_preview,
+    generate_user_model_strategy_code_preview,
     generate_user_model_strategy_preview,
 )
 from .strategy_catalog import (
@@ -52,6 +58,8 @@ from .strategy_runtime import (
     INDICATOR_BY_KEY,
     INDICATOR_CATALOG,
     build_indicator_composite_spec,
+    full_strategy_parameter_schema,
+    indicator_composite_parameter_schema,
     strategy_spec_hash,
     validate_strategy_spec,
 )
@@ -414,6 +422,92 @@ def _apply_edit(
     _record_revision(db, strategy, source=source, summary=summary)
 
 
+def _validated_code_spec(
+    strategy: UserStrategy, spec_value: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if strategy.strategy_kind != "full_strategy" or strategy.engine_key != "strategy_dsl":
+        raise HTTPException(
+            status_code=409,
+            detail="code editing is available only for full strategy DSL revisions",
+        )
+    try:
+        spec = validate_strategy_spec(spec_value)
+        if spec["strategy_type"] == "indicator_composite":
+            indicator_keys = [str(item["key"]) for item in spec["indicators"]]
+            parameter_schema = indicator_composite_parameter_schema(indicator_keys)
+        else:
+            parameter_schema = full_strategy_parameter_schema()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return spec, parameter_schema
+
+
+def _apply_code_edit(
+    db: Session,
+    strategy: UserStrategy,
+    *,
+    expected_version: int,
+    name: str,
+    description: str,
+    category: str,
+    spec_value: Mapping[str, Any],
+    source: str,
+    summary: str,
+) -> None:
+    if strategy.status != "active":
+        raise HTTPException(status_code=409, detail="strategy is archived")
+    if strategy.version != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "strategy version conflict; reload before saving",
+                "current_version": strategy.version,
+            },
+        )
+    spec, parameter_schema = _validated_code_spec(strategy, spec_value)
+    strategy.name = name
+    strategy.description = description
+    strategy.category = category
+    strategy.spec_json = spec
+    strategy.spec_schema_version = int(spec["schema_version"])
+    strategy.spec_hash = strategy_spec_hash(spec)
+    strategy.parameter_schema_json = parameter_schema
+    strategy.parameters_json = copy.deepcopy(spec["parameters"])
+    strategy.version += 1
+    strategy.updated_at = utcnow()
+    _record_revision(db, strategy, source=source, summary=summary)
+
+
+def _code_validation_response(spec: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "valid": True,
+        "legacy": False,
+        "strategy_type": spec["strategy_type"],
+        "schema_version": spec["schema_version"],
+        "spec_hash": strategy_spec_hash(spec),
+        "normalized_spec": copy.deepcopy(dict(spec)),
+        "data_requirements": {
+            "market": spec["market"],
+            "timeframes": copy.deepcopy(spec["timeframes"]),
+            "closed_bar_only": True,
+        },
+        "warnings": [],
+    }
+
+
+def _strategy_ai_http_error(exc: StrategyAiError) -> HTTPException:
+    status_by_category = {
+        "not_configured": 503,
+        "timeout": 504,
+        "upstream": 502,
+        "invalid_output": 502,
+    }
+    return HTTPException(
+        status_code=status_by_category[exc.category],
+        detail={"message": "AI strategy preview failed", "category": exc.category},
+    )
+
+
 def _commit_or_conflict(db: Session) -> None:
     try:
         db.commit()
@@ -688,19 +782,21 @@ def validate_full_strategy(
         spec = validate_strategy_spec(strategy.spec_json)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    return {
-        "valid": True,
-        "legacy": False,
-        "strategy_type": spec["strategy_type"],
-        "schema_version": spec["schema_version"],
-        "spec_hash": strategy_spec_hash(spec),
-        "data_requirements": {
-            "market": spec["market"],
-            "timeframes": spec["timeframes"],
-            "closed_bar_only": True,
-        },
-        "warnings": [],
-    }
+    return _code_validation_response(spec)
+
+
+@router.post("/{public_id}/code/validate")
+def validate_strategy_code(
+    public_id: str,
+    payload: StrategyCodeValidateRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = get_user_strategy(db, user.id, public_id)
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="strategy not found")
+    spec, _ = _validated_code_spec(strategy, payload.spec)
+    return _code_validation_response(spec)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -844,6 +940,44 @@ def update_strategy(
     return serialize_user_strategy(strategy)
 
 
+@router.put("/{public_id}/code")
+def update_strategy_code(
+    public_id: str,
+    payload: StrategyCodeUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = _locked_user_strategy(db, user.id, public_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    _apply_code_edit(
+        db,
+        strategy,
+        expected_version=payload.version,
+        name=payload.name,
+        description=payload.description,
+        category=payload.category,
+        spec_value=payload.spec,
+        source="manual",
+        summary="手工修改完整策略代码",
+    )
+    _audit(
+        db,
+        request,
+        "strategy.code_update",
+        user.id,
+        strategy.public_id,
+        metadata={
+            "version": strategy.version,
+            "source": "manual",
+            "spec_hash": strategy.spec_hash,
+        },
+    )
+    _commit_or_conflict(db)
+    return serialize_user_strategy(strategy)
+
+
 @router.post("/{public_id}/ai-preview")
 def preview_ai_strategy_edit(
     public_id: str,
@@ -919,6 +1053,88 @@ def preview_ai_strategy_edit(
             status_code=status_by_category[exc.category],
             detail={"message": "AI strategy preview failed", "category": exc.category},
         ) from None
+
+
+@router.post("/{public_id}/code/ai-preview")
+def preview_ai_strategy_code_edit(
+    public_id: str,
+    payload: StrategyCodeAiPreviewRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = get_user_strategy(db, user.id, public_id)
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="strategy not found")
+    if strategy.strategy_kind != "full_strategy" or not strategy.spec_json:
+        raise HTTPException(
+            status_code=409,
+            detail="code editing is available only for full strategy DSL revisions",
+        )
+    input_spec, _ = _validated_code_spec(strategy, payload.spec)
+    editable = strategy_snapshot(strategy)
+    editable["spec"] = input_spec
+    settings = request.app.state.settings
+    user_model = get_global_ai_model_config(db, legacy_fallback_user_id=user.id)
+    user_model_runtime: tuple[str, str, str] | None = None
+    if user_model is not None:
+        try:
+            api_key = CredentialCipher(
+                settings.credential_master_key.get_secret_value()
+            ).decrypt(user_model.api_key_encrypted)
+        except SecurityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "AI strategy preview failed",
+                    "category": "not_configured",
+                },
+            ) from None
+        user_model_runtime = (
+            user_model.provider_code,
+            user_model.model_name,
+            api_key,
+        )
+    db.rollback()
+    safety_identifier = (
+        "qd_"
+        + hmac.new(
+            settings.jwt_secret.get_secret_value().encode("utf-8"),
+            f"strategy-code-user:{user.id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()[:32]
+    )
+    try:
+        if user_model_runtime is not None:
+            provider_code, model_name, api_key = user_model_runtime
+            preview = generate_user_model_strategy_code_preview(
+                editable,
+                payload.prompt,
+                provider_code=provider_code,
+                api_key=api_key,
+                model_name=model_name,
+                timeout_seconds=settings.openai_strategy_timeout_seconds,
+            )
+        else:
+            preview = generate_strategy_code_preview(
+                editable,
+                payload.prompt,
+                settings.openai_api_key.get_secret_value(),
+                settings.openai_strategy_model,
+                settings.openai_strategy_timeout_seconds,
+                safety_identifier,
+            )
+    except StrategyAiError as exc:
+        raise _strategy_ai_http_error(exc) from None
+    proposed = preview.get("proposed_spec")
+    if not isinstance(proposed, Mapping):
+        raise _strategy_ai_http_error(StrategyAiError("invalid_output"))
+    spec, _ = _validated_code_spec(strategy, proposed)
+    preview["proposed_spec"] = spec
+    preview["strategy_code"] = json.dumps(spec, ensure_ascii=False, indent=2)
+    preview["spec_hash"] = strategy_spec_hash(spec)
+    return preview
 
 
 @router.post("/{public_id}/ai-apply")

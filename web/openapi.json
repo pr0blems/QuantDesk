@@ -2928,6 +2928,7 @@
         "title": "HealthOut",
         "type": "object"
       },
+      "JsonValue": {},
       "LiveAccountArmRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4094,6 +4095,99 @@
           "risk_defaults"
         ],
         "title": "StrategyAiProposed",
+        "type": "object"
+      },
+      "StrategyCodeAiPreviewRequest": {
+        "additionalProperties": false,
+        "description": "Edit the currently visible code buffer without persisting it.",
+        "properties": {
+          "prompt": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "spec": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "maxProperties": 32,
+            "minProperties": 1,
+            "title": "Spec",
+            "type": "object"
+          }
+        },
+        "required": [
+          "prompt",
+          "spec"
+        ],
+        "title": "StrategyCodeAiPreviewRequest",
+        "type": "object"
+      },
+      "StrategyCodeUpdateRequest": {
+        "additionalProperties": false,
+        "description": "Publish a complete strategy DSL revision under optimistic locking.",
+        "properties": {
+          "category": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Category",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "maxLength": 600,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "spec": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "maxProperties": 32,
+            "minProperties": 1,
+            "title": "Spec",
+            "type": "object"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "name",
+          "category",
+          "spec"
+        ],
+        "title": "StrategyCodeUpdateRequest",
+        "type": "object"
+      },
+      "StrategyCodeValidateRequest": {
+        "additionalProperties": false,
+        "description": "Validate one complete, declarative strategy program without persisting it.",
+        "properties": {
+          "spec": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "maxProperties": 32,
+            "minProperties": 1,
+            "title": "Spec",
+            "type": "object"
+          }
+        },
+        "required": [
+          "spec"
+        ],
+        "title": "StrategyCodeValidateRequest",
         "type": "object"
       },
       "StrategyCreateRequest": {
@@ -11455,6 +11549,183 @@
           }
         ],
         "summary": "Preview Ai Strategy Edit",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/code": {
+      "put": {
+        "operationId": "update_strategy_code_api_v2_strategies__public_id__code_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyCodeUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Strategy Code Api V2 Strategies  Public Id  Code Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Strategy Code",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/code/ai-preview": {
+      "post": {
+        "operationId": "preview_ai_strategy_code_edit_api_v2_strategies__public_id__code_ai_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyCodeAiPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Preview Ai Strategy Code Edit Api V2 Strategies  Public Id  Code Ai Preview Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Preview Ai Strategy Code Edit",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/code/validate": {
+      "post": {
+        "operationId": "validate_strategy_code_api_v2_strategies__public_id__code_validate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyCodeValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate Strategy Code Api V2 Strategies  Public Id  Code Validate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Validate Strategy Code",
         "tags": [
           "strategies"
         ]

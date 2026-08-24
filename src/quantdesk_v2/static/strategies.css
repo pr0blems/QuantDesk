@@ -227,6 +227,17 @@
 .strategy-version-strip strong { color: var(--brand); font-size: 16px; }
 .strategy-version-strip small { justify-self: end; color: #536c82; }
 .strategy-form-block { display: grid; gap: 11px; padding: 13px; border: 1px solid rgba(125, 155, 183, .14); border-radius: 11px; background: rgba(9, 25, 41, .68); }
+.strategy-edit-scope-block { background: linear-gradient(120deg, rgba(43, 215, 163, .045), rgba(77, 141, 247, .035)); }
+.strategy-edit-scope { justify-self: start; min-width: 270px; }
+.strategy-edit-scope button { min-width: 128px; }
+.strategy-code-block { border-color: rgba(77, 141, 247, .22); background: rgba(5, 17, 29, .78); }
+.strategy-form .strategy-code-editor { min-height: 430px; padding: 13px 14px; color: #b8d6ce; border-color: rgba(77, 141, 247, .24); background: #04101a; font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: 12.8px; line-height: 1.62; tab-size: 2; white-space: pre; }
+.strategy-code-actions { display: flex; align-items: center; gap: 7px; }
+.strategy-code-actions button { min-height: 33px; padding: 6px 10px; }
+.strategy-code-status { margin-left: auto; color: #6d8398; font-size: 11.2px; }
+.strategy-code-status.success { color: var(--brand); }
+.strategy-code-status.error { color: var(--danger); }
+.strategy-code-guard { margin: 0; color: #61778b; font-size: 11.2px; line-height: 1.55; }
 .strategy-create-mode { justify-self: start; }
 .strategy-create-mode button { min-width: 94px; }
 #strategy-indicator-composer { display: grid; gap: 11px; }

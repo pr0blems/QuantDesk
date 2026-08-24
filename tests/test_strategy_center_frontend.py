@@ -13,6 +13,9 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'data-create-mode="indicators"',
         'data-create-mode="template"',
         'id="strategy-detail-layer"',
+        'data-edit-scope="parameters"',
+        'data-edit-scope="code"',
+        'id="strategy-code-editor"',
         'this.node("button", "strategy-edit-button secondary", "详情")',
         'this.node("button", "strategy-edit-button secondary", "验证")',
         'this.node("button", "strategy-edit-button danger", "归档")',
@@ -25,6 +28,9 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'method: "DELETE"',
         'template_key: this.querySelector("#strategy-template").value',
         'this.signalCard(item)',
+        '/code/validate`',
+        '${codeEdit ? "/code/ai-preview" : "/ai-preview"}',
+        '/code`, { method: "PUT"',
     ):
         assert api_contract in script
 
@@ -38,8 +44,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260806-4" in index
-    assert index.index("/assets/strategies.js?v=20260806-4") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260824-code1" in index
+    assert index.index("/assets/strategies.js?v=20260824-code1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel
@@ -50,6 +56,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     assert ".strategy-card-actions" in stylesheet
     assert ".strategy-detail-dialog" in stylesheet
     assert ".strategy-revision-row" in stylesheet
+    assert ".strategy-code-editor" in stylesheet
+    assert ".strategy-code-status.success" in stylesheet
 
 
 def test_strategy_custom_element_initializes_after_construction() -> None:

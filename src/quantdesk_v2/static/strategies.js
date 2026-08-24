@@ -19,6 +19,7 @@ class StrategyCenter extends HTMLElement {
     this.categoryFilter = "all";
     this.activeItem = null;
     this.editorMode = "edit";
+    this.editScope = "parameters";
     this.createMode = "indicators";
     this.preview = null;
   }
@@ -85,6 +86,14 @@ class StrategyCenter extends HTMLElement {
             <form id="strategy-form" class="strategy-form" novalidate>
               <div id="strategy-version-strip" class="strategy-version-strip"><span>当前版本</span><strong id="strategy-editor-version">--</strong><small>乐观锁保护</small></div>
 
+              <div id="strategy-edit-scope-block" class="strategy-form-block strategy-edit-scope-block hidden">
+                <div class="strategy-section-heading"><div><span>00</span><strong>维护方式</strong></div><small id="strategy-edit-scope-help">选择修改完整策略代码或仅调整参数</small></div>
+                <div id="strategy-edit-scope" class="strategy-segments strategy-edit-scope" aria-label="策略维护方式">
+                  <button class="active" type="button" data-edit-scope="parameters" aria-pressed="true">参数配置</button>
+                  <button type="button" data-edit-scope="code" aria-pressed="false">策略代码</button>
+                </div>
+              </div>
+
               <div id="strategy-composer-block" class="strategy-form-block hidden">
                 <div class="strategy-section-heading"><div><span>01</span><strong id="strategy-create-mode-title">选择指标</strong></div><small id="strategy-create-mode-help">至少选择 2 个，参数会动态出现</small></div>
                 <div id="strategy-create-mode" class="strategy-segments strategy-create-mode" aria-label="策略创建方式">
@@ -116,6 +125,17 @@ class StrategyCenter extends HTMLElement {
                 <label>策略说明<textarea id="strategy-description" rows="3" maxlength="500" placeholder="说明入场逻辑、适用行情与风险边界"></textarea></label>
               </div>
 
+              <div id="strategy-code-block" class="strategy-form-block strategy-code-block hidden">
+                <div class="strategy-section-heading"><div><span>02</span><strong>策略 DSL 代码</strong></div><small>JSON · 同一运行时校验 · 保存即生成新版本</small></div>
+                <label>完整策略代码<textarea id="strategy-code-editor" class="strategy-code-editor" rows="22" spellcheck="false" autocomplete="off" aria-label="完整策略 DSL 代码"></textarea></label>
+                <div class="strategy-code-actions">
+                  <button id="strategy-code-format" class="strategy-quiet-button" type="button">格式化</button>
+                  <button id="strategy-code-validate" class="strategy-quiet-button" type="button">校验代码</button>
+                  <span id="strategy-code-status" class="strategy-code-status">尚未校验</span>
+                </div>
+                <p class="strategy-code-guard">仅支持平台策略 DSL；禁止 Python、JavaScript、网络请求和任意系统调用。保存前服务端会重新校验完整结构。</p>
+              </div>
+
               <div id="strategy-parameters-block" class="strategy-form-block">
                 <div class="strategy-section-heading"><div><span id="strategy-parameters-index">02</span><strong>策略参数</strong></div><small>字段范围由策略模型约束</small></div>
                 <div id="strategy-parameter-fields" class="strategy-field-grid two"></div>
@@ -136,7 +156,7 @@ class StrategyCenter extends HTMLElement {
             <aside id="strategy-ai-panel" class="strategy-ai-panel">
               <header>
                 <div><span>AI STRATEGY COMPOSER</span><h3 id="strategy-ai-title">用自然语言修改策略</h3></div>
-                <span class="strategy-ai-status"><i></i>受约束配置</span>
+                <span id="strategy-ai-status" class="strategy-ai-status"><i></i>受约束配置</span>
               </header>
               <p id="strategy-ai-description">描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改，不会生成或执行任意代码。</p>
               <label>自然语言要求<textarea id="strategy-ai-prompt" rows="5" maxlength="1200" placeholder="例如：做一个 1 小时趋势策略，用 EMA、MACD 和成交量确认，减少噪声并把止损控制在 3%。"></textarea></label>
@@ -211,6 +231,12 @@ class StrategyCenter extends HTMLElement {
     this.querySelectorAll("[data-create-mode]").forEach((button) => button.addEventListener("click", () => {
       this.switchCreateMode(button.dataset.createMode || "indicators");
     }));
+    this.querySelectorAll("[data-edit-scope]").forEach((button) => button.addEventListener("click", () => {
+      this.switchEditScope(button.dataset.editScope || "parameters", { resetCode: false });
+    }));
+    this.querySelector("#strategy-code-format").addEventListener("click", () => this.formatStrategyCode());
+    this.querySelector("#strategy-code-validate").addEventListener("click", () => this.validateStrategyCode());
+    this.querySelector("#strategy-code-editor").addEventListener("input", () => this.setCodeStatus("代码已修改，尚未校验"));
     this.querySelector("#strategy-template").addEventListener("change", (event) => this.applyTemplate(event.target.value));
     this.querySelector("#strategy-detail-close").addEventListener("click", () => this.closeDetails());
     this.querySelector("#strategy-detail-layer").addEventListener("click", (event) => {
@@ -668,6 +694,7 @@ class StrategyCenter extends HTMLElement {
 
   openCreate() {
     this.editorMode = "create";
+    this.editScope = "parameters";
     this.createMode = "indicators";
     this.activeItem = null;
     this.preview = null;
@@ -675,11 +702,14 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-editor-title").textContent = "新增策略";
     this.querySelector("#strategy-editor-subtitle").textContent = "勾选多个标准指标并配置参数，保存为可执行的完整策略。";
     this.querySelector("#strategy-version-strip").classList.add("hidden");
+    this.querySelector("#strategy-edit-scope-block").classList.add("hidden");
+    this.querySelector("#strategy-code-block").classList.add("hidden");
     this.querySelector("#strategy-composer-block").classList.remove("hidden");
     this.querySelector("#strategy-basic-index").textContent = "02";
     this.querySelector("#strategy-parameters-index").textContent = "--";
     this.querySelector("#strategy-risk-index").textContent = "03";
     this.querySelector("#strategy-ai-panel").classList.remove("hidden");
+    this.querySelector("#strategy-ai-status").lastChild.textContent = "受约束配置";
     this.querySelector("#strategy-ai-title").textContent = "用自然语言生成指标组合";
     this.querySelector("#strategy-ai-description").textContent = "描述周期、风格和风险偏好。AI 会从指标库选择多个指标并调整参数，只生成结构化方案。";
     this.querySelector("#strategy-ai-preview-button strong").textContent = "AI 生成指标方案";
@@ -708,18 +738,21 @@ class StrategyCenter extends HTMLElement {
 
   openEdit(item) {
     this.editorMode = "edit";
+    this.editScope = "parameters";
     this.activeItem = this.normalizeItem(item);
     this.preview = null;
     this.querySelector("#strategy-editor-kicker").textContent = "EDIT STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = this.activeItem.name;
     this.querySelector("#strategy-editor-subtitle").textContent = "保存后生成新版本；已完成的回测仍保留当时的策略快照。";
     this.querySelector("#strategy-version-strip").classList.remove("hidden");
+    this.querySelector("#strategy-edit-scope-block").classList.toggle("hidden", this.activeItem.strategy_kind !== "full_strategy");
     this.querySelector("#strategy-editor-version").textContent = `v${this.activeItem.version}`;
     this.querySelector("#strategy-composer-block").classList.add("hidden");
     this.querySelector("#strategy-basic-index").textContent = "01";
     this.querySelector("#strategy-parameters-index").textContent = "02";
     this.querySelector("#strategy-risk-index").textContent = "03";
     this.querySelector("#strategy-ai-panel").classList.remove("hidden");
+    this.querySelector("#strategy-ai-status").lastChild.textContent = "受约束配置";
     this.querySelector("#strategy-ai-title").textContent = "用自然语言修改策略";
     this.querySelector("#strategy-ai-description").textContent = "描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改。";
     this.querySelector("#strategy-ai-preview-button strong").textContent = "生成修改预览";
@@ -729,6 +762,9 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-description").value = this.activeItem.description;
     this.renderParameterFields(this.activeItem.parameter_schema, this.activeItem.parameters);
     this.renderRiskFields(this.activeItem.risk_defaults);
+    this.querySelector("#strategy-code-editor").value = this.strategyCode(this.activeItem.spec);
+    this.setCodeStatus("当前版本代码，尚未重新校验");
+    this.switchEditScope("parameters", { resetCode: false });
     this.querySelector("#strategy-ai-prompt").value = "";
     this.clearPreview();
     this.showFormError("");
@@ -752,6 +788,99 @@ class StrategyCenter extends HTMLElement {
     this.setButtonBusy(this.querySelector("#strategy-save"), false);
     this.setButtonBusy(this.querySelector("#strategy-ai-preview-button"), false);
     this.setButtonBusy(this.querySelector("#strategy-ai-apply"), false);
+  }
+
+  switchEditScope(scope, { resetCode = true } = {}) {
+    if (this.editorMode !== "edit") return;
+    const codeAvailable = this.activeItem?.strategy_kind === "full_strategy" && this.plainObject(this.activeItem?.spec);
+    this.editScope = scope === "code" && codeAvailable ? "code" : "parameters";
+    this.querySelectorAll("[data-edit-scope]").forEach((button) => {
+      const active = button.dataset.editScope === this.editScope;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    const codeMode = this.editScope === "code";
+    this.querySelector("#strategy-code-block").classList.toggle("hidden", !codeMode);
+    if (codeMode) {
+      this.querySelector("#strategy-parameters-block").classList.add("hidden");
+      this.querySelector("#strategy-risk-block").classList.add("hidden");
+      if (resetCode) this.querySelector("#strategy-code-editor").value = this.strategyCode(this.activeItem.spec);
+      this.setCodeStatus("当前版本代码，尚未重新校验");
+      this.querySelector("#strategy-edit-scope-help").textContent = "维护完整入场、退出、风险与执行 DSL";
+      this.querySelector("#strategy-ai-title").textContent = "用自然语言修改策略代码";
+      this.querySelector("#strategy-ai-description").textContent = "描述要调整的指标组合、方向、周期、入场、退出或风险逻辑。模型只生成受控策略 DSL 代码预览，服务端会再次校验。";
+      this.querySelector("#strategy-ai-status").lastChild.textContent = "受控策略 DSL";
+      this.querySelector("#strategy-ai-preview-button strong").textContent = "生成代码修改预览";
+      this.querySelector("#strategy-ai-prompt").placeholder = "例如：只做多，把止盈调整为 3R，盈利 1.5R 后启动移动止损，最大持仓改为 72 根 K 线。";
+    } else {
+      this.renderParameterFields(this.activeItem.parameter_schema, this.activeItem.parameters);
+      this.renderRiskFields(this.activeItem.risk_defaults);
+      this.querySelector("#strategy-edit-scope-help").textContent = "仅调整已定义参数，不改变策略结构";
+      this.querySelector("#strategy-ai-title").textContent = "用自然语言维护策略参数";
+      this.querySelector("#strategy-ai-description").textContent = "描述你想调整的参数或风险默认值。模型只能修改已有字段，不会改变策略结构。";
+      this.querySelector("#strategy-ai-status").lastChild.textContent = "受约束参数";
+      this.querySelector("#strategy-ai-preview-button strong").textContent = "生成参数修改预览";
+      this.querySelector("#strategy-ai-prompt").placeholder = "例如：把止损改为 2%，止盈改为 6%，最大持仓改成 72 根 K 线。";
+    }
+    this.querySelector("#strategy-ai-prompt").value = "";
+    this.clearPreview();
+    this.showAiError("");
+  }
+
+  strategyCode(spec) {
+    try { return JSON.stringify(this.plainObject(spec), null, 2); } catch (_) { return "{}"; }
+  }
+
+  parseStrategyCode() {
+    const raw = this.querySelector("#strategy-code-editor").value.trim();
+    if (!raw) throw new Error("策略代码不能为空。");
+    let spec;
+    try { spec = JSON.parse(raw); } catch (error) {
+      throw new Error(`JSON 语法错误：${error?.message || "无法解析"}`);
+    }
+    if (!spec || Array.isArray(spec) || typeof spec !== "object") throw new Error("策略代码根节点必须是 JSON 对象。");
+    return spec;
+  }
+
+  formatStrategyCode() {
+    try {
+      const spec = this.parseStrategyCode();
+      this.querySelector("#strategy-code-editor").value = JSON.stringify(spec, null, 2);
+      this.setCodeStatus("格式化完成，尚未校验");
+      this.showFormError("");
+    } catch (error) {
+      this.setCodeStatus(error?.message || "代码格式化失败", "error");
+    }
+  }
+
+  async validateStrategyCode() {
+    if (!this.activeItem?.public_id || this.editScope !== "code") return;
+    let spec;
+    try { spec = this.parseStrategyCode(); } catch (error) {
+      this.setCodeStatus(error?.message || "策略代码无法解析", "error");
+      return;
+    }
+    const button = this.querySelector("#strategy-code-validate");
+    this.setButtonBusy(button, true, "校验中…");
+    try {
+      const result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}/code/validate`, {
+        method: "POST",
+        body: JSON.stringify({ spec }),
+      });
+      if (result?.normalized_spec) this.querySelector("#strategy-code-editor").value = JSON.stringify(result.normalized_spec, null, 2);
+      this.setCodeStatus(`校验通过 · ${String(result?.spec_hash || "").slice(0, 12)}`, "success");
+      this.showFormError("");
+    } catch (error) {
+      this.setCodeStatus(this.friendlyMutationError(error), "error");
+    } finally {
+      this.setButtonBusy(button, false);
+    }
+  }
+
+  setCodeStatus(message, tone = "") {
+    const target = this.querySelector("#strategy-code-status");
+    target.textContent = message;
+    target.className = `strategy-code-status${tone ? ` ${tone}` : ""}`;
   }
 
   populateTemplateSelect() {
@@ -1011,6 +1140,15 @@ class StrategyCenter extends HTMLElement {
     const name = this.querySelector("#strategy-name").value.trim();
     const description = this.querySelector("#strategy-description").value.trim();
     const category = this.querySelector("#strategy-category").value.trim();
+    const codeEdit = this.editorMode === "edit" && this.editScope === "code";
+    let codeSpec = null;
+    if (codeEdit) {
+      try { codeSpec = this.parseStrategyCode(); } catch (error) {
+        this.showFormError(error?.message || "策略代码无法解析。");
+        this.setCodeStatus(error?.message || "策略代码无法解析", "error");
+        return;
+      }
+    }
     const indicatorCreate = this.editorMode === "create" && this.createMode === "indicators";
     const indicatorSelections = indicatorCreate ? this.collectIndicatorSelections() : [];
     const directions = indicatorCreate
@@ -1052,6 +1190,15 @@ class StrategyCenter extends HTMLElement {
             };
         if (!indicatorCreate && !body.template_key) throw new Error("请选择一个系统策略模板。");
         result = await this.api("", { method: "POST", body: JSON.stringify(body) });
+      } else if (codeEdit) {
+        const body = {
+          name,
+          description,
+          category,
+          spec: codeSpec,
+          version: this.activeItem.version,
+        };
+        result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}/code`, { method: "PUT", body: JSON.stringify(body) });
       } else {
         const body = {
           name,
@@ -1206,12 +1353,14 @@ class StrategyCenter extends HTMLElement {
     this.showAiError("");
     this.clearPreview();
     try {
+      const codeEdit = this.editorMode === "edit" && this.editScope === "code";
       const path = this.editorMode === "create"
         ? "/compose/ai-preview"
-        : `/${encodeURIComponent(this.activeItem.public_id)}/ai-preview`;
+        : `/${encodeURIComponent(this.activeItem.public_id)}${codeEdit ? "/code/ai-preview" : "/ai-preview"}`;
+      const requestBody = codeEdit ? { prompt, spec: this.parseStrategyCode() } : { prompt };
       const result = await this.api(path, {
         method: "POST",
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify(requestBody),
       });
       this.preview = {
         base_version: Number(result?.base_version ?? this.activeItem?.version ?? 1),
@@ -1219,7 +1368,10 @@ class StrategyCenter extends HTMLElement {
         summary: String(result?.summary ?? "模型已生成受约束的指标组合建议。"),
         changes: Array.isArray(result?.changes) ? result.changes : [],
         proposed: this.plainObject(result?.proposed),
+        proposed_spec: this.plainObject(result?.proposed_spec),
+        strategy_code: String(result?.strategy_code ?? ""),
         draft: this.plainObject(result?.draft),
+        mode: codeEdit ? "code" : "parameters",
       };
       this.renderPreview();
     } catch (error) {
@@ -1236,6 +1388,7 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-ai-provider").textContent = this.providerLabel(this.preview.provider);
     this.querySelector("#strategy-ai-base-version").textContent = this.editorMode === "create" ? "新策略草案" : `基于 v${this.preview.base_version}`;
     this.querySelector("#strategy-ai-summary").textContent = this.preview.summary;
+    this.querySelector("#strategy-ai-apply strong").textContent = this.preview.mode === "code" ? "应用到代码编辑器" : "确认应用";
     const changes = this.querySelector("#strategy-ai-changes");
     if (!this.preview.changes.length) {
       changes.replaceChildren(this.node("div", "strategy-change-empty", "模型未发现需要修改的有效字段"));
@@ -1260,12 +1413,22 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-ai-preview").classList.add("hidden");
     this.querySelector("#strategy-ai-changes").replaceChildren();
     this.querySelector("#strategy-ai-apply").disabled = false;
+    this.querySelector("#strategy-ai-apply strong").textContent = "确认应用";
   }
 
   async applyAiPreview() {
     if (!this.preview) return;
     if (this.editorMode === "create") {
       this.applyCompositionDraft(this.preview.draft);
+      return;
+    }
+    if (this.preview.mode === "code") {
+      const code = this.preview.strategy_code || this.strategyCode(this.preview.proposed_spec);
+      this.querySelector("#strategy-code-editor").value = code;
+      this.querySelector("#strategy-ai-prompt").value = "";
+      this.clearPreview();
+      this.setCodeStatus("AI 修改已写入编辑器，请校验后保存新版本");
+      this.showAiError("代码预览已应用到编辑器，尚未保存，也不会执行交易。", "success");
       return;
     }
     if (!this.activeItem?.public_id) return;

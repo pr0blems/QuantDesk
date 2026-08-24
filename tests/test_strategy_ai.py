@@ -9,9 +9,12 @@ from quantdesk_v2 import strategy_ai, strategy_routes
 from quantdesk_v2.ai_providers import AI_PROVIDER_PRESETS
 from quantdesk_v2.strategy_ai import (
     StrategyAiError,
+    generate_strategy_code_preview,
     generate_strategy_preview,
+    generate_user_model_strategy_code_preview,
     generate_user_model_strategy_preview,
 )
+from quantdesk_v2.strategy_runtime import build_trend_pullback_spec
 
 
 def strategy() -> dict[str, Any]:
@@ -600,3 +603,144 @@ def test_local_edits_still_enforce_numeric_and_content_bounds() -> None:
             model="unused",
         )
     assert content.value.category == "invalid_output"
+
+
+def code_strategy() -> dict[str, Any]:
+    return {
+        "version": 7,
+        "spec": build_trend_pullback_spec(),
+        "public_id": "must-not-leak",
+        "user_id": 91,
+    }
+
+
+def test_local_strategy_code_preview_edits_only_supported_dsl_values() -> None:
+    preview = generate_strategy_code_preview(
+        code_strategy(),
+        "只做多，take_profit_r = 3.5，max_holding_bars = 72",
+        api_key="",
+        model="unused",
+    )
+
+    assert preview["provider"] == "local_semantic"
+    assert preview["base_version"] == 7
+    assert preview["proposed_spec"]["directions"] == ["long"]
+    assert preview["proposed_spec"]["exit"]["take_profit_r"] == 3.5
+    assert preview["proposed_spec"]["exit"]["max_holding_bars"] == 72
+    assert "public_id" not in preview["strategy_code"]
+    assert {item["path"] for item in preview["changes"]} >= {
+        "spec.directions",
+        "spec.exit.take_profit_r",
+        "spec.exit.max_holding_bars",
+    }
+
+
+def test_openai_strategy_code_preview_is_structured_and_review_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = code_strategy()
+    proposed = build_trend_pullback_spec()
+    proposed["exit"]["take_profit_r"] = 4.0
+    model_output = {
+        "strategy_code": json.dumps(proposed),
+        "summary": "把止盈目标调整为 4R。",
+    }
+    captured: dict[str, Any] = {}
+
+    def transport(
+        body: bytes, headers: dict[str, str], timeout_seconds: float
+    ) -> tuple[int, bytes]:
+        captured["payload"] = json.loads(body)
+        captured["headers"] = headers
+        captured["timeout"] = timeout_seconds
+        return 200, responses_body(model_output)
+
+    monkeypatch.setattr(strategy_ai, "_http_transport", transport)
+    preview = generate_strategy_code_preview(
+        current,
+        "把止盈目标改为 4R",
+        api_key="sk-test-abcdefghijklmnopqrstuvwxyz",
+        model="gpt-5.6-luna",
+        timeout_seconds=11,
+        safety_identifier="qd_strategy_code_test",
+    )
+
+    payload = captured["payload"]
+    assert payload["store"] is False
+    assert payload["text"]["format"]["name"] == "strategy_code_edit_preview"
+    assert payload["text"]["format"]["strict"] is True
+    request_text = json.dumps(payload, ensure_ascii=False)
+    assert "must-not-leak" not in request_text
+    assert "user_id" not in request_text
+    assert preview["proposed_spec"]["exit"]["take_profit_r"] == 4.0
+    assert preview["changes"] == [
+        {"path": "spec.exit.take_profit_r", "before": 2.5, "after": 4.0}
+    ]
+    assert captured["timeout"] == 11
+
+
+def test_user_model_strategy_code_preview_uses_allowlisted_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposed = build_trend_pullback_spec()
+    proposed["directions"] = ["short"]
+    output = {
+        "strategy_code": json.dumps(proposed),
+        "summary": "改为仅做空。",
+    }
+    captured: dict[str, Any] = {}
+
+    def transport(
+        endpoint: Any,
+        body: bytes,
+        _headers: dict[str, str],
+        _timeout_seconds: float,
+    ) -> tuple[int, bytes]:
+        captured["endpoint"] = endpoint
+        captured["payload"] = json.loads(body)
+        return 200, chat_completions_body(output)
+
+    monkeypatch.setattr(strategy_ai, "_chat_http_transport", transport)
+    preview = generate_user_model_strategy_code_preview(
+        code_strategy(),
+        "只做空",
+        provider_code="deepseek",
+        api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+        model_name=AI_PROVIDER_PRESETS["deepseek"].default_model,
+    )
+
+    assert captured["endpoint"] is AI_PROVIDER_PRESETS["deepseek"]
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+    assert preview["provider"] == "deepseek"
+    assert preview["proposed_spec"]["directions"] == ["short"]
+
+
+@pytest.mark.parametrize(
+    "strategy_code",
+    [
+        "```json\n{}\n```",
+        '{"python":"import os"}',
+        '{"endpoint":"https://attacker.invalid"}',
+    ],
+)
+def test_strategy_code_preview_rejects_non_dsl_content(
+    monkeypatch: pytest.MonkeyPatch, strategy_code: str
+) -> None:
+    monkeypatch.setattr(
+        strategy_ai,
+        "_http_transport",
+        lambda *_: (
+            200,
+            responses_body(
+                {"strategy_code": strategy_code, "summary": "修改策略代码。"}
+            ),
+        ),
+    )
+    with pytest.raises(StrategyAiError) as caught:
+        generate_strategy_code_preview(
+            code_strategy(),
+            "修改策略",
+            api_key="sk-test-abcdefghijklmnopqrstuvwxyz",
+            model="gpt-5.6-luna",
+        )
+    assert caught.value.category == "invalid_output"

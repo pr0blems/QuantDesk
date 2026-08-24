@@ -1348,6 +1348,34 @@ class StrategyAiApplyRequest(BaseModel):
     proposed: StrategyAiProposed
 
 
+class StrategyCodeValidateRequest(BaseModel):
+    """Validate one complete, declarative strategy program without persisting it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec: dict[str, JsonValue] = Field(min_length=1, max_length=32)
+
+
+class StrategyCodeAiPreviewRequest(StrategyAiPreviewRequest):
+    """Edit the currently visible code buffer without persisting it."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    spec: dict[str, JsonValue] = Field(min_length=1, max_length=32)
+
+
+class StrategyCodeUpdateRequest(BaseModel):
+    """Publish a complete strategy DSL revision under optimistic locking."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    version: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=600)
+    category: str = Field(min_length=1, max_length=32)
+    spec: dict[str, JsonValue] = Field(min_length=1, max_length=32)
+
+
 class BacktestRunRequest(BaseModel):
     """创建单策略、单品种回测所需的可信输入。"""
 

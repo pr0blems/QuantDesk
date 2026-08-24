@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -437,3 +438,137 @@ def test_strategy_edit_rejects_parameter_expansion_and_cross_tenant_apply(
             },
         )
         assert hidden.status_code == 404
+
+
+def test_full_strategy_code_can_be_validated_and_published_as_a_revision(
+    mysql_test_engine: Engine,
+) -> None:
+    client, session_factory = build_test_client(mysql_test_engine)
+    with client:
+        headers = register_and_login(client, "strategy-code-owner")
+        items = client.get("/api/v2/strategies", headers=headers).json()["items"]
+        strategy = next(
+            item
+            for item in items
+            if item["source_template_key"] == "trend_pullback_continuation_v1"
+        )
+        proposed = copy.deepcopy(strategy["spec"])
+        proposed["directions"] = ["long"]
+        proposed["exit"]["take_profit_r"] = 3.25
+        proposed["exit"]["max_holding_bars"] = 72
+
+        validation = client.post(
+            f"/api/v2/strategies/{strategy['id']}/code/validate",
+            headers=headers,
+            json={"spec": proposed},
+        )
+        assert validation.status_code == 200
+        assert validation.json()["valid"] is True
+        assert validation.json()["normalized_spec"]["directions"] == ["long"]
+        assert len(validation.json()["spec_hash"]) == 64
+
+        response = client.put(
+            f"/api/v2/strategies/{strategy['id']}/code",
+            headers=headers,
+            json={
+                "version": strategy["version"],
+                "name": strategy["name"],
+                "description": strategy["description"],
+                "category": strategy["category"],
+                "spec": proposed,
+            },
+        )
+        assert response.status_code == 200
+        saved = response.json()
+        assert saved["version"] == strategy["version"] + 1
+        assert saved["spec"]["directions"] == ["long"]
+        assert saved["spec"]["exit"]["take_profit_r"] == 3.25
+        assert saved["parameters"] == saved["spec"]["parameters"]
+        assert saved["spec_hash"] == validation.json()["spec_hash"]
+
+        with session_factory() as db:
+            row = db.scalar(
+                select(UserStrategy).where(UserStrategy.public_id == strategy["id"])
+            )
+            assert row is not None
+            revision = db.scalar(
+                select(StrategyRevision).where(
+                    StrategyRevision.user_strategy_id == row.id,
+                    StrategyRevision.version == saved["version"],
+                )
+            )
+            assert revision is not None
+            assert revision.change_summary == "手工修改完整策略代码"
+            assert revision.spec_hash == saved["spec_hash"]
+
+
+def test_strategy_code_rejects_unknown_programs_legacy_engines_and_stale_versions(
+    mysql_test_engine: Engine,
+) -> None:
+    client, _ = build_test_client(mysql_test_engine)
+    with client:
+        headers = register_and_login(client, "strategy-code-guard")
+        items = client.get("/api/v2/strategies", headers=headers).json()["items"]
+        full = next(item for item in items if item["strategy_kind"] == "full_strategy")
+        legacy = next(item for item in items if item["strategy_kind"] == "legacy_signal")
+
+        unsafe = copy.deepcopy(full["spec"])
+        unsafe["python"] = "import os"
+        invalid = client.post(
+            f"/api/v2/strategies/{full['id']}/code/validate",
+            headers=headers,
+            json={"spec": unsafe},
+        )
+        assert invalid.status_code == 422
+
+        unsupported = client.post(
+            f"/api/v2/strategies/{legacy['id']}/code/validate",
+            headers=headers,
+            json={"spec": full["spec"]},
+        )
+        assert unsupported.status_code == 409
+
+        stale = client.put(
+            f"/api/v2/strategies/{full['id']}/code",
+            headers=headers,
+            json={
+                "version": full["version"] + 99,
+                "name": full["name"],
+                "description": full["description"],
+                "category": full["category"],
+                "spec": full["spec"],
+            },
+        )
+        assert stale.status_code == 409
+
+
+def test_ai_strategy_code_preview_is_validated_before_reaching_the_editor(
+    mysql_test_engine: Engine,
+) -> None:
+    client, _ = build_test_client(mysql_test_engine)
+    with client:
+        headers = register_and_login(client, "strategy-code-ai")
+        items = client.get("/api/v2/strategies", headers=headers).json()["items"]
+        strategy = next(item for item in items if item["strategy_kind"] == "full_strategy")
+
+        response = client.post(
+            f"/api/v2/strategies/{strategy['id']}/code/ai-preview",
+            headers=headers,
+            json={
+                "prompt": "只做多，take_profit_r = 3.5，max_holding_bars = 72",
+                "spec": strategy["spec"],
+            },
+        )
+        assert response.status_code == 200
+        preview = response.json()
+        assert preview["provider"] == "local_semantic"
+        assert preview["base_version"] == strategy["version"]
+        assert preview["proposed_spec"]["directions"] == ["long"]
+        assert preview["proposed_spec"]["exit"]["take_profit_r"] == 3.5
+        assert preview["proposed_spec"]["exit"]["max_holding_bars"] == 72
+        assert preview["spec_hash"]
+        assert {change["path"] for change in preview["changes"]} >= {
+            "spec.directions",
+            "spec.exit.take_profit_r",
+            "spec.exit.max_holding_bars",
+        }

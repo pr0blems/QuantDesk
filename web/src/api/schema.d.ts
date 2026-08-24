@@ -2169,6 +2169,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/strategies/{public_id}/code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Strategy Code */
+        put: operations["update_strategy_code_api_v2_strategies__public_id__code_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/strategies/{public_id}/code/ai-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview Ai Strategy Code Edit */
+        post: operations["preview_ai_strategy_code_edit_api_v2_strategies__public_id__code_ai_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/strategies/{public_id}/code/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate Strategy Code */
+        post: operations["validate_strategy_code_api_v2_strategies__public_id__code_validate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/strategies/{public_id}/revisions": {
         parameters: {
             query?: never;
@@ -3507,6 +3558,7 @@ export interface components {
             /** Version */
             version: string;
         };
+        JsonValue: unknown;
         /** LiveAccountArmRequest */
         LiveAccountArmRequest: {
             /**
@@ -3885,6 +3937,49 @@ export interface components {
             /** Risk Defaults */
             risk_defaults: {
                 [key: string]: number;
+            };
+        };
+        /**
+         * StrategyCodeAiPreviewRequest
+         * @description Edit the currently visible code buffer without persisting it.
+         */
+        StrategyCodeAiPreviewRequest: {
+            /** Prompt */
+            prompt: string;
+            /** Spec */
+            spec: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+        };
+        /**
+         * StrategyCodeUpdateRequest
+         * @description Publish a complete strategy DSL revision under optimistic locking.
+         */
+        StrategyCodeUpdateRequest: {
+            /** Category */
+            category: string;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /** Name */
+            name: string;
+            /** Spec */
+            spec: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /** Version */
+            version: number;
+        };
+        /**
+         * StrategyCodeValidateRequest
+         * @description Validate one complete, declarative strategy program without persisting it.
+         */
+        StrategyCodeValidateRequest: {
+            /** Spec */
+            spec: {
+                [key: string]: components["schemas"]["JsonValue"];
             };
         };
         /**
@@ -8400,6 +8495,117 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["StrategyAiPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_strategy_code_api_v2_strategies__public_id__code_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategyCodeUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_ai_strategy_code_edit_api_v2_strategies__public_id__code_ai_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategyCodeAiPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_strategy_code_api_v2_strategies__public_id__code_validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategyCodeValidateRequest"];
             };
         };
         responses: {
