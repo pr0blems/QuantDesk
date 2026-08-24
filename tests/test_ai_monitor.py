@@ -1577,6 +1577,113 @@ def test_adaptive_exit_activates_profit_lock_only_on_the_next_closed_bar() -> No
     assert result["price_time_ms"] == start + interval * 2
 
 
+def test_new_risk_plan_uses_r_normalized_profit_protection() -> None:
+    plan = virtual_risk_plan_snapshot(
+        entry_price=100,
+        direction="long",
+        timeframe="1h",
+        atr_pct=1,
+    )
+
+    assert plan["version"] == "atr_risk_reward_guard_v3"
+    assert plan["execution_policy"] == "risk_unit_profit_guard_v6"
+    assert plan["stop_loss_pct"] == 1.5
+    assert plan["take_profit_pct"] == 3.0
+    assert plan["profit_protection"] == {
+        "version": "risk_unit_profit_guard_v1",
+        "mode": "risk_unit",
+        "risk_bps": 150.0,
+        "activation_r": 0.5,
+        "minimum_protected_r": 0.0,
+        "trailing_activation_r": 1.0,
+        "maximum_giveback_r": 0.5,
+        "activation_boundary": "prior_closed_15m_bar",
+        "minimum_hold_policy": "immediate_after_activation",
+    }
+    assert plan["failed_follow_through"]["maximum_favorable_r"] == 0.5
+    assert plan["failed_follow_through"]["maximum_favorable_bps"] == 75
+    assert (
+        plan["failed_follow_through"]["minimum_hold_policy"]
+        == "horizon_aligned"
+    )
+
+
+def test_risk_unit_profit_guard_is_not_delayed_by_signal_soft_exit_window() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    result = prediction_adaptive_path_exit(
+        [
+            {
+                "open_time": start,
+                "open": 100,
+                "high": 100.7,
+                "low": 99.9,
+                "close": 100.6,
+            },
+            {
+                "open_time": start + interval,
+                "open": 100.6,
+                "high": 100.65,
+                "low": 100.1,
+                "close": 100.2,
+            },
+        ],
+        100,
+        "long",
+        start,
+        start + interval * 2,
+        estimated_cost_bps=16,
+        minimum_soft_exit_ms=2 * 60 * 60 * 1000,
+        minimum_profit_protection_ms=0,
+        minimum_failed_follow_through_ms=2 * 60 * 60 * 1000,
+        profit_protection={
+            "mode": "risk_unit",
+            "risk_bps": 100,
+            "activation_r": 0.5,
+            "minimum_protected_r": 0,
+            "trailing_activation_r": 1,
+            "maximum_giveback_r": 0.5,
+        },
+    )
+
+    assert result is not None
+    assert result["reason"] == "take_profit"
+    assert result["exit_subreason"] == "profit_lock"
+    assert result["protection_mode"] == "risk_unit"
+    assert result["activation_bps"] == 50
+    assert result["price"] == pytest.approx(100.18)
+    assert result["price_time_ms"] == start + interval * 2
+
+
+def test_risk_unit_guard_keeps_failed_follow_through_horizon_aligned() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    result = prediction_adaptive_path_exit(
+        [
+            {
+                "open_time": start + index * interval,
+                "open": 100 - index * 0.05,
+                "high": 100.1,
+                "low": 99.7 - index * 0.1,
+                "close": 99.9 - index * 0.1,
+            }
+            for index in range(3)
+        ],
+        100,
+        "long",
+        start,
+        start + interval * 3,
+        minimum_profit_protection_ms=0,
+        minimum_failed_follow_through_ms=2 * 60 * 60 * 1000,
+        profit_protection={
+            "mode": "risk_unit",
+            "risk_bps": 100,
+        },
+    )
+
+    assert result is None
+
+
 def test_adaptive_exit_cuts_failed_follow_through_after_three_closed_bars() -> None:
     start = 1_800_000_000_000
     interval = 900_000
@@ -2129,6 +2236,11 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
     assert "FOR UPDATE SKIP LOCKED" in mysql_sql
     assert "FOR UPDATE" not in sqlite_sql
     assert mysql_sql.count("ai_monitor_predictions.status = %s") == 2
+    assert (
+        "ai_monitor_predictions.status = %s OR "
+        "ai_monitor_predictions.status = %s AND "
+        "ai_monitor_predictions.updated_at <= %s"
+    ) in mysql_sql
     assert {"pending", "unavailable"}.issubset(set(mysql_compiled.params.values()))
     assert database.statement.get_execution_options()["populate_existing"] is True
     assert {call[0] for call in repository.calls} == {
@@ -3065,11 +3177,14 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "virtualEntryGate(item)" in component
     assert "virtualEntryState(item, gate)" in component
     assert "virtualPositionSnapshot(item)" in component
-    assert "当前 ${this.state.displayLeverage}x 净收益率" in component
+    assert "当前 ${this.state.displayLeverage}x 仓位ROE" in component
+    assert "保证金口径，不代表账户总收益" in component
     assert "冻结入场价" in component
     assert "实时价格" in component
     assert "参考止损价" in component
     assert "参考止盈价" in component
+    assert "越过参考止损·待K线确认" in component
+    assert "已按止损结算" in component
     assert "net_pnl_per_10000" in component
     assert ".virtual-position-metrics" in stylesheet
     assert 'check.key !== "entry_price"' in component
@@ -3241,10 +3356,13 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "筛选样本" in component
     assert "多 / 空方向" in component
     assert 'this.api("/prediction-records?limit=200")' not in component
-    for label in ("历史机会", "筛选样本", "命中次数", "命中概率", "x 净收益率"):
+    for label in ("历史机会", "筛选样本", "命中次数", "命中概率", "x 仓位ROE"):
         assert label in component
-    for label in ("x 毛 / 净收益率", "MFE / MAE", "成本后结果", "成本计算"):
+    for label in ("x 毛 / 净仓位ROE", "MFE / MAE", "成本后结果", "成本计算"):
         assert label in component
+    assert "RISK UNIT EXIT GUARD V6" in component
+    assert "0.5R 启动" in component
+    assert "强制保守成本" in component
     for label in (
         "最低技术强度",
         "最低组合评分",

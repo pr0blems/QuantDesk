@@ -1414,7 +1414,7 @@ class AiMonitorDashboard extends HTMLElement {
           <label><span>保证金占用上限</span><input name="margin_cap_pct" type="number" min="1" max="100" step="0.1" value="${this.escape(risk.margin_cap_pct ?? 20)}"><small data-capital-basis-help="single">占账户权益 %</small></label>
           <label><span>单日亏损上限</span><input name="daily_loss_limit_pct" type="number" min="0.5" max="20" step="0.1" value="${this.escape(risk.daily_loss_limit_pct ?? 2)}"><small>触发后停止新开仓</small></label>
           <label><span>最大回撤上限</span><input name="max_drawdown_pct" type="number" min="1" max="50" step="0.1" value="${this.escape(risk.max_drawdown_pct ?? 6)}"><small>触发后安全停机</small></label>
-          <label><span>往返成本估计</span><input name="round_trip_cost_bps" type="number" min="0" max="500" step="0.1" value="${this.escape(risk.round_trip_cost_bps ?? 16)}"><small>手续费 + 滑点，bps</small></label>
+          <label><span>往返成本估计</span><input name="round_trip_cost_bps" type="number" min="16" max="500" step="0.1" value="${this.escape(Math.max(16, Number(risk.round_trip_cost_bps ?? 16)))}"><small>手续费 + 滑点，最低按 16 bps 计入</small></label>
         </div></fieldset>
         <fieldset><legend>信号准入</legend><div class="live-copy-config-grid">
           <label><span>最低组合评分</span><input name="minimum_combined_score" type="number" min="0" max="100" step="0.1" value="${this.escape(risk.minimum_combined_score ?? 70)}"><small>低于该分数不会实盘开仓</small></label>
@@ -3798,9 +3798,9 @@ class AiMonitorDashboard extends HTMLElement {
         ? "最近价格 · 行情延迟"
         : "实时价格";
       const targetStateLabel = position.target_state === "take_profit_reached"
-        ? "已越过止盈线"
+        ? position.valuation_state === "settled" ? "已按止盈结算" : "越过参考止盈·待K线确认"
         : position.target_state === "stop_loss_reached"
-        ? "已越过止损线"
+        ? position.valuation_state === "settled" ? "已按止损结算" : "越过参考止损·待K线确认"
         : position.valuation_state === "settled"
         ? "预测已结算"
         : "持仓观察中";
@@ -3809,7 +3809,7 @@ class AiMonitorDashboard extends HTMLElement {
         <div class="virtual-position-metrics">
           <span><em>冻结入场价</em><b>${position.entry_price > 0 ? this.escape(this.compactNumber(position.entry_price)) : "--"}</b><small>触发时价格，不随行情变化</small></span>
           <span class="live-mark"><em>${markLabel}</em><b>${position.current_price > 0 ? this.escape(this.compactNumber(position.current_price)) : "--"}</b><small>${position.market_at ? this.formatDate(position.market_at) : "等待最新行情"}</small></span>
-          <span class="position-pnl ${positionTone}"><em>当前 ${this.state.displayLeverage}x 净收益率</em><b>${position.available ? this.formatLeveragedReturnFromPercent(position.net_return_pct) : "--"}</b><small>${position.available ? `标的净收益 ${this.signedMetric(position.net_return_pct, 2, "%")} · 含成本换算 · 不含强平` : "暂无可用实时行情"}</small></span>
+          <span class="position-pnl ${positionTone}"><em>当前 ${this.state.displayLeverage}x 仓位ROE</em><b>${position.available ? this.formatLeveragedReturnFromPercent(position.net_return_pct) : "--"}</b><small>${position.available ? `标的净收益 ${this.signedMetric(position.net_return_pct, 2, "%")} · 保证金口径，不代表账户总收益` : "暂无可用实时行情"}</small></span>
           <span class="risk-stop"><em>参考止损价</em><b>${riskPlan.stop_loss_price > 0 ? this.escape(this.compactNumber(riskPlan.stop_loss_price)) : "--"}</b><small>风险 ${riskPlan.stop_loss_pct == null ? "--" : `-${Number(riskPlan.stop_loss_pct).toFixed(2)}%`}</small></span>
           <span class="risk-target"><em>参考止盈价</em><b>${riskPlan.take_profit_price > 0 ? this.escape(this.compactNumber(riskPlan.take_profit_price)) : "--"}</b><small>目标 ${riskPlan.take_profit_pct == null ? "--" : `+${Number(riskPlan.take_profit_pct).toFixed(2)}%`}</small></span>
           <span><em>风险收益比</em><b>1 : ${Number(riskPlan.risk_reward_ratio || 2).toFixed(1)}</b><small>${riskPlan.method === "atr14_x_1_5" ? "ATR(14) 波动率冻结" : "按周期默认风险"} · 仅观察线</small></span>
@@ -5044,7 +5044,7 @@ class AiMonitorDashboard extends HTMLElement {
       <div class="replay-summary">
         <article><span>任务进度</span><b>${latest ? `${progress}%` : "--"}</b><small>${latest ? `${this.number(latest.generated_signals)} 个去重信号` : "等待首次运行"}</small></article>
         <article><span>样本外信号</span><b>${this.number(readiness.oos_summary?.sample_count)}</b><small>多 ${this.number(readiness.oos_summary?.long_count)} / 空 ${this.number(readiness.oos_summary?.short_count)}</small></article>
-        <article><span>样本外平均 ${this.state.displayLeverage}x 净收益率</span><b class="${Number(readiness.oos_summary?.average_net_return_bps || 0) > 0 ? "positive" : "negative"}">${readiness.oos_summary?.average_net_return_bps == null ? "--" : this.formatLeveragedReturnFromBps(readiness.oos_summary.average_net_return_bps)}</b><small>标的 ${readiness.oos_summary?.average_net_return_bps == null ? "--" : this.formatBps(readiness.oos_summary.average_net_return_bps)} · 强制成本后</small></article>
+        <article><span>样本外平均 ${this.state.displayLeverage}x 仓位ROE</span><b class="${Number(readiness.oos_summary?.average_net_return_bps || 0) > 0 ? "positive" : "negative"}">${readiness.oos_summary?.average_net_return_bps == null ? "--" : this.formatLeveragedReturnFromBps(readiness.oos_summary.average_net_return_bps)}</b><small>标的 ${readiness.oos_summary?.average_net_return_bps == null ? "--" : this.formatBps(readiness.oos_summary.average_net_return_bps)} · 强制成本后 · 非账户收益率</small></article>
         <article><span>样本外准入</span><b class="${readiness.quantitative_ready ? "positive" : "negative"}">${readiness.passed_count || 0} / ${readiness.total_count || 8}</b><small>${readiness.quantitative_ready ? "可进入影子验证" : "仍限研究"}</small></article>
       </div>
       ${criteria.length ? `<div class="replay-criteria">${criteria.map((item) => `<span class="${item.passed ? "passed" : "blocked"}">${item.passed ? "✓" : "×"} ${this.escape(item.label)} <b>${item.current == null ? "--" : this.escape(item.current)}</b></span>`).join("")}</div>` : `<p class="replay-note">${this.escape(readiness.note || "完成回放后显示样本外准入结果。")}</p>`}
@@ -5231,22 +5231,22 @@ class AiMonitorDashboard extends HTMLElement {
       const exitCounts = summary.exit_reason_counts || {};
       const protectedCount = Number(exitCounts.profit_lock || 0) + Number(exitCounts.trailing_profit || 0);
       exitPolicyTarget.innerHTML = `
-        <header><div><span>ADAPTIVE EXIT GUARD V4</span><h3>盈利保护与失败跟随早退</h3><p>所有退出只使用当时已经收盘的 15 分钟 K 线；不会用同一根 K 线的未来高低点回写结果。</p></div><strong>因果回放<small>${this.escape(summary.settlement_policy_version || "--")}</small></strong></header>
+        <header><div><span>RISK UNIT EXIT GUARD V6</span><h3>R 单位盈利保护与失败跟随早退</h3><p>新预测按每笔止损距离 R 管理浮盈；旧预测保留冻结规则。保护线仅使用已经收盘的 15 分钟 K 线。</p></div><strong>因果回放<small>${this.escape(summary.settlement_policy_version || "--")}</small></strong></header>
         <div>
-          <article class="profit"><span>浮盈保护</span><b>+20 bps</b><small>前一根 K 线确认后冻结保护线 · 已触发 ${this.number(exitCounts.profit_lock)}</small></article>
-          <article class="profit"><span>移动保护</span><b>峰值 -30 bps</b><small>峰值达到 50 bps 后启用 · 已触发 ${this.number(exitCounts.trailing_profit)}</small></article>
-          <article class="risk"><span>跟随失败</span><b>3 × 15m</b><small>未曾浮盈 20 bps 且亏损达到 15 bps · 已触发 ${this.number(exitCounts.failed_follow_through)}</small></article>
+          <article class="profit"><span>浮盈保护</span><b>0.5R 启动</b><small>不再等待半个持有周期；前一根收盘确认后武装 · 已触发 ${this.number(exitCounts.profit_lock)}</small></article>
+          <article class="profit"><span>移动保护</span><b>1R / 回吐 0.5R</b><small>按本笔 ATR 风险归一，不再使用所有品种统一 30 bps · 已触发 ${this.number(exitCounts.trailing_profit)}</small></article>
+          <article class="risk"><span>跟随失败</span><b>仍按持有周期确认</b><small>与盈利保护分离，避免短线噪声秒平 · 已触发 ${this.number(exitCounts.failed_follow_through)}</small></article>
           <article><span>保护退出合计</span><b>${this.number(protectedCount)}</b><small>ATR 硬止损、2R 止盈和评分反转仍然保留</small></article>
         </div>`;
     }
     this.renderMarketAblation(data.ablation);
-    this.q("#prediction-note").textContent = `${data.note || "按历史预测的成本后结果统计，不执行任何下单。"} 页面收益率按 ${this.state.displayLeverage} 倍杠杆换算展示，并保留标的原始收益；不改变信号或下单逻辑。`;
+    this.q("#prediction-note").textContent = `${data.note || "按历史预测的成本后结果统计，不执行任何下单。"} 页面展示 ${this.state.displayLeverage}x 仓位保证金 ROE，并保留标的原始收益；仓位 ROE 不代表账户总收益。`;
     this.q("#analytics-summary").innerHTML = `
       <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)} · 旧口径剔除 ${this.number(summary.excluded_legacy_settlement_count)}</small></article>
       <article><span>多 / 空方向</span><strong class="analytics-directions"><b>${this.number(summary.long_count)}</b><i>/</i><em>${this.number(summary.short_count)}</em></strong><small>做多 / 做空样本分布</small></article>
       <article class="positive"><span>命中次数</span><strong>${this.number(summary.win_count)}</strong><small>未命中 ${this.number(summary.loss_count)} · 持平 ${this.number(summary.flat_count)}</small></article>
       <article class="${Number(summary.hit_rate || 0) >= 50 ? "positive" : "negative"}"><span>命中概率</span><strong>${hitRate}</strong><small>命中 ÷ 有方向结果</small></article>
-      <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均 ${this.state.displayLeverage}x 净收益率</span><strong>${this.formatLeveragedReturnFromBps(summary.average_directional_return_bps)}</strong><small>标的净 ${metricBps(summary.average_directional_return_bps)} · 毛 ${metricBps(summary.average_gross_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(summary.average_estimated_cost_bps || 0)))} · 费/滑点/资金已计入</small></article>
+      <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均 ${this.state.displayLeverage}x 仓位ROE</span><strong>${this.formatLeveragedReturnFromBps(summary.average_directional_return_bps)}</strong><small>标的净 ${metricBps(summary.average_directional_return_bps)} · 毛 ${metricBps(summary.average_gross_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(summary.average_estimated_cost_bps || 0)))} · 强制保守成本 · 非账户收益率</small></article>
       <article><span>平均 MFE / MAE</span><strong class="analytics-range"><b>${metricBps(summary.average_max_favorable_bps)}</b><i>${metricBps(summary.average_max_adverse_bps)}</i></strong><small>持有期最大有利 / 不利波动</small></article>
       <article><span>影子候选 / 研究</span><strong class="analytics-directions"><b>${this.number(summary.shadow_ready_count)}</b><i>/</i><em>${this.number(summary.research_only_count)}</em></strong><small>生成信号时的准入状态</small></article>`;
     const target = this.q("#prediction-list");
@@ -5261,12 +5261,12 @@ class AiMonitorDashboard extends HTMLElement {
       ${this.predictionFeatureCells(item)}
       <td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}<small>${item.entry_at ? this.formatDate(item.entry_at) : "入场时刻快照"}</small></td>
       <td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${this.exitReasonLabel(item.exit_reason, item.exit_detail)} · ${item.settled_price_at ? this.formatDate(item.settled_price_at) : "退出行情不足"}</small></td>
-      <td class="${Number(item.directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净 ${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)} · 标的净 ${metricBps(item.net_directional_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(item.estimated_cost_bps || 0)))} · 费/滑点/资金已计入</small></td>
+      <td class="${Number(item.directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净仓位ROE ${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)} · 标的净 ${metricBps(item.net_directional_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(item.estimated_cost_bps || 0)))} · 强制保守成本</small></td>
       <td>${metricBps(item.max_favorable_bps)}<small>${metricBps(item.max_adverse_bps)}</small></td>
       <td><span class="prediction-result ${this.escape(item.result || "unavailable")}">${this.analyticsResultLabel(item.result)}</span></td>
       <td>${this.formatDate(item.expires_at)}<small>计划 ${this.number(item.max_holding_bars || 1)} 根 · ${this.formatDuration(item.signal_time, item.expires_at)}</small><small>实际 ${this.formatDuration(item.signal_time, item.settled_price_at || item.exit_at)}</small></td>
     </tr>`).join("");
-    target.innerHTML = `<div class="table-wrap enhanced-analytics-table"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>时段 / 行情质量</th><th>期权 / GEX / 机构</th><th>事件 / 数据覆盖</th><th>入场价格</th><th>退出价格 / 原因</th><th>${this.state.displayLeverage}x 毛 / 净收益率</th><th>MFE / MAE</th><th>成本后结果</th><th>计划 / 实际持有</th></tr></thead><tbody>${predictionRows}</tbody></table></div>`;
+    target.innerHTML = `<div class="table-wrap enhanced-analytics-table"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>时段 / 行情质量</th><th>期权 / GEX / 机构</th><th>事件 / 数据覆盖</th><th>入场价格</th><th>退出价格 / 原因</th><th>${this.state.displayLeverage}x 毛 / 净仓位ROE</th><th>MFE / MAE</th><th>成本后结果</th><th>计划 / 实际持有</th></tr></thead><tbody>${predictionRows}</tbody></table></div>`;
     target.insertAdjacentHTML("beforeend", this.predictionPaginationMarkup(data.pagination || {}, items.length));
   }
 

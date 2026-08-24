@@ -161,6 +161,51 @@ def test_fixed_copy_total_amount_is_the_live_sizing_base(
     assert captured["available_balance"] == Decimal("40.0")
 
 
+def test_ai_monitor_risk_proposal_tightens_legacy_live_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+    account = _account()
+    account["strategy_snapshot_json"] = {"strategy_kind": "legacy_signal"}
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(
+        live_engine,
+        "atr_risk_position_size",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(allowed=False),
+    )
+
+    live_engine._open_position(
+        account,
+        "key",
+        "secret",
+        SimpleNamespace(
+            available_balance=Decimal("1000"),
+            wallet_balance=Decimal("1000"),
+            unrealized_pnl=Decimal("0"),
+            positions=(),
+        ),
+        symbol="AAPLUSDT",
+        direction=1,
+        price=100.0,
+        atr=None,
+        signal_time=123,
+        signal_evidence={
+            "source": "ai_monitor_live_copy_v1",
+            "risk_proposal": {
+                "stop_distance": 2,
+                "take_profit_distance": 4,
+                "risk_per_trade_pct": 0.125,
+                "max_margin_pct": 0.5,
+                "max_leverage": 4,
+            },
+        },
+    )
+
+    assert captured["policy"].risk_per_trade_pct == Decimal("0.125")
+    assert captured["policy"].max_margin_per_trade_pct == Decimal("0.5")
+    assert captured["policy"].max_leverage == 4
+
+
 def test_fixed_copy_total_amount_never_exceeds_real_collateral() -> None:
     capital = live_engine._position_sizing_capital(
         {
@@ -188,6 +233,130 @@ def test_missing_position_size_basis_preserves_account_equity_behavior() -> None
     assert capital.configured_total_amount is None
     assert capital.effective_equity == Decimal("1100")
     assert capital.margin_equity == Decimal("1000")
+
+
+def test_ai_monitor_caps_same_direction_beta_exposure() -> None:
+    account = _account()
+    account["config_json"].update(
+        {
+            "signal_source": "ai_monitor",
+            "ai_monitor_live_max_same_direction_positions": 2,
+        }
+    )
+    two_longs = {
+        ("BXUSDT", "LONG"): {"side": "long", "position_side": "LONG"},
+        ("COINUSDT", "LONG"): {"side": "long", "position_side": "LONG"},
+    }
+
+    assert not live_engine._automatic_directional_exposure_allowed(
+        account, 1, two_longs
+    )
+    assert live_engine._automatic_directional_exposure_allowed(account, -1, two_longs)
+
+
+def test_live_profit_guard_locks_costs_then_trails_in_r_units() -> None:
+    opened = {
+        "id": 17,
+        "symbol": "AAPLUSDT",
+        "position_side": "LONG",
+        "entry_basis_json": {
+            "execution": {"entry_price": 100, "stop": 90},
+            "signal": {
+                "evidence": {
+                    "risk_plan": {
+                        "profit_protection": {
+                            "mode": "risk_unit",
+                            "activation_r": 0.5,
+                            "trailing_activation_r": 1.0,
+                            "maximum_giveback_r": 0.5,
+                        }
+                    }
+                }
+            },
+        },
+    }
+    position = {
+        "symbol": "AAPLUSDT",
+        "position_side": "LONG",
+        "side": "long",
+        "entry_price": 100,
+        "mark_price": 105,
+    }
+
+    activated, should_exit = live_engine._live_profit_guard_snapshot(
+        position,
+        opened,
+        None,
+        exit_cost_bps=16,
+        observed_at=1,
+    )
+    assert activated is not None
+    assert activated["peak_r"] == pytest.approx(0.5)
+    assert activated["protected_price"] == pytest.approx(100.18)
+    assert should_exit is False
+
+    position["mark_price"] = 110
+    trailing, should_exit = live_engine._live_profit_guard_snapshot(
+        position,
+        opened,
+        activated,
+        exit_cost_bps=16,
+        observed_at=2,
+    )
+    assert trailing is not None
+    assert trailing["protected_price"] == pytest.approx(105)
+    assert should_exit is False
+
+    position["mark_price"] = 104.9
+    unchanged, should_exit = live_engine._live_profit_guard_snapshot(
+        position,
+        opened,
+        trailing,
+        exit_cost_bps=16,
+        observed_at=3,
+    )
+    assert unchanged == trailing
+    assert should_exit is True
+
+
+def test_live_profit_guard_handles_short_positions_symmetrically() -> None:
+    opened = {
+        "id": 18,
+        "symbol": "AAPLUSDT",
+        "position_side": "SHORT",
+        "entry_basis_json": {
+            "execution": {"entry_price": 100, "stop": 110},
+            "signal": {"evidence": {"risk_plan": {}}},
+        },
+    }
+    position = {
+        "symbol": "AAPLUSDT",
+        "position_side": "SHORT",
+        "side": "short",
+        "entry_price": 100,
+        "mark_price": 90,
+    }
+
+    trailing, should_exit = live_engine._live_profit_guard_snapshot(
+        position,
+        opened,
+        None,
+        exit_cost_bps=16,
+        observed_at=1,
+    )
+    assert trailing is not None
+    assert trailing["protected_price"] == pytest.approx(95)
+    assert should_exit is False
+
+    position["mark_price"] = 95.1
+    _, should_exit = live_engine._live_profit_guard_snapshot(
+        position,
+        opened,
+        trailing,
+        exit_cost_bps=16,
+        observed_at=2,
+    )
+    assert should_exit is True
 
 
 def test_zero_exchange_liquidation_floor_is_safe_only_for_protected_long() -> None:

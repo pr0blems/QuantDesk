@@ -1016,6 +1016,21 @@ def _historical_exit_decision(
             estimated_cost_bps=estimated_cost_bps,
             timeframe_ms=timeframe_ms,
             minimum_soft_exit_ms=minimum_soft_exit_ms,
+            minimum_profit_protection_ms=(
+                0
+                if str(
+                    dict(risk_plan.get("profit_protection") or {}).get("mode")
+                    or ""
+                )
+                == "risk_unit"
+                else minimum_soft_exit_ms
+            ),
+            minimum_failed_follow_through_ms=minimum_soft_exit_ms,
+            profit_protection=(
+                dict(risk_plan.get("profit_protection") or {})
+                if isinstance(risk_plan.get("profit_protection"), Mapping)
+                else None
+            ),
         )
         if adaptive_exit_enabled
         else None

@@ -252,7 +252,7 @@ def policy_from_config(config: Mapping[str, Any] | None) -> LiveRiskPolicy:
             raw,
             "round_trip_cost_bps",
             Decimal("16"),
-            ZERO,
+            Decimal("16"),
             Decimal("500"),
         ),
         short_risk_multiplier=_bounded_decimal(

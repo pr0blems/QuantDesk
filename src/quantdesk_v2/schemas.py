@@ -420,7 +420,7 @@ class AiMonitorLiveCopyConfigUpdate(BaseModel):
     margin_cap_pct: float = Field(default=20.0, ge=1.0, le=100.0)
     daily_loss_limit_pct: float = Field(default=2.0, ge=0.5, le=20.0)
     max_drawdown_pct: float = Field(default=6.0, ge=1.0, le=50.0)
-    round_trip_cost_bps: float = Field(default=16.0, ge=0.0, le=500.0)
+    round_trip_cost_bps: float = Field(default=16.0, ge=16.0, le=500.0)
     signal_max_age_seconds: int = Field(default=300, ge=60, le=1_800)
     minimum_combined_score: float = Field(default=70.0, ge=0.0, le=100.0)
     allow_long: bool = True

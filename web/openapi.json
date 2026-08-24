@@ -1151,7 +1151,7 @@
           "round_trip_cost_bps": {
             "default": 16.0,
             "maximum": 500.0,
-            "minimum": 0.0,
+            "minimum": 16.0,
             "title": "Round Trip Cost Bps",
             "type": "number"
           },
@@ -6860,6 +6860,56 @@
           }
         ],
         "summary": "Update Live Copy Config"
+      }
+    },
+    "/api/v2/ai-monitor/live-copy/history": {
+      "get": {
+        "description": "Return manual-follow executions with PnL from Binance income history.",
+        "operationId": "get_live_copy_history_api_v2_ai_monitor_live_copy_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Live Copy History Api V2 Ai Monitor Live Copy History Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Live Copy History"
       }
     },
     "/api/v2/ai-monitor/live-copy/manual-follow": {

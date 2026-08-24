@@ -69,6 +69,12 @@ _position_mode_cache: dict[int, tuple[str, float]] = {}
 _POSITION_MODE_TTL_SECONDS = 600.0
 _account_backoff: dict[int, tuple[float, int]] = {}
 _MAX_ACCOUNT_BACKOFF_SECONDS = 300.0
+_LIVE_PROFIT_GUARD_VERSION = "risk_unit_live_guard_v1"
+_LIVE_PROFIT_GUARD_ACTIVATION_R = 0.5
+_LIVE_PROFIT_GUARD_TRAILING_ACTIVATION_R = 1.0
+_LIVE_PROFIT_GUARD_GIVEBACK_R = 0.5
+_LIVE_PROFIT_GUARD_PEAK_WRITE_STEP_R = 0.1
+_LIVE_PROFIT_GUARD_COST_BUFFER_BPS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,7 +226,9 @@ def _ai_monitor_signal(
             """SELECT p.public_id AS prediction_public_id,
                       o.public_id AS opportunity_public_id,
                       p.direction,p.timeframe,p.confidence_score,p.entry_price,
-                      p.evidence_json,p.predicted_at,p.due_at,o.expires_at
+                      p.evidence_json,p.predicted_at,p.due_at,o.expires_at,
+                      p.readiness_status,p.estimated_cost_bps,
+                      p.expected_edge_lower_bound_bps
                FROM ai_monitor_predictions p
                JOIN ai_monitor_opportunities o
                  ON o.id=p.opportunity_id AND o.user_id=p.user_id
@@ -242,7 +250,9 @@ def _ai_monitor_signal(
                       o.direction,o.timeframe,o.combined_score AS confidence_score,
                       NULL AS entry_price,o.evidence_json,
                       o.discovered_at AS predicted_at,
-                      o.expires_at AS due_at,o.expires_at
+                      o.expires_at AS due_at,o.expires_at,
+                      NULL AS readiness_status,NULL AS estimated_cost_bps,
+                      NULL AS expected_edge_lower_bound_bps
                FROM ai_monitor_opportunities o
                WHERE o.user_id=? AND o.contract_symbol=? AND o.public_id=?
                  AND o.status IN ('candidate','discovered')
@@ -254,7 +264,9 @@ def _ai_monitor_signal(
             """SELECT p.public_id AS prediction_public_id,
                       o.public_id AS opportunity_public_id,
                       p.direction,p.timeframe,p.confidence_score,p.entry_price,
-                      p.evidence_json,p.predicted_at,p.due_at,o.expires_at
+                      p.evidence_json,p.predicted_at,p.due_at,o.expires_at,
+                      p.readiness_status,p.estimated_cost_bps,
+                      p.expected_edge_lower_bound_bps
                FROM ai_monitor_predictions p
                JOIN ai_monitor_opportunities o
                  ON o.id=p.opportunity_id AND o.user_id=p.user_id
@@ -285,7 +297,10 @@ def _ai_monitor_signal(
     execution_order_book: dict[str, Any] | None = None
     if not manual_selection:
         execution_order_book = _current_order_book_gate(symbol, direction_name)
-        if not bool(execution_order_book.get("passed")):
+        if not (
+            execution_order_book.get("passed") is True
+            and execution_order_book.get("confirms_direction") is True
+        ):
             return 0, None, [], None, {}
     market_environment = evidence.get("market_environment")
     market_environment = (
@@ -312,6 +327,45 @@ def _ai_monitor_signal(
         return 0, None, [], None, {}
     readiness = evidence.get("live_readiness")
     readiness = readiness if isinstance(readiness, dict) else {}
+    readiness_checks = readiness.get("checks")
+    readiness_checks = readiness_checks if isinstance(readiness_checks, dict) else {}
+    required_readiness_checks = {
+        "indicator_policy_passed",
+        "indicator_strength",
+        "combined_score",
+        "macro_entry_policy",
+        "market_quality",
+        "market_flow_available",
+        "market_flow_freshness",
+        "market_flow_quality",
+        "calibration_samples",
+        "cost_stress_edge",
+    }
+    try:
+        expected_edge_lower_bound_bps = float(
+            row.get("expected_edge_lower_bound_bps")
+        )
+        estimated_cost_bps = float(row.get("estimated_cost_bps"))
+        required_gross_edge_bps = max(
+            estimated_cost_bps + float(readiness.get("safety_margin_bps") or 0.0),
+            float(readiness.get("required_gross_edge_bps") or 0.0),
+        )
+    except (TypeError, ValueError, OverflowError):
+        expected_edge_lower_bound_bps = math.nan
+        required_gross_edge_bps = math.inf
+    persisted_edge_passed = bool(
+        math.isfinite(expected_edge_lower_bound_bps)
+        and math.isfinite(required_gross_edge_bps)
+        and expected_edge_lower_bound_bps > required_gross_edge_bps
+    )
+    automatic_readiness_passed = bool(
+        readiness.get("status") == "shadow_ready"
+        and row.get("readiness_status") == "shadow_ready"
+        and all(readiness_checks.get(key) is True for key in required_readiness_checks)
+        and persisted_edge_passed
+    )
+    if not automatic_readiness_passed and not manual_selection:
+        return 0, None, [], None, {}
     minimum_score = max(
         float(config.get("ai_monitor_live_min_combined_score", 70.0)),
         float(readiness.get("minimum_combined_score", 0.0) or 0.0),
@@ -396,8 +450,25 @@ def _ai_monitor_signal(
         "manual_selection": manual_selection,
         "manual_gate_override": bool(
             manual_selection
-            and (not entry_ready or combined_score < minimum_score)
+            and (
+                not entry_ready
+                or not automatic_readiness_passed
+                or combined_score < minimum_score
+            )
         ),
+        "automatic_readiness_passed": automatic_readiness_passed,
+        "persisted_edge_passed": persisted_edge_passed,
+        "expected_edge_lower_bound_bps": (
+            expected_edge_lower_bound_bps
+            if math.isfinite(expected_edge_lower_bound_bps)
+            else None
+        ),
+        "required_gross_edge_bps": (
+            required_gross_edge_bps
+            if math.isfinite(required_gross_edge_bps)
+            else None
+        ),
+        "live_readiness": readiness,
         "entry_gate": gate,
         "execution_order_book": execution_order_book,
         "risk_plan": risk_plan,
@@ -411,7 +482,12 @@ def _ai_monitor_signal(
         f"组合评分：{combined_score:.1f}",
         (
             "准入：人工确认覆盖研究门槛"
-            if manual_selection and (not entry_ready or combined_score < minimum_score)
+            if manual_selection
+            and (
+                not entry_ready
+                or not automatic_readiness_passed
+                or combined_score < minimum_score
+            )
             else "准入：全部入场条件已满足"
         ),
     ]
@@ -1606,6 +1682,51 @@ def _has_unmanaged_exposure(
     return False
 
 
+def _automatic_directional_exposure_allowed(
+    account: dict[str, Any],
+    direction: int,
+    positions: dict[tuple[str, str], dict[str, Any]],
+) -> bool:
+    """Cap correlated AI-monitor beta exposure in the same direction.
+
+    Binance equity perpetuals share a broad US-equity risk factor even when
+    their narrower symbol clusters differ.  The ordinary symbol admission
+    rule remains useful, but it must not allow a burst of unrelated-looking
+    long (or short) entries from the same scan.
+    """
+
+    config = account.get("config_json")
+    config = config if isinstance(config, dict) else {}
+    if str(config.get("signal_source") or "strategy") != "ai_monitor":
+        return True
+    if direction not in {-1, 1}:
+        return False
+    try:
+        configured_cap = int(
+            config.get(
+                "ai_monitor_live_max_same_direction_positions",
+                min(int(config.get("max_cluster_positions", 2)), 2),
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        configured_cap = 2
+    cap = max(1, min(configured_cap, 5))
+    same_direction = 0
+    for position in positions.values():
+        side = str(position.get("side") or "").lower()
+        position_side = str(position.get("position_side") or "BOTH").upper()
+        position_direction = (
+            1
+            if position_side == "LONG" or side == "long"
+            else -1
+            if position_side == "SHORT" or side == "short"
+            else 0
+        )
+        if position_direction == direction:
+            same_direction += 1
+    return same_direction < cap
+
+
 def _is_grandfathered_open(opened: dict[str, Any]) -> bool:
     """Return whether an open predates immutable live entry capture.
 
@@ -1914,6 +2035,185 @@ def _opened_at_seconds(managed_open: dict[str, Any]) -> float | None:
     return None
 
 
+def _live_profit_guard_snapshot(
+    position: dict[str, Any],
+    managed_open: dict[str, Any],
+    previous: dict[str, Any] | None,
+    *,
+    exit_cost_bps: Decimal | float | int | str,
+    observed_at: int,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Advance a causal R-based profit guard from Binance mark prices.
+
+    The exchange-native initial stop remains the hard-loss backstop.  Once an
+    automatic position proves at least 0.5R of favorable movement, this state
+    protects costs; after 1R it trails the best observed mark by 0.5R.  The
+    returned exit flag is acted on by the normal crash-safe market-close path.
+    """
+
+    basis = _json_object(managed_open.get("entry_basis_json"))
+    execution = _json_object(basis.get("execution"))
+    signal = _json_object(basis.get("signal"))
+    evidence = _json_object(signal.get("evidence"))
+    risk_plan = _json_object(evidence.get("risk_plan"))
+    protection = _json_object(risk_plan.get("profit_protection"))
+    try:
+        entry_price = float(position.get("entry_price") or execution.get("entry_price"))
+        mark_price = float(position.get("mark_price"))
+        initial_stop = float(execution.get("stop"))
+        cost_bps = max(16.0, float(exit_cost_bps))
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    direction = 1 if str(position.get("side") or "").lower() == "long" else -1
+    if str(position.get("position_side") or "BOTH").upper() == "LONG":
+        direction = 1
+    elif str(position.get("position_side") or "BOTH").upper() == "SHORT":
+        direction = -1
+    risk_distance = abs(entry_price - initial_stop)
+    if not (
+        math.isfinite(entry_price)
+        and math.isfinite(mark_price)
+        and math.isfinite(initial_stop)
+        and entry_price > 0
+        and mark_price > 0
+        and initial_stop > 0
+        and risk_distance > 0
+        and direction * (entry_price - initial_stop) > 0
+    ):
+        return None, False
+
+    def risk_multiple(name: str, default: float, *, minimum: float, maximum: float) -> float:
+        try:
+            parsed = float(protection.get(name, default))
+        except (TypeError, ValueError, OverflowError):
+            parsed = default
+        if not math.isfinite(parsed):
+            parsed = default
+        return max(minimum, min(parsed, maximum))
+
+    activation_r = risk_multiple(
+        "activation_r",
+        _LIVE_PROFIT_GUARD_ACTIVATION_R,
+        minimum=0.25,
+        maximum=2.0,
+    )
+    trailing_activation_r = max(
+        activation_r,
+        risk_multiple(
+            "trailing_activation_r",
+            _LIVE_PROFIT_GUARD_TRAILING_ACTIVATION_R,
+            minimum=0.5,
+            maximum=4.0,
+        ),
+    )
+    giveback_r = risk_multiple(
+        "maximum_giveback_r",
+        _LIVE_PROFIT_GUARD_GIVEBACK_R,
+        minimum=0.1,
+        maximum=1.5,
+    )
+    minimum_protected_r = risk_multiple(
+        "minimum_protected_r",
+        0.0,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    prior = previous if isinstance(previous, dict) else {}
+    try:
+        prior_peak = float(prior.get("peak_price"))
+    except (TypeError, ValueError, OverflowError):
+        prior_peak = entry_price
+    if not math.isfinite(prior_peak) or direction * (prior_peak - entry_price) < 0:
+        prior_peak = entry_price
+    observed_peak = max(prior_peak, mark_price) if direction > 0 else min(prior_peak, mark_price)
+    peak_favorable_distance = max(0.0, direction * (observed_peak - entry_price))
+    peak_r = peak_favorable_distance / risk_distance
+    if peak_r < activation_r:
+        return None, False
+
+    cost_lock_distance = entry_price * (
+        cost_bps + _LIVE_PROFIT_GUARD_COST_BUFFER_BPS
+    ) / 10_000.0
+    protected_distance = max(cost_lock_distance, minimum_protected_r * risk_distance)
+    if peak_r >= trailing_activation_r:
+        protected_distance = max(
+            protected_distance,
+            peak_favorable_distance - giveback_r * risk_distance,
+        )
+    protected_price = entry_price + direction * protected_distance
+    should_exit = direction * (mark_price - protected_price) <= 0
+
+    try:
+        persisted_peak = float(prior.get("peak_price"))
+        persisted_peak_r = float(prior.get("peak_r"))
+    except (TypeError, ValueError, OverflowError):
+        persisted_peak = entry_price
+        persisted_peak_r = 0.0
+    threshold_crossed = (
+        persisted_peak_r < activation_r <= peak_r
+        or persisted_peak_r < trailing_activation_r <= peak_r
+    )
+    peak_advanced = direction * (observed_peak - persisted_peak) >= (
+        risk_distance * _LIVE_PROFIT_GUARD_PEAK_WRITE_STEP_R
+    )
+    if prior and not threshold_crossed and not peak_advanced:
+        # Reuse the durable peak/protected level between material advances.
+        try:
+            protected_price = float(prior["protected_price"])
+            should_exit = direction * (mark_price - protected_price) <= 0
+        except (KeyError, TypeError, ValueError, OverflowError):
+            pass
+        return dict(prior), should_exit
+
+    return (
+        {
+            "version": _LIVE_PROFIT_GUARD_VERSION,
+            "open_intent_id": int(managed_open["id"]),
+            "symbol": str(position.get("symbol") or "").upper(),
+            "position_side": str(position.get("position_side") or "BOTH").upper(),
+            "entry_price": entry_price,
+            "initial_stop": initial_stop,
+            "risk_distance": risk_distance,
+            "peak_price": observed_peak,
+            "peak_r": round(peak_r, 8),
+            "protected_price": protected_price,
+            "activation_r": activation_r,
+            "trailing_activation_r": trailing_activation_r,
+            "giveback_r": giveback_r,
+            "cost_floor_bps": cost_bps + _LIVE_PROFIT_GUARD_COST_BUFFER_BPS,
+            "observed_at": int(observed_at),
+        },
+        should_exit,
+    )
+
+
+def _live_profit_guard_key(managed_open: dict[str, Any]) -> str:
+    return ":".join(
+        (
+            str(managed_open.get("id") or ""),
+            str(managed_open.get("symbol") or "").upper(),
+            str(managed_open.get("position_side") or "BOTH").upper(),
+        )
+    )
+
+
+def _persist_live_profit_guards(
+    account: dict[str, Any], guards: dict[str, dict[str, Any]]
+) -> None:
+    state = _json_object(account.get("runtime_state_json"))
+    state["live_profit_guards"] = guards
+    store.execute(
+        """UPDATE strategy_deployments SET runtime_state_json=?,updated_at=UTC_TIMESTAMP()
+           WHERE id=? AND user_id=?""",
+        (
+            json.dumps(state, ensure_ascii=False),
+            account["deployment_id"],
+            account["user_id"],
+        ),
+    )
+    account["runtime_state_json"] = state
+
+
 def _record_reconciled_close(account: dict[str, Any], managed_open: dict[str, Any]) -> None:
     """Close the local position generation after Binance reports no position."""
     symbol = str(managed_open["symbol"]).upper()
@@ -2019,7 +2319,11 @@ def _open_position(
     config = account["config_json"]
     policy = policy_from_config(config)
     strategy_snapshot = account.get("strategy_snapshot_json") or {}
-    if strategy_snapshot.get("strategy_kind") == "full_strategy":
+    signal_source = str((signal_evidence or {}).get("source") or "")
+    if (
+        strategy_snapshot.get("strategy_kind") == "full_strategy"
+        or signal_source == "ai_monitor_live_copy_v1"
+    ):
         proposal = (signal_evidence or {}).get("risk_proposal")
         if not isinstance(proposal, dict):
             return False
@@ -2732,6 +3036,30 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
     _cancel_orphan_protections(account, api_key, api_secret, managed, set(positions))
     protection_counts = _protection_counts(account, managed)
     stop_prices = _current_stop_prices(account, managed)
+    runtime_state = _json_object(account.get("runtime_state_json"))
+    raw_profit_guards = runtime_state.get("live_profit_guards")
+    profit_guards = (
+        {
+            str(key): dict(value)
+            for key, value in raw_profit_guards.items()
+            if isinstance(value, dict)
+        }
+        if isinstance(raw_profit_guards, dict)
+        else {}
+    )
+    active_profit_guard_keys = {
+        _live_profit_guard_key(opened)
+        for key, opened in managed.items()
+        if key in positions and not _is_manual_follow_open(opened)
+    }
+    profit_guards_changed = any(
+        key not in active_profit_guard_keys for key in profit_guards
+    )
+    profit_guards = {
+        key: value
+        for key, value in profit_guards.items()
+        if key in active_profit_guard_keys
+    }
     max_positions = max(1, min(int(config.get("max_positions", 1)), 20))
     positions_changed = False
 
@@ -2784,6 +3112,32 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                 )
                 _fail_account(account, "liquidation_buffer_unsafe")
                 return
+            profit_guard_key = _live_profit_guard_key(managed[key])
+            profit_guard, profit_guard_exit = _live_profit_guard_snapshot(
+                position,
+                managed[key],
+                profit_guards.get(profit_guard_key),
+                exit_cost_bps=policy.round_trip_cost_bps,
+                observed_at=int(time.time()),
+            )
+            if profit_guard is not None and profit_guard != profit_guards.get(
+                profit_guard_key
+            ):
+                profit_guards[profit_guard_key] = profit_guard
+                profit_guards_changed = True
+            if profit_guard_exit:
+                closed = _close_position(
+                    account,
+                    api_key,
+                    api_secret,
+                    position,
+                    "live_profit_guard",
+                )
+                positions_changed = closed or positions_changed
+                if closed:
+                    profit_guards.pop(profit_guard_key, None)
+                    profit_guards_changed = True
+                continue
             max_holding_bars = max(
                 0, min(int(config.get("max_holding_bars", 12)), 1_000)
             )
@@ -2815,6 +3169,8 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                 or positions_changed
             )
 
+    if profit_guards_changed:
+        _persist_live_profit_guards(account, profit_guards)
     if positions_changed:
         snapshot = _account_service.account(api_key, api_secret, force_refresh=True)
     positions = {_position_key(item): item for item in snapshot.positions}
@@ -2879,6 +3235,12 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                     policy,
                     signal_evidence,
                 )
+            ):
+                continue
+            if not _automatic_directional_exposure_allowed(
+                account,
+                direction,
+                positions,
             ):
                 continue
             _open_position(

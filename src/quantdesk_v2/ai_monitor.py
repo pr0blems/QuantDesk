@@ -82,6 +82,11 @@ PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS = 20.0
 PREDICTION_PROFIT_PROTECTION_MIN_BPS = 20.0
 PREDICTION_TRAILING_TRIGGER_BPS = 50.0
 PREDICTION_TRAILING_GIVEBACK_BPS = 30.0
+PREDICTION_RISK_UNIT_PROTECTION_VERSION = "risk_unit_profit_guard_v1"
+PREDICTION_RISK_UNIT_PROTECTION_ACTIVATION_R = 0.5
+PREDICTION_RISK_UNIT_TRAILING_ACTIVATION_R = 1.0
+PREDICTION_RISK_UNIT_TRAILING_GIVEBACK_R = 0.5
+PREDICTION_RISK_UNIT_MINIMUM_PROTECTED_R = 0.0
 PREDICTION_FOLLOW_THROUGH_BARS = 3
 PREDICTION_FOLLOW_THROUGH_LOSS_BPS = -15.0
 PREDICTION_SCORE_EXIT_BAR_MS = 15 * 60 * 1_000
@@ -1583,7 +1588,7 @@ def virtual_risk_plan_snapshot(
         stop_loss_price = 0.0
         take_profit_price = 0.0
     return {
-        "version": "atr_risk_reward_guard_v2",
+        "version": "atr_risk_reward_guard_v3",
         "method": "atr14_x_1_5" if volatility_risk > 0 else "timeframe_fallback",
         "timeframe": timeframe,
         "direction": normalized_direction,
@@ -1597,17 +1602,33 @@ def virtual_risk_plan_snapshot(
         ),
         "risk_reward_ratio": 2.0,
         "profit_protection": {
-            "activation_bps": PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS,
-            "minimum_protected_bps": PREDICTION_PROFIT_PROTECTION_MIN_BPS,
-            "trailing_activation_bps": PREDICTION_TRAILING_TRIGGER_BPS,
-            "maximum_giveback_bps": PREDICTION_TRAILING_GIVEBACK_BPS,
+            "version": PREDICTION_RISK_UNIT_PROTECTION_VERSION,
+            "mode": "risk_unit",
+            "risk_bps": round(stop_loss_pct * 100.0, 8),
+            "activation_r": PREDICTION_RISK_UNIT_PROTECTION_ACTIVATION_R,
+            "minimum_protected_r": PREDICTION_RISK_UNIT_MINIMUM_PROTECTED_R,
+            "trailing_activation_r": (
+                PREDICTION_RISK_UNIT_TRAILING_ACTIVATION_R
+            ),
+            "maximum_giveback_r": PREDICTION_RISK_UNIT_TRAILING_GIVEBACK_R,
+            "activation_boundary": "prior_closed_15m_bar",
+            "minimum_hold_policy": "immediate_after_activation",
         },
         "failed_follow_through": {
             "closed_bars": PREDICTION_FOLLOW_THROUGH_BARS,
-            "maximum_favorable_bps": PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS,
+            "maximum_favorable_r": (
+                PREDICTION_RISK_UNIT_PROTECTION_ACTIVATION_R
+            ),
+            "maximum_favorable_bps": round(
+                stop_loss_pct
+                * 100.0
+                * PREDICTION_RISK_UNIT_PROTECTION_ACTIVATION_R,
+                8,
+            ),
             "directional_loss_bps": PREDICTION_FOLLOW_THROUGH_LOSS_BPS,
+            "minimum_hold_policy": "horizon_aligned",
         },
-        "execution_policy": "horizon_aligned_soft_exit_v5",
+        "execution_policy": "risk_unit_profit_guard_v6",
     }
 
 
@@ -2144,13 +2165,18 @@ def prediction_adaptive_path_exit(
     estimated_cost_bps: float = 0.0,
     timeframe_ms: int = 15 * 60 * 1_000,
     minimum_soft_exit_ms: int = 0,
+    minimum_profit_protection_ms: int | None = None,
+    minimum_failed_follow_through_ms: int | None = None,
+    profit_protection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Protect proven profit and cut a failed follow-through without look-ahead.
 
     A protective level is activated only *after* a candle has fully closed.  A
     favorable high/low therefore cannot create and hit a trailing stop inside
-    the same candle.  This makes live settlement and point-in-time replay use
-    the same causal information boundary.
+    the same candle.  Profit protection and failed-follow-through may use
+    separate waiting periods: a frozen R-based guard can protect established
+    profit immediately while thesis invalidation remains horizon-aligned.  This
+    keeps live settlement and point-in-time replay on the same causal boundary.
     """
 
     if entry_price <= 0 or end_ms < start_ms:
@@ -2180,9 +2206,69 @@ def prediction_adaptive_path_exit(
     peak_favorable_bps = 0.0
     protected_bps: float | None = None
     observed_bar_count = 0
-    soft_exit_not_before_ms = start_ms + max(0, int(minimum_soft_exit_ms))
+    profit_delay_ms = (
+        minimum_soft_exit_ms
+        if minimum_profit_protection_ms is None
+        else minimum_profit_protection_ms
+    )
+    failed_follow_delay_ms = (
+        minimum_soft_exit_ms
+        if minimum_failed_follow_through_ms is None
+        else minimum_failed_follow_through_ms
+    )
+    profit_exit_not_before_ms = start_ms + max(0, int(profit_delay_ms))
+    failed_follow_not_before_ms = start_ms + max(
+        0, int(failed_follow_delay_ms)
+    )
+    protection = dict(profit_protection or {})
+    protection_mode = str(protection.get("mode") or "fixed_bps")
+    if protection_mode == "risk_unit":
+        risk_bps = max(0.0, float(protection.get("risk_bps") or 0.0))
+        activation_bps = risk_bps * max(
+            0.0,
+            float(
+                protection.get(
+                    "activation_r",
+                    PREDICTION_RISK_UNIT_PROTECTION_ACTIVATION_R,
+                )
+            ),
+        )
+        trailing_activation_bps = risk_bps * max(
+            0.0,
+            float(
+                protection.get(
+                    "trailing_activation_r",
+                    PREDICTION_RISK_UNIT_TRAILING_ACTIVATION_R,
+                )
+            ),
+        )
+        trailing_giveback_bps = risk_bps * max(
+            0.0,
+            float(
+                protection.get(
+                    "maximum_giveback_r",
+                    PREDICTION_RISK_UNIT_TRAILING_GIVEBACK_R,
+                )
+            ),
+        )
+        minimum_protected_bps = risk_bps * max(
+            0.0,
+            float(
+                protection.get(
+                    "minimum_protected_r",
+                    PREDICTION_RISK_UNIT_MINIMUM_PROTECTED_R,
+                )
+            ),
+        )
+        if risk_bps <= 0:
+            protection_mode = "fixed_bps"
+    if protection_mode != "risk_unit":
+        activation_bps = PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS
+        trailing_activation_bps = PREDICTION_TRAILING_TRIGGER_BPS
+        trailing_giveback_bps = PREDICTION_TRAILING_GIVEBACK_BPS
+        minimum_protected_bps = PREDICTION_PROFIT_PROTECTION_MIN_BPS
     cost_floor_bps = max(
-        PREDICTION_PROFIT_PROTECTION_MIN_BPS,
+        minimum_protected_bps,
         max(0.0, float(estimated_cost_bps)) + 2.0,
     )
     for (
@@ -2195,7 +2281,7 @@ def prediction_adaptive_path_exit(
     ) in sorted(normalized):
         # This stop was frozen from prior closed bars, so it is executable from
         # the current open without relying on the current candle's future path.
-        if protected_bps is not None and open_time >= soft_exit_not_before_ms:
+        if protected_bps is not None and open_time >= profit_exit_not_before_ms:
             protected_price = (
                 entry_price * (1 - protected_bps / 10_000.0)
                 if normalized_direction == "short"
@@ -2214,7 +2300,7 @@ def prediction_adaptive_path_exit(
             if gap_execution or touched:
                 subreason = (
                     "trailing_profit"
-                    if peak_favorable_bps >= PREDICTION_TRAILING_TRIGGER_BPS
+                    if peak_favorable_bps >= trailing_activation_bps
                     else "profit_lock"
                 )
                 return {
@@ -2227,6 +2313,14 @@ def prediction_adaptive_path_exit(
                     "observed_bar_count": observed_bar_count + 1,
                     "peak_favorable_bps": round(peak_favorable_bps, 8),
                     "protected_bps": round(protected_bps, 8),
+                    "protection_mode": protection_mode,
+                    "activation_bps": round(activation_bps, 8),
+                    "trailing_activation_bps": round(
+                        trailing_activation_bps, 8
+                    ),
+                    "trailing_giveback_bps": round(
+                        trailing_giveback_bps, 8
+                    ),
                 }
 
         observed_bar_count += 1
@@ -2245,10 +2339,10 @@ def prediction_adaptive_path_exit(
             else (close_price / entry_price - 1.0) * 10_000.0
         )
         if (
-            close_time >= soft_exit_not_before_ms
+            close_time >= failed_follow_not_before_ms
             and
             observed_bar_count >= PREDICTION_FOLLOW_THROUGH_BARS
-            and peak_favorable_bps < PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS
+            and peak_favorable_bps < activation_bps
             and close_directional_bps <= PREDICTION_FOLLOW_THROUGH_LOSS_BPS
         ):
             return {
@@ -2263,10 +2357,10 @@ def prediction_adaptive_path_exit(
                 "protected_bps": None,
                 "confirmation_points": PREDICTION_FOLLOW_THROUGH_BARS,
             }
-        if peak_favorable_bps >= PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS:
+        if peak_favorable_bps >= activation_bps:
             trailing_floor = (
-                peak_favorable_bps - PREDICTION_TRAILING_GIVEBACK_BPS
-                if peak_favorable_bps >= PREDICTION_TRAILING_TRIGGER_BPS
+                peak_favorable_bps - trailing_giveback_bps
+                if peak_favorable_bps >= trailing_activation_bps
                 else cost_floor_bps
             )
             protected_bps = max(cost_floor_bps, trailing_floor)
@@ -4997,10 +5091,11 @@ def _compact_historical_outcome(
 
     actual_exit_at = row.get("exit_at") or row["due_at"]
     gross_return = float(row.get("directional_return_bps") or 0)
+    conservative_cost_config = readiness_cost_config(current_config)
     cost_breakdown = prediction_cost_breakdown(
         row["predicted_at"],
         actual_exit_at,
-        current_config,
+        conservative_cost_config,
     )
     net_outcome = prediction_net_outcome(
         gross_return,
@@ -5921,10 +6016,11 @@ def _prediction_fact_outcome(
 
     actual_exit_at = fact.exit_at or fact.due_at
     gross_return = float(fact.gross_return_bps or 0)
+    conservative_cost_config = readiness_cost_config(current_config)
     cost_breakdown = prediction_cost_breakdown(
         fact.signal_at,
         actual_exit_at,
-        current_config,
+        conservative_cost_config,
     )
     estimated_cost = float(cost_breakdown["total_cost_bps"])
     net_outcome = prediction_net_outcome(gross_return, estimated_cost)
@@ -6273,7 +6369,9 @@ def historical_opportunity_fact_analytics(
     total_pages = max(1, (total_items + page_size - 1) // page_size)
     current_page = min(max(1, int(page)), total_pages)
     page_start = (current_page - 1) * page_size
-    active_cost_settings = prediction_cost_settings(current_config)
+    configured_cost_settings = prediction_cost_settings(current_config)
+    conservative_cost_config = readiness_cost_config(current_config)
+    active_cost_settings = prediction_cost_settings(conservative_cost_config)
     result: dict[str, Any] = {
         "summary": summary,
         "ablation": {
@@ -6295,10 +6393,12 @@ def historical_opportunity_fact_analytics(
         },
         "cost_config": {
             **active_cost_settings,
+            "configured": configured_cost_settings,
+            "forced_conservative_floor": True,
             "example_one_hour_total_bps": prediction_estimated_cost_bps(
                 datetime(2026, 1, 1),
                 datetime(2026, 1, 1) + timedelta(hours=1),
-                current_config,
+                conservative_cost_config,
             ),
         },
         "filters": {
@@ -6365,7 +6465,9 @@ def historical_opportunity_analytics(
 
     current_config = config_data(db.get(AiMonitorConfig, user_id))
     local_date_offset = timedelta(minutes=timezone_offset_minutes)
-    active_cost_settings = prediction_cost_settings(current_config)
+    configured_cost_settings = prediction_cost_settings(current_config)
+    conservative_cost_config = readiness_cost_config(current_config)
+    active_cost_settings = prediction_cost_settings(conservative_cost_config)
     news_score_expression = func.coalesce(
         AiMonitorPrediction.signal_news_score,
         AiMonitorOpportunity.news_score,
@@ -6793,7 +6895,7 @@ def historical_opportunity_analytics(
         cost_breakdown = prediction_cost_breakdown(
             prediction.predicted_at,
             actual_exit_at,
-            current_config,
+            conservative_cost_config,
         )
         estimated_cost = float(cost_breakdown["total_cost_bps"])
         net_outcome = prediction_net_outcome(gross_return, estimated_cost)
@@ -7286,10 +7388,12 @@ def historical_opportunity_analytics(
         },
         "cost_config": {
             **active_cost_settings,
+            "configured": configured_cost_settings,
+            "forced_conservative_floor": True,
             "example_one_hour_total_bps": prediction_estimated_cost_bps(
                 datetime(2026, 1, 1),
                 datetime(2026, 1, 1) + timedelta(hours=1),
-                current_config,
+                conservative_cost_config,
             ),
         },
         "filters": {
@@ -7343,14 +7447,18 @@ def settle_due_predictions(
     retry_before = now - timedelta(minutes=PREDICTION_SETTLEMENT_RETRY_MINUTES)
     backfill_since = now - timedelta(days=PREDICTION_SETTLEMENT_BACKFILL_DAYS)
     grace_cutoff = now - timedelta(hours=PREDICTION_SETTLEMENT_GRACE_HOURS)
+    # Opportunity rescans may refresh a pending prediction's generic
+    # ``updated_at`` while its frozen entry and risk plan remain unchanged.
+    # Hard stops therefore stay eligible on every poll; the retry cooldown is
+    # only for rows whose settlement data was actually unavailable.
     statement = (
         select(AiMonitorPrediction)
         .where(
-            AiMonitorPrediction.updated_at <= retry_before,
             or_(
                 AiMonitorPrediction.status == "pending",
                 (
                     (AiMonitorPrediction.status == "unavailable")
+                    & (AiMonitorPrediction.updated_at <= retry_before)
                     & (AiMonitorPrediction.due_at <= now)
                     & (AiMonitorPrediction.due_at >= backfill_since)
                 ),
@@ -7487,6 +7595,23 @@ def settle_due_predictions(
             observed_until_ms,
             estimated_cost_bps=guard_cost_estimate,
             minimum_soft_exit_ms=int(soft_exit_policy["minimum_hold_ms"]),
+            minimum_profit_protection_ms=(
+                0
+                if str(
+                    dict(risk_plan.get("profit_protection") or {}).get("mode")
+                    or ""
+                )
+                == "risk_unit"
+                else int(soft_exit_policy["minimum_hold_ms"])
+            ),
+            minimum_failed_follow_through_ms=int(
+                soft_exit_policy["minimum_hold_ms"]
+            ),
+            profit_protection=(
+                dict(risk_plan.get("profit_protection") or {})
+                if isinstance(risk_plan.get("profit_protection"), Mapping)
+                else None
+            ),
         )
         score_signal = prediction_score_exit_signal(
             evidence,
@@ -8374,7 +8499,8 @@ def _scan_opportunities(
     minimum_indicator_score = float(config["minimum_indicator_score"])
     minimum_combined_score = float(config["minimum_combined_score"])
     minimum_calibration_samples = int(config["minimum_calibration_samples"])
-    cost_settings = prediction_cost_settings(config)
+    conservative_prediction_cost_config = readiness_cost_config(config)
+    cost_settings = prediction_cost_settings(conservative_prediction_cost_config)
     calibrations = {
         direction: historical_edge_calibration(
             db,
@@ -8740,7 +8866,11 @@ def _scan_opportunities(
         # lifetime.  The technical timeframe no longer doubles as a one-bar
         # forced exit horizon.
         expires_at = due_at
-        cost_breakdown = prediction_cost_breakdown(now, due_at, config)
+        cost_breakdown = prediction_cost_breakdown(
+            now,
+            due_at,
+            conservative_prediction_cost_config,
+        )
         estimated_cost = float(cost_breakdown["total_cost_bps"])
         readiness = signal_readiness_snapshot(
             matched=technical_confirmed and not decision_hard_conflict,

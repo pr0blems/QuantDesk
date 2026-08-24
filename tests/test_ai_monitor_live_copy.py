@@ -50,6 +50,9 @@ def _prediction_row(*, entry_ready: bool = True, direction: str = "long") -> dic
         "timeframe": "1h",
         "confidence_score": 82.5,
         "entry_price": 100,
+        "readiness_status": "shadow_ready",
+        "estimated_cost_bps": 16,
+        "expected_edge_lower_bound_bps": 30,
         "predicted_at": predicted_at,
         "due_at": predicted_at + timedelta(hours=4),
         "expires_at": predicted_at + timedelta(hours=2),
@@ -63,6 +66,24 @@ def _prediction_row(*, entry_ready: bool = True, direction: str = "long") -> dic
                 "stop_loss_pct": 1.5,
                 "take_profit_pct": 3.0,
                 "atr_pct": 1.0,
+            },
+            "live_readiness": {
+                "status": "shadow_ready",
+                "minimum_combined_score": 70,
+                "safety_margin_bps": 10,
+                "required_gross_edge_bps": 26,
+                "checks": {
+                    "indicator_policy_passed": True,
+                    "indicator_strength": True,
+                    "combined_score": True,
+                    "macro_entry_policy": True,
+                    "market_quality": True,
+                    "market_flow_available": True,
+                    "market_flow_freshness": True,
+                    "market_flow_quality": True,
+                    "calibration_samples": True,
+                    "cost_stress_edge": True,
+                },
             },
         },
     }
@@ -81,6 +102,7 @@ def _fresh_order_book_for_live_signal_tests(
             "quality_passed": True,
             "direction_clear": True,
             "direction_conflict": False,
+            "confirms_direction": True,
         },
     )
 
@@ -269,7 +291,7 @@ def test_ai_monitor_live_signal_applies_frozen_macro_position_multiplier(
         "position_multiplier": 0.25,
         "state": "rate_liquidity_shock",
     }
-    row["evidence_json"]["live_readiness"] = {"minimum_combined_score": 80}
+    row["evidence_json"]["live_readiness"]["minimum_combined_score"] = 80
     monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [row])
     monkeypatch.setattr(live_engine.time, "time", lambda: now)
 
@@ -319,6 +341,74 @@ def test_ai_monitor_auto_signal_rechecks_current_book_but_manual_follow_bypasses
     assert manual[0] == 1
     assert manual[4]["execution_order_book"] is None
     assert calls == [("AAPLUSDT", "long")]
+
+
+def test_ai_monitor_auto_requires_positive_order_book_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 17, 10, 1, tzinfo=UTC).timestamp()
+    monkeypatch.setattr(live_engine.time, "time", lambda: now)
+    monkeypatch.setattr(
+        live_engine.store,
+        "query",
+        lambda *_args, **_kwargs: [_prediction_row()],
+    )
+    monkeypatch.setattr(
+        live_engine,
+        "_current_order_book_gate",
+        lambda *_args, **_kwargs: {
+            "status": "passed",
+            "passed": True,
+            "quality_passed": True,
+            "direction_clear": True,
+            "direction_conflict": False,
+            "confirms_direction": False,
+        },
+    )
+
+    assert live_engine._ai_monitor_signal(_account(), "AAPLUSDT", price=102)[0] == 0
+
+
+def test_ai_monitor_auto_requires_shadow_readiness_but_manual_follow_bypasses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 17, 10, 1, tzinfo=UTC).timestamp()
+    row = _prediction_row()
+    row["evidence_json"]["live_readiness"] = {
+        "status": "research_only",
+        "minimum_combined_score": 70,
+        "checks": {
+            "calibration_samples": False,
+            "cost_stress_edge": False,
+        },
+    }
+    monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [row])
+    monkeypatch.setattr(live_engine.time, "time", lambda: now)
+
+    assert live_engine._ai_monitor_signal(_account(), "AAPLUSDT", price=102)[0] == 0
+    manual = live_engine._ai_monitor_signal(
+        _account(),
+        "AAPLUSDT",
+        price=102,
+        prediction_public_id="prediction-public-id",
+        opportunity_public_id="opportunity-public-id",
+    )
+
+    assert manual[0] == 1
+    assert manual[4]["manual_gate_override"] is True
+    assert manual[4]["automatic_readiness_passed"] is False
+
+
+def test_ai_monitor_auto_requires_persisted_positive_edge_lower_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 17, 10, 1, tzinfo=UTC).timestamp()
+    row = _prediction_row()
+    row["expected_edge_lower_bound_bps"] = 26
+    monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [row])
+    monkeypatch.setattr(live_engine.time, "time", lambda: now)
+
+    assert live_engine._ai_monitor_signal(_account(), "AAPLUSDT", price=102)[0] == 0
 
 
 def test_ai_monitor_manual_signal_query_is_bound_to_clicked_prediction(

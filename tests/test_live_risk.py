@@ -60,6 +60,12 @@ def test_policy_safe_defaults_match_live_api_contract() -> None:
     assert policy.block_high_risk_products is True
 
 
+def test_live_policy_enforces_conservative_round_trip_cost_floor() -> None:
+    assert policy_from_config({"round_trip_cost_bps": 0}).round_trip_cost_bps == Decimal(
+        "16"
+    )
+
+
 def test_strategy_risk_proposal_can_only_tighten_account_policy() -> None:
     policy = LiveRiskPolicy(
         risk_per_trade_pct=Decimal("0.5"),
