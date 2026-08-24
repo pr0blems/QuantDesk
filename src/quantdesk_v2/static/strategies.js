@@ -24,6 +24,11 @@ class StrategyCenter extends HTMLElement {
     this.createMode = "indicators";
     this.preview = null;
     this.codeBuffers = {};
+    this.sourceWorkbenchDirty = false;
+    this.sourceWorkbenchTab = "backtest";
+    this.sourceBacktestCatalog = null;
+    this.sourceBacktestResult = null;
+    this.sourceBacktestRunning = false;
   }
 
   connectedCallback() {
@@ -81,7 +86,15 @@ class StrategyCenter extends HTMLElement {
         <section class="strategy-editor" role="dialog" aria-modal="true" aria-labelledby="strategy-editor-title">
           <header class="strategy-editor-head">
             <div><span id="strategy-editor-kicker">EDIT STRATEGY</span><h2 id="strategy-editor-title">编辑策略</h2><p id="strategy-editor-subtitle">保存后将生成新版本，回测会读取最新配置。</p></div>
-            <button id="strategy-editor-close" class="strategy-close-button" type="button" aria-label="关闭策略编辑器">×</button>
+            <div class="strategy-editor-head-actions">
+              <div id="strategy-workbench-actions" class="strategy-workbench-actions hidden">
+                <span id="strategy-workbench-dirty" class="strategy-workbench-dirty clean"><i></i><b>已同步</b></span>
+                <button id="strategy-workbench-validate" class="strategy-quiet-button" type="button">校验源码</button>
+                <button id="strategy-workbench-save" class="strategy-save-button" type="button">保存版本</button>
+                <button id="strategy-workbench-run" class="strategy-run-button" type="button"><span aria-hidden="true">▶</span><strong>保存并回测</strong></button>
+              </div>
+              <button id="strategy-editor-close" class="strategy-close-button" type="button" aria-label="关闭策略编辑器">×</button>
+            </div>
           </header>
 
           <div class="strategy-editor-body">
@@ -120,7 +133,7 @@ class StrategyCenter extends HTMLElement {
                 </div>
               </div>
 
-              <div class="strategy-form-block">
+              <div id="strategy-basic-block" class="strategy-form-block">
                 <div class="strategy-section-heading"><div><span id="strategy-basic-index">01</span><strong>基本信息</strong></div><small>仅当前用户可见</small></div>
                 <div class="strategy-field-grid two">
                   <label>策略名称<input id="strategy-name" type="text" minlength="2" maxlength="64" autocomplete="off" required></label>
@@ -131,7 +144,7 @@ class StrategyCenter extends HTMLElement {
 
               <div id="strategy-code-block" class="strategy-form-block strategy-code-block hidden">
                 <div class="strategy-section-heading"><div><span>02</span><strong id="strategy-code-title">策略 DSL 配置</strong></div><small id="strategy-code-runtime">JSON · 同一运行时校验 · 保存即生成新版本</small></div>
-                <label><span id="strategy-code-label">完整策略 DSL</span><textarea id="strategy-code-editor" class="strategy-code-editor" rows="22" spellcheck="false" autocomplete="off" aria-label="策略代码编辑器"></textarea></label>
+                <label><span id="strategy-code-label">完整策略 DSL</span><span class="strategy-code-frame"><span id="strategy-code-lines" class="strategy-code-lines" aria-hidden="true">1</span><textarea id="strategy-code-editor" class="strategy-code-editor" rows="22" spellcheck="false" autocomplete="off" aria-label="策略代码编辑器"></textarea></span></label>
                 <div class="strategy-code-actions">
                   <button id="strategy-code-format" class="strategy-quiet-button" type="button">格式化</button>
                   <button id="strategy-code-validate" class="strategy-quiet-button" type="button">校验代码</button>
@@ -158,30 +171,65 @@ class StrategyCenter extends HTMLElement {
             </form>
 
             <aside id="strategy-ai-panel" class="strategy-ai-panel">
-              <header>
-                <div><span>AI STRATEGY COMPOSER</span><h3 id="strategy-ai-title">用自然语言修改策略</h3></div>
-                <span id="strategy-ai-status" class="strategy-ai-status"><i></i>受约束配置</span>
-              </header>
-              <p id="strategy-ai-description">描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改，不会生成或执行任意代码。</p>
-              <label>自然语言要求<textarea id="strategy-ai-prompt" rows="5" maxlength="1200" placeholder="例如：做一个 1 小时趋势策略，用 EMA、MACD 和成交量确认，减少噪声并把止损控制在 3%。"></textarea></label>
-              <div class="strategy-ai-examples" aria-label="AI 编辑示例">
-                <button type="button" data-ai-example="创建 1 小时趋势策略，使用 EMA、MACD、ADX 和成交量确认，参数偏稳健。">趋势组合</button>
-                <button type="button" data-ai-example="创建 15 分钟反转策略，使用 RSI、布林带和 ATR 过滤，减少噪声。">反转组合</button>
-                <button type="button" data-ai-example="创建 4 小时突破策略，使用 Donchian、ADX 和成交量确认，只做多。">突破组合</button>
-              </div>
-              <button id="strategy-ai-preview-button" class="strategy-ai-preview-button" type="button"><span aria-hidden="true">✦</span><strong>AI 生成指标方案</strong></button>
-              <div class="strategy-safety-note"><span aria-hidden="true">!</span><p><strong>仅生成预览，不执行交易</strong>。采用方案后只会回填表单，点击“创建策略”才保存，之后仍需通过回测与模拟盘验证。</p></div>
+              <nav id="strategy-workbench-tabs" class="strategy-workbench-tabs hidden" aria-label="源码策略工具">
+                <button class="active" type="button" data-workbench-tab="backtest" aria-pressed="true">回测与结果</button>
+                <button type="button" data-workbench-tab="ai" aria-pressed="false">AI 助手</button>
+              </nav>
 
-              <section id="strategy-ai-preview" class="strategy-ai-preview hidden" aria-live="polite">
-                <header><div><span id="strategy-ai-provider">--</span><strong>修改预览</strong></div><span id="strategy-ai-base-version">--</span></header>
-                <p id="strategy-ai-summary"></p>
-                <div id="strategy-ai-changes" class="strategy-change-list"></div>
-                <div class="strategy-ai-actions">
-                  <button id="strategy-ai-discard" class="strategy-quiet-button" type="button">放弃预览</button>
-                  <button id="strategy-ai-apply" class="strategy-ai-apply-button" type="button"><span aria-hidden="true">✓</span><strong>确认应用</strong></button>
+              <section id="strategy-ai-pane" class="strategy-workbench-pane strategy-ai-pane">
+                <header>
+                  <div><span>AI STRATEGY COMPOSER</span><h3 id="strategy-ai-title">用自然语言修改策略</h3></div>
+                  <span id="strategy-ai-status" class="strategy-ai-status"><i></i>受约束配置</span>
+                </header>
+                <p id="strategy-ai-description">描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改，不会生成或执行任意代码。</p>
+                <label>自然语言要求<textarea id="strategy-ai-prompt" rows="5" maxlength="1200" placeholder="例如：做一个 1 小时趋势策略，用 EMA、MACD 和成交量确认，减少噪声并把止损控制在 3%。"></textarea></label>
+                <div class="strategy-ai-examples" aria-label="AI 编辑示例">
+                  <button type="button" data-ai-example="创建 1 小时趋势策略，使用 EMA、MACD、ADX 和成交量确认，参数偏稳健。">趋势组合</button>
+                  <button type="button" data-ai-example="创建 15 分钟反转策略，使用 RSI、布林带和 ATR 过滤，减少噪声。">反转组合</button>
+                  <button type="button" data-ai-example="创建 4 小时突破策略，使用 Donchian、ADX 和成交量确认，只做多。">突破组合</button>
                 </div>
+                <button id="strategy-ai-preview-button" class="strategy-ai-preview-button" type="button"><span aria-hidden="true">✦</span><strong>AI 生成指标方案</strong></button>
+                <div class="strategy-safety-note"><span aria-hidden="true">!</span><p><strong>仅生成预览，不执行交易</strong>。采用方案后只会回填表单，点击“创建策略”才保存，之后仍需通过回测与模拟盘验证。</p></div>
+
+                <section id="strategy-ai-preview" class="strategy-ai-preview hidden" aria-live="polite">
+                  <header><div><span id="strategy-ai-provider">--</span><strong>修改预览</strong></div><span id="strategy-ai-base-version">--</span></header>
+                  <p id="strategy-ai-summary"></p>
+                  <div id="strategy-ai-changes" class="strategy-change-list"></div>
+                  <div class="strategy-ai-actions">
+                    <button id="strategy-ai-discard" class="strategy-quiet-button" type="button">放弃预览</button>
+                    <button id="strategy-ai-apply" class="strategy-ai-apply-button" type="button"><span aria-hidden="true">✓</span><strong>确认应用</strong></button>
+                  </div>
+                </section>
+                <div id="strategy-ai-error" class="strategy-form-error hidden" role="alert"></div>
               </section>
-              <div id="strategy-ai-error" class="strategy-form-error hidden" role="alert"></div>
+
+              <section id="strategy-backtest-pane" class="strategy-workbench-pane strategy-backtest-pane hidden">
+                <header class="strategy-runner-head"><div><span>STRATEGY REPLAY</span><h3>源码回测</h3></div><span id="strategy-runner-status" class="strategy-runner-status idle"><i></i>等候配置</span></header>
+                <p class="strategy-runner-copy">运行前会校验并保存当前源码为不可变版本，再使用历史 K 线按下一根开盘价撮合。</p>
+                <div id="strategy-runner-notice" class="strategy-runner-notice hidden" role="status"></div>
+                <div class="strategy-runner-fields">
+                  <label>交易品种<select id="strategy-runner-symbol"><option value="">读取行情目录…</option></select></label>
+                  <label>数据周期<select id="strategy-runner-timeframe"><option value="">读取行情目录…</option></select></label>
+                  <label>开始日期<input id="strategy-runner-start" type="date"></label>
+                  <label>结束日期<input id="strategy-runner-end" type="date"></label>
+                  <label>初始资金<input id="strategy-runner-capital" type="number" min="1" step="100" value="10000"></label>
+                  <label>单次仓位 (%)<input id="strategy-runner-position" type="number" min="0.01" max="100" step="0.1" value="10"></label>
+                  <label>杠杆倍数<input id="strategy-runner-leverage" type="number" min="1" max="20" step="1" value="1"></label>
+                  <label>最大持有 (K)<input id="strategy-runner-holding" type="number" min="0" max="50000" step="1" value="120"></label>
+                  <label>止损 (%)<input id="strategy-runner-stop" type="number" min="0" max="99.9" step="0.1" value="5"></label>
+                  <label>止盈 (%)<input id="strategy-runner-take" type="number" min="0" max="99.9" step="0.1" value="10"></label>
+                  <label>手续费 (bp)<input id="strategy-runner-fee" type="number" min="0" max="1000" step="0.1" value="4"></label>
+                  <label>滑点 (bp)<input id="strategy-runner-slippage" type="number" min="0" max="1000" step="0.1" value="2"></label>
+                </div>
+                <button id="strategy-runner-submit" class="strategy-runner-submit" type="button"><span aria-hidden="true">▶</span><strong>保存当前版本并运行回测</strong></button>
+                <div id="strategy-runner-empty" class="strategy-runner-empty"><span aria-hidden="true">⌁</span><strong>尚未运行当前源码</strong><small>回测完成后将在这里显示收益、回撤、胜率、权益曲线与最近成交。</small></div>
+                <section id="strategy-runner-result" class="strategy-runner-result hidden">
+                  <header><div><span id="strategy-runner-result-meta">BACKTEST COMPLETE</span><strong id="strategy-runner-result-title">--</strong></div><b id="strategy-runner-return">--</b></header>
+                  <div id="strategy-runner-metrics" class="strategy-runner-metrics"></div>
+                  <div class="strategy-runner-chart"><div><strong>权益曲线</strong><span>已计手续费与滑点</span></div><canvas id="strategy-runner-canvas" aria-label="源码策略回测权益曲线"></canvas></div>
+                  <div id="strategy-runner-trades" class="strategy-runner-trades"></div>
+                </section>
+              </section>
             </aside>
           </div>
         </section>
@@ -244,7 +292,26 @@ class StrategyCenter extends HTMLElement {
       if (["code", "source"].includes(this.editScope)) this.codeBuffers[this.editScope] = event.target.value;
       if (this.editorMode === "create" && this.createMode === "source") this.codeBuffers.source = event.target.value;
       this.setCodeStatus("代码已修改，尚未校验");
+      this.renderCodeLines();
+      if (this.isSourceWorkbench()) this.setSourceWorkbenchDirty(true);
     });
+    this.querySelector("#strategy-code-editor").addEventListener("scroll", (event) => {
+      this.querySelector("#strategy-code-lines").scrollTop = event.target.scrollTop;
+    });
+    ["#strategy-name", "#strategy-category", "#strategy-description"].forEach((selector) => {
+      this.querySelector(selector).addEventListener("input", () => {
+        if (this.isSourceWorkbench()) this.setSourceWorkbenchDirty(true);
+      });
+    });
+    this.querySelector("#strategy-workbench-validate").addEventListener("click", () => this.validateStrategyCode());
+    this.querySelector("#strategy-workbench-save").addEventListener("click", () => this.persistSourceWorkbench());
+    this.querySelector("#strategy-workbench-run").addEventListener("click", () => this.runSourceBacktest());
+    this.querySelector("#strategy-runner-submit").addEventListener("click", () => this.runSourceBacktest());
+    this.querySelector("#strategy-runner-symbol").addEventListener("change", () => this.syncSourceBacktestBounds());
+    this.querySelector("#strategy-runner-timeframe").addEventListener("change", () => this.syncSourceBacktestBounds());
+    this.querySelectorAll("[data-workbench-tab]").forEach((button) => button.addEventListener("click", () => {
+      this.switchSourceWorkbenchTab(button.dataset.workbenchTab || "backtest");
+    }));
     this.querySelector("#strategy-template").addEventListener("change", (event) => this.applyTemplate(event.target.value));
     this.querySelector("#strategy-detail-close").addEventListener("click", () => this.closeDetails());
     this.querySelector("#strategy-detail-layer").addEventListener("click", (event) => {
@@ -259,6 +326,16 @@ class StrategyCenter extends HTMLElement {
       this.querySelector("#strategy-ai-prompt").focus();
     }));
     document.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && this.isSourceWorkbench()) {
+        event.preventDefault();
+        void this.persistSourceWorkbench();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && this.isSourceWorkbench()) {
+        event.preventDefault();
+        void this.runSourceBacktest();
+        return;
+      }
       if (event.key === "Escape" && !this.querySelector("#strategy-dialog-layer").classList.contains("hidden")) this.closeEditor();
       else if (event.key === "Escape" && !this.querySelector("#strategy-detail-layer").classList.contains("hidden")) this.closeDetails();
     });
@@ -301,6 +378,11 @@ class StrategyCenter extends HTMLElement {
     this.createMode = "indicators";
     this.preview = null;
     this.codeBuffers = {};
+    this.sourceWorkbenchDirty = false;
+    this.sourceWorkbenchTab = "backtest";
+    this.sourceBacktestCatalog = null;
+    this.sourceBacktestResult = null;
+    this.sourceBacktestRunning = false;
     this.querySelector("#strategy-search").value = "";
     this.querySelector("#strategy-category-filter").replaceChildren(this.option("all", "全部分类"));
     this.querySelectorAll("[data-section]").forEach((button) => {
@@ -313,7 +395,7 @@ class StrategyCenter extends HTMLElement {
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", String(active));
     });
-    this.closeEditor();
+    this.closeEditor(true);
     this.closeDetails();
     this.renderLoading("登录后读取个人策略…");
     this.renderStats();
@@ -376,6 +458,7 @@ class StrategyCenter extends HTMLElement {
       source_language: String(item.source_language ?? ""),
       source_code: String(item.source_code ?? ""),
       source_hash: String(item.source_hash ?? ""),
+      source_validation: this.plainObject(item.source_validation),
       is_default: Boolean(item.is_default),
       parameter_schema: schema,
       parameters: this.plainObject(item.parameters),
@@ -714,6 +797,7 @@ class StrategyCenter extends HTMLElement {
     this.activeItem = null;
     this.preview = null;
     this.codeBuffers = {};
+    this.resetSourceBacktestResult();
     this.querySelector("#strategy-editor-kicker").textContent = "CREATE STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = "新增策略";
     this.querySelector("#strategy-editor-subtitle").textContent = "勾选多个标准指标并配置参数，保存为可执行的完整策略。";
@@ -754,9 +838,10 @@ class StrategyCenter extends HTMLElement {
 
   openEdit(item) {
     this.editorMode = "edit";
-    this.editScope = "parameters";
     this.activeItem = this.normalizeItem(item);
+    this.editScope = this.activeItem.strategy_kind === "source_strategy" ? "source" : "parameters";
     this.preview = null;
+    this.resetSourceBacktestResult();
     this.querySelector("#strategy-editor-kicker").textContent = "EDIT STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = this.activeItem.name;
     this.querySelector("#strategy-editor-subtitle").textContent = "保存后生成新版本；已完成的回测仍保留当时的策略快照。";
@@ -788,7 +873,7 @@ class StrategyCenter extends HTMLElement {
       source: this.activeItem.source_code || String(this.sourceRuntime.conversion_starter_source || this.sourceRuntime.starter_source || ""),
     };
     this.setCodeStatus("当前版本代码，尚未重新校验");
-    this.switchEditScope("parameters", { resetCode: false });
+    this.switchEditScope(this.editScope, { resetCode: false });
     this.querySelector("#strategy-ai-prompt").value = "";
     this.clearPreview();
     this.showFormError("");
@@ -801,17 +886,428 @@ class StrategyCenter extends HTMLElement {
     layer.classList.remove("hidden");
     layer.setAttribute("aria-hidden", "false");
     document.body.classList.add("strategy-dialog-open");
-    window.setTimeout(() => this.querySelector("#strategy-name").focus(), 0);
+    window.setTimeout(() => (this.isSourceWorkbench() ? this.querySelector("#strategy-code-editor") : this.querySelector("#strategy-name")).focus(), 0);
   }
 
-  closeEditor() {
+  closeEditor(force = false) {
     const layer = this.querySelector("#strategy-dialog-layer");
+    if (!force && !layer.classList.contains("hidden") && this.isSourceWorkbench() && this.sourceWorkbenchDirty) {
+      if (!window.confirm("当前源码尚未保存，确认关闭工作台并放弃修改？")) return;
+    }
     layer.classList.add("hidden");
     layer.setAttribute("aria-hidden", "true");
     document.body.classList.remove("strategy-dialog-open");
     this.setButtonBusy(this.querySelector("#strategy-save"), false);
     this.setButtonBusy(this.querySelector("#strategy-ai-preview-button"), false);
     this.setButtonBusy(this.querySelector("#strategy-ai-apply"), false);
+    this.setSourceWorkbenchActive(false);
+  }
+
+  isSourceWorkbench() {
+    return (this.editorMode === "edit" && this.editScope === "source")
+      || (this.editorMode === "create" && this.createMode === "source");
+  }
+
+  setSourceWorkbenchActive(active) {
+    const editor = this.querySelector(".strategy-editor");
+    const enabled = Boolean(active);
+    editor.classList.toggle("source-workbench", enabled);
+    this.querySelector("#strategy-workbench-actions").classList.toggle("hidden", !enabled);
+    this.querySelector("#strategy-workbench-tabs").classList.toggle("hidden", !enabled);
+    if (!enabled) {
+      this.querySelector("#strategy-backtest-pane").classList.add("hidden");
+      this.querySelector("#strategy-ai-pane").classList.remove("hidden");
+      return;
+    }
+    this.querySelector("#strategy-editor-kicker").textContent = "STRATEGY WORKBENCH";
+    this.querySelector("#strategy-editor-subtitle").textContent = "真实 Python 源码 · 不可变版本 · 校验、AI 修改与回测同屏完成";
+    this.renderCodeLines();
+    this.setSourceWorkbenchDirty(false);
+    this.switchSourceWorkbenchTab(this.sourceWorkbenchTab || "backtest");
+    this.applySourceRiskDefaults();
+    void this.loadSourceBacktestCatalog();
+  }
+
+  setSourceWorkbenchDirty(dirty) {
+    this.sourceWorkbenchDirty = Boolean(dirty);
+    const status = this.querySelector("#strategy-workbench-dirty");
+    status.className = `strategy-workbench-dirty ${dirty ? "dirty" : "clean"}`;
+    status.querySelector("b").textContent = dirty ? "未保存" : "已同步";
+  }
+
+  resetSourceBacktestResult() {
+    this.sourceBacktestResult = null;
+    const empty = this.querySelector("#strategy-runner-empty");
+    const result = this.querySelector("#strategy-runner-result");
+    if (empty) empty.classList.remove("hidden");
+    if (result) result.classList.add("hidden");
+    if (this.querySelector("#strategy-runner-notice")) this.showSourceRunnerNotice("");
+  }
+
+  renderCodeLines() {
+    const editor = this.querySelector("#strategy-code-editor");
+    const count = Math.max(1, String(editor.value || "").split("\n").length);
+    this.querySelector("#strategy-code-lines").textContent = Array.from({ length: count }, (_, index) => index + 1).join("\n");
+  }
+
+  switchSourceWorkbenchTab(tab) {
+    this.sourceWorkbenchTab = tab === "ai" ? "ai" : "backtest";
+    this.querySelectorAll("[data-workbench-tab]").forEach((button) => {
+      const active = button.dataset.workbenchTab === this.sourceWorkbenchTab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    this.querySelector("#strategy-ai-pane").classList.toggle("hidden", this.sourceWorkbenchTab !== "ai");
+    this.querySelector("#strategy-backtest-pane").classList.toggle("hidden", this.sourceWorkbenchTab !== "backtest");
+    if (this.sourceWorkbenchTab === "backtest" && this.sourceBacktestResult) {
+      window.requestAnimationFrame(() => this.drawSourceBacktestChart(this.sourceBacktestResult.result || {}));
+    }
+  }
+
+  async backtestApi(path = "", options = {}) {
+    if (typeof window.quantdeskApi !== "function") throw new Error("认证服务尚未就绪");
+    return window.quantdeskApi(`/api/v2/backtests${path}`, options);
+  }
+
+  applySourceRiskDefaults() {
+    const risk = this.plainObject(this.activeItem?.risk_defaults || this.indicatorDefaults.risk_defaults);
+    const values = {
+      "#strategy-runner-position": risk.position_size_pct ?? 10,
+      "#strategy-runner-leverage": risk.leverage ?? 1,
+      "#strategy-runner-holding": risk.max_holding_bars ?? 120,
+      "#strategy-runner-stop": risk.stop_loss_pct ?? 5,
+      "#strategy-runner-take": risk.take_profit_pct ?? 10,
+      "#strategy-runner-fee": risk.fee_bps ?? 4,
+      "#strategy-runner-slippage": risk.slippage_bps ?? 2,
+    };
+    Object.entries(values).forEach(([selector, value]) => { this.querySelector(selector).value = String(value); });
+  }
+
+  async loadSourceBacktestCatalog(force = false) {
+    if (!this.isSourceWorkbench()) return;
+    if (this.sourceBacktestCatalog && !force) {
+      this.renderSourceBacktestCatalog();
+      return;
+    }
+    this.setSourceRunnerStatus("读取行情", "loading");
+    this.showSourceRunnerNotice("");
+    try {
+      const payload = await this.backtestApi("/catalog");
+      this.sourceBacktestCatalog = {
+        strategies: Array.isArray(payload?.strategies) ? payload.strategies : [],
+        symbols: (Array.isArray(payload?.symbols) ? payload.symbols : []).map((item) => ({
+          value: String(item?.value ?? item?.symbol ?? item ?? ""),
+          label: String(item?.label ?? item?.name ?? item?.symbol ?? item ?? ""),
+        })).filter((item) => item.value),
+        timeframes: (Array.isArray(payload?.timeframes) ? payload.timeframes : []).map((item) => ({
+          value: String(item?.value ?? item?.timeframe ?? item ?? ""),
+          label: String(item?.label ?? item?.timeframe ?? item ?? ""),
+        })).filter((item) => item.value),
+        bounds: this.plainObject(payload?.bounds),
+      };
+      this.renderSourceBacktestCatalog();
+      this.setSourceRunnerStatus("可以回测", "ready");
+    } catch (error) {
+      this.setSourceRunnerStatus("目录不可用", "error");
+      this.showSourceRunnerNotice(`回测目录读取失败：${error?.message || "请稍后重试"}`, "error");
+    }
+  }
+
+  renderSourceBacktestCatalog() {
+    const catalog = this.sourceBacktestCatalog || { symbols: [], timeframes: [] };
+    const populate = (selector, items, placeholder) => {
+      const select = this.querySelector(selector);
+      const previous = select.value;
+      select.replaceChildren(this.option("", placeholder), ...items.map((item) => this.option(item.value, item.label)));
+      if (items.some((item) => item.value === previous)) select.value = previous;
+      else if (items.length) select.value = items[0].value;
+    };
+    populate("#strategy-runner-symbol", catalog.symbols, "暂无可用行情");
+    populate("#strategy-runner-timeframe", catalog.timeframes, "暂无可用周期");
+    const preferred = String(this.activeItem?.source_validation?.trigger_timeframe || "");
+    const timeframe = this.querySelector("#strategy-runner-timeframe");
+    if (preferred && catalog.timeframes.some((item) => item.value === preferred)) timeframe.value = preferred;
+    this.syncSourceBacktestBounds();
+  }
+
+  syncSourceBacktestBounds() {
+    const symbol = this.querySelector("#strategy-runner-symbol").value;
+    const timeframe = this.querySelector("#strategy-runner-timeframe").value;
+    const bound = this.plainObject(this.sourceBacktestCatalog?.bounds?.[symbol]?.[timeframe]);
+    const min = String(bound.min_date || bound.start || "");
+    const max = String(bound.max_date || bound.end || "");
+    const start = this.querySelector("#strategy-runner-start");
+    const end = this.querySelector("#strategy-runner-end");
+    start.min = min;
+    start.max = max;
+    end.min = min;
+    end.max = max;
+    const endValue = max || new Date().toISOString().slice(0, 10);
+    const startCandidate = new Date(`${endValue}T00:00:00Z`);
+    startCandidate.setUTCDate(startCandidate.getUTCDate() - 90);
+    const startValue = startCandidate.toISOString().slice(0, 10);
+    end.value = !end.value || (max && end.value > max) ? endValue : end.value;
+    start.value = !start.value || start.value > end.value || (min && start.value < min)
+      ? (min && startValue < min ? min : startValue)
+      : start.value;
+  }
+
+  setSourceRunnerStatus(message, tone = "idle") {
+    const status = this.querySelector("#strategy-runner-status");
+    status.className = `strategy-runner-status ${tone}`;
+    status.lastChild.textContent = message;
+  }
+
+  showSourceRunnerNotice(message, tone = "") {
+    const notice = this.querySelector("#strategy-runner-notice");
+    notice.textContent = message;
+    notice.className = `strategy-runner-notice${message ? "" : " hidden"}${tone ? ` ${tone}` : ""}`;
+  }
+
+  async persistSourceWorkbench() {
+    if (!this.isSourceWorkbench()) return null;
+    const form = this.querySelector("#strategy-form");
+    if (!form.checkValidity()) {
+      form.reportValidity();
+      this.showSourceRunnerNotice("请先补全有效的策略名称、分类和风险参数。", "error");
+      return null;
+    }
+    let sourceCode;
+    try { sourceCode = this.parseStrategyCode(); } catch (error) {
+      this.setCodeStatus(error?.message || "策略源码无法解析", "error");
+      this.showSourceRunnerNotice(error?.message || "策略源码无法解析", "error");
+      return null;
+    }
+    const button = this.querySelector("#strategy-workbench-save");
+    this.setButtonBusy(button, true, "保存中…");
+    this.showSourceRunnerNotice("");
+    try {
+      const body = {
+        name: this.querySelector("#strategy-name").value.trim(),
+        description: this.querySelector("#strategy-description").value.trim(),
+        category: this.querySelector("#strategy-category").value.trim(),
+        language: "python",
+        source_code: sourceCode,
+      };
+      let result;
+      if (this.editorMode === "create") {
+        result = await this.api("/source", {
+          method: "POST",
+          body: JSON.stringify({
+            ...body,
+            risk_defaults: {
+              ...this.collectConfig("risk", this.plainObject(this.indicatorDefaults.risk_defaults)),
+              position_size_pct: Number(this.querySelector("#strategy-runner-position").value),
+              leverage: Number(this.querySelector("#strategy-runner-leverage").value),
+              max_holding_bars: Number(this.querySelector("#strategy-runner-holding").value),
+              stop_loss_pct: Number(this.querySelector("#strategy-runner-stop").value),
+              take_profit_pct: Number(this.querySelector("#strategy-runner-take").value),
+              fee_bps: Number(this.querySelector("#strategy-runner-fee").value),
+              slippage_bps: Number(this.querySelector("#strategy-runner-slippage").value),
+            },
+          }),
+        });
+      } else {
+        result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}/source`, {
+          method: "PUT",
+          body: JSON.stringify({ ...body, version: this.activeItem.version }),
+        });
+      }
+      const item = this.normalizeItem(result?.item ?? result);
+      this.activeItem = item;
+      this.editorMode = "edit";
+      this.editScope = "source";
+      this.codeBuffers.source = item.source_code || sourceCode;
+      this.upsertItem(item);
+      this.querySelector("#strategy-editor-title").textContent = item.name;
+      this.querySelector("#strategy-editor-version").textContent = `v${item.version}`;
+      this.querySelector("#strategy-version-strip").classList.remove("hidden");
+      this.querySelector("#strategy-edit-scope-block").classList.remove("hidden");
+      this.querySelector("#strategy-dsl-scope").classList.add("hidden");
+      this.setSourceWorkbenchDirty(false);
+      this.setCodeStatus(`已保存 v${item.version} · ${String(item.source_hash || "").slice(0, 12)}`, "success");
+      this.showSourceRunnerNotice(`源码已保存为 v${item.version}，该版本可用于回测。`, "success");
+      this.renderFilters();
+      this.renderStats();
+      this.renderCards();
+      this.notifyStrategiesChanged();
+      this.sourceBacktestCatalog = null;
+      await this.loadSourceBacktestCatalog(true);
+      return item;
+    } catch (error) {
+      const message = this.friendlyMutationError(error);
+      this.setCodeStatus(message, "error");
+      this.showSourceRunnerNotice(message, "error");
+      return null;
+    } finally {
+      this.setButtonBusy(button, false);
+    }
+  }
+
+  sourceBacktestPayload() {
+    const numericParameters = {};
+    Object.entries(this.plainObject(this.activeItem?.parameters)).forEach(([key, value]) => {
+      const number = Number(value);
+      if (Number.isFinite(number)) numericParameters[key] = number;
+    });
+    return {
+      strategy_id: this.activeItem.public_id,
+      symbol: this.querySelector("#strategy-runner-symbol").value,
+      timeframe: this.querySelector("#strategy-runner-timeframe").value,
+      start_date: this.querySelector("#strategy-runner-start").value,
+      end_date: this.querySelector("#strategy-runner-end").value,
+      initial_capital: Number(this.querySelector("#strategy-runner-capital").value),
+      position_size_pct: Number(this.querySelector("#strategy-runner-position").value),
+      leverage: Number(this.querySelector("#strategy-runner-leverage").value),
+      fee_bps: Number(this.querySelector("#strategy-runner-fee").value),
+      slippage_bps: Number(this.querySelector("#strategy-runner-slippage").value),
+      stop_loss_pct: Number(this.querySelector("#strategy-runner-stop").value),
+      take_profit_pct: Number(this.querySelector("#strategy-runner-take").value),
+      max_holding_bars: Number(this.querySelector("#strategy-runner-holding").value),
+      params: numericParameters,
+    };
+  }
+
+  async runSourceBacktest() {
+    if (!this.isSourceWorkbench() || this.sourceBacktestRunning) return;
+    this.switchSourceWorkbenchTab("backtest");
+    if (this.sourceWorkbenchDirty || this.editorMode === "create" || !this.activeItem?.public_id) {
+      const saved = await this.persistSourceWorkbench();
+      if (!saved) return;
+    }
+    if (!this.sourceBacktestCatalog) await this.loadSourceBacktestCatalog(true);
+    const payload = this.sourceBacktestPayload();
+    if (!payload.symbol || !payload.timeframe || !payload.start_date || !payload.end_date) {
+      this.showSourceRunnerNotice("请选择可用的交易品种、周期和回测区间。", "error");
+      return;
+    }
+    if (payload.start_date > payload.end_date) {
+      this.showSourceRunnerNotice("回测开始日期不能晚于结束日期。", "error");
+      return;
+    }
+    this.sourceBacktestRunning = true;
+    const buttons = [this.querySelector("#strategy-workbench-run"), this.querySelector("#strategy-runner-submit")];
+    buttons.forEach((button) => this.setButtonBusy(button, true, "回放中…"));
+    this.setSourceRunnerStatus("回放行情", "loading");
+    this.showSourceRunnerNotice("正在使用当前不可变源码版本回放历史行情，请稍候…");
+    try {
+      let detail = await this.backtestApi("", { method: "POST", body: JSON.stringify(payload) });
+      const id = detail?.run?.id ?? detail?.run?.run_id ?? detail?.id ?? detail?.run_id;
+      if (!detail?.result && id != null) detail = await this.backtestApi(`/${encodeURIComponent(id)}`);
+      const run = detail?.run || detail || {};
+      const result = detail?.result || {
+        account: { initial_capital: run.initial_capital, final_equity: run.final_equity },
+        metrics: this.plainObject(run.metrics_json),
+        equity_curve: Array.isArray(run.equity_curve_json) ? run.equity_curve_json : [],
+        trades: Array.isArray(run.trades) ? run.trades : [],
+        data_quality: this.plainObject(run.data_quality_json),
+      };
+      this.sourceBacktestResult = { run, result };
+      this.renderSourceBacktestResult(run, result);
+      this.setSourceRunnerStatus("回测完成", "ready");
+      this.showSourceRunnerNotice("回测完成。请优先检查交易样本、最大回撤和扣费后收益。", "success");
+    } catch (error) {
+      this.setSourceRunnerStatus("回测失败", "error");
+      this.showSourceRunnerNotice(`回测失败：${error?.message || "请检查行情数据与策略输出"}`, "error");
+    } finally {
+      this.sourceBacktestRunning = false;
+      buttons.forEach((button) => this.setButtonBusy(button, false));
+    }
+  }
+
+  renderSourceBacktestResult(run, result) {
+    const metrics = this.plainObject(result?.metrics);
+    const account = this.plainObject(result?.account);
+    const metric = (...keys) => {
+      for (const key of keys) if (metrics[key] != null) return Number(metrics[key]);
+      return NaN;
+    };
+    const number = (value, digits = 2) => Number.isFinite(Number(value)) ? Number(value).toLocaleString("zh-CN", { maximumFractionDigits: digits }) : "--";
+    const percent = (value) => Number.isFinite(Number(value)) ? `${Number(value) > 0 ? "+" : ""}${number(value)}%` : "--";
+    const totalReturn = metric("total_return_pct", "return_pct", "total_return");
+    this.querySelector("#strategy-runner-empty").classList.add("hidden");
+    this.querySelector("#strategy-runner-result").classList.remove("hidden");
+    this.querySelector("#strategy-runner-result-meta").textContent = `${run.symbol || "--"} · ${run.timeframe || "--"} · v${this.activeItem.version}`;
+    this.querySelector("#strategy-runner-result-title").textContent = this.activeItem.name;
+    const returnNode = this.querySelector("#strategy-runner-return");
+    returnNode.textContent = percent(totalReturn);
+    returnNode.className = Number(totalReturn) > 0 ? "positive" : (Number(totalReturn) < 0 ? "negative" : "neutral");
+    const definitions = [
+      ["累计收益", percent(totalReturn)],
+      ["最大回撤", percent(-Math.abs(metric("max_drawdown_pct", "max_drawdown")))],
+      ["夏普比率", number(metric("sharpe_ratio", "sharpe"))],
+      ["胜率", percent(metric("win_rate_pct", "win_rate"))],
+      ["收益因子", number(metric("profit_factor", "payoff_ratio"))],
+      ["交易次数", number(metric("trade_count", "total_trades", "trades"), 0)],
+    ];
+    this.querySelector("#strategy-runner-metrics").replaceChildren(...definitions.map(([label, value]) => {
+      const node = this.node("article");
+      node.append(this.node("span", "", label), this.node("strong", "", value));
+      return node;
+    }));
+    const trades = Array.isArray(result?.trades) ? result.trades : [];
+    const tradeBox = this.querySelector("#strategy-runner-trades");
+    const quality = this.plainObject(result?.data_quality);
+    const coverage = Number(quality.coverage_pct ?? quality.coverage);
+    const finalEquity = account.final_equity ?? account.ending_capital ?? account.equity;
+    tradeBox.replaceChildren(
+      this.node("strong", "", `最近成交 · ${trades.length} 笔`),
+      this.node("span", "", `期末权益 ${number(finalEquity)} · 行情覆盖 ${Number.isFinite(coverage) ? `${number(coverage <= 1 ? coverage * 100 : coverage)}%` : "已检查"}`),
+    );
+    trades.slice(-4).reverse().forEach((trade) => {
+      const pnl = Number(trade.net_pnl ?? trade.pnl ?? 0);
+      const row = this.node("div");
+      row.append(
+        this.node("span", "", String(trade.side ?? trade.direction ?? "--").toUpperCase()),
+        this.node("span", "", `${number(trade.entry_price)} → ${number(trade.exit_price)}`),
+        this.node("b", pnl > 0 ? "positive" : (pnl < 0 ? "negative" : ""), `${pnl > 0 ? "+" : ""}${number(pnl)}`),
+      );
+      tradeBox.append(row);
+    });
+    window.requestAnimationFrame(() => this.drawSourceBacktestChart(result));
+  }
+
+  drawSourceBacktestChart(result) {
+    const canvas = this.querySelector("#strategy-runner-canvas");
+    const width = Math.floor(canvas.clientWidth);
+    const height = Math.floor(canvas.clientHeight);
+    if (!width || !height) return;
+    const points = (Array.isArray(result?.equity_curve) ? result.equity_curve : []).map((point) => Number(Array.isArray(point) ? point[1] : point?.equity ?? point?.value ?? point?.balance)).filter(Number.isFinite);
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(width * ratio);
+    canvas.height = Math.floor(height * ratio);
+    const context = canvas.getContext("2d");
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    if (points.length < 2) {
+      context.fillStyle = "#61798f";
+      context.font = "12px Inter, sans-serif";
+      context.fillText("权益样本不足，暂无曲线", 16, 28);
+      return;
+    }
+    const padding = { left: 8, right: 8, top: 14, bottom: 14 };
+    let min = Math.min(...points);
+    let max = Math.max(...points);
+    const extra = (max - min || Math.abs(max) * .01 || 1) * .08;
+    min -= extra;
+    max += extra;
+    const x = (index) => padding.left + index / (points.length - 1) * (width - padding.left - padding.right);
+    const y = (value) => padding.top + (max - value) / (max - min || 1) * (height - padding.top - padding.bottom);
+    context.strokeStyle = "rgba(125, 155, 183, .12)";
+    for (let row = 0; row <= 3; row += 1) {
+      const yValue = padding.top + row / 3 * (height - padding.top - padding.bottom);
+      context.beginPath(); context.moveTo(padding.left, yValue); context.lineTo(width - padding.right, yValue); context.stroke();
+    }
+    const gradient = context.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, "rgba(43, 215, 163, .24)");
+    gradient.addColorStop(1, "rgba(43, 215, 163, 0)");
+    context.beginPath();
+    points.forEach((value, index) => index ? context.lineTo(x(index), y(value)) : context.moveTo(x(index), y(value)));
+    context.lineTo(x(points.length - 1), height - padding.bottom); context.lineTo(x(0), height - padding.bottom); context.closePath();
+    context.fillStyle = gradient; context.fill();
+    context.beginPath();
+    points.forEach((value, index) => index ? context.lineTo(x(index), y(value)) : context.moveTo(x(index), y(value)));
+    context.strokeStyle = "#2bd7a3"; context.lineWidth = 2; context.lineJoin = "round"; context.stroke();
   }
 
   switchEditScope(scope, { resetCode = true } = {}) {
@@ -832,6 +1328,7 @@ class StrategyCenter extends HTMLElement {
     });
     const codeMode = ["code", "source"].includes(this.editScope);
     const sourceMode = this.editScope === "source";
+    this.setSourceWorkbenchActive(sourceMode);
     this.querySelector("#strategy-code-block").classList.toggle("hidden", !codeMode);
     if (codeMode) {
       this.querySelector("#strategy-parameters-block").classList.add("hidden");
@@ -842,6 +1339,7 @@ class StrategyCenter extends HTMLElement {
           : this.strategyCode(this.activeItem.spec);
       }
       this.querySelector("#strategy-code-editor").value = this.codeBuffers[this.editScope] || "";
+      this.renderCodeLines();
       this.setCodeStatus("当前版本代码，尚未重新校验");
       this.querySelector("#strategy-code-title").textContent = sourceMode ? "Python 策略源码" : "策略 DSL 配置";
       this.querySelector("#strategy-code-runtime").textContent = sourceMode ? "Python · sandbox v1 · 保存生成不可变版本" : "JSON · 声明式 DSL · 保存生成新版本";
@@ -964,6 +1462,7 @@ class StrategyCenter extends HTMLElement {
     });
     const templateMode = this.createMode === "template";
     const sourceMode = this.createMode === "source";
+    this.setSourceWorkbenchActive(sourceMode);
     this.querySelector("#strategy-indicator-composer").classList.toggle("hidden", templateMode || sourceMode);
     this.querySelector("#strategy-template-composer").classList.toggle("hidden", !templateMode);
     this.querySelector("#strategy-code-block").classList.toggle("hidden", !sourceMode);
@@ -981,6 +1480,7 @@ class StrategyCenter extends HTMLElement {
       this.querySelector("#strategy-code-guard").textContent = "这是真正执行的 Python 策略逻辑；禁止 import、文件、网络、系统调用和动态执行。";
       if (resetValues && !this.codeBuffers.source) this.codeBuffers.source = String(this.sourceRuntime.starter_source || "");
       this.querySelector("#strategy-code-editor").value = this.codeBuffers.source || String(this.sourceRuntime.starter_source || "");
+      this.renderCodeLines();
       this.querySelector("#strategy-ai-title").textContent = "用自然语言修改 Python 策略";
       this.querySelector("#strategy-ai-description").textContent = "模型生成完整 Python 源码预览，服务端通过静态审查后才可保存。";
       this.querySelector("#strategy-ai-status").lastChild.textContent = "Python 隔离运行时";
@@ -1318,6 +1818,7 @@ class StrategyCenter extends HTMLElement {
         result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}`, { method: "PUT", body: JSON.stringify(body) });
       }
       const item = this.normalizeItem(result?.item ?? result);
+      if (sourceEdit) this.setSourceWorkbenchDirty(false);
       this.upsertItem(item);
       this.renderFilters();
       this.renderStats();
@@ -1541,6 +2042,8 @@ class StrategyCenter extends HTMLElement {
         : (this.preview.strategy_code || this.strategyCode(this.preview.proposed_spec));
       this.querySelector("#strategy-code-editor").value = code;
       this.codeBuffers[this.preview.mode] = code;
+      this.renderCodeLines();
+      if (this.preview.mode === "source") this.setSourceWorkbenchDirty(true);
       this.querySelector("#strategy-ai-prompt").value = "";
       this.clearPreview();
       this.setCodeStatus("AI 修改已写入编辑器，请校验后保存新版本");
