@@ -6311,6 +6311,8 @@ def historical_opportunity_fact_analytics(
     normalized_symbol = str(symbol or "").strip().upper()
     conditions = [
         AiMonitorPredictionFact.user_id == user_id,
+        AiMonitorPredictionFact.settlement_version
+        == PREDICTION_SETTLEMENT_VERSION,
         AiMonitorPredictionFact.news_score >= Decimal(str(news_score_min)),
         AiMonitorPredictionFact.technical_score >= Decimal(str(indicator_score_min)),
         AiMonitorPredictionFact.combined_score >= Decimal(str(combined_score_min)),
@@ -6391,17 +6393,6 @@ def historical_opportunity_fact_analytics(
             .group_by(AiMonitorPredictionFact.prediction_status)
         ).all()
     }
-    legacy_completed_count = int(
-        db.scalar(
-            select(func.count(AiMonitorPredictionFact.id)).where(
-                *conditions,
-                AiMonitorPredictionFact.prediction_status == "completed",
-                AiMonitorPredictionFact.settlement_version
-                != PREDICTION_SETTLEMENT_VERSION,
-            )
-        )
-        or 0
-    )
     summary.update(
         {
             "exit_reason_counts": exit_reason_counts,
@@ -6409,7 +6400,6 @@ def historical_opportunity_fact_analytics(
             "discarded_unavailable_count": status_counts.get("unavailable", 0),
             "pending_count": status_counts.get("pending", 0),
             "total_prediction_count": sum(status_counts.values()),
-            "excluded_legacy_settlement_count": legacy_completed_count,
         }
     )
     page_size = max(1, int(limit))
@@ -6527,6 +6517,8 @@ def historical_opportunity_analytics(
     conditions = [
         AiMonitorPrediction.user_id == user_id,
         AiMonitorOpportunity.user_id == user_id,
+        AiMonitorPrediction.settlement_version
+        == PREDICTION_SETTLEMENT_VERSION,
         news_score_expression >= Decimal(str(news_score_min)),
         indicator_score_expression >= Decimal(str(indicator_score_min)),
     ]
@@ -7302,32 +7294,9 @@ def historical_opportunity_analytics(
             AiMonitorOpportunity,
             AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
         )
-        .where(
-            *conditions,
-            or_(
-                AiMonitorPrediction.status != "completed",
-                AiMonitorPrediction.settlement_version
-                == PREDICTION_SETTLEMENT_VERSION,
-            ),
-        )
+        .where(*conditions)
         .group_by(AiMonitorPrediction.status)
     ).all()
-    legacy_completed_count = int(
-        db.scalar(
-            select(func.count(AiMonitorPrediction.id))
-            .join(
-                AiMonitorOpportunity,
-                AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
-            )
-            .where(
-                *conditions,
-                AiMonitorPrediction.status == "completed",
-                AiMonitorPrediction.settlement_version
-                != PREDICTION_SETTLEMENT_VERSION,
-            )
-        )
-        or 0
-    )
     status_counts = {str(status): int(count) for status, count in status_rows}
     summary_outcomes = (
         [
@@ -7347,7 +7316,6 @@ def historical_opportunity_analytics(
     summary["discarded_unavailable_count"] = status_counts.get("unavailable", 0)
     summary["pending_count"] = status_counts.get("pending", 0)
     summary["total_prediction_count"] = sum(status_counts.values())
-    summary["excluded_legacy_settlement_count"] = legacy_completed_count
     ablation = (
         frozen_market_ablation_summary(summary_outcomes)
         if include_ablation

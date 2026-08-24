@@ -2550,6 +2550,43 @@ def test_strategy_readiness_uses_the_latest_bounded_prediction_window() -> None:
     assert "item.exit_at or item.due_at" in readiness
 
 
+def test_prediction_surfaces_only_expose_the_current_settlement_policy() -> None:
+    analytics_source = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(
+        encoding="utf-8"
+    )
+    api_source = (
+        ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    frontend = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+        encoding="utf-8"
+    )
+    fact_analytics = analytics_source[
+        analytics_source.index("def historical_opportunity_fact_analytics(") :
+        analytics_source.index("def historical_opportunity_analytics(")
+    ]
+    historical_analytics = analytics_source[
+        analytics_source.index("def historical_opportunity_analytics(") :
+        analytics_source.index("def settle_due_predictions(")
+    ]
+    overview = api_source[
+        api_source.index("def overview(") : api_source.index("def ai_monitor_events(")
+    ]
+    prediction_records = api_source[
+        api_source.index("def prediction_records(") : api_source.index(
+            "def opportunity_analytics("
+        )
+    ]
+
+    assert "AiMonitorPredictionFact.settlement_version" in fact_analytics
+    assert "AiMonitorPrediction.settlement_version" in historical_analytics
+    assert "excluded_legacy_settlement_count" not in fact_analytics
+    assert "excluded_legacy_settlement_count" not in historical_analytics
+    assert "AiMonitorPrediction.settlement_version" in overview
+    assert "AiMonitorPrediction.settlement_version" in prediction_records
+    assert "excluded_legacy_settlement_count" not in frontend
+    assert "当前策略 ${this.escape(summary.settlement_policy_version" in frontend
+
+
 def test_market_flow_snapshot_combines_real_inputs_and_blocks_opposite_direction() -> None:
     now = datetime(2026, 8, 11, 8, 0, tzinfo=UTC)
     now_seconds = int(now.timestamp())
@@ -3108,7 +3145,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260824-84"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260824-85"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3118,7 +3155,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260824-84"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260824-85"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app

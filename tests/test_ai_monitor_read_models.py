@@ -280,6 +280,8 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
     assert analytics is not None
     assert analytics["query_mode"] == "prediction_fact_read_model"
     assert analytics["pagination"]["total"] == 1
+    assert analytics["summary"]["total_prediction_count"] == 1
+    assert "excluded_legacy_settlement_count" not in analytics["summary"]
     assert analytics["items"][0]["price_source"] == "binance"
     assert analytics["items"][0]["entry_price"] == 190.0
 

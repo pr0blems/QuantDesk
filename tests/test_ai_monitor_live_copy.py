@@ -274,8 +274,10 @@ def test_ai_monitor_live_signal_is_fresh_bounded_and_carries_protection(
     assert "o.expires_at>?" in captured["statement"]
     assert "CURRENT_TIMESTAMP" not in captured["statement"]
     assert captured["params"][0:2] == (7, "AAPLUSDT")
-    assert captured["params"][2] == datetime(2026, 8, 17, 10, 1)
-    assert captured["params"][3] == datetime(2026, 8, 17, 9, 59)
+    assert "p.settlement_version=?" in captured["statement"]
+    assert captured["params"][2] == "cost_consistent_exit_v6"
+    assert captured["params"][3] == datetime(2026, 8, 17, 10, 1)
+    assert captured["params"][4] == datetime(2026, 8, 17, 9, 59)
     assert any("组合评分" in item for item in basis)
     policy = live_engine.policy_from_config(_account()["config_json"])
     assert live_engine._signal_is_fresh(_account(), signal_time, policy, evidence)
@@ -438,11 +440,13 @@ def test_ai_monitor_manual_signal_query_is_bound_to_clicked_prediction(
     assert "p.predicted_at>=" not in captured["statement"]
     assert "o.expires_at>?" not in captured["statement"]
     assert "CURRENT_TIMESTAMP" not in captured["statement"]
-    assert captured["params"][2:4] == (
+    assert "p.settlement_version=?" in captured["statement"]
+    assert captured["params"][2] == "cost_consistent_exit_v6"
+    assert captured["params"][3:5] == (
         "prediction-public-id",
         "opportunity-public-id",
     )
-    assert len(captured["params"]) == 4
+    assert len(captured["params"]) == 5
 
 
 def test_ai_monitor_manual_signal_keeps_exact_stale_evidence_without_expiring(

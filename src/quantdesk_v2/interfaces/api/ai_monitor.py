@@ -2112,7 +2112,11 @@ def overview(
                 func.count(AiMonitorPrediction.id).label("total"),
                 func.sum(AiMonitorPrediction.status == "pending").label("pending"),
                 func.sum(AiMonitorPrediction.status == "completed").label("completed"),
-            ).where(AiMonitorPrediction.user_id == user.id)
+            ).where(
+                AiMonitorPrediction.user_id == user.id,
+                AiMonitorPrediction.settlement_version
+                == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
+            )
         )
         .mappings()
         .one()
@@ -3509,6 +3513,8 @@ def opportunities(
                 AiMonitorOpportunity.user_id == user.id,
                 AiMonitorPrediction.user_id == user.id,
                 AiMonitorPrediction.status.in_(("pending", "unavailable")),
+                AiMonitorPrediction.settlement_version
+                == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
             )
         )
     elif projection_page is None:
@@ -4245,7 +4251,11 @@ def prediction_records(
 ) -> dict[str, Any]:
     items = db.scalars(
         select(AiMonitorPrediction)
-        .where(AiMonitorPrediction.user_id == user.id)
+        .where(
+            AiMonitorPrediction.user_id == user.id,
+            AiMonitorPrediction.settlement_version
+            == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
+        )
         .order_by(AiMonitorPrediction.predicted_at.desc(), AiMonitorPrediction.id.desc())
         .limit(limit)
     ).all()

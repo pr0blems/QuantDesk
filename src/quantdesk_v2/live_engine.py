@@ -20,6 +20,7 @@ from typing import Any
 
 from . import macro_market
 from . import market_store as store
+from .ai_monitor import PREDICTION_SETTLEMENT_VERSION
 from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
@@ -233,12 +234,14 @@ def _ai_monitor_signal(
                JOIN ai_monitor_opportunities o
                  ON o.id=p.opportunity_id AND o.user_id=p.user_id
                WHERE p.user_id=? AND p.contract_symbol=? AND p.status='pending'
+                  AND p.settlement_version=?
                   AND p.public_id=? AND o.public_id=?
                   AND o.status IN ('candidate','discovered')
                 ORDER BY p.predicted_at DESC,p.id DESC LIMIT 1""",
             (
                 account["user_id"],
                 symbol,
+                PREDICTION_SETTLEMENT_VERSION,
                 prediction_public_id,
                 opportunity_public_id,
             ),
@@ -271,10 +274,17 @@ def _ai_monitor_signal(
                JOIN ai_monitor_opportunities o
                  ON o.id=p.opportunity_id AND o.user_id=p.user_id
                 WHERE p.user_id=? AND p.contract_symbol=? AND p.status='pending'
+                  AND p.settlement_version=?
                   AND o.status IN ('candidate','discovered')
                   AND o.expires_at>? AND p.predicted_at>=?
                 ORDER BY p.predicted_at DESC,p.id DESC LIMIT 1""",
-            (account["user_id"], symbol, query_now, enabled_datetime),
+            (
+                account["user_id"],
+                symbol,
+                PREDICTION_SETTLEMENT_VERSION,
+                query_now,
+                enabled_datetime,
+            ),
         )
     if not rows:
         return 0, None, [], None, {}

@@ -5242,7 +5242,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.renderMarketAblation(data.ablation);
     this.q("#prediction-note").textContent = `${data.note || "按历史预测的成本后结果统计，不执行任何下单。"} 页面展示 ${this.state.displayLeverage}x 仓位保证金 ROE，并保留标的原始收益；仓位 ROE 不代表账户总收益。`;
     this.q("#analytics-summary").innerHTML = `
-      <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)} · 旧口径剔除 ${this.number(summary.excluded_legacy_settlement_count)}</small></article>
+      <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>当前策略 ${this.escape(summary.settlement_policy_version || "--")} · 等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)}</small></article>
       <article><span>多 / 空方向</span><strong class="analytics-directions"><b>${this.number(summary.long_count)}</b><i>/</i><em>${this.number(summary.short_count)}</em></strong><small>做多 / 做空样本分布</small></article>
       <article class="positive"><span>命中次数</span><strong>${this.number(summary.win_count)}</strong><small>未命中 ${this.number(summary.loss_count)} · 持平 ${this.number(summary.flat_count)}</small></article>
       <article class="${Number(summary.hit_rate || 0) >= 50 ? "positive" : "negative"}"><span>命中概率</span><strong>${hitRate}</strong><small>命中 ÷ 有方向结果</small></article>
