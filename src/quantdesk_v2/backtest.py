@@ -34,6 +34,12 @@ from .strategy_runtime import (
     strategy_required_bars,
     validate_strategy_spec,
 )
+from .strategy_source_runtime import (
+    StrategySourceError,
+    StrategySourceExecutionError,
+    evaluate_source_many,
+    validate_source,
+)
 
 
 class BacktestUnavailable(RuntimeError):
@@ -562,6 +568,170 @@ class BacktestRepository:
             extra_assumptions=[
                 "完整策略严格按 4h/1h/15m 各周期已收盘 K 线对齐求值",
                 "完整策略入场后的止损和止盈使用信号时生成的 ATR 风险距离",
+            ],
+        )
+
+    def run_source_strategy(
+        self,
+        config: dict[str, Any],
+        source_code: str,
+        *,
+        language: str = "python",
+    ) -> dict[str, Any]:
+        """Replay one immutable source revision in the isolated Python worker."""
+
+        try:
+            metadata = validate_source(source_code, language)
+        except StrategySourceError as exc:
+            raise BacktestUnavailable(f"invalid source strategy: {exc}") from None
+        config_with_engine = dict(config)
+        config_with_engine["strategy_id"] = "strategy_dsl"
+        dynamic_parameters = dict(config_with_engine.get("params", {}))
+        config_with_engine["params"] = {}
+        validated = self._validate_config(config_with_engine)
+        validated["params"] = dynamic_parameters
+        if validated["timeframe"] != metadata.trigger_timeframe:
+            raise BacktestUnavailable(
+                f"source strategy trigger timeframe must be {metadata.trigger_timeframe}"
+            )
+
+        candles_by_timeframe: dict[str, list[_Candle]] = {}
+        quality_by_timeframe: dict[str, dict[str, Any]] = {}
+        raw_counts: dict[str, int] = {}
+        on_demand_fetches: list[dict[str, Any]] = []
+        for timeframe in metadata.timeframes:
+            interval = _timeframe_seconds(timeframe)
+            if interval is None:
+                raise BacktestUnavailable(f"unsupported strategy timeframe: {timeframe}")
+            fetched = self._ensure_klines_if_missing(
+                validated["symbol"],
+                timeframe,
+                max(0, validated["start_ts"] - interval * metadata.lookback_bars),
+                validated["end_ts"],
+            )
+            if fetched:
+                on_demand_fetches.append(fetched)
+            series = self._series_info(validated["symbol"], timeframe)
+            warmup_start = max(
+                series["start_ts"],
+                validated["start_ts"] - interval * metadata.lookback_bars,
+            )
+            rows = self._query(
+                """
+                SELECT open_time, open, high, low, close, volume FROM klines
+                WHERE symbol=? AND tf=? AND open_time>=? AND open_time<=?
+                ORDER BY open_time ASC
+                """,
+                (
+                    validated["symbol"],
+                    timeframe,
+                    warmup_start * series["scale"],
+                    validated["end_ts"] * series["scale"] + series["scale"] - 1,
+                ),
+            )
+            candles, quality = _clean_candles(rows, series["scale"], timeframe)
+            candles_by_timeframe[timeframe] = candles
+            quality_by_timeframe[timeframe] = quality
+            raw_counts[timeframe] = len(rows)
+
+        trigger_candles = [
+            candle
+            for candle in candles_by_timeframe[metadata.trigger_timeframe]
+            if validated["start_ts"] <= candle.ts <= validated["end_ts"]
+        ]
+        if len(trigger_candles) < 2:
+            raise BacktestUnavailable("at least two valid trigger klines are required")
+        if len(trigger_candles) > MAX_BARS:
+            raise BacktestUnavailable(f"backtest range exceeds the {MAX_BARS} bar limit")
+        close_times = {
+            timeframe: [
+                candle.ts + int(_timeframe_seconds(timeframe) or 0) for candle in candles
+            ]
+            for timeframe, candles in candles_by_timeframe.items()
+        }
+        context_batch: list[dict[str, Any]] = []
+        decisions = []
+
+        def evaluate_batch() -> None:
+            if not context_batch:
+                return
+            try:
+                decisions.extend(
+                    evaluate_source_many(
+                        source_code,
+                        context_batch,
+                        validated["params"],
+                        language=language,
+                        timeout_seconds=12.0,
+                    )
+                )
+            except (StrategySourceError, StrategySourceExecutionError) as exc:
+                raise BacktestUnavailable(
+                    f"source strategy evaluation failed: {exc}"
+                ) from None
+            context_batch.clear()
+
+        for trigger in trigger_candles:
+            decision_at = trigger.ts + int(
+                _timeframe_seconds(metadata.trigger_timeframe) or 0
+            )
+            market: dict[str, list[dict[str, float | int]]] = {}
+            for timeframe in metadata.timeframes:
+                end_index = bisect_right(close_times[timeframe], decision_at)
+                start_index = max(0, end_index - metadata.lookback_bars)
+                market[timeframe] = [
+                    _runtime_candle(candle)
+                    for candle in candles_by_timeframe[timeframe][start_index:end_index]
+                ]
+            context_batch.append(
+                {
+                    "symbol": validated["symbol"],
+                    "decision_time": decision_at,
+                    "bars": market,
+                }
+            )
+            if len(context_batch) >= 250:
+                evaluate_batch()
+        evaluate_batch()
+        signals = [
+            {"LONG_ENTRY": 1, "SHORT_ENTRY": -1}.get(decision.decision, 0)
+            for decision in decisions
+        ]
+        risk_proposals = [
+            decision.risk_proposal if direction else None
+            for decision, direction in zip(decisions, signals, strict=True)
+        ]
+        decision_counts: dict[str, int] = {}
+        for decision in decisions:
+            decision_counts[decision.decision] = decision_counts.get(decision.decision, 0) + 1
+        result = _run_engine(
+            trigger_candles,
+            validated,
+            signals=signals,
+            risk_proposals=risk_proposals,
+        )
+        quality = dict(quality_by_timeframe[metadata.trigger_timeframe])
+        quality.update(
+            {
+                "strategy_kind": "source_strategy",
+                "source_language": metadata.language,
+                "source_hash": metadata.source_hash,
+                "source_runtime_version": metadata.runtime_version,
+                "timeframes": quality_by_timeframe,
+                "raw_bars_by_timeframe": raw_counts,
+                "decision_counts": decision_counts,
+                "on_demand_fetches": on_demand_fetches,
+            }
+        )
+        return _finalize_result(
+            result,
+            trigger_candles,
+            validated,
+            len(trigger_candles),
+            quality,
+            extra_assumptions=[
+                "Python 源码在隔离进程中按已收盘 K 线批量求值",
+                "回测、模拟和实盘使用同一源码修订与参数快照",
             ],
         )
 

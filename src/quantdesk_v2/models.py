@@ -2218,11 +2218,12 @@ class UserStrategy(Base):
         ),
         CheckConstraint(
             "engine_key IN ('multi_factor', 'ma_cross', 'macd_momentum', "
-            "'rsi_reversal', 'bollinger_reversion', 'strategy_dsl')",
+            "'rsi_reversal', 'bollinger_reversion', 'strategy_dsl', 'python_source')",
             name="supported_engine",
         ),
         CheckConstraint(
-            "strategy_kind IN ('full_strategy', 'legacy_signal')", name="valid_strategy_kind"
+            "strategy_kind IN ('full_strategy', 'source_strategy', 'legacy_signal')",
+            name="valid_strategy_kind",
         ),
         CheckConstraint(
             "lifecycle_status IN ('draft', 'published', 'retired')",
@@ -2240,6 +2241,7 @@ class UserStrategy(Base):
         UniqueConstraint("id", "user_id", name="uq_user_strategies_id_user_id"),
         Index("ix_user_strategies_user_status_updated", "user_id", "status", "updated_at"),
         Index("ix_user_strategies_user_name", "user_id", "name"),
+        Index("ix_user_strategies_source_hash", "source_hash"),
         {
             "comment": "用户独立拥有并可编辑的策略配置",
             "mysql_engine": "InnoDB",
@@ -2301,6 +2303,21 @@ class UserStrategy(Base):
     )
     spec_hash: Mapped[str | None] = mapped_column(
         String(64), comment="规范化策略 DSL 的 SHA-256 哈希"
+    )
+    source_language: Mapped[str | None] = mapped_column(
+        String(24), comment="源码策略语言；首个运行时支持 python"
+    )
+    source_code: Mapped[str | None] = mapped_column(
+        Text, comment="用户发布的可执行策略源码"
+    )
+    source_hash: Mapped[str | None] = mapped_column(
+        String(64), comment="规范化策略源码的 SHA-256 哈希"
+    )
+    source_runtime_version: Mapped[str | None] = mapped_column(
+        String(32), comment="隔离源码求值器版本"
+    )
+    source_validation_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, comment="源码静态校验结果及行情依赖"
     )
     risk_level: Mapped[str] = mapped_column(
         String(16), default="medium", nullable=False, comment="策略风险等级：low、medium 或 high"
@@ -2397,6 +2414,18 @@ class StrategyRevision(Base):
     )
     spec_hash: Mapped[str | None] = mapped_column(
         String(64), comment="该修订规范化策略 DSL 的 SHA-256 哈希"
+    )
+    source_language: Mapped[str | None] = mapped_column(
+        String(24), comment="该修订使用的源码语言"
+    )
+    source_code: Mapped[str | None] = mapped_column(
+        Text, comment="该修订不可变的策略源码"
+    )
+    source_hash: Mapped[str | None] = mapped_column(
+        String(64), comment="该修订规范化策略源码的 SHA-256 哈希"
+    )
+    source_runtime_version: Mapped[str | None] = mapped_column(
+        String(32), comment="该修订使用的隔离源码求值器版本"
     )
     validation_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, comment="发布时的静态校验、数据依赖和风险提示"

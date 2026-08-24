@@ -1376,6 +1376,55 @@ class StrategyCodeUpdateRequest(BaseModel):
     spec: dict[str, JsonValue] = Field(min_length=1, max_length=32)
 
 
+class StrategySourceValidateRequest(BaseModel):
+    """Validate executable strategy source without persisting it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    language: Literal["python"] = "python"
+    source_code: str = Field(min_length=1, max_length=65_536)
+
+
+class StrategySourceAiPreviewRequest(StrategyAiPreviewRequest):
+    """Modify the visible source buffer and return a review-only preview."""
+
+    language: Literal["python"] = "python"
+    source_code: str = Field(min_length=1, max_length=65_536)
+
+
+class StrategySourceUpdateRequest(BaseModel):
+    """Publish one immutable executable source revision."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    version: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=600)
+    category: str = Field(min_length=1, max_length=32)
+    language: Literal["python"] = "python"
+    source_code: str = Field(min_length=1, max_length=65_536)
+
+
+class StrategySourceCreateRequest(BaseModel):
+    """Create a user-owned Python strategy with separate editable parameters."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(default="Python EMA 策略", min_length=1, max_length=80)
+    description: str = Field(default="可编辑 Python 源码策略", max_length=600)
+    category: str = Field(default="源码策略", min_length=1, max_length=32)
+    language: Literal["python"] = "python"
+    source_code: str | None = Field(default=None, min_length=1, max_length=65_536)
+    risk_defaults: dict[str, int | float] | None = Field(default=None, max_length=16)
+
+    @field_validator("risk_defaults")
+    @classmethod
+    def validate_risk_defaults(
+        cls, value: dict[str, int | float] | None
+    ) -> dict[str, int | float] | None:
+        return _bounded_numeric_map(value, "risk default") if value is not None else None
+
+
 class BacktestRunRequest(BaseModel):
     """创建单策略、单品种回测所需的可信输入。"""
 

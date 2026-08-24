@@ -1902,13 +1902,21 @@ def _matching_strategies(db: Session, user_id: int) -> dict[str, list[dict[str, 
         select(UserStrategy).where(
             UserStrategy.user_id == user_id,
             UserStrategy.status == "active",
-            UserStrategy.strategy_kind == "full_strategy",
+            UserStrategy.strategy_kind.in_(("full_strategy", "source_strategy")),
             UserStrategy.lifecycle_status == "published",
         )
     ).all()
     for strategy in strategies:
-        spec = strategy.spec_json if isinstance(strategy.spec_json, dict) else {}
-        directions = spec.get("directions")
+        if strategy.strategy_kind == "source_strategy":
+            validation = (
+                strategy.source_validation_json
+                if isinstance(strategy.source_validation_json, dict)
+                else {}
+            )
+            directions = validation.get("directions")
+        else:
+            spec = strategy.spec_json if isinstance(strategy.spec_json, dict) else {}
+            directions = spec.get("directions")
         if not isinstance(directions, list):
             continue
         summary = {
@@ -2158,10 +2166,15 @@ def _execution_strategy_snapshot(strategy: UserStrategy) -> dict[str, Any]:
         "spec_schema_version": strategy.spec_schema_version,
         "spec": strategy.spec_json,
         "spec_hash": strategy.spec_hash,
+        "source_language": getattr(strategy, "source_language", None),
+        "source_code": getattr(strategy, "source_code", None),
+        "source_hash": getattr(strategy, "source_hash", None),
+        "source_runtime_version": getattr(strategy, "source_runtime_version", None),
+        "source_validation": getattr(strategy, "source_validation_json", None),
         "parameters": strategy.parameters_json,
         "risk_defaults": strategy.risk_defaults_json,
     }
-    if strategy.strategy_kind != "full_strategy":
+    if strategy.strategy_kind not in {"full_strategy", "source_strategy"}:
         try:
             snapshot["timeframe"] = resolve_legacy_strategy_timeframe(
                 strategy.parameters_json,
@@ -2430,7 +2443,8 @@ def create_paper_account(
         "max_holding_bars": risk.get("max_holding_bars", 12),
         "signal_mode": (
             "strategy_event_v2"
-            if len(strategies) > 1 or primary_strategy.strategy_kind == "full_strategy"
+            if len(strategies) > 1
+            or primary_strategy.strategy_kind in {"full_strategy", "source_strategy"}
             else "legacy_score_v1"
         ),
         "strategy_combination_mode": "all",
@@ -2593,7 +2607,8 @@ def update_paper_account_strategy(
             "max_holding_bars": risk.get("max_holding_bars", config.get("max_holding_bars", 12)),
             "signal_mode": (
                 "strategy_event_v2"
-                if len(strategies) > 1 or primary_strategy.strategy_kind == "full_strategy"
+                if len(strategies) > 1
+                or primary_strategy.strategy_kind in {"full_strategy", "source_strategy"}
                 else "legacy_score_v1"
             ),
             "strategy_combination_mode": "all",
@@ -3327,9 +3342,16 @@ def backtest_catalog(
         strategy
         for strategy in ensure_user_default_strategies(db, user.id)
         if strategy.status == "active"
-        and strategy.strategy_kind == "full_strategy"
+        and strategy.strategy_kind in {"full_strategy", "source_strategy"}
         and strategy.lifecycle_status == "published"
-        and isinstance(strategy.spec_json, dict)
+        and (
+            isinstance(strategy.spec_json, dict)
+            or (
+                strategy.strategy_kind == "source_strategy"
+                and isinstance(strategy.source_code, str)
+                and bool(strategy.source_code.strip())
+            )
+        )
     ]
     db.commit()
     try:
@@ -3354,9 +3376,16 @@ def create_backtest(
     selected = get_user_strategy(db, user_id, payload.strategy_id)
     if selected is not None and not (
         selected.status == "active"
-        and selected.strategy_kind == "full_strategy"
+        and selected.strategy_kind in {"full_strategy", "source_strategy"}
         and selected.lifecycle_status == "published"
-        and isinstance(selected.spec_json, dict)
+        and (
+            isinstance(selected.spec_json, dict)
+            or (
+                selected.strategy_kind == "source_strategy"
+                and isinstance(selected.source_code, str)
+                and bool(selected.source_code.strip())
+            )
+        )
     ):
         raise HTTPException(
             status_code=422,
@@ -3394,7 +3423,16 @@ def create_backtest(
             strategy = _strategy_from_catalog(catalog, payload.strategy_id)
         config = _engine_config(payload, strategy)
         try:
-            if strategy.get("strategy_kind") == "full_strategy":
+            if strategy.get("strategy_kind") == "source_strategy":
+                source_code = strategy.get("source_code")
+                if not isinstance(source_code, str) or not source_code.strip():
+                    raise HTTPException(status_code=409, detail="strategy source is unavailable")
+                raw_result = repository.run_source_strategy(
+                    config,
+                    source_code,
+                    language=str(strategy.get("source_language") or "python"),
+                )
+            elif strategy.get("strategy_kind") == "full_strategy":
                 spec = strategy.get("spec")
                 if not isinstance(spec, dict):
                     raise HTTPException(status_code=409, detail="full strategy spec is unavailable")

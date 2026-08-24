@@ -1987,6 +1987,19 @@ def _execution_timeframe_seconds(account: dict[str, Any]) -> int:
     """Resolve the immutable trigger interval used by holding/freshness rules."""
 
     snapshot = account.get("strategy_snapshot_json") or {}
+    if snapshot.get("strategy_kind") == "source_strategy":
+        validation = snapshot.get("source_validation")
+        requirements = (
+            validation.get("data_requirements") if isinstance(validation, dict) else None
+        )
+        trigger = (
+            requirements.get("trigger_timeframe")
+            if isinstance(requirements, dict)
+            else None
+        )
+        if not isinstance(trigger, str):
+            raise StrategyEvaluationError("source strategy trigger timeframe is unavailable")
+        return strategy_timeframe_seconds(trigger)
     if snapshot.get("strategy_kind") == "full_strategy":
         spec = snapshot.get("spec")
         timeframes = spec.get("timeframes") if isinstance(spec, dict) else None
@@ -2331,7 +2344,7 @@ def _open_position(
     strategy_snapshot = account.get("strategy_snapshot_json") or {}
     signal_source = str((signal_evidence or {}).get("source") or "")
     if (
-        strategy_snapshot.get("strategy_kind") == "full_strategy"
+        strategy_snapshot.get("strategy_kind") in {"full_strategy", "source_strategy"}
         or signal_source == "ai_monitor_live_copy_v1"
     ):
         proposal = (signal_evidence or {}).get("risk_proposal")

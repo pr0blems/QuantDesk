@@ -30,6 +30,12 @@ from quantdesk_v2.strategy_runtime import (
     evaluate_strategy,
     validate_strategy_spec,
 )
+from quantdesk_v2.strategy_source_runtime import (
+    StrategySourceError,
+    StrategySourceExecutionError,
+    evaluate_source,
+    validate_source,
+)
 
 from . import indicators as ind
 from . import market_store as store
@@ -270,7 +276,7 @@ def _paper_risk_policy(
     full_strategy_indexes = [
         index
         for index, snapshot in enumerate(snapshots)
-        if snapshot.get("strategy_kind") == "full_strategy"
+        if snapshot.get("strategy_kind") in {"full_strategy", "source_strategy"}
     ]
     if not full_strategy_indexes or signal_evidence is None:
         return policy
@@ -308,7 +314,7 @@ def _paper_signal_mode(account: dict[str, Any]) -> str:
     if len(snapshots) > 1:
         return STRATEGY_EVENT_SIGNAL_MODE
     snapshot = snapshots[0] if snapshots else {}
-    if snapshot.get("strategy_kind") == "full_strategy":
+    if snapshot.get("strategy_kind") in {"full_strategy", "source_strategy"}:
         return STRATEGY_EVENT_SIGNAL_MODE
     raw = account.get("config_json") or {}
     configured = str(raw.get("signal_mode") or "").strip()
@@ -404,7 +410,7 @@ def _snapshot_signal_is_fresh(
     policy: Any,
 ) -> bool:
     try:
-        if snapshot.get("strategy_kind") == "full_strategy":
+        if snapshot.get("strategy_kind") in {"full_strategy", "source_strategy"}:
             decision = signal_freshness(
                 signal_time,
                 now=now,
@@ -893,6 +899,8 @@ def _strategy_signal(
     account: dict[str, Any], symbol: str, snapshot: dict[str, Any] | None = None
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
     selected = snapshot or (_strategy_snapshots(account)[0] if _strategy_snapshots(account) else {})
+    if selected.get("strategy_kind") == "source_strategy":
+        return _source_strategy_signal(account, selected, symbol)
     if selected.get("strategy_kind") == "full_strategy":
         return _full_strategy_signal(account, selected, symbol)
 
@@ -1073,6 +1081,90 @@ def _full_strategy_signal(
     ):
         return 0, atr, [*basis, "信号未执行：缺少可审计的策略部署记录"], decision.signal_time, {}
     evidence = {
+        "decision": decision.decision,
+        "confidence": decision.confidence,
+        "valid_until": decision.valid_until,
+        "reason_codes": list(decision.reason_codes),
+        "evidence": decision.evidence,
+        "risk_proposal": decision.risk_proposal,
+    }
+    return direction, atr, basis, decision.signal_time, evidence
+
+
+def _source_strategy_signal(
+    account: dict[str, Any], snapshot: dict[str, Any], symbol: str
+) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
+    """Evaluate one immutable Python source revision in the isolated worker."""
+
+    source_code = snapshot.get("source_code")
+    language = str(snapshot.get("source_language") or "python")
+    parameters = _json_object(snapshot.get("parameters"))
+    try:
+        if not isinstance(source_code, str) or not source_code.strip():
+            raise StrategySourceError("策略源码不可用")
+        metadata = validate_source(source_code, language)
+        market = {
+            timeframe: [
+                {
+                    "open_time": int(row["open_time"]),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                }
+                for row in store.get_klines(symbol, timeframe, metadata.lookback_bars)
+            ]
+            for timeframe in metadata.timeframes
+        }
+        decision = evaluate_source(
+            source_code,
+            {
+                "symbol": symbol,
+                "decision_time": int(time.time()),
+                "bars": market,
+            },
+            parameters,
+            language=language,
+        )
+    except (
+        StrategySourceError,
+        StrategySourceExecutionError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        return 0, None, [f"源码策略不可用：{type(exc).__name__}"], None, {}
+
+    direction = {"LONG_ENTRY": 1, "SHORT_ENTRY": -1}.get(decision.decision, 0)
+    atr = None
+    for candidate_source in (decision.evidence, decision.risk_proposal):
+        try:
+            candidate = float(candidate_source.get("atr"))
+        except (AttributeError, TypeError, ValueError):
+            candidate = math.nan
+        if math.isfinite(candidate) and candidate > 0:
+            atr = candidate
+            break
+    basis = [
+        f"策略：{snapshot.get('name') or 'Python 源码策略'}",
+        f"类型：源码策略 / {language}",
+        f"周期：{'/'.join(metadata.timeframes)}（触发 {metadata.trigger_timeframe}）",
+        f"决策：{decision.decision}",
+    ]
+    if decision.reason_codes:
+        basis.append(f"依据：{' / '.join(decision.reason_codes)}")
+    if decision.confidence is not None:
+        basis.append(f"置信度：{decision.confidence:.2%}")
+    audit_spec = {"timeframes": {"trigger": metadata.trigger_timeframe}}
+    if direction and not _record_full_strategy_decision(
+        account, symbol, audit_spec, decision, snapshot
+    ):
+        return 0, atr, [*basis, "信号未执行：缺少可审计的策略部署记录"], decision.signal_time, {}
+    evidence = {
+        "source": "python_source_strategy_v1",
+        "source_hash": metadata.source_hash,
+        "runtime_version": metadata.runtime_version,
         "decision": decision.decision,
         "confidence": decision.confidence,
         "valid_until": decision.valid_until,

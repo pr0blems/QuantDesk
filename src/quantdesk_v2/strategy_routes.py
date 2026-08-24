@@ -34,6 +34,10 @@ from .schemas import (
     StrategyCodeUpdateRequest,
     StrategyCodeValidateRequest,
     StrategyCreateRequest,
+    StrategySourceAiPreviewRequest,
+    StrategySourceCreateRequest,
+    StrategySourceUpdateRequest,
+    StrategySourceValidateRequest,
     StrategyUpdateRequest,
 )
 from .security import CredentialCipher, SecurityError
@@ -41,8 +45,10 @@ from .strategy_ai import (
     StrategyAiError,
     generate_strategy_code_preview,
     generate_strategy_preview,
+    generate_strategy_source_preview,
     generate_user_model_strategy_code_preview,
     generate_user_model_strategy_preview,
+    generate_user_model_strategy_source_preview,
 )
 from .strategy_catalog import (
     DEFAULT_RISK,
@@ -62,6 +68,13 @@ from .strategy_runtime import (
     indicator_composite_parameter_schema,
     strategy_spec_hash,
     validate_strategy_spec,
+)
+from .strategy_source_runtime import (
+    StrategySourceError,
+    conversion_python_source,
+    default_python_parameters,
+    default_python_source,
+    validate_source,
 )
 
 router = APIRouter(prefix="/api/v2/strategies", tags=["strategies"])
@@ -353,10 +366,18 @@ def _record_revision(
             spec_schema_version=strategy.spec_schema_version,
             spec_json=copy.deepcopy(strategy.spec_json),
             spec_hash=strategy.spec_hash,
+            source_language=strategy.source_language,
+            source_code=strategy.source_code,
+            source_hash=strategy.source_hash,
+            source_runtime_version=strategy.source_runtime_version,
             validation_json=(
-                {"valid": True, "engine": "strategy_runtime_v1"}
-                if strategy.strategy_kind == "full_strategy"
-                else {"valid": True, "legacy": True}
+                copy.deepcopy(strategy.source_validation_json)
+                if strategy.strategy_kind == "source_strategy"
+                else (
+                    {"valid": True, "engine": "strategy_runtime_v1"}
+                    if strategy.strategy_kind == "full_strategy"
+                    else {"valid": True, "legacy": True}
+                )
             ),
             published_at=utcnow() if strategy.lifecycle_status == "published" else None,
             created_at=utcnow(),
@@ -385,7 +406,7 @@ def _apply_edit(
         )
     try:
         current_spec = strategy.spec_json if isinstance(strategy.spec_json, dict) else {}
-        if current_spec.get("strategy_type") == "indicator_composite":
+        if strategy.strategy_kind == "source_strategy" or current_spec.get("strategy_type") == "indicator_composite":
             parameters = _normalize_schema_parameters(
                 strategy.parameter_schema_json,
                 editable["parameters"],
@@ -495,6 +516,83 @@ def _code_validation_response(spec: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _source_validation_response(source_code: str, language: str = "python") -> dict[str, Any]:
+    try:
+        metadata = validate_source(source_code, language)
+    except StrategySourceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {
+        "valid": True,
+        "engine": metadata.runtime_version,
+        "language": metadata.language,
+        "source_hash": metadata.source_hash,
+        "data_requirements": {
+            "timeframes": list(metadata.timeframes),
+            "trigger_timeframe": metadata.trigger_timeframe,
+            "lookback_bars": metadata.lookback_bars,
+        },
+        "directions": list(metadata.directions),
+        "valid_for_bars": metadata.valid_for_bars,
+        "parameter_keys": list(metadata.parameter_keys),
+        "warnings": [
+            "源码在隔离进程中执行，不能导入模块或访问文件、网络和系统命令。"
+        ],
+    }
+
+
+def _apply_source_edit(
+    db: Session,
+    strategy: UserStrategy,
+    *,
+    expected_version: int,
+    name: str,
+    description: str,
+    category: str,
+    language: str,
+    source_code: str,
+    source: str,
+    summary: str,
+) -> None:
+    if strategy.status != "active":
+        raise HTTPException(status_code=409, detail="strategy is archived")
+    if strategy.version != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "strategy version conflict; reload before saving",
+                "current_version": strategy.version,
+            },
+        )
+    validation = _source_validation_response(source_code, language)
+    available_parameters = {
+        str(item.get("key"))
+        for item in strategy.parameter_schema_json
+        if isinstance(item, Mapping) and item.get("key")
+    }
+    unknown_parameters = sorted(set(validation["parameter_keys"]) - available_parameters)
+    if unknown_parameters:
+        raise HTTPException(
+            status_code=422,
+            detail=f"源码引用了未定义参数：{', '.join(unknown_parameters)}",
+        )
+    strategy.name = name
+    strategy.description = description
+    strategy.category = category
+    strategy.engine_key = "python_source"
+    strategy.strategy_kind = "source_strategy"
+    strategy.spec_schema_version = None
+    strategy.spec_json = None
+    strategy.spec_hash = None
+    strategy.source_language = language
+    strategy.source_code = source_code.replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
+    strategy.source_hash = str(validation["source_hash"])
+    strategy.source_runtime_version = str(validation["engine"])
+    strategy.source_validation_json = validation
+    strategy.version += 1
+    strategy.updated_at = utcnow()
+    _record_revision(db, strategy, source=source, summary=summary)
+
+
 def _strategy_ai_http_error(exc: StrategyAiError) -> HTTPException:
     status_by_category = {
         "not_configured": 503,
@@ -506,6 +604,71 @@ def _strategy_ai_http_error(exc: StrategyAiError) -> HTTPException:
         status_code=status_by_category[exc.category],
         detail={"message": "AI strategy preview failed", "category": exc.category},
     )
+
+
+def _generate_source_ai_preview(
+    strategy_dict: Mapping[str, Any],
+    payload: StrategySourceAiPreviewRequest,
+    request: Request,
+    db: Session,
+    user: User,
+    *,
+    safety_scope: str,
+) -> dict[str, Any]:
+    # The visible editor buffer is the source of truth for previews; saving still
+    # rechecks ownership, version and the complete AST in a later request.
+    editable = dict(strategy_dict)
+    editable["source_code"] = payload.source_code
+    settings = request.app.state.settings
+    user_model = get_global_ai_model_config(db, legacy_fallback_user_id=user.id)
+    user_model_runtime: tuple[str, str, str] | None = None
+    if user_model is not None:
+        try:
+            api_key = CredentialCipher(
+                settings.credential_master_key.get_secret_value()
+            ).decrypt(user_model.api_key_encrypted)
+        except SecurityError:
+            db.rollback()
+            raise _strategy_ai_http_error(StrategyAiError("not_configured")) from None
+        user_model_runtime = (user_model.provider_code, user_model.model_name, api_key)
+    db.rollback()
+    safety_identifier = (
+        "qd_"
+        + hmac.new(
+            settings.jwt_secret.get_secret_value().encode("utf-8"),
+            f"{safety_scope}:{user.id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()[:32]
+    )
+    try:
+        if user_model_runtime is not None:
+            provider_code, model_name, api_key = user_model_runtime
+            preview = generate_user_model_strategy_source_preview(
+                editable,
+                payload.prompt,
+                provider_code=provider_code,
+                api_key=api_key,
+                model_name=model_name,
+                timeout_seconds=settings.openai_strategy_timeout_seconds,
+            )
+        else:
+            preview = generate_strategy_source_preview(
+                editable,
+                payload.prompt,
+                settings.openai_api_key.get_secret_value(),
+                settings.openai_strategy_model,
+                settings.openai_strategy_timeout_seconds,
+                safety_identifier,
+            )
+    except StrategyAiError as exc:
+        raise _strategy_ai_http_error(exc) from None
+    proposed = preview.get("source_code")
+    if not isinstance(proposed, str):
+        raise _strategy_ai_http_error(StrategyAiError("invalid_output"))
+    validation = _source_validation_response(proposed, payload.language)
+    preview["source_hash"] = validation["source_hash"]
+    preview["validation"] = validation
+    return preview
 
 
 def _commit_or_conflict(db: Session) -> None:
@@ -533,6 +696,13 @@ def list_strategies(
     return {
         "items": [serialize_user_strategy(item) for item in strategies],
         "templates": [_template_response(item) for item in templates if item.is_active],
+        "source_runtime": {
+            "languages": ["python"],
+            "default_language": "python",
+            "runtime_version": "python_sandbox_v1",
+            "starter_source": default_python_source(),
+            "conversion_starter_source": conversion_python_source(),
+        },
         "limits": {"max_active_strategies": MAX_ACTIVE_STRATEGIES},
     }
 
@@ -754,6 +924,9 @@ def list_strategy_revisions(
                 "change_summary": row.change_summary,
                 "spec_schema_version": row.spec_schema_version,
                 "spec_hash": row.spec_hash,
+                "source_language": row.source_language,
+                "source_hash": row.source_hash,
+                "source_runtime_version": row.source_runtime_version,
                 "validation": row.validation_json,
                 "published_at": row.published_at.isoformat() + "Z" if row.published_at else None,
                 "created_at": row.created_at.isoformat() + "Z",
@@ -772,6 +945,10 @@ def validate_full_strategy(
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None:
         raise HTTPException(status_code=404, detail="strategy not found")
+    if strategy.strategy_kind == "source_strategy":
+        if not strategy.source_code or not strategy.source_language:
+            raise HTTPException(status_code=422, detail="source strategy is incomplete")
+        return _source_validation_response(strategy.source_code, strategy.source_language)
     if strategy.strategy_kind != "full_strategy" or not strategy.spec_json:
         return {
             "valid": True,
@@ -797,6 +974,109 @@ def validate_strategy_code(
         raise HTTPException(status_code=404, detail="strategy not found")
     spec, _ = _validated_code_spec(strategy, payload.spec)
     return _code_validation_response(spec)
+
+
+@router.post("/{public_id}/source/validate")
+def validate_strategy_source(
+    public_id: str,
+    payload: StrategySourceValidateRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = get_user_strategy(db, user.id, public_id)
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="strategy not found")
+    return _source_validation_response(payload.source_code, payload.language)
+
+
+@router.post("/runtime/python/validate")
+def validate_new_strategy_source(
+    payload: StrategySourceValidateRequest,
+    _: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return _source_validation_response(payload.source_code, payload.language)
+
+
+@router.post("/runtime/python/ai-preview")
+def preview_new_strategy_source(
+    payload: StrategySourceAiPreviewRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return _generate_source_ai_preview(
+        {"version": 1, "source_code": payload.source_code},
+        payload,
+        request,
+        db,
+        user,
+        safety_scope="strategy-source-create",
+    )
+
+
+@router.post("/source", status_code=status.HTTP_201_CREATED)
+def create_source_strategy(
+    payload: StrategySourceCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    active_count = db.scalar(
+        select(func.count(UserStrategy.id)).where(
+            UserStrategy.user_id == user.id,
+            UserStrategy.status == "active",
+        )
+    )
+    if int(active_count or 0) >= MAX_ACTIVE_STRATEGIES:
+        raise HTTPException(status_code=409, detail="active strategy limit reached")
+    source_code = payload.source_code or default_python_source()
+    validation = _source_validation_response(source_code, payload.language)
+    parameter_schema, parameters = default_python_parameters()
+    unknown_parameters = sorted(set(validation["parameter_keys"]) - set(parameters))
+    if unknown_parameters:
+        raise HTTPException(
+            status_code=422,
+            detail=f"新源码策略引用了未定义参数：{', '.join(unknown_parameters)}",
+        )
+    try:
+        risks = _normalize_risk_defaults(payload.risk_defaults, base=DEFAULT_RISK)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    now = utcnow()
+    strategy = UserStrategy(
+        public_id=str(uuid.uuid4()),
+        user_id=user.id,
+        source_template_id=None,
+        name=payload.name,
+        category=payload.category,
+        description=payload.description,
+        status="active",
+        version=1,
+        engine_key="python_source",
+        strategy_kind="source_strategy",
+        lifecycle_status="published",
+        spec_schema_version=None,
+        spec_json=None,
+        spec_hash=None,
+        source_language=payload.language,
+        source_code=source_code.replace("\r\n", "\n").replace("\r", "\n").strip() + "\n",
+        source_hash=validation["source_hash"],
+        source_runtime_version=validation["engine"],
+        source_validation_json=validation,
+        risk_level="medium",
+        parameter_schema_json=parameter_schema,
+        parameters_json=parameters,
+        risk_defaults_json=risks,
+        created_via="manual",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(strategy)
+    db.flush()
+    _record_revision(db, strategy, source="manual", summary="新增 Python 源码策略")
+    _audit(db, request, "strategy.source_create", user.id, strategy.public_id)
+    _commit_or_conflict(db)
+    return serialize_user_strategy(strategy)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -978,6 +1258,41 @@ def update_strategy_code(
     return serialize_user_strategy(strategy)
 
 
+@router.put("/{public_id}/source")
+def update_strategy_source(
+    public_id: str,
+    payload: StrategySourceUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = _locked_user_strategy(db, user.id, public_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    _apply_source_edit(
+        db,
+        strategy,
+        expected_version=payload.version,
+        name=payload.name,
+        description=payload.description,
+        category=payload.category,
+        language=payload.language,
+        source_code=payload.source_code,
+        source="manual",
+        summary="手工发布 Python 策略源码",
+    )
+    _audit(
+        db,
+        request,
+        "strategy.source_update",
+        user.id,
+        strategy.public_id,
+        metadata={"version": strategy.version, "source_hash": strategy.source_hash},
+    )
+    _commit_or_conflict(db)
+    return serialize_user_strategy(strategy)
+
+
 @router.post("/{public_id}/ai-preview")
 def preview_ai_strategy_edit(
     public_id: str,
@@ -1135,6 +1450,27 @@ def preview_ai_strategy_code_edit(
     preview["strategy_code"] = json.dumps(spec, ensure_ascii=False, indent=2)
     preview["spec_hash"] = strategy_spec_hash(spec)
     return preview
+
+
+@router.post("/{public_id}/source/ai-preview")
+def preview_ai_strategy_source_edit(
+    public_id: str,
+    payload: StrategySourceAiPreviewRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = get_user_strategy(db, user.id, public_id)
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="strategy not found")
+    return _generate_source_ai_preview(
+        {"version": strategy.version, "source_code": payload.source_code},
+        payload,
+        request,
+        db,
+        user,
+        safety_scope="strategy-source-edit",
+    )
 
 
 @router.post("/{public_id}/ai-apply")

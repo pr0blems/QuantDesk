@@ -15,6 +15,8 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'id="strategy-detail-layer"',
         'data-edit-scope="parameters"',
         'data-edit-scope="code"',
+        'data-edit-scope="source"',
+        'data-create-mode="source"',
         'id="strategy-code-editor"',
         'this.node("button", "strategy-edit-button secondary", "详情")',
         'this.node("button", "strategy-edit-button secondary", "验证")',
@@ -31,6 +33,10 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         '/code/validate`',
         '${codeEdit ? "/code/ai-preview" : "/ai-preview"}',
         '/code`, { method: "PUT"',
+        '/source`, { method: "PUT"',
+        '/source/validate`',
+        '/source/ai-preview`',
+        'source_code: codeSpec',
     ):
         assert api_contract in script
 

@@ -10,6 +10,7 @@ class StrategyCenter extends HTMLElement {
     this.templates = [];
     this.indicators = [];
     this.indicatorDefaults = {};
+    this.sourceRuntime = {};
     this.selectedIndicators = new Map();
     this.deployments = [];
     this.signals = [];
@@ -22,6 +23,7 @@ class StrategyCenter extends HTMLElement {
     this.editScope = "parameters";
     this.createMode = "indicators";
     this.preview = null;
+    this.codeBuffers = {};
   }
 
   connectedCallback() {
@@ -90,7 +92,8 @@ class StrategyCenter extends HTMLElement {
                 <div class="strategy-section-heading"><div><span>00</span><strong>维护方式</strong></div><small id="strategy-edit-scope-help">选择修改完整策略代码或仅调整参数</small></div>
                 <div id="strategy-edit-scope" class="strategy-segments strategy-edit-scope" aria-label="策略维护方式">
                   <button class="active" type="button" data-edit-scope="parameters" aria-pressed="true">参数配置</button>
-                  <button type="button" data-edit-scope="code" aria-pressed="false">策略代码</button>
+                  <button id="strategy-dsl-scope" type="button" data-edit-scope="code" aria-pressed="false">DSL 配置</button>
+                  <button id="strategy-source-scope" type="button" data-edit-scope="source" aria-pressed="false">Python 源码</button>
                 </div>
               </div>
 
@@ -99,6 +102,7 @@ class StrategyCenter extends HTMLElement {
                 <div id="strategy-create-mode" class="strategy-segments strategy-create-mode" aria-label="策略创建方式">
                   <button class="active" type="button" data-create-mode="indicators" aria-pressed="true">指标组合</button>
                   <button type="button" data-create-mode="template" aria-pressed="false">系统模板</button>
+                  <button type="button" data-create-mode="source" aria-pressed="false">Python 源码</button>
                 </div>
                 <div id="strategy-indicator-composer">
                   <div id="strategy-indicator-picker" class="strategy-indicator-picker"></div>
@@ -126,14 +130,14 @@ class StrategyCenter extends HTMLElement {
               </div>
 
               <div id="strategy-code-block" class="strategy-form-block strategy-code-block hidden">
-                <div class="strategy-section-heading"><div><span>02</span><strong>策略 DSL 代码</strong></div><small>JSON · 同一运行时校验 · 保存即生成新版本</small></div>
-                <label>完整策略代码<textarea id="strategy-code-editor" class="strategy-code-editor" rows="22" spellcheck="false" autocomplete="off" aria-label="完整策略 DSL 代码"></textarea></label>
+                <div class="strategy-section-heading"><div><span>02</span><strong id="strategy-code-title">策略 DSL 配置</strong></div><small id="strategy-code-runtime">JSON · 同一运行时校验 · 保存即生成新版本</small></div>
+                <label><span id="strategy-code-label">完整策略 DSL</span><textarea id="strategy-code-editor" class="strategy-code-editor" rows="22" spellcheck="false" autocomplete="off" aria-label="策略代码编辑器"></textarea></label>
                 <div class="strategy-code-actions">
                   <button id="strategy-code-format" class="strategy-quiet-button" type="button">格式化</button>
                   <button id="strategy-code-validate" class="strategy-quiet-button" type="button">校验代码</button>
                   <span id="strategy-code-status" class="strategy-code-status">尚未校验</span>
                 </div>
-                <p class="strategy-code-guard">仅支持平台策略 DSL；禁止 Python、JavaScript、网络请求和任意系统调用。保存前服务端会重新校验完整结构。</p>
+                <p id="strategy-code-guard" class="strategy-code-guard">DSL 是声明式配置，不是底层源码。Python 源码在独立进程中运行，并禁止文件、网络与系统调用。</p>
               </div>
 
               <div id="strategy-parameters-block" class="strategy-form-block">
@@ -236,7 +240,11 @@ class StrategyCenter extends HTMLElement {
     }));
     this.querySelector("#strategy-code-format").addEventListener("click", () => this.formatStrategyCode());
     this.querySelector("#strategy-code-validate").addEventListener("click", () => this.validateStrategyCode());
-    this.querySelector("#strategy-code-editor").addEventListener("input", () => this.setCodeStatus("代码已修改，尚未校验"));
+    this.querySelector("#strategy-code-editor").addEventListener("input", (event) => {
+      if (["code", "source"].includes(this.editScope)) this.codeBuffers[this.editScope] = event.target.value;
+      if (this.editorMode === "create" && this.createMode === "source") this.codeBuffers.source = event.target.value;
+      this.setCodeStatus("代码已修改，尚未校验");
+    });
     this.querySelector("#strategy-template").addEventListener("change", (event) => this.applyTemplate(event.target.value));
     this.querySelector("#strategy-detail-close").addEventListener("click", () => this.closeDetails());
     this.querySelector("#strategy-detail-layer").addEventListener("click", (event) => {
@@ -281,6 +289,7 @@ class StrategyCenter extends HTMLElement {
     this.templates = [];
     this.indicators = [];
     this.indicatorDefaults = {};
+    this.sourceRuntime = {};
     this.selectedIndicators = new Map();
     this.deployments = [];
     this.signals = [];
@@ -291,6 +300,7 @@ class StrategyCenter extends HTMLElement {
     this.activeItem = null;
     this.createMode = "indicators";
     this.preview = null;
+    this.codeBuffers = {};
     this.querySelector("#strategy-search").value = "";
     this.querySelector("#strategy-category-filter").replaceChildren(this.option("all", "全部分类"));
     this.querySelectorAll("[data-section]").forEach((button) => {
@@ -330,6 +340,7 @@ class StrategyCenter extends HTMLElement {
       this.templates = Array.isArray(payload?.templates) ? payload.templates.map((item) => this.normalizeTemplate(item)) : [];
       this.indicators = Array.isArray(indicatorPayload?.items) ? indicatorPayload.items : [];
       this.indicatorDefaults = this.plainObject(indicatorPayload?.defaults);
+      this.sourceRuntime = this.plainObject(payload?.source_runtime);
       this.deployments = Array.isArray(deploymentPayload?.items) ? deploymentPayload.items : [];
       this.signals = Array.isArray(signalPayload?.items) ? signalPayload.items : [];
       this.renderFilters();
@@ -362,6 +373,9 @@ class StrategyCenter extends HTMLElement {
       strategy_kind: String(item.strategy_kind ?? "legacy_signal"),
       lifecycle_status: String(item.lifecycle_status ?? "published"),
       spec: this.plainObject(item.spec),
+      source_language: String(item.source_language ?? ""),
+      source_code: String(item.source_code ?? ""),
+      source_hash: String(item.source_hash ?? ""),
       is_default: Boolean(item.is_default),
       parameter_schema: schema,
       parameters: this.plainObject(item.parameters),
@@ -436,9 +450,9 @@ class StrategyCenter extends HTMLElement {
   }
 
   renderStats() {
-    const full = this.items.filter((item) => item.strategy_kind === "full_strategy").length;
+    const full = this.items.filter((item) => ["full_strategy", "source_strategy"].includes(item.strategy_kind)).length;
     const composite = this.items.filter((item) => item.spec?.strategy_type === "indicator_composite").length;
-    const legacy = this.items.filter((item) => item.strategy_kind !== "full_strategy").length;
+    const legacy = this.items.filter((item) => !["full_strategy", "source_strategy"].includes(item.strategy_kind)).length;
     const running = this.deployments.filter((item) => item.status === "running").length;
     this.querySelector("#strategy-total").textContent = String(full).padStart(2, "0");
     this.querySelector("#strategy-active").textContent = String(running).padStart(2, "0");
@@ -453,9 +467,8 @@ class StrategyCenter extends HTMLElement {
 
   filteredItems() {
     return this.items.filter((item) => {
-      const kindMatches = this.section === "legacy"
-        ? item.strategy_kind !== "full_strategy"
-        : item.strategy_kind === "full_strategy";
+      const complete = ["full_strategy", "source_strategy"].includes(item.strategy_kind);
+      const kindMatches = this.section === "legacy" ? !complete : complete;
       const isDefault = Boolean(item.is_default || item.source_template_key);
       const statusMatches = this.statusFilter === "all"
         || (this.statusFilter === "default" && isDefault)
@@ -541,12 +554,13 @@ class StrategyCenter extends HTMLElement {
   }
 
   strategyCard(item) {
-    const isFull = item.strategy_kind === "full_strategy";
+    const isSource = item.strategy_kind === "source_strategy";
+    const isFull = item.strategy_kind === "full_strategy" || isSource;
     const card = this.node("article", `strategy-card-item ${isFull ? "full-strategy" : "legacy-signal"}`);
     const head = this.node("header", "strategy-card-head");
     const icon = this.node("span", "strategy-card-icon", this.strategyInitial(item.name));
     const title = this.node("div", "strategy-card-title");
-    title.append(this.node("strong", "", item.name), this.node("small", "", `${item.category} · ${isFull ? "完整策略" : "旧版信号"}`));
+    title.append(this.node("strong", "", item.name), this.node("small", "", `${item.category} · ${isSource ? "Python 源码策略" : (isFull ? "完整策略" : "旧版信号")}`));
     const state = this.node("span", `strategy-state ${item.status === "active" ? "active" : "draft"}`, item.status === "active" ? "已启用" : "草稿");
     head.append(icon, title, state);
 
@@ -560,7 +574,8 @@ class StrategyCenter extends HTMLElement {
         const indicator = this.indicators.find((candidate) => candidate.key === selection.key);
         tags.append(this.node("span", "", indicator?.name || selection.key));
       });
-    } else if (isFull) tags.append(this.node("span", "strategy-kind-tag", `多周期 ${timeframes.regime || "4h"}/${timeframes.setup || "1h"}/${timeframes.trigger || "15m"}`));
+    } else if (isSource) tags.append(this.node("span", "strategy-kind-tag", `Python · ${String(item.source_hash || "").slice(0, 10) || "未发布"}`));
+    else if (isFull) tags.append(this.node("span", "strategy-kind-tag", `多周期 ${timeframes.regime || "4h"}/${timeframes.setup || "1h"}/${timeframes.trigger || "15m"}`));
     else tags.append(this.node("span", "strategy-legacy-tag", "兼容指标信号"));
     const schema = Array.isArray(item.parameter_schema) ? item.parameter_schema : [];
     schema.slice(0, 3).forEach((field) => {
@@ -698,6 +713,7 @@ class StrategyCenter extends HTMLElement {
     this.createMode = "indicators";
     this.activeItem = null;
     this.preview = null;
+    this.codeBuffers = {};
     this.querySelector("#strategy-editor-kicker").textContent = "CREATE STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = "新增策略";
     this.querySelector("#strategy-editor-subtitle").textContent = "勾选多个标准指标并配置参数，保存为可执行的完整策略。";
@@ -745,7 +761,9 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-editor-title").textContent = this.activeItem.name;
     this.querySelector("#strategy-editor-subtitle").textContent = "保存后生成新版本；已完成的回测仍保留当时的策略快照。";
     this.querySelector("#strategy-version-strip").classList.remove("hidden");
-    this.querySelector("#strategy-edit-scope-block").classList.toggle("hidden", this.activeItem.strategy_kind !== "full_strategy");
+    const maintainable = ["full_strategy", "source_strategy"].includes(this.activeItem.strategy_kind);
+    this.querySelector("#strategy-edit-scope-block").classList.toggle("hidden", !maintainable);
+    this.querySelector("#strategy-dsl-scope").classList.toggle("hidden", this.activeItem.strategy_kind !== "full_strategy");
     this.querySelector("#strategy-editor-version").textContent = `v${this.activeItem.version}`;
     this.querySelector("#strategy-composer-block").classList.add("hidden");
     this.querySelector("#strategy-basic-index").textContent = "01";
@@ -762,7 +780,13 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-description").value = this.activeItem.description;
     this.renderParameterFields(this.activeItem.parameter_schema, this.activeItem.parameters);
     this.renderRiskFields(this.activeItem.risk_defaults);
-    this.querySelector("#strategy-code-editor").value = this.strategyCode(this.activeItem.spec);
+    this.querySelector("#strategy-code-editor").value = this.activeItem.strategy_kind === "source_strategy"
+      ? this.activeItem.source_code
+      : this.strategyCode(this.activeItem.spec);
+    this.codeBuffers = {
+      code: this.strategyCode(this.activeItem.spec),
+      source: this.activeItem.source_code || String(this.sourceRuntime.conversion_starter_source || this.sourceRuntime.starter_source || ""),
+    };
     this.setCodeStatus("当前版本代码，尚未重新校验");
     this.switchEditScope("parameters", { resetCode: false });
     this.querySelector("#strategy-ai-prompt").value = "";
@@ -792,27 +816,50 @@ class StrategyCenter extends HTMLElement {
 
   switchEditScope(scope, { resetCode = true } = {}) {
     if (this.editorMode !== "edit") return;
-    const codeAvailable = this.activeItem?.strategy_kind === "full_strategy" && this.plainObject(this.activeItem?.spec);
-    this.editScope = scope === "code" && codeAvailable ? "code" : "parameters";
+    const previousScope = this.editScope;
+    if (["code", "source"].includes(previousScope)) {
+      this.codeBuffers[previousScope] = this.querySelector("#strategy-code-editor").value;
+    }
+    const dslAvailable = this.activeItem?.strategy_kind === "full_strategy" && this.plainObject(this.activeItem?.spec);
+    const sourceAvailable = ["full_strategy", "source_strategy"].includes(this.activeItem?.strategy_kind);
+    this.editScope = scope === "code" && dslAvailable
+      ? "code"
+      : (scope === "source" && sourceAvailable ? "source" : "parameters");
     this.querySelectorAll("[data-edit-scope]").forEach((button) => {
       const active = button.dataset.editScope === this.editScope;
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", String(active));
     });
-    const codeMode = this.editScope === "code";
+    const codeMode = ["code", "source"].includes(this.editScope);
+    const sourceMode = this.editScope === "source";
     this.querySelector("#strategy-code-block").classList.toggle("hidden", !codeMode);
     if (codeMode) {
       this.querySelector("#strategy-parameters-block").classList.add("hidden");
       this.querySelector("#strategy-risk-block").classList.add("hidden");
-      if (resetCode) this.querySelector("#strategy-code-editor").value = this.strategyCode(this.activeItem.spec);
+      if (resetCode) {
+        this.codeBuffers[this.editScope] = sourceMode
+          ? (this.activeItem.source_code || String(this.sourceRuntime.conversion_starter_source || this.sourceRuntime.starter_source || ""))
+          : this.strategyCode(this.activeItem.spec);
+      }
+      this.querySelector("#strategy-code-editor").value = this.codeBuffers[this.editScope] || "";
       this.setCodeStatus("当前版本代码，尚未重新校验");
-      this.querySelector("#strategy-edit-scope-help").textContent = "维护完整入场、退出、风险与执行 DSL";
+      this.querySelector("#strategy-code-title").textContent = sourceMode ? "Python 策略源码" : "策略 DSL 配置";
+      this.querySelector("#strategy-code-runtime").textContent = sourceMode ? "Python · sandbox v1 · 保存生成不可变版本" : "JSON · 声明式 DSL · 保存生成新版本";
+      this.querySelector("#strategy-code-label").textContent = sourceMode ? "可执行 evaluate(context, params) 源码" : "完整策略 DSL";
+      this.querySelector("#strategy-code-format").classList.toggle("hidden", sourceMode);
+      this.querySelector("#strategy-code-guard").textContent = sourceMode
+        ? "这是真正执行的 Python 策略逻辑。允许函数、循环和计算；禁止 import、对象属性、文件、网络、系统调用和动态执行。"
+        : "DSL 是声明式策略配置，不是 Python 源码；由平台固定求值器执行。";
+      this.querySelector("#strategy-edit-scope-help").textContent = sourceMode ? "维护真正执行的 Python 策略函数" : "维护声明式入场、退出、风险与执行 DSL";
       this.querySelector("#strategy-ai-title").textContent = "用自然语言修改策略代码";
-      this.querySelector("#strategy-ai-description").textContent = "描述要调整的指标组合、方向、周期、入场、退出或风险逻辑。模型只生成受控策略 DSL 代码预览，服务端会再次校验。";
-      this.querySelector("#strategy-ai-status").lastChild.textContent = "受控策略 DSL";
+      this.querySelector("#strategy-ai-description").textContent = sourceMode
+        ? "描述要修改的 Python 入场、退出或指标逻辑。模型返回完整源码预览，必须通过服务端源码审查后才能保存。"
+        : "描述要调整的指标组合、方向、周期、入场、退出或风险逻辑。模型只生成受控策略 DSL 配置预览。";
+      this.querySelector("#strategy-ai-status").lastChild.textContent = sourceMode ? "Python 隔离运行时" : "受控策略 DSL";
       this.querySelector("#strategy-ai-preview-button strong").textContent = "生成代码修改预览";
       this.querySelector("#strategy-ai-prompt").placeholder = "例如：只做多，把止盈调整为 3R，盈利 1.5R 后启动移动止损，最大持仓改为 72 根 K 线。";
     } else {
+      this.querySelector("#strategy-code-format").classList.remove("hidden");
       this.renderParameterFields(this.activeItem.parameter_schema, this.activeItem.parameters);
       this.renderRiskFields(this.activeItem.risk_defaults);
       this.querySelector("#strategy-edit-scope-help").textContent = "仅调整已定义参数，不改变策略结构";
@@ -834,6 +881,7 @@ class StrategyCenter extends HTMLElement {
   parseStrategyCode() {
     const raw = this.querySelector("#strategy-code-editor").value.trim();
     if (!raw) throw new Error("策略代码不能为空。");
+    if (this.editScope === "source" || (this.editorMode === "create" && this.createMode === "source")) return `${raw}\n`;
     let spec;
     try { spec = JSON.parse(raw); } catch (error) {
       throw new Error(`JSON 语法错误：${error?.message || "无法解析"}`);
@@ -854,21 +902,31 @@ class StrategyCenter extends HTMLElement {
   }
 
   async validateStrategyCode() {
-    if (!this.activeItem?.public_id || this.editScope !== "code") return;
-    let spec;
-    try { spec = this.parseStrategyCode(); } catch (error) {
+    const sourceCreate = this.editorMode === "create" && this.createMode === "source";
+    if (!sourceCreate && (!this.activeItem?.public_id || !["code", "source"].includes(this.editScope))) return;
+    let code;
+    try { code = this.parseStrategyCode(); } catch (error) {
       this.setCodeStatus(error?.message || "策略代码无法解析", "error");
       return;
     }
     const button = this.querySelector("#strategy-code-validate");
     this.setButtonBusy(button, true, "校验中…");
     try {
-      const result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}/code/validate`, {
+      const sourceMode = sourceCreate || this.editScope === "source";
+      const path = sourceCreate
+        ? "/runtime/python/validate"
+        : (sourceMode
+          ? `/${encodeURIComponent(this.activeItem.public_id)}/source/validate`
+          : `/${encodeURIComponent(this.activeItem.public_id)}/code/validate`);
+      const result = await this.api(path, {
         method: "POST",
-        body: JSON.stringify({ spec }),
+        body: JSON.stringify(sourceMode ? { language: "python", source_code: code } : { spec: code }),
       });
-      if (result?.normalized_spec) this.querySelector("#strategy-code-editor").value = JSON.stringify(result.normalized_spec, null, 2);
-      this.setCodeStatus(`校验通过 · ${String(result?.spec_hash || "").slice(0, 12)}`, "success");
+      if (result?.normalized_spec) {
+        this.querySelector("#strategy-code-editor").value = JSON.stringify(result.normalized_spec, null, 2);
+        this.codeBuffers.code = this.querySelector("#strategy-code-editor").value;
+      }
+      this.setCodeStatus(`校验通过 · ${String(result?.source_hash || result?.spec_hash || "").slice(0, 12)}`, "success");
       this.showFormError("");
     } catch (error) {
       this.setCodeStatus(this.friendlyMutationError(error), "error");
@@ -897,22 +955,46 @@ class StrategyCenter extends HTMLElement {
 
   switchCreateMode(mode, { resetValues = true } = {}) {
     if (this.editorMode !== "create") return;
-    this.createMode = mode === "template" ? "template" : "indicators";
+    if (this.createMode === "source") this.codeBuffers.source = this.querySelector("#strategy-code-editor").value;
+    this.createMode = ["template", "source"].includes(mode) ? mode : "indicators";
     this.querySelectorAll("[data-create-mode]").forEach((button) => {
       const active = button.dataset.createMode === this.createMode;
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", String(active));
     });
     const templateMode = this.createMode === "template";
-    this.querySelector("#strategy-indicator-composer").classList.toggle("hidden", templateMode);
+    const sourceMode = this.createMode === "source";
+    this.querySelector("#strategy-indicator-composer").classList.toggle("hidden", templateMode || sourceMode);
     this.querySelector("#strategy-template-composer").classList.toggle("hidden", !templateMode);
+    this.querySelector("#strategy-code-block").classList.toggle("hidden", !sourceMode);
+    this.querySelector("#strategy-parameters-block").classList.toggle("hidden", !templateMode);
     this.querySelector("#strategy-ai-panel").classList.toggle("hidden", templateMode);
-    this.querySelector("#strategy-create-mode-title").textContent = templateMode ? "选择模板" : "选择指标";
-    this.querySelector("#strategy-create-mode-help").textContent = templateMode ? "复制系统策略后独立管理版本" : "至少选择 2 个，参数会动态出现";
+    this.querySelector("#strategy-create-mode-title").textContent = sourceMode ? "源码运行时" : (templateMode ? "选择模板" : "选择指标");
+    this.querySelector("#strategy-create-mode-help").textContent = sourceMode ? "Python sandbox v1" : (templateMode ? "复制系统策略后独立管理版本" : "至少选择 2 个，参数会动态出现");
     this.querySelector("#strategy-parameters-index").textContent = templateMode ? "03" : "--";
     this.querySelector("#strategy-risk-index").textContent = templateMode ? "04" : "03";
+    if (sourceMode) {
+      this.querySelector("#strategy-code-title").textContent = "Python 策略源码";
+      this.querySelector("#strategy-code-runtime").textContent = "Python · sandbox v1 · 创建后参数与源码分开维护";
+      this.querySelector("#strategy-code-label").textContent = "可执行 evaluate(context, params) 源码";
+      this.querySelector("#strategy-code-format").classList.add("hidden");
+      this.querySelector("#strategy-code-guard").textContent = "这是真正执行的 Python 策略逻辑；禁止 import、文件、网络、系统调用和动态执行。";
+      if (resetValues && !this.codeBuffers.source) this.codeBuffers.source = String(this.sourceRuntime.starter_source || "");
+      this.querySelector("#strategy-code-editor").value = this.codeBuffers.source || String(this.sourceRuntime.starter_source || "");
+      this.querySelector("#strategy-ai-title").textContent = "用自然语言修改 Python 策略";
+      this.querySelector("#strategy-ai-description").textContent = "模型生成完整 Python 源码预览，服务端通过静态审查后才可保存。";
+      this.querySelector("#strategy-ai-status").lastChild.textContent = "Python 隔离运行时";
+      this.querySelector("#strategy-ai-preview-button strong").textContent = "生成源码修改预览";
+    } else {
+      this.querySelector("#strategy-code-format").classList.remove("hidden");
+    }
     if (!resetValues) return;
-    if (templateMode) {
+    if (sourceMode) {
+      this.querySelector("#strategy-name").value = "Python EMA 策略";
+      this.querySelector("#strategy-category").value = "源码策略";
+      this.querySelector("#strategy-description").value = "可编辑 Python 源码，参数与代码独立版本化。";
+      this.renderRiskFields(this.plainObject(this.indicatorDefaults.risk_defaults));
+    } else if (templateMode) {
       const select = this.querySelector("#strategy-template");
       this.applyTemplate(select.value);
     } else {
@@ -1141,8 +1223,9 @@ class StrategyCenter extends HTMLElement {
     const description = this.querySelector("#strategy-description").value.trim();
     const category = this.querySelector("#strategy-category").value.trim();
     const codeEdit = this.editorMode === "edit" && this.editScope === "code";
+    const sourceEdit = (this.editorMode === "edit" && this.editScope === "source") || (this.editorMode === "create" && this.createMode === "source");
     let codeSpec = null;
-    if (codeEdit) {
+    if (codeEdit || sourceEdit) {
       try { codeSpec = this.parseStrategyCode(); } catch (error) {
         this.showFormError(error?.message || "策略代码无法解析。");
         this.setCodeStatus(error?.message || "策略代码无法解析", "error");
@@ -1168,6 +1251,19 @@ class StrategyCenter extends HTMLElement {
     try {
       let result;
       if (this.editorMode === "create") {
+        if (sourceEdit) {
+          result = await this.api("/source", {
+            method: "POST",
+            body: JSON.stringify({
+              name,
+              description,
+              category,
+              language: "python",
+              source_code: codeSpec,
+              risk_defaults: this.collectConfig("risk", this.plainObject(this.indicatorDefaults.risk_defaults)),
+            }),
+          });
+        } else {
         const body = indicatorCreate
           ? {
               name,
@@ -1190,6 +1286,7 @@ class StrategyCenter extends HTMLElement {
             };
         if (!indicatorCreate && !body.template_key) throw new Error("请选择一个系统策略模板。");
         result = await this.api("", { method: "POST", body: JSON.stringify(body) });
+        }
       } else if (codeEdit) {
         const body = {
           name,
@@ -1199,6 +1296,16 @@ class StrategyCenter extends HTMLElement {
           version: this.activeItem.version,
         };
         result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}/code`, { method: "PUT", body: JSON.stringify(body) });
+      } else if (sourceEdit) {
+        const body = {
+          name,
+          description,
+          category,
+          language: "python",
+          source_code: codeSpec,
+          version: this.activeItem.version,
+        };
+        result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}/source`, { method: "PUT", body: JSON.stringify(body) });
       } else {
         const body = {
           name,
@@ -1354,10 +1461,15 @@ class StrategyCenter extends HTMLElement {
     this.clearPreview();
     try {
       const codeEdit = this.editorMode === "edit" && this.editScope === "code";
-      const path = this.editorMode === "create"
-        ? "/compose/ai-preview"
-        : `/${encodeURIComponent(this.activeItem.public_id)}${codeEdit ? "/code/ai-preview" : "/ai-preview"}`;
-      const requestBody = codeEdit ? { prompt, spec: this.parseStrategyCode() } : { prompt };
+      const sourceEdit = (this.editorMode === "edit" && this.editScope === "source") || (this.editorMode === "create" && this.createMode === "source");
+      const path = sourceEdit
+        ? (this.editorMode === "create" ? "/runtime/python/ai-preview" : `/${encodeURIComponent(this.activeItem.public_id)}/source/ai-preview`)
+        : (this.editorMode === "create"
+          ? "/compose/ai-preview"
+          : `/${encodeURIComponent(this.activeItem.public_id)}${codeEdit ? "/code/ai-preview" : "/ai-preview"}`);
+      const requestBody = sourceEdit
+        ? { prompt, language: "python", source_code: this.parseStrategyCode() }
+        : (codeEdit ? { prompt, spec: this.parseStrategyCode() } : { prompt });
       const result = await this.api(path, {
         method: "POST",
         body: JSON.stringify(requestBody),
@@ -1370,8 +1482,9 @@ class StrategyCenter extends HTMLElement {
         proposed: this.plainObject(result?.proposed),
         proposed_spec: this.plainObject(result?.proposed_spec),
         strategy_code: String(result?.strategy_code ?? ""),
+        source_code: String(result?.source_code ?? ""),
         draft: this.plainObject(result?.draft),
-        mode: codeEdit ? "code" : "parameters",
+        mode: sourceEdit ? "source" : (codeEdit ? "code" : "parameters"),
       };
       this.renderPreview();
     } catch (error) {
@@ -1388,7 +1501,7 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-ai-provider").textContent = this.providerLabel(this.preview.provider);
     this.querySelector("#strategy-ai-base-version").textContent = this.editorMode === "create" ? "新策略草案" : `基于 v${this.preview.base_version}`;
     this.querySelector("#strategy-ai-summary").textContent = this.preview.summary;
-    this.querySelector("#strategy-ai-apply strong").textContent = this.preview.mode === "code" ? "应用到代码编辑器" : "确认应用";
+    this.querySelector("#strategy-ai-apply strong").textContent = ["code", "source"].includes(this.preview.mode) ? "应用到代码编辑器" : "确认应用";
     const changes = this.querySelector("#strategy-ai-changes");
     if (!this.preview.changes.length) {
       changes.replaceChildren(this.node("div", "strategy-change-empty", "模型未发现需要修改的有效字段"));
@@ -1418,13 +1531,16 @@ class StrategyCenter extends HTMLElement {
 
   async applyAiPreview() {
     if (!this.preview) return;
-    if (this.editorMode === "create") {
+    if (this.editorMode === "create" && this.preview.mode !== "source") {
       this.applyCompositionDraft(this.preview.draft);
       return;
     }
-    if (this.preview.mode === "code") {
-      const code = this.preview.strategy_code || this.strategyCode(this.preview.proposed_spec);
+    if (["code", "source"].includes(this.preview.mode)) {
+      const code = this.preview.mode === "source"
+        ? this.preview.source_code
+        : (this.preview.strategy_code || this.strategyCode(this.preview.proposed_spec));
       this.querySelector("#strategy-code-editor").value = code;
+      this.codeBuffers[this.preview.mode] = code;
       this.querySelector("#strategy-ai-prompt").value = "";
       this.clearPreview();
       this.setCodeStatus("AI 修改已写入编辑器，请校验后保存新版本");
