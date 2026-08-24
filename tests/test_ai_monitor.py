@@ -3145,7 +3145,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260824-85"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260824-86"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3155,7 +3155,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260824-85"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260824-86"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -3485,8 +3485,10 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'this.api("/prediction-records?limit=200")' not in component
     for label in ("历史机会", "筛选样本", "命中次数", "命中概率", "x 仓位ROE"):
         assert label in component
-    for label in ("x 毛 / 净仓位ROE", "MFE / MAE", "成本后结果", "成本计算"):
+    for label in ("x 成本后利润率", "毛利润率", "MFE / MAE", "成本后结果", "成本计算"):
         assert label in component
+    assert '${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)}<small>毛利润率' in component
+    assert '${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净仓位ROE' not in component
     assert "RISK UNIT EXIT GUARD V6" in component
     assert "0.5R 启动" in component
     assert "强制保守成本" in component
