@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import threading
 import time
 import uuid
@@ -77,17 +78,23 @@ PREDICTION_SETTLEMENT_BATCH_SIZE = 25
 PREDICTION_FEE_BPS_PER_SIDE = 5.0
 PREDICTION_SLIPPAGE_BPS_PER_SIDE = 3.0
 PREDICTION_FUNDING_BPS_PER_8H = 1.0
-PREVIOUS_PREDICTION_SETTLEMENT_VERSION = "horizon_aligned_exit_v5"
-PREDICTION_SETTLEMENT_VERSION = "cost_consistent_exit_v6"
+PREVIOUS_PREDICTION_SETTLEMENT_VERSION = "cost_consistent_exit_v6"
+PREDICTION_SETTLEMENT_VERSION = "cost_consistent_exit_v7"
+COST_CONSISTENT_SETTLEMENT_VERSIONS = {
+    PREVIOUS_PREDICTION_SETTLEMENT_VERSION,
+    PREDICTION_SETTLEMENT_VERSION,
+}
 PREDICTION_PROFIT_PROTECTION_TRIGGER_BPS = 20.0
 PREDICTION_PROFIT_PROTECTION_MIN_BPS = 20.0
 PREDICTION_TRAILING_TRIGGER_BPS = 50.0
 PREDICTION_TRAILING_GIVEBACK_BPS = 30.0
-PREDICTION_RISK_UNIT_PROTECTION_VERSION = "risk_unit_profit_guard_v1"
+PREDICTION_RISK_UNIT_PROTECTION_VERSION = "risk_unit_profit_guard_v2"
 PREDICTION_RISK_UNIT_PROTECTION_ACTIVATION_R = 0.5
 PREDICTION_RISK_UNIT_TRAILING_ACTIVATION_R = 1.0
 PREDICTION_RISK_UNIT_TRAILING_GIVEBACK_R = 0.5
+PREDICTION_RISK_UNIT_EARLY_GIVEBACK_R = 0.35
 PREDICTION_RISK_UNIT_MINIMUM_PROTECTED_R = 0.0
+PREDICTION_RISK_UNIT_MINIMUM_NET_PROTECTED_R = 0.25
 PREDICTION_FOLLOW_THROUGH_BARS = 3
 PREDICTION_FOLLOW_THROUGH_LOSS_BPS = -15.0
 PREDICTION_SCORE_EXIT_BAR_MS = 15 * 60 * 1_000
@@ -1589,7 +1596,7 @@ def virtual_risk_plan_snapshot(
         stop_loss_price = 0.0
         take_profit_price = 0.0
     return {
-        "version": "atr_risk_reward_guard_v4",
+        "version": "atr_risk_reward_guard_v5",
         "settlement_version": PREDICTION_SETTLEMENT_VERSION,
         "method": "atr14_x_1_5" if volatility_risk > 0 else "timeframe_fallback",
         "timeframe": timeframe,
@@ -1608,7 +1615,10 @@ def virtual_risk_plan_snapshot(
             "mode": "risk_unit",
             "risk_bps": round(stop_loss_pct * 100.0, 8),
             "activation_r": PREDICTION_RISK_UNIT_PROTECTION_ACTIVATION_R,
-            "minimum_protected_r": PREDICTION_RISK_UNIT_MINIMUM_PROTECTED_R,
+            "minimum_net_protected_r": (
+                PREDICTION_RISK_UNIT_MINIMUM_NET_PROTECTED_R
+            ),
+            "early_maximum_giveback_r": PREDICTION_RISK_UNIT_EARLY_GIVEBACK_R,
             "trailing_activation_r": (
                 PREDICTION_RISK_UNIT_TRAILING_ACTIVATION_R
             ),
@@ -1630,7 +1640,7 @@ def virtual_risk_plan_snapshot(
             "directional_loss_bps": PREDICTION_FOLLOW_THROUGH_LOSS_BPS,
             "minimum_hold_policy": "horizon_aligned",
         },
-        "execution_policy": "cost_consistent_risk_guard_v7",
+        "execution_policy": "cost_consistent_risk_guard_v8",
     }
 
 
@@ -2000,7 +2010,7 @@ def prediction_settlement_cost_config(
             frozen.get("funding_bps_per_8h", PREDICTION_FUNDING_BPS_PER_8H)
         ),
     }
-    if settlement_version == PREDICTION_SETTLEMENT_VERSION:
+    if settlement_version in COST_CONSISTENT_SETTLEMENT_VERSIONS:
         return readiness_cost_config(config)
     return config
 
@@ -2164,6 +2174,7 @@ def prediction_price_barrier_exit(
             if open_price <= target_price:
                 return {
                     "reason": "take_profit",
+                    "exit_subreason": "hard_target",
                     "price": target_price,
                     "price_time_ms": open_time,
                     "same_bar_conflict": False,
@@ -2183,6 +2194,7 @@ def prediction_price_barrier_exit(
             if open_price >= target_price:
                 return {
                     "reason": "take_profit",
+                    "exit_subreason": "hard_target",
                     "price": target_price,
                     "price_time_ms": open_time,
                     "same_bar_conflict": False,
@@ -2195,6 +2207,7 @@ def prediction_price_barrier_exit(
             continue
         return {
             "reason": reason,
+            "exit_subreason": "hard_target" if reason == "take_profit" else None,
             "price": stop_price if reason == "stop_loss" else target_price,
             "price_time_ms": close_time,
             "same_bar_conflict": bool(stop_hit and target_hit),
@@ -2308,6 +2321,18 @@ def prediction_adaptive_path_exit(
                 )
             ),
         )
+        minimum_net_protected_r = protection.get("minimum_net_protected_r")
+        minimum_net_protected_bps = (
+            risk_bps * max(0.0, float(minimum_net_protected_r))
+            if minimum_net_protected_r is not None
+            else None
+        )
+        early_giveback_r = protection.get("early_maximum_giveback_r")
+        early_giveback_bps = (
+            risk_bps * max(0.0, float(early_giveback_r))
+            if early_giveback_r is not None
+            else None
+        )
         if risk_bps <= 0:
             protection_mode = "fixed_bps"
     if protection_mode != "risk_unit":
@@ -2315,10 +2340,19 @@ def prediction_adaptive_path_exit(
         trailing_activation_bps = PREDICTION_TRAILING_TRIGGER_BPS
         trailing_giveback_bps = PREDICTION_TRAILING_GIVEBACK_BPS
         minimum_protected_bps = PREDICTION_PROFIT_PROTECTION_MIN_BPS
+        minimum_net_protected_bps = None
+        early_giveback_bps = None
     cost_floor_bps = max(
         minimum_protected_bps,
         max(0.0, float(estimated_cost_bps)) + 2.0,
     )
+    if minimum_net_protected_bps is not None:
+        cost_floor_bps = max(
+            cost_floor_bps,
+            max(0.0, float(estimated_cost_bps))
+            + minimum_net_protected_bps,
+        )
+    effective_activation_bps = max(activation_bps, cost_floor_bps)
     for (
         open_time,
         close_time,
@@ -2363,11 +2397,19 @@ def prediction_adaptive_path_exit(
                     "protected_bps": round(protected_bps, 8),
                     "protection_mode": protection_mode,
                     "activation_bps": round(activation_bps, 8),
+                    "effective_activation_bps": round(
+                        effective_activation_bps, 8
+                    ),
                     "trailing_activation_bps": round(
                         trailing_activation_bps, 8
                     ),
                     "trailing_giveback_bps": round(
                         trailing_giveback_bps, 8
+                    ),
+                    "early_giveback_bps": (
+                        round(early_giveback_bps, 8)
+                        if early_giveback_bps is not None
+                        else None
                     ),
                 }
 
@@ -2405,13 +2447,20 @@ def prediction_adaptive_path_exit(
                 "protected_bps": None,
                 "confirmation_points": PREDICTION_FOLLOW_THROUGH_BARS,
             }
-        if peak_favorable_bps >= activation_bps:
-            trailing_floor = (
-                peak_favorable_bps - trailing_giveback_bps
-                if peak_favorable_bps >= trailing_activation_bps
-                else cost_floor_bps
+        if peak_favorable_bps >= effective_activation_bps:
+            if peak_favorable_bps >= trailing_activation_bps:
+                candidate_floor = peak_favorable_bps - trailing_giveback_bps
+            elif early_giveback_bps is not None:
+                candidate_floor = peak_favorable_bps - early_giveback_bps
+            else:
+                # Frozen v6 plans do not have an early giveback rule and retain
+                # their original cost-plus-2-bps protection for auditability.
+                candidate_floor = cost_floor_bps
+            protected_bps = max(
+                float(protected_bps or 0.0),
+                cost_floor_bps,
+                candidate_floor,
             )
-            protected_bps = max(cost_floor_bps, trailing_floor)
     return None
 
 
@@ -5173,7 +5222,19 @@ def _compact_historical_outcome(
         ),
         "readiness_status": row.get("readiness_status"),
         "exit_reason": row.get("exit_reason") or "legacy_horizon_close",
-        "exit_detail": None,
+        "exit_detail": row.get("exit_subreason"),
+        "exit_protection": {
+            "peak_favorable_bps": (
+                float(row["peak_favorable_bps_at_exit"])
+                if row.get("peak_favorable_bps_at_exit") is not None
+                else None
+            ),
+            "protected_bps": (
+                float(row["protected_bps_at_exit"])
+                if row.get("protected_bps_at_exit") is not None
+                else None
+            ),
+        },
     }
 
 
@@ -6231,7 +6292,19 @@ def _prediction_fact_outcome(
         "exit_price": float(fact.exit_price) if fact.exit_price is not None else None,
         "settled_price_at": actual_exit_at,
         "exit_reason": fact.exit_reason or "legacy_horizon_close",
-        "exit_detail": None,
+        "exit_detail": fact.exit_subreason,
+        "exit_protection": {
+            "peak_favorable_bps": (
+                float(fact.peak_favorable_bps_at_exit)
+                if fact.peak_favorable_bps_at_exit is not None
+                else None
+            ),
+            "protected_bps": (
+                float(fact.protected_bps_at_exit)
+                if fact.protected_bps_at_exit is not None
+                else None
+            ),
+        },
         "raw_return_bps": gross_return,
         "gross_directional_return_bps": gross_return,
         "estimated_cost_bps": estimated_cost,
@@ -6277,6 +6350,55 @@ def _prediction_fact_outcome(
     }
 
 
+_SETTLEMENT_VERSION_LABELS = {
+    "cost_consistent_exit_v7": "V7 · R单位递进锁盈",
+    "cost_consistent_exit_v6": "V6 · 成本保护线",
+    "horizon_aligned_exit_v5": "V5 · 原移动保护",
+}
+
+
+def normalized_settlement_version(value: str) -> str:
+    normalized = str(value or "current").strip().lower()
+    if normalized in {"", "current"}:
+        return PREDICTION_SETTLEMENT_VERSION
+    if normalized == "all":
+        return "all"
+    return str(value).strip()[:32]
+
+
+def prediction_settlement_version_catalog(
+    db: Session,
+    user_id: int,
+) -> list[dict[str, Any]]:
+    counts = {
+        str(version): int(count)
+        for version, count in db.execute(
+            select(
+                AiMonitorPrediction.settlement_version,
+                func.count(AiMonitorPrediction.id),
+            )
+            .where(AiMonitorPrediction.user_id == user_id)
+            .group_by(AiMonitorPrediction.settlement_version)
+        ).all()
+        if version and not str(version).startswith("repair_pending")
+    }
+    counts.setdefault(PREDICTION_SETTLEMENT_VERSION, 0)
+
+    def sort_key(version: str) -> tuple[int, str]:
+        match = re.search(r"_v(\d+)$", version)
+        return (int(match.group(1)) if match else -1, version)
+
+    return [
+        {
+            "value": version,
+            "label": _SETTLEMENT_VERSION_LABELS.get(version, version),
+            "count": counts[version],
+            "current": version == PREDICTION_SETTLEMENT_VERSION,
+        }
+        for version in sorted(counts, key=sort_key, reverse=True)
+    ]
+
+
 def historical_opportunity_fact_analytics(
     db: Session,
     user_id: int,
@@ -6295,6 +6417,7 @@ def historical_opportunity_fact_analytics(
     min_data_coverage: float,
     feature_version: str,
     decision_version: str,
+    settlement_version: str,
     direction: str,
     market_session: str,
     quote_quality: str,
@@ -6309,14 +6432,18 @@ def historical_opportunity_fact_analytics(
     current_config = config_data(db.get(AiMonitorConfig, user_id))
     local_date_offset = timedelta(minutes=timezone_offset_minutes)
     normalized_symbol = str(symbol or "").strip().upper()
+    selected_settlement_version = normalized_settlement_version(settlement_version)
     conditions = [
         AiMonitorPredictionFact.user_id == user_id,
-        AiMonitorPredictionFact.settlement_version
-        == PREDICTION_SETTLEMENT_VERSION,
         AiMonitorPredictionFact.news_score >= Decimal(str(news_score_min)),
         AiMonitorPredictionFact.technical_score >= Decimal(str(indicator_score_min)),
         AiMonitorPredictionFact.combined_score >= Decimal(str(combined_score_min)),
     ]
+    if selected_settlement_version != "all":
+        conditions.append(
+            AiMonitorPredictionFact.settlement_version
+            == selected_settlement_version
+        )
     if date_from is not None:
         conditions.append(AiMonitorPredictionFact.signal_at >= date_from)
     if date_to is not None:
@@ -6356,12 +6483,18 @@ def historical_opportunity_fact_analytics(
         conditions.append(AiMonitorPredictionFact.event_risk == event_risk)
     if exit_reason != "all":
         conditions.append(
-            func.lower(AiMonitorPredictionFact.exit_reason).contains(exit_reason.lower())
+            or_(
+                func.lower(AiMonitorPredictionFact.exit_reason).contains(
+                    exit_reason.lower()
+                ),
+                func.lower(AiMonitorPredictionFact.exit_subreason).contains(
+                    exit_reason.lower()
+                ),
+            )
         )
     completed_conditions = [
         *conditions,
         AiMonitorPredictionFact.prediction_status == "completed",
-        AiMonitorPredictionFact.settlement_version == PREDICTION_SETTLEMENT_VERSION,
         AiMonitorPredictionFact.result.is_not(None),
         AiMonitorPredictionFact.entry_price.is_not(None),
         AiMonitorPredictionFact.exit_price.is_not(None),
@@ -6380,7 +6513,7 @@ def historical_opportunity_fact_analytics(
     summary = summarize_historical_opportunities(outcomes)
     exit_reason_counts: dict[str, int] = {}
     for outcome in outcomes:
-        key = str(outcome.get("exit_reason") or "unknown")
+        key = str(outcome.get("exit_detail") or outcome.get("exit_reason") or "unknown")
         exit_reason_counts[key] = exit_reason_counts.get(key, 0) + 1
     status_counts = {
         str(status): int(count)
@@ -6396,7 +6529,7 @@ def historical_opportunity_fact_analytics(
     summary.update(
         {
             "exit_reason_counts": exit_reason_counts,
-            "settlement_policy_version": PREDICTION_SETTLEMENT_VERSION,
+            "settlement_policy_version": selected_settlement_version,
             "discarded_unavailable_count": status_counts.get("unavailable", 0),
             "pending_count": status_counts.get("pending", 0),
             "total_prediction_count": sum(status_counts.values()),
@@ -6439,6 +6572,7 @@ def historical_opportunity_fact_analytics(
                 conservative_cost_config,
             ),
         },
+        "settlement_versions": prediction_settlement_version_catalog(db, user_id),
         "filters": {
             "date_from": (
                 (date_from + local_date_offset).date().isoformat() if date_from else None
@@ -6458,6 +6592,7 @@ def historical_opportunity_fact_analytics(
             "min_data_coverage": float(min_data_coverage),
             "feature_version": feature_version,
             "decision_version": decision_version,
+            "settlement_version": selected_settlement_version,
             "direction": direction,
             "market_session": market_session,
             "quote_quality": quote_quality,
@@ -6491,6 +6626,7 @@ def historical_opportunity_analytics(
     min_data_coverage: float = 0.0,
     feature_version: str = "",
     decision_version: str = "",
+    settlement_version: str = "current",
     direction: str = "all",
     market_session: str = "all",
     quote_quality: str = "all",
@@ -6506,6 +6642,7 @@ def historical_opportunity_analytics(
     configured_cost_settings = prediction_cost_settings(current_config)
     conservative_cost_config = readiness_cost_config(current_config)
     active_cost_settings = prediction_cost_settings(conservative_cost_config)
+    selected_settlement_version = normalized_settlement_version(settlement_version)
     news_score_expression = func.coalesce(
         AiMonitorPrediction.signal_news_score,
         AiMonitorOpportunity.news_score,
@@ -6517,11 +6654,14 @@ def historical_opportunity_analytics(
     conditions = [
         AiMonitorPrediction.user_id == user_id,
         AiMonitorOpportunity.user_id == user_id,
-        AiMonitorPrediction.settlement_version
-        == PREDICTION_SETTLEMENT_VERSION,
         news_score_expression >= Decimal(str(news_score_min)),
         indicator_score_expression >= Decimal(str(indicator_score_min)),
     ]
+    if selected_settlement_version != "all":
+        conditions.append(
+            AiMonitorPrediction.settlement_version
+            == selected_settlement_version
+        )
     if date_from is not None:
         conditions.append(AiMonitorPrediction.predicted_at >= date_from)
     if date_to is not None:
@@ -6554,7 +6694,6 @@ def historical_opportunity_analytics(
     completed_conditions = [
         *conditions,
         AiMonitorPrediction.status == "completed",
-        AiMonitorPrediction.settlement_version == PREDICTION_SETTLEMENT_VERSION,
         AiMonitorPrediction.result.is_not(None),
         AiMonitorPrediction.entry_price.is_not(None),
         AiMonitorPrediction.exit_price.is_not(None),
@@ -6576,6 +6715,9 @@ def historical_opportunity_analytics(
                 AiMonitorPrediction.max_adverse_bps,
                 AiMonitorPrediction.readiness_status,
                 AiMonitorPrediction.exit_reason,
+                AiMonitorPrediction.exit_subreason,
+                AiMonitorPrediction.peak_favorable_bps_at_exit,
+                AiMonitorPrediction.protected_bps_at_exit,
             )
             .join(
                 AiMonitorOpportunity,
@@ -6663,6 +6805,9 @@ def historical_opportunity_analytics(
                     AiMonitorPrediction.expected_gross_edge_bps,
                     AiMonitorPrediction.expected_edge_lower_bound_bps,
                     AiMonitorPrediction.exit_reason,
+                    AiMonitorPrediction.exit_subreason,
+                    AiMonitorPrediction.peak_favorable_bps_at_exit,
+                    AiMonitorPrediction.protected_bps_at_exit,
                     AiMonitorOpportunity.id.label("opportunity_id"),
                     AiMonitorOpportunity.public_id.label("opportunity_public_id"),
                     AiMonitorOpportunity.news_score.label("opportunity_news_score"),
@@ -6778,6 +6923,11 @@ def historical_opportunity_analytics(
                         "expected_edge_lower_bound_bps"
                     ],
                     exit_reason=row["exit_reason"],
+                    exit_subreason=row["exit_subreason"],
+                    peak_favorable_bps_at_exit=row[
+                        "peak_favorable_bps_at_exit"
+                    ],
+                    protected_bps_at_exit=row["protected_bps_at_exit"],
                     evidence_json=evidence,
                 )
                 opportunity = SimpleNamespace(
@@ -6984,12 +7134,23 @@ def historical_opportunity_analytics(
             "exit_price": float(prediction.exit_price),
             "settled_price_at": actual_exit_at,
             "exit_reason": prediction.exit_reason or "legacy_horizon_close",
-            "exit_detail": settlement_evidence.get("exit_subreason"),
+            "exit_detail": (
+                prediction.exit_subreason
+                or settlement_evidence.get("exit_subreason")
+            ),
             "exit_protection": {
-                "peak_favorable_bps": settlement_evidence.get(
-                    "peak_favorable_bps_at_decision"
+                "peak_favorable_bps": (
+                    float(prediction.peak_favorable_bps_at_exit)
+                    if prediction.peak_favorable_bps_at_exit is not None
+                    else settlement_evidence.get(
+                        "peak_favorable_bps_at_decision"
+                    )
                 ),
-                "protected_bps": settlement_evidence.get("protected_bps"),
+                "protected_bps": (
+                    float(prediction.protected_bps_at_exit)
+                    if prediction.protected_bps_at_exit is not None
+                    else settlement_evidence.get("protected_bps")
+                ),
                 "observed_bar_count": settlement_evidence.get(
                     "observed_bar_count"
                 ),
@@ -7312,7 +7473,7 @@ def historical_opportunity_analytics(
         exit_key = str(outcome.get("exit_detail") or outcome.get("exit_reason") or "unknown")
         exit_reason_counts[exit_key] = exit_reason_counts.get(exit_key, 0) + 1
     summary["exit_reason_counts"] = exit_reason_counts
-    summary["settlement_policy_version"] = PREDICTION_SETTLEMENT_VERSION
+    summary["settlement_policy_version"] = selected_settlement_version
     summary["discarded_unavailable_count"] = status_counts.get("unavailable", 0)
     summary["pending_count"] = status_counts.get("pending", 0)
     summary["total_prediction_count"] = sum(status_counts.values())
@@ -7412,6 +7573,7 @@ def historical_opportunity_analytics(
                 conservative_cost_config,
             ),
         },
+        "settlement_versions": prediction_settlement_version_catalog(db, user_id),
         "filters": {
             "date_from": (
                 (date_from + local_date_offset).date().isoformat()
@@ -7433,6 +7595,7 @@ def historical_opportunity_analytics(
             "min_data_coverage": float(min_data_coverage),
             "feature_version": feature_version,
             "decision_version": decision_version,
+            "settlement_version": selected_settlement_version,
             "direction": direction,
             "market_session": market_session,
             "quote_quality": quote_quality,
@@ -7720,11 +7883,23 @@ def settle_due_predictions(
             int(exit_decision["price_time_ms"]),
         )
         exit_reason = str(exit_decision["reason"])
+        exit_subreason = str(exit_decision.get("exit_subreason") or "") or None
+        peak_favorable_bps_at_exit = (
+            Decimal(str(path_metrics["max_favorable_bps"]))
+            if path_metrics["max_favorable_bps"] is not None
+            else None
+        )
+        protected_bps_at_exit = (
+            Decimal(str(exit_decision["protected_bps"]))
+            if exit_decision.get("protected_bps") is not None
+            else None
+        )
         item.status = "completed"
         item.result = str(outcome["result"])
         item.exit_price = Decimal(str(exit_price))
         item.exit_at = exit_at
         item.exit_reason = exit_reason
+        item.exit_subreason = exit_subreason
         item.raw_return_bps = Decimal(str(outcome["raw_return_bps"]))
         item.directional_return_bps = Decimal(str(outcome["directional_return_bps"]))
         item.estimated_cost_bps = Decimal(str(net_outcome["estimated_cost_bps"]))
@@ -7742,20 +7917,24 @@ def settle_due_predictions(
             if path_metrics["max_adverse_bps"] is not None
             else None
         )
+        item.peak_favorable_bps_at_exit = peak_favorable_bps_at_exit
+        item.protected_bps_at_exit = protected_bps_at_exit
         item.settlement_version = settlement_version
         evidence["settlement"] = {
             "version": settlement_version,
             "score_exit_policy_version": PREDICTION_SCORE_EXIT_POLICY_VERSION,
             "exit_reason": exit_reason,
-            "exit_subreason": exit_decision.get("exit_subreason"),
+            "exit_subreason": exit_subreason,
             "exit_at": exit_at.replace(tzinfo=UTC).isoformat(),
             "exit_price": exit_price,
             "same_bar_conflict": bool(exit_decision.get("same_bar_conflict")),
             "gap_execution": bool(exit_decision.get("gap_execution")),
             "price_source": exit_decision.get("price_source") or "closed_candle_path",
             "reference_price_time_ms": exit_decision.get("reference_price_time_ms"),
-            "peak_favorable_bps_at_decision": exit_decision.get(
-                "peak_favorable_bps"
+            "peak_favorable_bps_at_decision": (
+                float(peak_favorable_bps_at_exit)
+                if peak_favorable_bps_at_exit is not None
+                else None
             ),
             "protected_bps": exit_decision.get("protected_bps"),
             "observed_bar_count": exit_decision.get("observed_bar_count"),
@@ -7884,12 +8063,15 @@ def reopen_legacy_prediction_settlements(
         item.exit_price = None
         item.exit_at = None
         item.exit_reason = None
+        item.exit_subreason = None
         item.raw_return_bps = None
         item.directional_return_bps = None
         item.net_directional_return_bps = None
         item.net_result = None
         item.max_favorable_bps = None
         item.max_adverse_bps = None
+        item.peak_favorable_bps_at_exit = None
+        item.protected_bps_at_exit = None
         item.completed_at = None
         item.settlement_version = "repair_pending_v4"
         item.evidence_json = evidence

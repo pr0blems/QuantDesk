@@ -2011,6 +2011,7 @@ def _prediction_out(item: AiMonitorPrediction) -> dict[str, Any]:
         "exit_price": float(item.exit_price) if item.exit_price is not None else None,
         "exit_at": _utc_out(item.exit_at),
         "exit_reason": item.exit_reason,
+        "exit_subreason": item.exit_subreason,
         "raw_return_bps": (float(item.raw_return_bps) if item.raw_return_bps is not None else None),
         "directional_return_bps": (
             float(item.directional_return_bps) if item.directional_return_bps is not None else None
@@ -2033,6 +2034,16 @@ def _prediction_out(item: AiMonitorPrediction) -> dict[str, Any]:
         ),
         "max_adverse_bps": (
             float(item.max_adverse_bps) if item.max_adverse_bps is not None else None
+        ),
+        "peak_favorable_bps_at_exit": (
+            float(item.peak_favorable_bps_at_exit)
+            if item.peak_favorable_bps_at_exit is not None
+            else None
+        ),
+        "protected_bps_at_exit": (
+            float(item.protected_bps_at_exit)
+            if item.protected_bps_at_exit is not None
+            else None
         ),
         "settlement_version": item.settlement_version,
         "readiness_status": item.readiness_status,
@@ -4284,6 +4295,7 @@ def opportunity_analytics(
     min_data_coverage: float = Query(default=0, ge=0, le=100),
     feature_version: str = Query(default="", max_length=32),
     decision_version: str = Query(default="", max_length=32),
+    settlement_version: str = Query(default="current", max_length=32),
     direction: Literal["all", "long", "short"] = Query(default="all"),
     market_session: Literal[
         "all", "premarket", "regular", "postmarket", "closed", "unknown"
@@ -4326,6 +4338,7 @@ def opportunity_analytics(
             min_data_coverage=min_data_coverage,
             feature_version=feature_version,
             decision_version=decision_version,
+            settlement_version=settlement_version,
             direction=direction,
             market_session=market_session,
             quote_quality=quote_quality,
@@ -4357,6 +4370,7 @@ def opportunity_analytics(
         min_data_coverage=min_data_coverage,
         feature_version=feature_version,
         decision_version=decision_version,
+        settlement_version=settlement_version,
         direction=direction,
         market_session=market_session,
         quote_quality=quote_quality,

@@ -1078,6 +1078,12 @@ class AiMonitorPrediction(Base):
             "updated_at",
             "id",
         ),
+        Index(
+            "ix_ai_monitor_predictions_user_settlement_predicted",
+            "user_id",
+            "settlement_version",
+            "predicted_at",
+        ),
         {
             "comment": "AI 监控机会生成的虚拟预测及到期结果，不产生任何交易订单",
             "mysql_engine": "InnoDB",
@@ -1131,6 +1137,9 @@ class AiMonitorPrediction(Base):
     exit_reason: Mapped[str | None] = mapped_column(
         String(32), comment="Virtual exit trigger"
     )
+    exit_subreason: Mapped[str | None] = mapped_column(
+        String(32), comment="Precise virtual exit subtype"
+    )
     raw_return_bps: Mapped[Decimal | None] = mapped_column(
         Numeric(20, 8), comment="到期价格相对入场价的原始涨跌基点"
     )
@@ -1160,6 +1169,12 @@ class AiMonitorPrediction(Base):
     )
     max_adverse_bps: Mapped[Decimal | None] = mapped_column(
         Numeric(20, 8), comment="预测持有期最大不利波动基点（MAE）"
+    )
+    peak_favorable_bps_at_exit: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="Peak favorable excursion known at exit"
+    )
+    protected_bps_at_exit: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), comment="Monotonic profit-protection floor at exit"
     )
     settlement_version: Mapped[str] = mapped_column(
         String(32),
@@ -1562,6 +1577,12 @@ class AiMonitorPredictionFact(Base):
             "symbol",
             "signal_at",
         ),
+        Index(
+            "ix_ai_monitor_prediction_facts_user_settlement_signal",
+            "user_id",
+            "settlement_version",
+            "signal_at",
+        ),
         {
             "comment": "Flattened prediction facts for paged analytics and reconciliation",
             "mysql_engine": "InnoDB",
@@ -1634,6 +1655,11 @@ class AiMonitorPredictionFact(Base):
     mae_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     estimated_cost_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     exit_reason: Mapped[str | None] = mapped_column(String(32))
+    exit_subreason: Mapped[str | None] = mapped_column(String(32))
+    peak_favorable_bps_at_exit: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8)
+    )
+    protected_bps_at_exit: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     weights_version: Mapped[str] = mapped_column(
         String(32), default="unknown", nullable=False
     )

@@ -275,7 +275,7 @@ def test_ai_monitor_live_signal_is_fresh_bounded_and_carries_protection(
     assert "CURRENT_TIMESTAMP" not in captured["statement"]
     assert captured["params"][0:2] == (7, "AAPLUSDT")
     assert "p.settlement_version=?" in captured["statement"]
-    assert captured["params"][2] == "cost_consistent_exit_v6"
+    assert captured["params"][2] == "cost_consistent_exit_v7"
     assert captured["params"][3] == datetime(2026, 8, 17, 10, 1)
     assert captured["params"][4] == datetime(2026, 8, 17, 9, 59)
     assert any("组合评分" in item for item in basis)
@@ -441,7 +441,7 @@ def test_ai_monitor_manual_signal_query_is_bound_to_clicked_prediction(
     assert "o.expires_at>?" not in captured["statement"]
     assert "CURRENT_TIMESTAMP" not in captured["statement"]
     assert "p.settlement_version=?" in captured["statement"]
-    assert captured["params"][2] == "cost_consistent_exit_v6"
+    assert captured["params"][2] == "cost_consistent_exit_v7"
     assert captured["params"][3:5] == (
         "prediction-public-id",
         "opportunity-public-id",
@@ -841,7 +841,7 @@ def test_real_fund_entry_is_blocked_until_current_policy_is_quantitatively_ready
 
     assert exc_info.value.status_code == 409
     assert "禁止新增真实资金订单" in str(exc_info.value.detail)
-    assert "cost_consistent_exit_v6" in str(exc_info.value.detail)
+    assert "cost_consistent_exit_v7" in str(exc_info.value.detail)
 
 
 def test_manual_follow_ui_and_api_require_second_real_funds_confirmation() -> None:

@@ -113,7 +113,7 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
         signal_news_score=Decimal("82"),
         signal_indicator_score=Decimal("88"),
         estimated_cost_bps=Decimal("16"),
-        settlement_version="cost_consistent_exit_v6",
+        settlement_version="cost_consistent_exit_v7",
         readiness_status="research_only",
         calibration_sample_count=0,
         evidence_json=opportunity.evidence_json,
@@ -203,7 +203,7 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
     assert fact.option_flow_status == "channel_disabled"
     assert fact.gex_status == "available"
     assert fact.institutional_flow_status == "available"
-    assert fact.projection_version == "signal_features_v3"
+    assert fact.projection_version == "signal_features_v4"
     assert fact.price_source == "binance"
     assert fact.news_score == Decimal("82.0000")
     assert fact.combined_score == Decimal("84.5000")
@@ -247,6 +247,10 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
     prediction.directional_return_bps = Decimal("105.2632")
     prediction.max_favorable_bps = Decimal("150")
     prediction.max_adverse_bps = Decimal("-20")
+    prediction.exit_reason = "take_profit"
+    prediction.exit_subreason = "profit_lock"
+    prediction.peak_favorable_bps_at_exit = Decimal("150")
+    prediction.protected_bps_at_exit = Decimal("45")
     prediction.exit_at = now + timedelta(minutes=30)
     prediction.completed_at = prediction.exit_at
     prediction.updated_at = now + timedelta(minutes=31)
@@ -270,6 +274,7 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
         min_data_coverage=0,
         feature_version="",
         decision_version="",
+        settlement_version="current",
         direction="all",
         market_session="all",
         quote_quality="all",
@@ -284,6 +289,47 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
     assert "excluded_legacy_settlement_count" not in analytics["summary"]
     assert analytics["items"][0]["price_source"] == "binance"
     assert analytics["items"][0]["entry_price"] == 190.0
+    assert analytics["items"][0]["exit_detail"] == "profit_lock"
+    assert analytics["items"][0]["exit_protection"] == {
+        "peak_favorable_bps": 150.0,
+        "protected_bps": 45.0,
+    }
+    assert analytics["filters"]["settlement_version"] == "cost_consistent_exit_v7"
+    assert analytics["settlement_versions"][0]["current"] is True
+
+    prediction.settlement_version = "cost_consistent_exit_v6"
+    prediction.updated_at = now + timedelta(minutes=32)
+    db.commit()
+    refresh_ai_monitor_read_models(db, user_id=7)
+    legacy = historical_opportunity_fact_analytics(
+        db,
+        7,
+        limit=20,
+        page=1,
+        date_from=None,
+        date_to=None,
+        timezone_offset_minutes=0,
+        symbol="",
+        news_score_min=0,
+        indicator_score_min=0,
+        combined_score_min=0,
+        option_flow_score_min=0,
+        gex_score_min=0,
+        min_data_coverage=0,
+        feature_version="",
+        decision_version="",
+        settlement_version="cost_consistent_exit_v6",
+        direction="all",
+        market_session="all",
+        quote_quality="all",
+        event_risk="all",
+        exit_reason="profit_lock",
+        include_readiness=False,
+    )
+    assert legacy is not None
+    assert legacy["pagination"]["total"] == 1
+    assert legacy["summary"]["exit_reason_counts"] == {"profit_lock": 1}
+    assert legacy["filters"]["settlement_version"] == "cost_consistent_exit_v6"
 
 
 def test_read_model_migration_follows_latest_revision() -> None:
@@ -318,6 +364,20 @@ def test_read_model_migration_follows_latest_revision() -> None:
         "projection_version",
     ):
         assert f'"{column}"' in feature_status_source
+
+    exit_semantics_source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "migrations"
+        / "versions"
+        / "0065_prediction_exit_semantics.py"
+    ).read_text(encoding="utf-8")
+    assert 'down_revision: str | None = "0064_strategy_source_runtime"' in exit_semantics_source
+    for column in (
+        "exit_subreason",
+        "peak_favorable_bps_at_exit",
+        "protected_bps_at_exit",
+    ):
+        assert f'"{column}"' in exit_semantics_source
 
 
 def test_ai_monitor_frontend_cancels_stale_opportunity_requests() -> None:

@@ -48,6 +48,7 @@ class AiMonitorDashboard extends HTMLElement {
         dataCoverageMin: 0,
         featureVersion: "",
         decisionVersion: "",
+        settlementVersion: "current",
         direction: "all",
         marketSession: "all",
         quoteQuality: "all",
@@ -359,6 +360,7 @@ class AiMonitorDashboard extends HTMLElement {
                     <label><span>数据覆盖率不低于</span><div><input id="prediction-data-coverage-min" type="number" min="0" max="100" step="1" value="0"><em>%</em></div></label>
                     <label><span>特征版本</span><input id="prediction-feature-version" type="search" maxlength="32" autocomplete="off" placeholder="全部版本"></label>
                     <label><span>决策版本</span><input id="prediction-decision-version" type="search" maxlength="32" autocomplete="off" placeholder="全部版本"></label>
+                    <label><span>结算策略版本</span><select id="prediction-settlement-version"><option value="current">当前版本</option><option value="all">全部版本</option></select></label>
                     <label><span>方向筛选</span><select id="prediction-direction"><option value="all">全部方向</option><option value="long">只看做多</option><option value="short">只看做空</option></select></label>
                     <label><span>交易时段</span><select id="prediction-market-session"><option value="all">全部时段</option><option value="premarket">盘前</option><option value="regular">盘中</option><option value="postmarket">盘后</option><option value="closed">休市</option></select></label>
                     <label><span>行情质量</span><select id="prediction-quote-quality"><option value="all">全部质量</option><option value="passed">NBBO 已通过</option><option value="partial">仅现货价快照</option><option value="blocked">未通过</option><option value="missing">数据缺失</option></select></label>
@@ -4730,6 +4732,7 @@ class AiMonitorDashboard extends HTMLElement {
       dataCoverageMin: clampScore(params.get("min_data_coverage")),
       featureVersion: cleanVersion(params.get("feature_version")),
       decisionVersion: cleanVersion(params.get("decision_version")),
+      settlementVersion: cleanVersion(params.get("settlement_version")) || "current",
       direction: oneOf(params.get("direction"), ["long", "short"]),
       marketSession: oneOf(params.get("market_session"), ["premarket", "regular", "postmarket", "closed"]),
       quoteQuality: oneOf(params.get("quote_quality"), ["passed", "partial", "blocked", "missing"]),
@@ -4753,6 +4756,7 @@ class AiMonitorDashboard extends HTMLElement {
       "prediction-data-coverage-min": filters.dataCoverageMin,
       "prediction-feature-version": filters.featureVersion,
       "prediction-decision-version": filters.decisionVersion,
+      "prediction-settlement-version": filters.settlementVersion,
       "prediction-direction": filters.direction,
       "prediction-market-session": filters.marketSession,
       "prediction-quote-quality": filters.quoteQuality,
@@ -4763,6 +4767,28 @@ class AiMonitorDashboard extends HTMLElement {
       const input = this.q(`#${id}`);
       if (input) input.value = String(value ?? "");
     });
+  }
+
+  renderSettlementVersionOptions(items) {
+    const select = this.q("#prediction-settlement-version");
+    if (!select) return;
+    const versions = Array.isArray(items) ? items : [];
+    const selected = String(this.state.predictionFilters.settlementVersion || "current");
+    select.innerHTML = [
+      '<option value="all">全部版本（跨策略对比）</option>',
+      ...versions.map((item) => {
+        const value = String(item?.value || "").slice(0, 32);
+        if (!value) return "";
+        const label = String(item?.label || value);
+        const current = item?.current ? " · 当前" : "";
+        return `<option value="${this.escape(value)}">${this.escape(label)}${current} · ${this.number(item?.count)}条</option>`;
+      }),
+    ].join("");
+    const available = [...select.options].some((option) => option.value === selected);
+    select.value = available
+      ? selected
+      : versions.find((item) => item?.current)?.value || "all";
+    this.state.predictionFilters.settlementVersion = select.value;
   }
 
   adoptPredictionResponseFilters(responseFilters) {
@@ -4781,6 +4807,7 @@ class AiMonitorDashboard extends HTMLElement {
     if (has("min_data_coverage")) filters.dataCoverageMin = score(responseFilters.min_data_coverage);
     if (has("feature_version")) filters.featureVersion = String(responseFilters.feature_version || "");
     if (has("decision_version")) filters.decisionVersion = String(responseFilters.decision_version || "");
+    if (has("settlement_version")) filters.settlementVersion = String(responseFilters.settlement_version || "current");
     if (has("direction")) filters.direction = ["long", "short"].includes(responseFilters.direction) ? responseFilters.direction : "all";
     if (has("market_session")) filters.marketSession = ["premarket", "regular", "postmarket", "closed"].includes(responseFilters.market_session) ? responseFilters.market_session : "all";
     if (has("quote_quality")) filters.quoteQuality = ["passed", "partial", "blocked", "missing"].includes(responseFilters.quote_quality) ? responseFilters.quote_quality : "all";
@@ -4803,6 +4830,7 @@ class AiMonitorDashboard extends HTMLElement {
       min_data_coverage: filters.dataCoverageMin || "",
       feature_version: filters.featureVersion,
       decision_version: filters.decisionVersion,
+      settlement_version: filters.settlementVersion === "current" ? "" : filters.settlementVersion,
       direction: filters.direction === "all" ? "" : filters.direction,
       market_session: filters.marketSession === "all" ? "" : filters.marketSession,
       quote_quality: filters.quoteQuality === "all" ? "" : filters.quoteQuality,
@@ -4873,6 +4901,7 @@ class AiMonitorDashboard extends HTMLElement {
         quote_quality: filters.quoteQuality,
         event_risk: filters.eventRisk,
         exit_reason: filters.exitReason,
+        settlement_version: filters.settlementVersion || "current",
         include_readiness: "false",
         include_ablation: "false",
       });
@@ -4892,6 +4921,7 @@ class AiMonitorDashboard extends HTMLElement {
         readiness: data.readiness || currentAnalytics.readiness || previousAnalytics.readiness || null,
       };
       this.adoptPredictionResponseFilters(data.filters);
+      this.renderSettlementVersionOptions(data.settlement_versions);
       this.state.predictionPage = Number(data.pagination?.page || this.state.predictionPage || 1);
       this.state.predictionAnalyticsLastLoadedAt = Date.now();
       if (!background) {
@@ -4943,6 +4973,7 @@ class AiMonitorDashboard extends HTMLElement {
       dataCoverageMin: clampScore(this.q("#prediction-data-coverage-min").value),
       featureVersion: this.q("#prediction-feature-version").value.trim().slice(0, 32),
       decisionVersion: this.q("#prediction-decision-version").value.trim().slice(0, 32),
+      settlementVersion: this.q("#prediction-settlement-version").value || "current",
       direction: ["long", "short"].includes(directionValue) ? directionValue : "all",
       marketSession: ["premarket", "regular", "postmarket", "closed"].includes(marketSessionValue) ? marketSessionValue : "all",
       quoteQuality: ["passed", "partial", "blocked", "missing"].includes(quoteQualityValue) ? quoteQualityValue : "all",
@@ -4968,6 +4999,7 @@ class AiMonitorDashboard extends HTMLElement {
       dataCoverageMin: 0,
       featureVersion: "",
       decisionVersion: "",
+      settlementVersion: "current",
       direction: "all",
       marketSession: "all",
       quoteQuality: "all",
@@ -5202,6 +5234,7 @@ class AiMonitorDashboard extends HTMLElement {
       min_data_coverage: this.firstValue(responseFilters.min_data_coverage, this.state.predictionFilters.dataCoverageMin, 0),
       feature_version: this.firstValue(responseFilters.feature_version, this.state.predictionFilters.featureVersion, ""),
       decision_version: this.firstValue(responseFilters.decision_version, this.state.predictionFilters.decisionVersion, ""),
+      settlement_version: this.firstValue(responseFilters.settlement_version, this.state.predictionFilters.settlementVersion, "current"),
       direction: this.firstValue(responseFilters.direction, this.state.predictionFilters.direction, "all"),
       market_session: this.firstValue(responseFilters.market_session, this.state.predictionFilters.marketSession, "all"),
       quote_quality: this.firstValue(responseFilters.quote_quality, this.state.predictionFilters.quoteQuality, "all"),
@@ -5214,7 +5247,7 @@ class AiMonitorDashboard extends HTMLElement {
     const dateScope = filters.date_from && filters.date_to && filters.date_from === filters.date_to
       ? `日期 ${filters.date_from}`
       : [filters.date_from && `从 ${filters.date_from}`, filters.date_to && `至 ${filters.date_to}`].filter(Boolean).join(" · ");
-    const scopeLabel = [dateScope, filters.symbol && `股票 ${filters.symbol}`, filters.feature_version && `F ${filters.feature_version}`, filters.decision_version && `D ${filters.decision_version}`].filter(Boolean).join(" · ");
+    const scopeLabel = [dateScope, filters.symbol && `股票 ${filters.symbol}`, filters.feature_version && `F ${filters.feature_version}`, filters.decision_version && `D ${filters.decision_version}`, filters.settlement_version && `策略 ${filters.settlement_version}`].filter(Boolean).join(" · ");
     if (filterResult) filterResult.textContent = `${this.number(summary.historical_count)} 条 · ${directionLabel} · ${sessionLabel} · 新闻 ≥ ${Number(filters.news_score_min || 0).toFixed(0)} · 指标 ≥ ${Number(filters.indicator_score_min || 0).toFixed(0)} · 覆盖 ≥ ${Number(filters.min_data_coverage || 0).toFixed(0)}%${scopeLabel ? ` · ${scopeLabel}` : ""}`;
     const costTotal = this.q("#prediction-cost-total");
     if (costTotal && costConfig.example_one_hour_total_bps != null) costTotal.textContent = `1h 往返 ${Number(costConfig.example_one_hour_total_bps).toFixed(2)} bps`;
@@ -5230,10 +5263,32 @@ class AiMonitorDashboard extends HTMLElement {
     if (exitPolicyTarget) {
       const exitCounts = summary.exit_reason_counts || {};
       const protectedCount = Number(exitCounts.profit_lock || 0) + Number(exitCounts.trailing_profit || 0);
+      const policyVersion = String(summary.settlement_policy_version || "--");
+      const isV7 = policyVersion.endsWith("_v7");
+      const isV6 = policyVersion.endsWith("_v6");
+      const policyTag = policyVersion === "all"
+        ? "MULTI-VERSION EXIT COMPARISON"
+        : isV7
+          ? "RISK UNIT EXIT GUARD V7"
+          : isV6
+            ? "FROZEN EXIT GUARD V6"
+            : "FROZEN LEGACY EXIT GUARD";
+      const policyTitle = policyVersion === "all"
+        ? "跨结算策略版本对比"
+        : isV7
+          ? "R 单位递进锁盈与失败跟随早退"
+          : "历史结算规则审计视图";
+      const policyDescription = policyVersion === "all"
+        ? "当前结果混合多个冻结策略版本，只适合横向审计；各版本不会互相重算。建议逐一选择版本比较命中率和成本后 ROE。"
+        : isV7
+          ? "浮盈覆盖交易成本并达到 0.5R 后，至少锁定成本后的 0.25R 净利润，并按峰值回撤 0.35R 递进抬高保护线；达到 1R 后切换为回撤 0.5R。旧版本规则保持冻结，不重写历史结果。"
+          : isV6
+            ? "V6 在 0.5R 后只锁定成本加 2bps，可能显示约 0.2% 的 10x 模拟 ROE。该规则已经停用，仅保留历史审计。"
+            : "该版本使用生成信号时冻结的历史退出规则，仅供复盘，不会用 V7 重新计算。";
       exitPolicyTarget.innerHTML = `
-        <header><div><span>RISK UNIT EXIT GUARD V6</span><h3>R 单位盈利保护与失败跟随早退</h3><p>新预测按每笔止损距离 R 管理浮盈；旧预测保留冻结规则。保护线仅使用已经收盘的 15 分钟 K 线。</p></div><strong>因果回放<small>${this.escape(summary.settlement_policy_version || "--")}</small></strong></header>
+        <header><div><span>${this.escape(policyTag)}</span><h3>${this.escape(policyTitle)}</h3><p>${this.escape(policyDescription)}</p></div><strong>虚拟回放<small>${this.escape(policyVersion)}</small></strong></header>
         <div>
-          <article class="profit"><span>浮盈保护</span><b>0.5R 启动</b><small>不再等待半个持有周期；前一根收盘确认后武装 · 已触发 ${this.number(exitCounts.profit_lock)}</small></article>
+          <article class="profit"><span>递进锁盈</span><b>0.5R / 净锁 0.25R</b><small>先覆盖交易成本，再锁定至少 0.25R；保护线只升不降 · 已触发 ${this.number(exitCounts.profit_lock)}</small></article>
           <article class="profit"><span>移动保护</span><b>1R / 回吐 0.5R</b><small>按本笔 ATR 风险归一，不再使用所有品种统一 30 bps · 已触发 ${this.number(exitCounts.trailing_profit)}</small></article>
           <article class="risk"><span>跟随失败</span><b>仍按持有周期确认</b><small>与盈利保护分离，避免短线噪声秒平 · 已触发 ${this.number(exitCounts.failed_follow_through)}</small></article>
           <article><span>保护退出合计</span><b>${this.number(protectedCount)}</b><small>ATR 硬止损、2R 止盈和评分反转仍然保留</small></article>
@@ -5246,7 +5301,7 @@ class AiMonitorDashboard extends HTMLElement {
       <article><span>多 / 空方向</span><strong class="analytics-directions"><b>${this.number(summary.long_count)}</b><i>/</i><em>${this.number(summary.short_count)}</em></strong><small>做多 / 做空样本分布</small></article>
       <article class="positive"><span>命中次数</span><strong>${this.number(summary.win_count)}</strong><small>未命中 ${this.number(summary.loss_count)} · 持平 ${this.number(summary.flat_count)}</small></article>
       <article class="${Number(summary.hit_rate || 0) >= 50 ? "positive" : "negative"}"><span>命中概率</span><strong>${hitRate}</strong><small>命中 ÷ 有方向结果</small></article>
-      <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均 Binance ${this.state.displayLeverage}x 成本后利润率</span><strong>${this.formatLeveragedReturnFromBps(summary.average_directional_return_bps)}</strong><small>标的净 ${metricBps(summary.average_directional_return_bps)} · 毛 ${metricBps(summary.average_gross_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(summary.average_estimated_cost_bps || 0)))} · 强制保守成本 · 非账户收益率</small></article>
+      <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均虚拟持仓 ${this.state.displayLeverage}x 成本后 ROE</span><strong>${this.formatLeveragedReturnFromBps(summary.average_directional_return_bps)}</strong><small>标的净 ${metricBps(summary.average_directional_return_bps)} · 毛 ${metricBps(summary.average_gross_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(summary.average_estimated_cost_bps || 0)))} · 模拟值，非账户实际收益</small></article>
       <article><span>平均 MFE / MAE</span><strong class="analytics-range"><b>${metricBps(summary.average_max_favorable_bps)}</b><i>${metricBps(summary.average_max_adverse_bps)}</i></strong><small>持有期最大有利 / 不利波动</small></article>
       <article><span>影子候选 / 研究</span><strong class="analytics-directions"><b>${this.number(summary.shadow_ready_count)}</b><i>/</i><em>${this.number(summary.research_only_count)}</em></strong><small>生成信号时的准入状态</small></article>`;
     const target = this.q("#prediction-list");
@@ -5260,13 +5315,13 @@ class AiMonitorDashboard extends HTMLElement {
       <td>${analyticsScore(item.news_score)} / ${analyticsScore(item.indicator_score)}<small>组合 ${analyticsScore(item.combined_score)}</small></td>
       ${this.predictionFeatureCells(item)}
       <td>${item.entry_price == null ? "--" : this.escape(this.compactNumber(item.entry_price))}<small>${item.entry_at ? this.formatDate(item.entry_at) : "入场时刻快照"}</small></td>
-      <td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${this.exitReasonLabel(item.exit_reason, item.exit_detail)} · ${item.settled_price_at ? this.formatDate(item.settled_price_at) : "退出行情不足"}</small></td>
+      <td>${item.exit_price == null ? "--" : this.escape(this.compactNumber(item.exit_price))}<small>${this.exitReasonLabel(item.exit_reason, item.exit_detail)} · ${item.settled_price_at ? this.formatDate(item.settled_price_at) : "退出行情不足"}</small><small>策略 ${this.escape(item.settlement_version || "--")}</small></td>
       <td class="${Number(item.net_directional_return_bps || 0) >= 0 ? "positive" : "negative"}">${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)}<small>毛利润率 ${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)} · 标的净 ${metricBps(item.net_directional_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(item.estimated_cost_bps || 0)))} · 强制保守成本</small></td>
       <td>${metricBps(item.max_favorable_bps)}<small>${metricBps(item.max_adverse_bps)}</small></td>
       <td><span class="prediction-result ${this.escape(item.result || "unavailable")}">${this.analyticsResultLabel(item.result)}</span></td>
       <td>${this.formatDate(item.expires_at)}<small>计划 ${this.number(item.max_holding_bars || 1)} 根 · ${this.formatDuration(item.signal_time, item.expires_at)}</small><small>实际 ${this.formatDuration(item.signal_time, item.settled_price_at || item.exit_at)}</small></td>
     </tr>`).join("");
-    target.innerHTML = `<div class="table-wrap enhanced-analytics-table"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>时段 / 行情质量</th><th>期权 / GEX / 机构</th><th>事件 / 数据覆盖</th><th>入场价格</th><th>退出价格 / 原因</th><th>Binance ${this.state.displayLeverage}x 成本后利润率</th><th>MFE / MAE</th><th>成本后结果</th><th>计划 / 实际持有</th></tr></thead><tbody>${predictionRows}</tbody></table></div>`;
+    target.innerHTML = `<div class="table-wrap enhanced-analytics-table"><table><thead><tr><th>信号时间</th><th>股票 / 合约</th><th>方向</th><th>技术状态</th><th>新闻 / 指标评分</th><th>时段 / 行情质量</th><th>期权 / GEX / 机构</th><th>事件 / 数据覆盖</th><th>入场价格</th><th>退出价格 / 原因 / 策略</th><th>虚拟持仓 ${this.state.displayLeverage}x 成本后 ROE</th><th>MFE / MAE</th><th>成本后结果</th><th>计划 / 实际持有</th></tr></thead><tbody>${predictionRows}</tbody></table></div>`;
     target.insertAdjacentHTML("beforeend", this.predictionPaginationMarkup(data.pagination || {}, items.length));
   }
 
@@ -5331,7 +5386,7 @@ class AiMonitorDashboard extends HTMLElement {
   categoryLabel(value) { return ({ macro: "宏观", company: "公司", earnings: "财报", policy: "政策", geopolitics: "地缘", commodity: "商品", crypto: "加密", other: "其他" })[value] || "分类待定"; }
   analyticsResultLabel(value) { return ({ win: "命中", loss: "未命中", flat: "持平", unavailable: "行情不足" })[value] || "行情不足"; }
   exitReasonLabel(value, detail = "") {
-    const detailLabels = { profit_lock: "浮盈保护退出", trailing_profit: "移动止盈退出", failed_follow_through: "跟随失败早退" };
+    const detailLabels = { hard_target: "命中最终止盈价", profit_lock: "递进锁盈退出", trailing_profit: "移动止盈退出", failed_follow_through: "跟随失败早退" };
     if (detailLabels[detail]) return detailLabels[detail];
     return ({ take_profit: "触发止盈", stop_loss: "触发止损", score_breakdown: "综合评分转弱", score_reversal: "方向反转", max_holding_time: "最大持有期退出", legacy_horizon_close: "旧版到期结算" })[value] || "退出原因待确认";
   }

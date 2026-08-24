@@ -485,7 +485,7 @@ def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None
     assert item.settlement_version == "repair_pending_v4"
     assert (
         item.evidence_json["risk_plan"]["settlement_version"]
-        == "horizon_aligned_exit_v5"
+        == "cost_consistent_exit_v6"
     )
     assert item.evidence_json["settlement_repair"]["status"] == "pending_recalculation"
     assert database.flushed is True
@@ -496,7 +496,7 @@ def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None
     assert {"completed", "legacy_horizon_close"}.issubset(
         set(mysql_compiled.params.values())
     )
-    assert "cost_consistent_exit_v6" not in set(mysql_compiled.params.values())
+    assert "cost_consistent_exit_v7" not in set(mysql_compiled.params.values())
     assert database.statement.get_execution_options()["populate_existing"] is True
 
 
@@ -1545,6 +1545,7 @@ def test_prediction_exit_uses_first_barrier_and_same_bar_is_conservative() -> No
     )
 
     assert target is not None and target["reason"] == "take_profit"
+    assert target["exit_subreason"] == "hard_target"
     assert target["price"] == 104
     assert conflict is not None and conflict["reason"] == "stop_loss"
     assert conflict["same_bar_conflict"] is True
@@ -1644,17 +1645,18 @@ def test_new_risk_plan_uses_r_normalized_profit_protection() -> None:
         atr_pct=1,
     )
 
-    assert plan["version"] == "atr_risk_reward_guard_v4"
-    assert plan["settlement_version"] == "cost_consistent_exit_v6"
-    assert plan["execution_policy"] == "cost_consistent_risk_guard_v7"
+    assert plan["version"] == "atr_risk_reward_guard_v5"
+    assert plan["settlement_version"] == "cost_consistent_exit_v7"
+    assert plan["execution_policy"] == "cost_consistent_risk_guard_v8"
     assert plan["stop_loss_pct"] == 1.5
     assert plan["take_profit_pct"] == 3.0
     assert plan["profit_protection"] == {
-        "version": "risk_unit_profit_guard_v1",
+        "version": "risk_unit_profit_guard_v2",
         "mode": "risk_unit",
         "risk_bps": 150.0,
         "activation_r": 0.5,
-        "minimum_protected_r": 0.0,
+        "minimum_net_protected_r": 0.25,
+        "early_maximum_giveback_r": 0.35,
         "trailing_activation_r": 1.0,
         "maximum_giveback_r": 0.5,
         "activation_boundary": "prior_closed_15m_bar",
@@ -1713,6 +1715,100 @@ def test_risk_unit_profit_guard_is_not_delayed_by_signal_soft_exit_window() -> N
     assert result["activation_bps"] == 50
     assert result["price"] == pytest.approx(100.18)
     assert result["price_time_ms"] == start + interval * 2
+
+
+def test_v7_profit_lock_guarantees_quarter_r_after_cost_before_arming() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    result = prediction_adaptive_path_exit(
+        [
+            {
+                "open_time": start,
+                "open": 100,
+                "high": 100.30,
+                "low": 99.95,
+                "close": 100.29,
+            },
+            {
+                "open_time": start + interval,
+                "open": 100.29,
+                "high": 100.31,
+                "low": 100.27,
+                "close": 100.28,
+            },
+        ],
+        100,
+        "long",
+        start,
+        start + interval * 2,
+        estimated_cost_bps=16,
+        minimum_profit_protection_ms=0,
+        profit_protection={
+            "mode": "risk_unit",
+            "risk_bps": 50,
+            "activation_r": 0.5,
+            "minimum_net_protected_r": 0.25,
+            "early_maximum_giveback_r": 0.35,
+            "trailing_activation_r": 1,
+            "maximum_giveback_r": 0.5,
+        },
+    )
+
+    assert result is not None
+    assert result["exit_subreason"] == "profit_lock"
+    assert result["effective_activation_bps"] == pytest.approx(28.5)
+    assert result["protected_bps"] == pytest.approx(28.5)
+    assert result["protected_bps"] - 16 == pytest.approx(12.5)
+
+
+def test_v7_profit_protection_floor_is_monotonic_across_r_regimes() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    result = prediction_adaptive_path_exit(
+        [
+            {
+                "open_time": start,
+                "open": 100,
+                "high": 100.8,
+                "low": 99.9,
+                "close": 100.7,
+            },
+            {
+                "open_time": start + interval,
+                "open": 100.7,
+                "high": 101.1,
+                "low": 100.65,
+                "close": 101.0,
+            },
+            {
+                "open_time": start + interval * 2,
+                "open": 101.0,
+                "high": 101.05,
+                "low": 100.5,
+                "close": 100.7,
+            },
+        ],
+        100,
+        "long",
+        start,
+        start + interval * 3,
+        estimated_cost_bps=16,
+        minimum_profit_protection_ms=0,
+        profit_protection={
+            "mode": "risk_unit",
+            "risk_bps": 100,
+            "activation_r": 0.5,
+            "minimum_net_protected_r": 0.25,
+            "early_maximum_giveback_r": 0.35,
+            "trailing_activation_r": 1,
+            "maximum_giveback_r": 0.5,
+        },
+    )
+
+    assert result is not None
+    assert result["exit_subreason"] == "trailing_profit"
+    assert result["peak_favorable_bps"] == pytest.approx(110)
+    assert result["protected_bps"] == pytest.approx(60)
 
 
 def test_risk_unit_guard_keeps_failed_follow_through_horizon_aligned() -> None:
@@ -2123,9 +2219,13 @@ def test_current_settlement_policy_cannot_disable_execution_costs() -> None:
         "funding_bps_per_8h": 0,
     }
 
-    current = prediction_settlement_cost_config(
+    previous = prediction_settlement_cost_config(
         disabled,
         settlement_version="cost_consistent_exit_v6",
+    )
+    current = prediction_settlement_cost_config(
+        disabled,
+        settlement_version="cost_consistent_exit_v7",
     )
     legacy = prediction_settlement_cost_config(
         disabled,
@@ -2138,6 +2238,7 @@ def test_current_settlement_policy_cannot_disable_execution_costs() -> None:
     assert current["prediction_slippage_bps_per_side"] == 3
     assert current["prediction_funding_enabled"] is True
     assert current["prediction_funding_bps_per_8h"] == 1
+    assert previous == current
     assert legacy["prediction_fee_enabled"] is False
     assert legacy["prediction_slippage_enabled"] is False
     assert legacy["prediction_funding_enabled"] is False
@@ -2309,7 +2410,7 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
     assert float(settled.net_directional_return_bps) == pytest.approx(183.96875)
     assert settled.max_favorable_bps == Decimal("200.0")
     assert settled.max_adverse_bps == Decimal("0.0")
-    assert settled.settlement_version == "horizon_aligned_exit_v5"
+    assert settled.settlement_version == "cost_consistent_exit_v6"
     assert (
         settled.evidence_json["settlement"]["score_exit_policy_version"]
         == "horizon_aligned_closed_bar_v3"
@@ -3145,7 +3246,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260824-86"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260824-87"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3155,7 +3256,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260824-86"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260824-87"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -3332,7 +3433,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "AI 新闻研判" in component
     assert "技术指标验证" in component
     assert "仅作预测研究，不会触发实盘交易" in component
-    assert "虚拟" not in component
+    assert "虚拟回放" in component
+    assert "虚拟持仓" in component
     assert "VIRTUAL" not in component
     assert 'id="open-news-logic"' in component
     assert "新闻分析逻辑" in component
@@ -3485,13 +3587,13 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'this.api("/prediction-records?limit=200")' not in component
     for label in ("历史机会", "筛选样本", "命中次数", "命中概率", "x 仓位ROE"):
         assert label in component
-    for label in ("x 成本后利润率", "毛利润率", "MFE / MAE", "成本后结果", "成本计算"):
+    for label in ("x 成本后 ROE", "毛利润率", "MFE / MAE", "成本后结果", "成本计算"):
         assert label in component
     assert '${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)}<small>毛利润率' in component
     assert '${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净仓位ROE' not in component
-    assert "RISK UNIT EXIT GUARD V6" in component
-    assert "0.5R 启动" in component
-    assert "强制保守成本" in component
+    assert "RISK UNIT EXIT GUARD V7" in component
+    assert 'id="prediction-settlement-version"' in component
+    assert "settlement_version: filters.settlementVersion" in component
     for label in (
         "最低技术强度",
         "最低组合评分",

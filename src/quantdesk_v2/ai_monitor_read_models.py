@@ -40,7 +40,7 @@ READ_MODEL_TABLES = frozenset(
 PROJECTION_FLUSH_BATCH_SIZE = 100
 PREDICTION_FACT_READ_BATCH_SIZE = 25
 SCORE_HISTORY_READ_BATCH_SIZE = 1000
-PREDICTION_FACT_PROJECTION_VERSION = "signal_features_v3"
+PREDICTION_FACT_PROJECTION_VERSION = "signal_features_v4"
 _availability_cache: dict[int, tuple[float, bool]] = {}
 _availability_lock = threading.Lock()
 
@@ -506,6 +506,9 @@ def refresh_prediction_facts(
             "mae_bps": prediction.max_adverse_bps,
             "estimated_cost_bps": prediction.estimated_cost_bps,
             "exit_reason": prediction.exit_reason,
+            "exit_subreason": prediction.exit_subreason,
+            "peak_favorable_bps_at_exit": prediction.peak_favorable_bps_at_exit,
+            "protected_bps_at_exit": prediction.protected_bps_at_exit,
             "weights_version": projection["weights_version"],
             "feature_version": projection["feature_version"],
             "decision_version": projection["decision_version"],
