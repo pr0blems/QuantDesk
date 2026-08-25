@@ -260,7 +260,6 @@ def generate_user_model_strategy_source_preview(
         api_key=api_key,
         model_name=model_name,
         timeout_seconds=timeout_seconds,
-        generation_context=generation_context,
     )
     return _chat_completions_source_preview(
         source_code,
@@ -271,6 +270,7 @@ def generate_user_model_strategy_source_preview(
         api_key=api_key,
         model_name=model_name,
         timeout_seconds=timeout_seconds,
+        generation_context=generation_context,
     )
 
 

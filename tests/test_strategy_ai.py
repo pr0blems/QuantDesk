@@ -14,6 +14,7 @@ from quantdesk_v2.strategy_ai import (
     generate_strategy_source_preview,
     generate_user_model_strategy_code_preview,
     generate_user_model_strategy_preview,
+    generate_user_model_strategy_source_preview,
 )
 from quantdesk_v2.strategy_runtime import build_trend_pullback_spec
 
@@ -760,6 +761,50 @@ def evaluate(context, params):
         "volume_ratio",
     ]
     assert preview["source_code"] == source
+
+
+def test_user_model_python_source_composer_forwards_generation_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = '''TIMEFRAMES = ("1h",)
+TRIGGER_TIMEFRAME = "1h"
+LOOKBACK_BARS = 80
+DIRECTIONS = ("long",)
+def evaluate(context, params):
+    return {"decision": "HOLD", "evidence": {"period": params["ema_fast_period"]}}
+'''
+    captured: dict[str, Any] = {}
+
+    def transport(
+        _endpoint: Any,
+        body: bytes,
+        _headers: dict[str, str],
+        _timeout_seconds: float,
+    ) -> tuple[int, bytes]:
+        captured["payload"] = json.loads(body)
+        return 200, chat_completions_body(
+            {"strategy_code": source, "summary": "生成 EMA Python 源码。"}
+        )
+
+    monkeypatch.setattr(strategy_ai, "_chat_http_transport", transport)
+    preview = generate_user_model_strategy_source_preview(
+        {"version": 1, "source_code": source},
+        "使用 EMA 生成策略",
+        provider_code="deepseek",
+        api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+        model_name=AI_PROVIDER_PRESETS["deepseek"].default_model,
+        generation_context={
+            "timeframe": "1h",
+            "selected_indicators": [{"key": "ema"}],
+            "required_parameter_keys": ["ema_fast_period"],
+        },
+    )
+
+    user_payload = json.loads(captured["payload"]["messages"][1]["content"])
+    assert user_payload["indicator_blueprint"]["selected_indicators"] == [
+        {"key": "ema"}
+    ]
+    assert preview["provider"] == "deepseek"
 
 
 @pytest.mark.parametrize(
