@@ -612,7 +612,8 @@ def _source_edit_messages(
 ) -> list[dict[str, str]]:
     contract = (
         "The source must keep literal constants TIMEFRAMES, TRIGGER_TIMEFRAME, "
-        "LOOKBACK_BARS, DIRECTIONS and optional VALID_FOR_BARS, plus "
+        "LOOKBACK_BARS, DIRECTIONS, optional VALID_FOR_BARS, and a literal "
+        "PARAMETERS mapping, plus "
         "evaluate(context, params). evaluate returns a dict with decision, optional "
         "confidence, reason_codes, evidence and risk_proposal. Available pure helpers: "
         "sma(values, period), ema(values, period), rsi(values, period), "
@@ -640,7 +641,11 @@ def _source_edit_messages(
                 "When indicator_blueprint is present, it is a trusted platform "
                 "constraint: implement every selected indicator, keep its timeframe "
                 "and directions, and read tunable values only from the supplied "
-                "parameter keys. Do not invent unavailable parameter names. "
+                "parameter keys. PARAMETERS must define exactly every params[\"key\"] "
+                "used by the source. Each definition must contain label, type "
+                "(integer or number), default, min, max and step. Use the trusted "
+                "parameter_schema and parameter_values when supplied. Do not invent "
+                "unavailable parameter names. "
                 f"{contract} Summarize changes briefly in Chinese."
             ),
         },
@@ -657,6 +662,11 @@ def _source_edit_messages(
                     ),
                     "sandbox_examples": {
                         "parameter": 'period = int(params["ema_fast_period"])',
+                        "parameter_contract": (
+                            'PARAMETERS = {"ema_fast_period": {"label": "快速 EMA", '
+                            '"type": "integer", "default": 20, "min": 2, '
+                            '"max": 200, "step": 1}}'
+                        ),
                         "bar_series": 'closes = [bar["close"] for bar in bars]',
                         "ema": "fast_now = ema(closes, period)",
                         "adx": "adx_value, plus_di, minus_di = adx(bars, period)",
@@ -695,6 +705,27 @@ def _source_contract_issue(
         )
         if missing:
             return "必须读取这些 params 参数：" + ", ".join(missing[:24])
+        declared = {item.get("key") for item in metadata.parameter_schema}
+        if (
+            "parameter_schema" in generation_context
+            or "parameter_values" in generation_context
+        ) and declared != {key for key in required if isinstance(key, str)}:
+            return "PARAMETERS 必须完整声明且只能声明所选指标参数"
+        expected_values = generation_context.get("parameter_values")
+        if isinstance(expected_values, Mapping):
+            defaults = {
+                str(item.get("key")): item.get("default")
+                for item in metadata.parameter_schema
+            }
+            mismatched = sorted(
+                key
+                for key, value in expected_values.items()
+                if key in defaults and defaults[key] != value
+            )
+            if mismatched:
+                return "PARAMETERS 默认值必须使用所选指标配置：" + ", ".join(
+                    mismatched[:24]
+                )
     return None
 
 

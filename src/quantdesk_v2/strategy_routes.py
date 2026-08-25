@@ -379,6 +379,7 @@ def _source_composition_context(
         "signal_valid_bars": composition.signal_valid_bars,
         "selected_indicators": selected_indicators,
         "parameter_values": copy.deepcopy(parameters),
+        "parameter_schema": copy.deepcopy(parameter_schema),
         "required_parameter_keys": sorted(parameters),
         "available_helpers": ["sma", "ema", "rsi", "adx", "atr", "sqrt", "log", "exp"],
         "helper_contracts": {
@@ -593,10 +594,66 @@ def _source_validation_response(source_code: str, language: str = "python") -> d
         "directions": list(metadata.directions),
         "valid_for_bars": metadata.valid_for_bars,
         "parameter_keys": list(metadata.parameter_keys),
+        "parameter_schema": [copy.deepcopy(item) for item in metadata.parameter_schema],
+        "parameters": {
+            str(item["key"]): item["default"] for item in metadata.parameter_schema
+        },
         "warnings": [
             "源码在隔离进程中执行，不能导入模块或访问文件、网络和系统命令。"
         ],
     }
+
+
+def _source_parameter_contract(
+    validation: Mapping[str, Any],
+    fallback_schema: list[dict[str, Any]],
+    fallback_parameters: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, int | float]]:
+    """Resolve tunable parameters from source metadata with legacy fallback."""
+
+    declared = validation.get("parameter_schema")
+    if isinstance(declared, list) and declared:
+        schema = copy.deepcopy(declared)
+        candidate = {
+            str(item["key"]): fallback_parameters.get(
+                str(item["key"]), item["default"]
+            )
+            for item in schema
+        }
+        try:
+            parameters = _normalize_schema_parameters(schema, candidate)
+        except ValueError:
+            parameters = {
+                str(item["key"]): item["default"] for item in schema
+            }
+        return schema, parameters
+
+    parameter_keys = {
+        str(key) for key in validation.get("parameter_keys", []) if isinstance(key, str)
+    }
+    if not parameter_keys:
+        return [], {}
+    definitions = {
+        str(item.get("key")): copy.deepcopy(item)
+        for item in fallback_schema
+        if isinstance(item, Mapping) and item.get("key")
+    }
+    unknown = sorted(parameter_keys - set(definitions))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "源码新增了未声明的参数："
+                + ", ".join(unknown)
+                + "；请在源码顶层 PARAMETERS 中定义类型、默认值和范围"
+            ),
+        )
+    schema = [definitions[key] for key in definitions if key in parameter_keys]
+    parameters = _normalize_schema_parameters(
+        schema,
+        {key: fallback_parameters.get(key, definitions[key]["default"]) for key in parameter_keys},
+    )
+    return schema, parameters
 
 
 def _apply_source_edit(
@@ -623,17 +680,11 @@ def _apply_source_edit(
             },
         )
     validation = _source_validation_response(source_code, language)
-    available_parameters = {
-        str(item.get("key"))
-        for item in strategy.parameter_schema_json
-        if isinstance(item, Mapping) and item.get("key")
-    }
-    unknown_parameters = sorted(set(validation["parameter_keys"]) - available_parameters)
-    if unknown_parameters:
-        raise HTTPException(
-            status_code=422,
-            detail=f"源码引用了未定义参数：{', '.join(unknown_parameters)}",
-        )
+    parameter_schema, parameters = _source_parameter_contract(
+        validation,
+        strategy.parameter_schema_json,
+        strategy.parameters_json,
+    )
     strategy.name = name
     strategy.description = description
     strategy.category = category
@@ -647,6 +698,8 @@ def _apply_source_edit(
     strategy.source_hash = str(validation["source_hash"])
     strategy.source_runtime_version = str(validation["engine"])
     strategy.source_validation_json = validation
+    strategy.parameter_schema_json = parameter_schema
+    strategy.parameters_json = parameters
     strategy.version += 1
     strategy.updated_at = utcnow()
     _record_revision(db, strategy, source=source, summary=summary)
@@ -761,8 +814,8 @@ def _generate_source_ai_preview(
     preview["validation"] = validation
     if payload.composition is not None:
         preview["composition"] = payload.composition.model_dump(mode="json")
-        preview["parameter_schema"] = parameter_schema
-        preview["parameters"] = parameters
+    preview["parameter_schema"] = validation["parameter_schema"] or parameter_schema or []
+    preview["parameters"] = validation["parameters"] or parameters or {}
     return preview
 
 
@@ -1127,15 +1180,16 @@ def create_source_strategy(
     source_code = payload.source_code or default_python_source()
     validation = _source_validation_response(source_code, payload.language)
     if payload.composition is not None:
-        _, parameter_schema, parameters = _source_composition_context(payload.composition)
-    else:
-        parameter_schema, parameters = default_python_parameters()
-    unknown_parameters = sorted(set(validation["parameter_keys"]) - set(parameters))
-    if unknown_parameters:
-        raise HTTPException(
-            status_code=422,
-            detail=f"新源码策略引用了未定义参数：{', '.join(unknown_parameters)}",
+        _, fallback_schema, fallback_parameters = _source_composition_context(
+            payload.composition
         )
+    else:
+        fallback_schema, fallback_parameters = default_python_parameters()
+    parameter_schema, parameters = _source_parameter_contract(
+        validation,
+        fallback_schema,
+        fallback_parameters,
+    )
     try:
         risks = _normalize_risk_defaults(payload.risk_defaults, base=DEFAULT_RISK)
     except ValueError as exc:

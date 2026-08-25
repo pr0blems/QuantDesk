@@ -85,7 +85,29 @@ def test_source_composition_builds_a_parameter_contract_for_generated_code() -> 
     assert parameters["ema_fast_period"] == 12
     assert parameters["volume_ratio_min_ratio"] == 1.4
     assert context["required_parameter_keys"] == sorted(parameters)
+    assert context["parameter_values"] == parameters
+    assert context["parameter_schema"] == schema
     assert {item["key"] for item in schema} == set(parameters)
+
+
+def test_source_validation_response_exposes_source_owned_parameter_contract() -> None:
+    source = '''TIMEFRAMES = ("1h",)
+TRIGGER_TIMEFRAME = "1h"
+LOOKBACK_BARS = 40
+DIRECTIONS = ("long",)
+PARAMETERS = {
+    "period": {"label": "计算周期", "type": "integer", "default": 21, "min": 2, "max": 200, "step": 1},
+}
+def evaluate(context, params):
+    bars = context["bars"][TRIGGER_TIMEFRAME]
+    return {"decision": "HOLD", "evidence": {"period": params["period"], "bars": len(bars)}}
+'''
+
+    validation = strategy_routes._source_validation_response(source)
+
+    assert validation["parameter_keys"] == ["period"]
+    assert validation["parameters"] == {"period": 21}
+    assert validation["parameter_schema"][0]["label"] == "计算周期"
 
 
 def register_and_login(client: TestClient, username: str) -> dict[str, str]:

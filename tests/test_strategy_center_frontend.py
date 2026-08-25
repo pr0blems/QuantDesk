@@ -52,6 +52,15 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
 
     assert "AI 生成 Python 源码" in script
     assert "左侧指标是强约束" in script
+    assert script.index('data-edit-scope="source"') < script.index(
+        'data-edit-scope="parameters"'
+    )
+    assert script.index('data-workbench-tab="ai"') < script.index(
+        'data-workbench-tab="backtest"'
+    )
+    assert 'id="strategy-dsl-scope" class="hidden"' in script
+    assert "由 Python 源码中的 PARAMETERS 动态生成" in script
+    assert "syncSourceParameterContract" in script
 
 
 def test_react_canary_loads_the_current_strategy_component_asset() -> None:
@@ -63,8 +72,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260825-codecomposer2" in index
-    assert index.index("/assets/strategies.js?v=20260825-codecomposer2") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260825-sourceparams3" in index
+    assert index.index("/assets/strategies.js?v=20260825-sourceparams3") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel

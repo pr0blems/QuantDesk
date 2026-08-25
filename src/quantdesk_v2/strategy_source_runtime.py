@@ -27,6 +27,7 @@ MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 SUPPORTED_TIMEFRAMES = frozenset({"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"})
 DECISIONS = frozenset({"LONG_ENTRY", "SHORT_ENTRY", "HOLD", "SKIP"})
 REQUIRED_CONSTANTS = frozenset({"TIMEFRAMES", "TRIGGER_TIMEFRAME", "LOOKBACK_BARS", "DIRECTIONS"})
+OPTIONAL_CONSTANTS = frozenset({"VALID_FOR_BARS", "PARAMETERS"})
 FORBIDDEN_NAMES = frozenset(
     {
         "__import__",
@@ -114,6 +115,7 @@ class SourceMetadata:
     directions: tuple[str, ...]
     valid_for_bars: int
     parameter_keys: tuple[str, ...]
+    parameter_schema: tuple[dict[str, Any], ...]
     source_hash: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -126,6 +128,7 @@ class SourceMetadata:
             "directions": list(self.directions),
             "valid_for_bars": self.valid_for_bars,
             "parameter_keys": list(self.parameter_keys),
+            "parameter_schema": [dict(item) for item in self.parameter_schema],
             "source_hash": self.source_hash,
         }
 
@@ -164,7 +167,7 @@ def validate_source(source_code: str, language: str = "python") -> SourceMetadat
             continue
         if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
             name = statement.targets[0].id
-            if name not in REQUIRED_CONSTANTS | {"VALID_FOR_BARS"}:
+            if name not in REQUIRED_CONSTANTS | OPTIONAL_CONSTANTS:
                 raise StrategySourceError(f"顶层只允许声明运行时常量，不能声明 {name}")
             if name in constants:
                 raise StrategySourceError(f"运行时常量不能重复声明：{name}")
@@ -229,6 +232,9 @@ def validate_source(source_code: str, language: str = "python") -> SourceMetadat
             }
         )
     )
+    parameter_schema = _parameter_schema_from_constant(
+        constants.get("PARAMETERS"), parameter_keys
+    )
 
     raw_timeframes = constants["TIMEFRAMES"]
     if not isinstance(raw_timeframes, (tuple, list)) or not 1 <= len(raw_timeframes) <= 6:
@@ -260,8 +266,111 @@ def validate_source(source_code: str, language: str = "python") -> SourceMetadat
         directions=directions,
         valid_for_bars=valid_for_bars,
         parameter_keys=parameter_keys,
+        parameter_schema=parameter_schema,
         source_hash=source_hash(normalized),
     )
+
+
+def _parameter_schema_from_constant(
+    raw: Any, parameter_keys: tuple[str, ...]
+) -> tuple[dict[str, Any], ...]:
+    """Validate the source-owned, literal parameter contract.
+
+    PARAMETERS is optional for legacy sources. New/AI-authored sources use it so
+    the configuration UI can be derived from the executable source rather than a
+    stale database-only schema.
+    """
+
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or len(raw) > 32:
+        raise StrategySourceError("PARAMETERS 必须是最多包含 32 项的字典")
+    schema: list[dict[str, Any]] = []
+    for raw_key, raw_definition in raw.items():
+        if (
+            not isinstance(raw_key, str)
+            or not raw_key.isidentifier()
+            or raw_key.startswith("_")
+            or len(raw_key) > 64
+        ):
+            raise StrategySourceError("PARAMETERS 参数名必须是有效的 Python 标识符")
+        if not isinstance(raw_definition, dict):
+            raise StrategySourceError(f"PARAMETERS.{raw_key} 必须是参数定义字典")
+        unknown = sorted(
+            set(raw_definition) - {"label", "type", "default", "min", "max", "step", "help"}
+        )
+        if unknown:
+            raise StrategySourceError(
+                f"PARAMETERS.{raw_key} 包含未知字段：{', '.join(unknown)}"
+            )
+        parameter_type = raw_definition.get("type", "number")
+        if parameter_type not in {"integer", "number"}:
+            raise StrategySourceError(
+                f"PARAMETERS.{raw_key}.type 只支持 integer 或 number"
+            )
+        label = raw_definition.get("label", raw_key.replace("_", " "))
+        help_text = raw_definition.get("help")
+        if not isinstance(label, str) or not label.strip() or len(label) > 80:
+            raise StrategySourceError(f"PARAMETERS.{raw_key}.label 格式无效")
+        if help_text is not None and (
+            not isinstance(help_text, str) or len(help_text) > 200
+        ):
+            raise StrategySourceError(f"PARAMETERS.{raw_key}.help 格式无效")
+        if "default" not in raw_definition:
+            raise StrategySourceError(f"PARAMETERS.{raw_key} 缺少 default")
+        default = _finite_parameter_number(
+            raw_definition["default"], f"PARAMETERS.{raw_key}.default"
+        )
+        minimum = _finite_parameter_number(
+            raw_definition.get("min", -1_000_000), f"PARAMETERS.{raw_key}.min"
+        )
+        maximum = _finite_parameter_number(
+            raw_definition.get("max", 1_000_000), f"PARAMETERS.{raw_key}.max"
+        )
+        step = _finite_parameter_number(
+            raw_definition.get("step", 1 if parameter_type == "integer" else 0.1),
+            f"PARAMETERS.{raw_key}.step",
+        )
+        if minimum > maximum or not minimum <= default <= maximum or step <= 0:
+            raise StrategySourceError(f"PARAMETERS.{raw_key} 的范围或默认值无效")
+        if parameter_type == "integer" and any(
+            not float(value).is_integer() for value in (minimum, maximum, default, step)
+        ):
+            raise StrategySourceError(f"PARAMETERS.{raw_key} 的整数配置必须使用整数")
+        definition: dict[str, Any] = {
+            "key": raw_key,
+            "label": label.strip(),
+            "type": parameter_type,
+            "default": int(default) if parameter_type == "integer" else default,
+            "min": int(minimum) if parameter_type == "integer" else minimum,
+            "max": int(maximum) if parameter_type == "integer" else maximum,
+            "step": int(step) if parameter_type == "integer" else step,
+        }
+        if help_text:
+            definition["help"] = help_text.strip()
+        schema.append(definition)
+    declared_keys = {item["key"] for item in schema}
+    referenced_keys = set(parameter_keys)
+    missing = sorted(referenced_keys - declared_keys)
+    unused = sorted(declared_keys - referenced_keys)
+    if missing:
+        raise StrategySourceError(
+            "PARAMETERS 缺少源码引用的参数：" + ", ".join(missing)
+        )
+    if unused:
+        raise StrategySourceError(
+            "PARAMETERS 包含源码未使用的参数：" + ", ".join(unused)
+        )
+    return tuple(schema)
+
+
+def _finite_parameter_number(value: Any, path: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StrategySourceError(f"{path} 必须是数字")
+    numeric = float(value)
+    if not math.isfinite(numeric) or abs(numeric) > 1_000_000:
+        raise StrategySourceError(f"{path} 必须是有限且合理的数字")
+    return int(numeric) if numeric.is_integer() else numeric
 
 
 def evaluate_source(
@@ -335,6 +444,13 @@ TRIGGER_TIMEFRAME = "1h"
 LOOKBACK_BARS = 200
 DIRECTIONS = ("long", "short")
 VALID_FOR_BARS = 1
+PARAMETERS = {
+    "fast_period": {"label": "快速 EMA", "type": "integer", "default": 20, "min": 2, "max": 200, "step": 1},
+    "slow_period": {"label": "慢速 EMA", "type": "integer", "default": 50, "min": 3, "max": 500, "step": 1},
+    "atr_period": {"label": "ATR 周期", "type": "integer", "default": 14, "min": 2, "max": 100, "step": 1},
+    "stop_atr": {"label": "止损 ATR 倍数", "type": "number", "default": 1.5, "min": 0.1, "max": 10, "step": 0.1},
+    "take_profit_r": {"label": "止盈 R 倍数", "type": "number", "default": 2, "min": 0.1, "max": 20, "step": 0.1},
+}
 
 def evaluate(context, params):
     bars = context["bars"][TRIGGER_TIMEFRAME]
@@ -370,6 +486,7 @@ TRIGGER_TIMEFRAME = "1h"
 LOOKBACK_BARS = 200
 DIRECTIONS = ("long", "short")
 VALID_FOR_BARS = 1
+PARAMETERS = {}
 
 def evaluate(context, params):
     bars = context["bars"][TRIGGER_TIMEFRAME]
@@ -384,13 +501,7 @@ def evaluate(context, params):
 
 
 def default_python_parameters() -> tuple[list[dict[str, Any]], dict[str, int | float]]:
-    schema = [
-        {"key": "fast_period", "label": "快速 EMA", "type": "integer", "default": 20, "min": 2, "max": 200},
-        {"key": "slow_period", "label": "慢速 EMA", "type": "integer", "default": 50, "min": 3, "max": 500},
-        {"key": "atr_period", "label": "ATR 周期", "type": "integer", "default": 14, "min": 2, "max": 100},
-        {"key": "stop_atr", "label": "止损 ATR 倍数", "type": "number", "default": 1.5, "min": 0.1, "max": 10},
-        {"key": "take_profit_r", "label": "止盈 R 倍数", "type": "number", "default": 2, "min": 0.1, "max": 20},
-    ]
+    schema = [dict(item) for item in validate_source(default_python_source()).parameter_schema]
     return schema, {item["key"]: item["default"] for item in schema}
 
 
