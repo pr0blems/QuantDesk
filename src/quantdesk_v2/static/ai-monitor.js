@@ -1775,33 +1775,9 @@ class AiMonitorDashboard extends HTMLElement {
     const target = this.q("#signal-health-strip");
     if (!target) return;
     const overview = this.state.overview || {};
-    const macro = this.state.macroMarket || {};
     const health = overview.data_health || overview.market_data_health || overview.realtime_health || overview.streaming || {};
-    const sourceHealth = health.sources || overview.data_sources || {};
-    const providers = macro.providers || {};
-    const websocketConnected = Boolean(this.firstValue(
-      health.websocket_connected,
-      health.ws_connected,
-      health.stream_connected,
-      sourceHealth.websocket?.connected,
-      sourceHealth.unusual_whales?.websocket_connected,
-      false,
-    ));
     const incrementalStreamConnected = this.state.updateStreamStatus === "connected";
-    const restHealthy = this.firstValue(
-      health.rest_healthy,
-      health.api_healthy,
-      sourceHealth.rest?.healthy,
-      providers.unusual_whales_configured ? true : undefined,
-      Boolean(this.state.lastSuccessfulRefreshAt),
-    ) !== false;
-    const lastEventAt = this.firstValue(
-      health.last_event_at,
-      health.last_message_at,
-      sourceHealth.websocket?.last_message_at,
-      macro.captured_at,
-      this.state.lastSuccessfulRefreshAt,
-    );
+    const transportUpdatedAt = this.state.lastSuccessfulRefreshAt;
     const quoteHealth = health.quote || health.quotes || {};
     const quoteAgeMs = Number(this.firstValue(quoteHealth.age_ms, quoteHealth.quote_age_ms, health.quote_age_ms));
     const quoteCoverageRaw = Number(this.firstValue(quoteHealth.coverage, quoteHealth.coverage_ratio, health.quote_coverage));
@@ -1822,29 +1798,28 @@ class AiMonitorDashboard extends HTMLElement {
     const moduleCoverage = sampleCount
       ? (moduleCounts.optionFlow + moduleCounts.gex + moduleCounts.institutional) / (sampleCount * 3) * 100
       : 0;
-    const lastSuccessfulRefreshMs = this.state.lastSuccessfulRefreshAt ? this.parseDate(this.state.lastSuccessfulRefreshAt).getTime() : NaN;
+    const lastSuccessfulRefreshMs = transportUpdatedAt ? this.parseDate(transportUpdatedAt).getTime() : NaN;
     const hasRecentRestSuccess = Number.isFinite(lastSuccessfulRefreshMs) && Date.now() - lastSuccessfulRefreshMs <= 120000;
+    const restPollingHealthy = hasRecentRestSuccess && !this.state.lastRefreshError;
     const pipelineInitializing = this.state.fullLoadLoading
       || (!this.state.lastSuccessfulRefreshAt && ["idle", "connecting"].includes(this.state.updateStreamStatus));
-    const pipelineReconnecting = this.state.updateStreamStatus === "reconnecting" && (restHealthy || hasRecentRestSuccess);
+    const pipelineReconnecting = this.state.updateStreamStatus === "reconnecting";
     const pipelineTone = this.state.lastRefreshError
       ? "danger"
-      : websocketConnected || incrementalStreamConnected
+      : incrementalStreamConnected
       ? "healthy"
-      : pipelineInitializing || pipelineReconnecting || restHealthy
+      : pipelineInitializing || pipelineReconnecting || restPollingHealthy
       ? "degraded"
       : "danger";
     const pipelineLabel = this.state.lastRefreshError
       ? "更新异常"
-      : websocketConnected
-      ? "行情实时流在线"
       : incrementalStreamConnected
       ? "页面增量推送在线"
       : pipelineInitializing
       ? "正在连接数据"
       : pipelineReconnecting
       ? "增量推送重连中"
-      : restHealthy
+      : restPollingHealthy
       ? "REST 轮询降级"
       : "数据源离线";
     const quoteTone = quoteCoverage >= 90 && (!Number.isFinite(quoteAgeMs) || quoteAgeMs <= 2000) ? "healthy" : quoteCoverage > 0 ? "degraded" : "neutral";
@@ -1852,7 +1827,7 @@ class AiMonitorDashboard extends HTMLElement {
     const versions = health.versions || overview.versions || {};
     this.patchStablePanel(target, `<header data-patch-key="health-heading"><span>DATA HEALTH</span><strong>触发数据状态</strong><small>异常只阻断新触发，不会清空已展示机会。</small></header>
       <div class="signal-health-grid" data-patch-key="health-grid">
-        <article class="${pipelineTone}"><span>传输状态</span><b><i></i>${this.escape(pipelineLabel)}</b><small>${lastEventAt ? `最后事件 ${this.formatDate(lastEventAt)}` : "等待首次数据"}</small></article>
+        <article class="${pipelineTone}"><span>传输状态</span><b><i></i>${this.escape(pipelineLabel)}</b><small>${transportUpdatedAt ? `最后刷新 ${this.formatDate(transportUpdatedAt)}` : "等待首次数据"}</small></article>
         <article class="${quoteTone}"><span>Quote 行情质量</span><b>${quoteCoverage.toFixed(0)}% 覆盖</b><small>${Number.isFinite(quoteAgeMs) ? `最新延迟 ${Math.round(quoteAgeMs)} ms` : "按机会数据覆盖估算"}</small></article>
         <article class="${featureTone}"><span>增强特征覆盖</span><b>${moduleCoverage.toFixed(0)}%</b><small>期权流 ${moduleCounts.optionFlow}/${sampleCount} · GEX ${moduleCounts.gex}/${sampleCount} · 机构 ${moduleCounts.institutional}/${sampleCount}</small></article>
         <article class="neutral"><span>决策版本</span><b>${this.escape(this.firstValue(versions.decision, health.decision_version, "兼容模式"))}</b><small>特征 ${this.escape(this.firstValue(versions.feature, health.feature_version, "--"))} · 权重 ${this.escape(this.firstValue(versions.weights, health.weights_version, "--"))}</small></article>
