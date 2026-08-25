@@ -148,7 +148,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260820-51">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260825-52">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
