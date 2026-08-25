@@ -2031,7 +2031,10 @@ class StrategyCenter extends HTMLElement {
       };
       this.renderPreview();
     } catch (error) {
-      this.showAiError(error?.message || "AI 修改预览生成失败，请稍后重试。");
+      const message = String(error?.message || "AI 修改预览生成失败，请稍后重试。");
+      this.showAiError(/timeout|timed out|超时|Gateway Timeout/i.test(message)
+        ? "策略源码较长，模型生成超时。系统已为源码生成预留更长时间，请稍后重试；也可以先减少指标数量。"
+        : this.friendlyMutationError(error));
     } finally {
       this.setButtonBusy(button, false);
     }

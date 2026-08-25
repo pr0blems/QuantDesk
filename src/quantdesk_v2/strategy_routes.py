@@ -705,7 +705,7 @@ def _generate_source_ai_preview(
                 provider_code=provider_code,
                 api_key=api_key,
                 model_name=model_name,
-                timeout_seconds=settings.openai_strategy_timeout_seconds,
+                timeout_seconds=settings.openai_strategy_source_timeout_seconds,
                 generation_context=generation_context,
             )
         else:
@@ -714,7 +714,7 @@ def _generate_source_ai_preview(
                 payload.prompt,
                 settings.openai_api_key.get_secret_value(),
                 settings.openai_strategy_model,
-                settings.openai_strategy_timeout_seconds,
+                settings.openai_strategy_source_timeout_seconds,
                 safety_identifier,
                 generation_context=generation_context,
             )

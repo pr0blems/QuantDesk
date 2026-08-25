@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr = SecretStr("")
     openai_strategy_model: str = "gpt-5.6-luna"
     openai_strategy_timeout_seconds: float = 20.0
+    openai_strategy_source_timeout_seconds: float = 60.0
     deepseek_optimizer_timeout_seconds: float = 120.0
     deepseek_optimizer_max_tokens: int = 16_000
 
@@ -172,6 +173,10 @@ class Settings(BaseSettings):
             raise RuntimeError("OPENAI_STRATEGY_MODEL must be an approved GPT-5.6 model")
         if not 2 <= self.openai_strategy_timeout_seconds <= 30:
             raise RuntimeError("OPENAI_STRATEGY_TIMEOUT_SECONDS must be between 2 and 30")
+        if not 10 <= self.openai_strategy_source_timeout_seconds <= 180:
+            raise RuntimeError(
+                "OPENAI_STRATEGY_SOURCE_TIMEOUT_SECONDS must be between 10 and 180"
+            )
 
     def _validate_finnhub_settings(self) -> None:
         parsed = urlparse(self.finnhub_base_url)
