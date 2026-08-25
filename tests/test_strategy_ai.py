@@ -276,6 +276,10 @@ def test_user_model_uses_server_owned_chat_completion_endpoint(
     else:
         assert captured["payload"]["response_format"] == {"type": "json_object"}
         assert "reasoning_split" not in captured["payload"]
+    if provider_code == "deepseek":
+        assert captured["payload"]["thinking"] == {"type": "disabled"}
+    else:
+        assert "thinking" not in captured["payload"]
     token_field = (
         "max_completion_tokens"
         if provider_code in {"openai", "qwen", "kimi", "minimax"}
@@ -804,6 +808,8 @@ def evaluate(context, params):
     assert user_payload["indicator_blueprint"]["selected_indicators"] == [
         {"key": "ema"}
     ]
+    assert captured["payload"]["thinking"] == {"type": "disabled"}
+    assert captured["payload"]["max_tokens"] == 8_000
     assert preview["provider"] == "deepseek"
 
 

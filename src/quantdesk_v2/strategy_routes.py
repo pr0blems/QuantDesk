@@ -649,9 +649,15 @@ def _strategy_ai_http_error(exc: StrategyAiError) -> HTTPException:
         "upstream": 502,
         "invalid_output": 502,
     }
+    message_by_category = {
+        "not_configured": "AI 模型尚未配置或凭证不可用",
+        "timeout": "AI 模型生成超时，请稍后重试",
+        "upstream": "AI 模型服务暂时不可用，请稍后重试",
+        "invalid_output": "AI 模型没有返回可用的策略源码，请重试",
+    }
     return HTTPException(
         status_code=status_by_category[exc.category],
-        detail={"message": "AI strategy preview failed", "category": exc.category},
+        detail={"message": message_by_category[exc.category], "category": exc.category},
     )
 
 

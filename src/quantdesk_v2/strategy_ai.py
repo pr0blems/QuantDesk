@@ -90,6 +90,30 @@ class StrategyAiError(RuntimeError):
         self.category = category
 
 
+def _configure_chat_json_response(
+    payload: dict[str, Any], provider: str, *, max_tokens: int
+) -> None:
+    """Request deterministic JSON without spending the budget on hidden reasoning."""
+
+    if provider == "minimax":
+        payload["reasoning_split"] = True
+    else:
+        payload["response_format"] = {"type": "json_object"}
+    if provider == "deepseek":
+        # DeepSeek V4 models may enable thinking by default.  A source-code
+        # response can consume the complete token budget in reasoning_content
+        # and leave message.content empty, which is unusable for this strict
+        # JSON boundary.  The strategy composer needs the code artifact, not a
+        # hidden chain of thought, so force the provider's non-thinking mode.
+        payload["thinking"] = {"type": "disabled"}
+    token_field = (
+        "max_completion_tokens"
+        if provider in {"openai", "qwen", "kimi", "minimax"}
+        else "max_tokens"
+    )
+    payload[token_field] = max_tokens
+
+
 def generate_strategy_preview(
     strategy_dict: Mapping[str, Any],
     prompt: str,
@@ -324,16 +348,7 @@ def _chat_completions_preview(
         ],
         "stream": False,
     }
-    if provider == "minimax":
-        request_payload["reasoning_split"] = True
-    else:
-        request_payload["response_format"] = {"type": "json_object"}
-    token_limit_field = (
-        "max_completion_tokens"
-        if provider in {"openai", "qwen", "kimi", "minimax"}
-        else "max_tokens"
-    )
-    request_payload[token_limit_field] = 2_000
+    _configure_chat_json_response(request_payload, provider, max_tokens=2_000)
     try:
         request_body = json.dumps(
             request_payload, ensure_ascii=False, separators=(",", ":")
@@ -479,16 +494,7 @@ def _chat_completions_code_preview(
         "messages": _code_edit_messages(current_spec, prompt),
         "stream": False,
     }
-    if provider == "minimax":
-        request_payload["reasoning_split"] = True
-    else:
-        request_payload["response_format"] = {"type": "json_object"}
-    token_limit_field = (
-        "max_completion_tokens"
-        if provider in {"openai", "qwen", "kimi", "minimax"}
-        else "max_tokens"
-    )
-    request_payload[token_limit_field] = 6_000
+    _configure_chat_json_response(request_payload, provider, max_tokens=6_000)
     try:
         request_body = json.dumps(
             request_payload, ensure_ascii=False, separators=(",", ":")
@@ -665,16 +671,7 @@ def _chat_completions_source_preview(
         "messages": _source_edit_messages(source_code, prompt, generation_context),
         "stream": False,
     }
-    if provider == "minimax":
-        request_payload["reasoning_split"] = True
-    else:
-        request_payload["response_format"] = {"type": "json_object"}
-    token_field = (
-        "max_completion_tokens"
-        if provider in {"openai", "qwen", "kimi", "minimax"}
-        else "max_tokens"
-    )
-    request_payload[token_field] = 8_000
+    _configure_chat_json_response(request_payload, provider, max_tokens=8_000)
     try:
         request_body = json.dumps(
             request_payload, ensure_ascii=False, separators=(",", ":")
