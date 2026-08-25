@@ -61,6 +61,8 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
     assert 'id="strategy-dsl-scope" class="hidden"' in script
     assert "由 Python 源码中的 PARAMETERS 动态生成" in script
     assert "syncSourceParameterContract" in script
+    assert "setSourceWorkbenchShellActive" in script
+    assert 'sourceAvailable && ["source", "parameters"].includes(this.editScope)' in script
 
 
 def test_react_canary_loads_the_current_strategy_component_asset() -> None:
@@ -72,8 +74,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260825-sourceparams3" in index
-    assert index.index("/assets/strategies.js?v=20260825-sourceparams3") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260825-workbenchshell1" in index
+    assert index.index("/assets/strategies.js?v=20260825-workbenchshell1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel
@@ -87,6 +89,7 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     assert ".strategy-code-editor" in stylesheet
     assert ".strategy-code-status.success" in stylesheet
     assert ".strategy-editor.source-workbench" in stylesheet
+    assert ".strategy-editor.source-workbench-shell" in stylesheet
     assert ".strategy-runner-result" in stylesheet
 
 

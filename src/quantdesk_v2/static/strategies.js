@@ -918,6 +918,7 @@ class StrategyCenter extends HTMLElement {
     this.setButtonBusy(this.querySelector("#strategy-ai-preview-button"), false);
     this.setButtonBusy(this.querySelector("#strategy-ai-apply"), false);
     this.setSourceWorkbenchActive(false);
+    this.setSourceWorkbenchShellActive(false);
   }
 
   isSourceWorkbench() {
@@ -943,6 +944,10 @@ class StrategyCenter extends HTMLElement {
     this.switchSourceWorkbenchTab(this.sourceWorkbenchTab || "backtest");
     this.applySourceRiskDefaults();
     void this.loadSourceBacktestCatalog();
+  }
+
+  setSourceWorkbenchShellActive(active) {
+    this.querySelector(".strategy-editor").classList.toggle("source-workbench-shell", Boolean(active));
   }
 
   setSourceWorkbenchDirty(dirty) {
@@ -1409,6 +1414,9 @@ class StrategyCenter extends HTMLElement {
     const codeMode = ["code", "source"].includes(this.editScope);
     const sourceMode = this.editScope === "source";
     this.setSourceWorkbenchActive(sourceMode);
+    this.setSourceWorkbenchShellActive(
+      sourceAvailable && ["source", "parameters"].includes(this.editScope),
+    );
     this.querySelector("#strategy-code-block").classList.toggle("hidden", !codeMode);
     if (codeMode) {
       this.querySelector("#strategy-parameters-block").classList.add("hidden");
@@ -1556,6 +1564,7 @@ class StrategyCenter extends HTMLElement {
     const templateMode = this.createMode === "template";
     const sourceMode = this.createMode === "source";
     this.setSourceWorkbenchActive(sourceMode);
+    this.setSourceWorkbenchShellActive(sourceMode);
     this.querySelector("#strategy-indicator-composer").classList.toggle("hidden", templateMode || sourceMode);
     this.querySelector("#strategy-template-composer").classList.toggle("hidden", !templateMode);
     this.querySelector("#strategy-code-block").classList.toggle("hidden", !sourceMode);

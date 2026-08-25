@@ -3282,7 +3282,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".workspace-content.ai-monitor-mode" in legacy_styles
     for asset in (
         "/assets/style.css?v=20260810-font1_6x-1",
-        "/assets/strategies.css?v=20260824-workbench1",
+        "/assets/strategies.css?v=20260825-workbenchshell1",
         "/assets/terminal.css?v=20260810-font1_6x-1",
         "/assets/paper.js?v=20260809-paper-combo-1",
         "/assets/live.js?v=20260809-font1_6x-1",

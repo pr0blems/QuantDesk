@@ -332,13 +332,13 @@
 .strategy-ai-apply-button { min-height: 36px; padding: 7px 10px; font-size: 14.4px; }
 .strategy-ai-pane > .strategy-form-error { margin-top: 10px; }
 
-.strategy-editor.source-workbench { width: calc(100vw - 16px); height: calc(100vh - 16px); height: calc(100svh - 16px); max-width: 1800px; border-radius: 9px; }
-.strategy-editor.source-workbench .strategy-editor-head { min-height: 66px; padding: 10px 13px; background: linear-gradient(100deg, #0b1c2c, #07131f); }
-.strategy-editor.source-workbench .strategy-editor-head h2 { font-size: 24px; }
-.strategy-editor.source-workbench .strategy-editor-head p { font-size: 11.2px; }
-.strategy-editor.source-workbench .strategy-editor-body { grid-template-columns: minmax(560px, 1.45fr) minmax(380px, .82fr); }
-.strategy-editor.source-workbench .strategy-form,
-.strategy-editor.source-workbench .strategy-ai-panel { padding: 10px 11px 14px; }
+.strategy-editor.source-workbench-shell { width: calc(100vw - 16px); height: calc(100vh - 16px); height: calc(100svh - 16px); max-width: 1800px; border-radius: 9px; }
+.strategy-editor.source-workbench-shell .strategy-editor-head { min-height: 66px; padding: 10px 13px; background: linear-gradient(100deg, #0b1c2c, #07131f); }
+.strategy-editor.source-workbench-shell .strategy-editor-head h2 { font-size: 24px; }
+.strategy-editor.source-workbench-shell .strategy-editor-head p { font-size: 11.2px; }
+.strategy-editor.source-workbench-shell .strategy-editor-body { grid-template-columns: minmax(560px, 1.45fr) minmax(380px, .82fr); }
+.strategy-editor.source-workbench-shell .strategy-form,
+.strategy-editor.source-workbench-shell .strategy-ai-panel { padding: 10px 11px 14px; }
 .strategy-editor.source-workbench .strategy-form { display: flex; align-content: stretch; flex-direction: column; overflow: hidden; }
 .strategy-editor.source-workbench #strategy-basic-block { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 10px; }
 .strategy-editor.source-workbench #strategy-basic-block .strategy-section-heading { display: none; }
@@ -352,7 +352,7 @@
 .strategy-editor.source-workbench .strategy-code-lines,
 .strategy-editor.source-workbench .strategy-code-editor { min-height: 100%; height: 100%; resize: none; }
 .strategy-editor.source-workbench .strategy-form-actions { display: none; }
-.strategy-editor.source-workbench .strategy-ai-panel { background: radial-gradient(circle at 100% 0, rgba(88, 104, 225, .12), transparent 33%), #06121e; }
+.strategy-editor.source-workbench-shell .strategy-ai-panel { background: radial-gradient(circle at 100% 0, rgba(88, 104, 225, .12), transparent 33%), #06121e; }
 
 .strategy-backtest-pane { display: grid; align-content: start; gap: 11px; }
 .strategy-runner-head h3 { color: #d8e4ee; }
@@ -442,7 +442,7 @@
 @media (max-width: 1120px) {
   .strategy-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .strategy-editor-body { grid-template-columns: minmax(0, 1fr) minmax(320px, .82fr); }
-  .strategy-editor.source-workbench .strategy-editor-body { grid-template-columns: minmax(500px, 1.2fr) minmax(350px, .82fr); }
+  .strategy-editor.source-workbench-shell .strategy-editor-body { grid-template-columns: minmax(500px, 1.2fr) minmax(350px, .82fr); }
   .strategy-runner-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -459,12 +459,12 @@
   .strategy-section-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .strategy-dialog-layer { place-items: stretch; padding: 0; }
   .strategy-editor { width: 100%; height: 100vh; height: 100svh; border: 0; border-radius: 0; }
-  .strategy-editor.source-workbench { width: 100%; height: 100svh; border-radius: 0; }
-  .strategy-editor.source-workbench .strategy-editor-head { align-items: flex-start; }
-  .strategy-editor.source-workbench .strategy-editor-head-actions { align-items: flex-end; flex-direction: column-reverse; }
-  .strategy-editor.source-workbench .strategy-editor-body { display: block; overflow-y: auto; }
-  .strategy-editor.source-workbench .strategy-form,
-  .strategy-editor.source-workbench .strategy-ai-panel { min-height: auto; overflow: visible; }
+  .strategy-editor.source-workbench-shell { width: 100%; height: 100svh; border-radius: 0; }
+  .strategy-editor.source-workbench-shell .strategy-editor-head { align-items: flex-start; }
+  .strategy-editor.source-workbench-shell .strategy-editor-head-actions { align-items: flex-end; flex-direction: column-reverse; }
+  .strategy-editor.source-workbench-shell .strategy-editor-body { display: block; overflow-y: auto; }
+  .strategy-editor.source-workbench-shell .strategy-form,
+  .strategy-editor.source-workbench-shell .strategy-ai-panel { min-height: auto; overflow: visible; }
   .strategy-editor.source-workbench .strategy-code-frame { height: min(62vh, 620px); }
   .strategy-workbench-dirty { display: none; }
   .strategy-editor-body { min-height: 0; display: block; overflow-y: auto; overscroll-behavior: contain; }
