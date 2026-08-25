@@ -18,7 +18,10 @@ from quantdesk_v2.main import create_app
 from quantdesk_v2.models import AiModelConfig, StrategyRevision, User, UserStrategy
 from quantdesk_v2.schemas import StrategySourceComposition
 from quantdesk_v2.security import CredentialCipher, api_key_fingerprint
-from quantdesk_v2.strategy_ai import generate_local_strategy_preview
+from quantdesk_v2.strategy_ai import (
+    build_platform_indicator_source,
+    generate_local_strategy_preview,
+)
 
 
 def build_test_client(mysql_test_engine: Engine):
@@ -108,6 +111,40 @@ def evaluate(context, params):
     assert validation["parameter_keys"] == ["period"]
     assert validation["parameters"] == {"period": 21}
     assert validation["parameter_schema"][0]["label"] == "计算周期"
+
+
+def test_platform_compiler_builds_safe_source_for_four_indicator_blueprint() -> None:
+    composition = StrategySourceComposition.model_validate(
+        {
+            "indicators": [
+                {"key": "ema", "weight": 1, "parameters": {"fast_period": 20, "slow_period": 50}},
+                {
+                    "key": "macd",
+                    "weight": 1,
+                    "parameters": {"fast_period": 12, "slow_period": 26, "signal_period": 9},
+                },
+                {
+                    "key": "rsi",
+                    "weight": 1,
+                    "parameters": {"period": 14, "oversold": 30, "overbought": 70},
+                },
+                {"key": "bollinger", "weight": 1, "parameters": {"period": 20, "stddev": 2}},
+            ],
+            "timeframe": "1h",
+            "directions": ["long", "short"],
+            "confirmation_threshold": 70,
+            "signal_valid_bars": 2,
+        }
+    )
+    context, _, parameters = strategy_routes._source_composition_context(composition)
+
+    source = build_platform_indicator_source(context)
+    validation = strategy_routes._source_validation_response(source)
+
+    assert validation["valid"] is True
+    assert validation["data_requirements"]["trigger_timeframe"] == "1h"
+    assert set(validation["parameter_keys"]) == set(parameters)
+    assert validation["directions"] == ["long", "short"]
 
 
 def register_and_login(client: TestClient, username: str) -> dict[str, str]:
@@ -460,6 +497,42 @@ def test_ai_composer_returns_reviewable_indicator_draft(
         }
 
 
+def test_ai_composer_normalizes_invalid_cross_parameter_relations() -> None:
+    proposed = strategy_routes._indicator_ai_snapshot()
+    parameters = proposed["parameters"]
+    for key in strategy_routes.INDICATOR_BY_KEY:
+        parameters[f"{key}_weight"] = 0
+    for key in ("ema", "macd", "rsi", "bollinger"):
+        parameters[f"{key}_weight"] = 1
+    parameters.update(
+        {
+            "ema_fast_period": 80,
+            "ema_slow_period": 20,
+            "macd_fast_period": 40,
+            "macd_slow_period": 10,
+            "rsi_oversold": 80,
+            "rsi_overbought": 20,
+        }
+    )
+
+    draft = strategy_routes._indicator_draft_from_proposed(
+        proposed, prompt="EMA RSI MACD 布林线超买超卖策略", local=False
+    )
+    selections = {item["key"]: item["parameters"] for item in draft["indicators"]}
+
+    assert selections["ema"]["fast_period"] < selections["ema"]["slow_period"]
+    assert selections["macd"]["fast_period"] < selections["macd"]["slow_period"]
+    assert selections["rsi"]["oversold"] < selections["rsi"]["overbought"]
+    assert len(draft["normalization_notes"]) >= 2
+    strategy_routes.build_indicator_composite_spec(
+        selections=draft["indicators"],
+        timeframe=draft["timeframe"],
+        directions=draft["directions"],
+        confirmation_threshold=draft["confirmation_threshold"],
+        signal_valid_bars=draft["signal_valid_bars"],
+    )
+
+
 def test_strategy_edit_rejects_parameter_expansion_and_cross_tenant_apply(
     mysql_test_engine: Engine,
 ) -> None:
@@ -707,6 +780,30 @@ def evaluate(context, params):
         assert saved["parameters"]["confirmation_threshold"] == 65
         assert set(saved["source_validation"]["parameter_keys"]) == set(saved["parameters"])
 
+        updated_risk = {
+            **saved["risk_defaults"],
+            "stop_loss_pct": 1.5,
+            "take_profit_pct": 4.5,
+        }
+        updated_response = client.put(
+            f"/api/v2/strategies/{saved['id']}/source",
+            headers=headers,
+            json={
+                "version": saved["version"],
+                "name": "EMA 成交量 Python 策略 v2",
+                "description": "AI 同步更新策略资料、源码参数与风险默认值。",
+                "category": "AI 源码策略",
+                "language": "python",
+                "source_code": saved["source_code"],
+                "risk_defaults": updated_risk,
+            },
+        )
+        assert updated_response.status_code == 200
+        updated = updated_response.json()
+        assert updated["risk_defaults"]["stop_loss_pct"] == 1.5
+        assert updated["risk_defaults"]["take_profit_pct"] == 4.5
+        assert updated["name"] == "EMA 成交量 Python 策略 v2"
+
         with session_factory() as db:
             row = db.scalar(
                 select(UserStrategy).where(UserStrategy.public_id == saved["id"])
@@ -720,3 +817,4 @@ def evaluate(context, params):
             )
             assert revision is not None
             assert revision.change_source == "ai"
+            assert row.risk_defaults_json["stop_loss_pct"] == 1.5

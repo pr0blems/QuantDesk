@@ -295,6 +295,7 @@ def _indicator_draft_from_proposed(
         selected_keys.append("volume_ratio" if "volume_ratio" not in selected_keys else "adx")
     selected_keys = list(dict.fromkeys(selected_keys))[:8]
     selections = []
+    normalization_notes: list[str] = []
     for key in selected_keys:
         indicator = INDICATOR_BY_KEY[key]
         raw_weight = float(parameters.get(f"{key}_weight", 1))
@@ -308,6 +309,35 @@ def _indicator_draft_from_proposed(
             elif value.is_integer():
                 value = int(value)
             indicator_parameters[definition["key"]] = value
+        if key in {"ema", "macd"} and (
+            indicator_parameters["fast_period"] >= indicator_parameters["slow_period"]
+        ):
+            slow_definition = next(
+                item for item in indicator["parameters"] if item["key"] == "slow_period"
+            )
+            corrected_slow = min(
+                int(slow_definition["max"]),
+                max(
+                    int(indicator_parameters["fast_period"]) + 1,
+                    int(slow_definition["default"]),
+                ),
+            )
+            indicator_parameters["slow_period"] = corrected_slow
+            normalization_notes.append(
+                f"{indicator['name']}：慢速周期自动调整为 {corrected_slow}"
+            )
+        if key == "rsi" and (
+            indicator_parameters["oversold"] >= indicator_parameters["overbought"]
+        ):
+            indicator_parameters["oversold"] = 30
+            indicator_parameters["overbought"] = 70
+            normalization_notes.append("RSI：超卖线/超买线自动调整为 30/70")
+        if key == "atr" and (
+            indicator_parameters["min_pct"] >= indicator_parameters["max_pct"]
+        ):
+            indicator_parameters["min_pct"] = 0.1
+            indicator_parameters["max_pct"] = 8
+            normalization_notes.append("ATR：最小/最大波动率自动调整为 0.1%/8%")
         selections.append({"key": key, "weight": weight, "parameters": indicator_parameters})
     timeframe_value = int(round(float(parameters.get("timeframe_minutes", 60))))
     timeframe = {15: "15m", 60: "1h", 240: "4h"}.get(timeframe_value, "1h")
@@ -335,6 +365,7 @@ def _indicator_draft_from_proposed(
         ),
         "indicators": selections,
         "risk_defaults": risk_defaults,
+        "normalization_notes": normalization_notes,
     }
 
 
@@ -666,6 +697,7 @@ def _apply_source_edit(
     category: str,
     language: str,
     source_code: str,
+    risk_defaults: Mapping[str, Any] | None,
     source: str,
     summary: str,
 ) -> None:
@@ -700,6 +732,12 @@ def _apply_source_edit(
     strategy.source_validation_json = validation
     strategy.parameter_schema_json = parameter_schema
     strategy.parameters_json = parameters
+    if risk_defaults is not None:
+        strategy.risk_defaults_json = _normalize_risk_defaults(
+            risk_defaults,
+            base=strategy.risk_defaults_json,
+            require_same_keys=True,
+        )
     strategy.version += 1
     strategy.updated_at = utcnow()
     _record_revision(db, strategy, source=source, summary=summary)
@@ -953,9 +991,15 @@ def preview_indicator_composition(
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=f"AI 指标方案校验失败：{exc}") from None
     indicator_names = [INDICATOR_BY_KEY[item["key"]]["name"] for item in draft["indicators"]]
+    normalization_notes = [
+        str(item) for item in draft.get("normalization_notes", []) if str(item).strip()
+    ]
+    summary = preview.get("summary") or "AI 已生成受约束的指标组合。"
+    if normalization_notes:
+        summary = f"{summary}；已自动修正参数关系：{'；'.join(normalization_notes)}"
     return {
         "provider": preview["provider"],
-        "summary": preview.get("summary") or "AI 已生成受约束的指标组合。",
+        "summary": summary[:600],
         "changes": [
             {"path": "indicators", "before": "未选择", "after": " + ".join(indicator_names)},
             {"path": "timeframe", "before": "1h", "after": draft["timeframe"]},
@@ -1439,6 +1483,7 @@ def update_strategy_source(
         category=payload.category,
         language=payload.language,
         source_code=payload.source_code,
+        risk_defaults=payload.risk_defaults,
         source="manual",
         summary="手工发布 Python 策略源码",
     )

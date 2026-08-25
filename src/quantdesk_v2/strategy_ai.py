@@ -729,6 +729,268 @@ def _source_contract_issue(
     return None
 
 
+def build_platform_indicator_source(
+    generation_context: Mapping[str, Any],
+) -> str:
+    """Compile a validated indicator blueprint into safe, editable Python.
+
+    This is the deterministic recovery path when a model selects a valid
+    composition but its free-form Python fails the sandbox contract.
+    """
+
+    timeframe = generation_context.get("timeframe")
+    directions = generation_context.get("directions")
+    selected = generation_context.get("selected_indicators")
+    schema = generation_context.get("parameter_schema")
+    values = generation_context.get("parameter_values")
+    if (
+        not isinstance(timeframe, str)
+        or not isinstance(directions, list)
+        or not directions
+        or not isinstance(selected, list)
+        or not selected
+        or not isinstance(schema, list)
+        or not isinstance(values, Mapping)
+    ):
+        raise StrategyAiError("invalid_output")
+
+    parameter_definitions: dict[str, dict[str, Any]] = {}
+    for item in schema:
+        if not isinstance(item, Mapping):
+            raise StrategyAiError("invalid_output")
+        key = str(item.get("key", ""))
+        if not _MAP_KEY_RE.fullmatch(key) or key not in values:
+            raise StrategyAiError("invalid_output")
+        parameter_definitions[key] = {
+            "label": str(item.get("label") or key)[:80],
+            "type": str(item.get("type") or "number"),
+            "default": values[key],
+            "min": item.get("min"),
+            "max": item.get("max"),
+            "step": item.get("step", 1),
+        }
+    required = generation_context.get("required_parameter_keys")
+    if not isinstance(required, list) or set(parameter_definitions) != set(required):
+        raise StrategyAiError("invalid_output")
+
+    numeric_values = [
+        abs(float(value))
+        for value in values.values()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    lookback_bars = min(1000, max(60, int(max(numeric_values or [60]) * 2 + 10)))
+    valid_for_bars = int(values.get("signal_valid_bars", 2))
+    parameters_literal = "{\n" + ",\n".join(
+        f"    {key!r}: {definition!r}"
+        for key, definition in parameter_definitions.items()
+    ) + "\n}"
+    lines = [
+        '"""平台根据 AI 指标蓝图编译的安全 Python 策略。"""',
+        "",
+        f"TIMEFRAMES = {(timeframe,)!r}",
+        f"TRIGGER_TIMEFRAME = {timeframe!r}",
+        f"LOOKBACK_BARS = {lookback_bars}",
+        f"DIRECTIONS = {tuple(str(item) for item in directions)!r}",
+        f"VALID_FOR_BARS = {valid_for_bars}",
+        f"PARAMETERS = {parameters_literal}",
+        "",
+        "def evaluate(context, params):",
+        '    bars = context["bars"][TRIGGER_TIMEFRAME]',
+        "    if len(bars) < LOOKBACK_BARS:",
+        '        return {"decision": "SKIP", "reason_codes": ["WARMUP"]}',
+        '    closes = [bar["close"] for bar in bars]',
+        '    highs = [bar["high"] for bar in bars]',
+        '    lows = [bar["low"] for bar in bars]',
+        '    volumes = [bar["volume"] for bar in bars]',
+        "    long_score = 0.0",
+        "    short_score = 0.0",
+        "    maximum_score = 0.0",
+        "    filters_pass = True",
+        "    evidence = {}",
+    ]
+    selected_keys: set[str] = set()
+    for item in selected:
+        if not isinstance(item, Mapping):
+            raise StrategyAiError("invalid_output")
+        key = str(item.get("key", ""))
+        if key in selected_keys or key not in {
+            "ema", "macd", "rsi", "bollinger", "adx", "donchian", "volume_ratio", "atr"
+        }:
+            raise StrategyAiError("invalid_output")
+        selected_keys.add(key)
+        weight_key = f"{key}_weight"
+        if weight_key not in parameter_definitions:
+            raise StrategyAiError("invalid_output")
+        prefix = f"    {key}_weight = float(params[{weight_key!r}])"
+        lines.append(prefix)
+        if key not in {"volume_ratio", "atr"}:
+            lines.append(f"    maximum_score += abs({key}_weight)")
+        if key == "ema":
+            lines.extend(
+                [
+                    '    ema_fast_period = int(params["ema_fast_period"])',
+                    '    ema_slow_period = int(params["ema_slow_period"])',
+                    "    ema_fast_value = ema(closes, ema_fast_period)",
+                    "    ema_slow_value = ema(closes, ema_slow_period)",
+                    "    if ema_fast_value > ema_slow_value:",
+                    "        long_score += ema_weight",
+                    "    if ema_fast_value < ema_slow_value:",
+                    "        short_score += ema_weight",
+                    '    evidence["ema_fast"] = ema_fast_value',
+                    '    evidence["ema_slow"] = ema_slow_value',
+                ]
+            )
+        elif key == "macd":
+            lines.extend(
+                [
+                    '    macd_fast_period = int(params["macd_fast_period"])',
+                    '    macd_slow_period = int(params["macd_slow_period"])',
+                    '    macd_signal_period = int(params["macd_signal_period"])',
+                    "    macd_series = [ema(closes[:index], macd_fast_period) - ema(closes[:index], macd_slow_period) for index in range(macd_slow_period, len(closes) + 1)]",
+                    "    macd_value = macd_series[-1]",
+                    "    macd_signal_value = ema(macd_series, macd_signal_period)",
+                    "    if macd_value > macd_signal_value:",
+                    "        long_score += macd_weight",
+                    "    if macd_value < macd_signal_value:",
+                    "        short_score += macd_weight",
+                    '    evidence["macd"] = macd_value',
+                    '    evidence["macd_signal"] = macd_signal_value',
+                ]
+            )
+        elif key == "rsi":
+            lines.extend(
+                [
+                    '    rsi_period = int(params["rsi_period"])',
+                    '    rsi_oversold = float(params["rsi_oversold"])',
+                    '    rsi_overbought = float(params["rsi_overbought"])',
+                    "    rsi_value = rsi(closes, rsi_period)",
+                    "    if rsi_value <= rsi_oversold:",
+                    "        long_score += rsi_weight",
+                    "    if rsi_value >= rsi_overbought:",
+                    "        short_score += rsi_weight",
+                    '    evidence["rsi"] = rsi_value',
+                ]
+            )
+        elif key == "bollinger":
+            lines.extend(
+                [
+                    '    bollinger_period = int(params["bollinger_period"])',
+                    '    bollinger_stddev = float(params["bollinger_stddev"])',
+                    "    bollinger_mean = sma(closes, bollinger_period)",
+                    "    bollinger_window = closes[-bollinger_period:]",
+                    "    bollinger_variance = sum([(value - bollinger_mean) * (value - bollinger_mean) for value in bollinger_window]) / float(bollinger_period)",
+                    "    bollinger_width = sqrt(bollinger_variance) * bollinger_stddev",
+                    "    if closes[-1] <= bollinger_mean - bollinger_width:",
+                    "        long_score += bollinger_weight",
+                    "    if closes[-1] >= bollinger_mean + bollinger_width:",
+                    "        short_score += bollinger_weight",
+                    '    evidence["bollinger_mean"] = bollinger_mean',
+                    '    evidence["bollinger_width"] = bollinger_width',
+                ]
+            )
+        elif key == "adx":
+            lines.extend(
+                [
+                    '    adx_period = int(params["adx_period"])',
+                    '    adx_min_strength = float(params["adx_min_strength"])',
+                    "    adx_value, plus_di, minus_di = adx(bars, adx_period)",
+                    "    if adx_value >= adx_min_strength and plus_di > minus_di:",
+                    "        long_score += adx_weight",
+                    "    if adx_value >= adx_min_strength and minus_di > plus_di:",
+                    "        short_score += adx_weight",
+                    '    evidence["adx"] = adx_value',
+                ]
+            )
+        elif key == "donchian":
+            lines.extend(
+                [
+                    '    donchian_period = int(params["donchian_period"])',
+                    "    donchian_high = max(highs[-donchian_period - 1:-1])",
+                    "    donchian_low = min(lows[-donchian_period - 1:-1])",
+                    "    if closes[-1] > donchian_high:",
+                    "        long_score += donchian_weight",
+                    "    if closes[-1] < donchian_low:",
+                    "        short_score += donchian_weight",
+                    '    evidence["donchian_high"] = donchian_high',
+                    '    evidence["donchian_low"] = donchian_low',
+                ]
+            )
+        elif key == "volume_ratio":
+            lines.extend(
+                [
+                    '    volume_ratio_period = int(params["volume_ratio_period"])',
+                    '    volume_ratio_min_ratio = float(params["volume_ratio_min_ratio"])',
+                    "    average_volume = sma(volumes[:-1], volume_ratio_period)",
+                    "    current_volume_ratio = volumes[-1] / average_volume if average_volume > 0 else 0.0",
+                    "    filters_pass = filters_pass and current_volume_ratio >= volume_ratio_min_ratio * volume_ratio_weight",
+                    '    evidence["volume_ratio"] = current_volume_ratio',
+                ]
+            )
+        elif key == "atr":
+            lines.extend(
+                [
+                    '    atr_period = int(params["atr_period"])',
+                    '    atr_min_pct = float(params["atr_min_pct"])',
+                    '    atr_max_pct = float(params["atr_max_pct"])',
+                    "    atr_value = atr(bars, atr_period)",
+                    "    atr_pct = atr_value / closes[-1] * 100.0 if closes[-1] > 0 else 0.0",
+                    "    filters_pass = filters_pass and atr_pct >= atr_min_pct and atr_pct <= atr_max_pct * atr_weight",
+                    '    evidence["atr_pct"] = atr_pct',
+                ]
+            )
+    lines.extend(
+        [
+            '    confirmation_threshold = float(params["confirmation_threshold"])',
+            '    signal_valid_bars = int(params["signal_valid_bars"])',
+            '    risk_atr_period = int(params["risk_atr_period"])',
+            "    risk_atr_value = atr(bars, risk_atr_period)",
+            "    required_score = maximum_score * confirmation_threshold / 100.0",
+            '    evidence["long_score"] = long_score',
+            '    evidence["short_score"] = short_score',
+            '    evidence["required_score"] = required_score',
+            '    evidence["signal_valid_bars"] = signal_valid_bars',
+            "    risk = {\"stop_distance\": risk_atr_value * 1.5, \"take_profit_distance\": risk_atr_value * 3.0}",
+            "    if not filters_pass:",
+            '        return {"decision": "HOLD", "reason_codes": ["FILTER_BLOCK"], "evidence": evidence}',
+        ]
+    )
+    if "long" in directions:
+        lines.extend(
+            [
+                "    if maximum_score > 0 and long_score >= required_score and long_score > short_score:",
+                "        confidence = min(0.99, max(0.01, long_score / maximum_score))",
+                '        return {"decision": "LONG_ENTRY", "confidence": confidence, "reason_codes": ["INDICATOR_CONSENSUS_LONG"], "evidence": evidence, "risk_proposal": risk}',
+            ]
+        )
+    if "short" in directions:
+        lines.extend(
+            [
+                "    if maximum_score > 0 and short_score >= required_score and short_score > long_score:",
+                "        confidence = min(0.99, max(0.01, short_score / maximum_score))",
+                '        return {"decision": "SHORT_ENTRY", "confidence": confidence, "reason_codes": ["INDICATOR_CONSENSUS_SHORT"], "evidence": evidence, "risk_proposal": risk}',
+            ]
+        )
+    lines.append('    return {"decision": "HOLD", "reason_codes": ["NO_CONSENSUS"], "evidence": evidence}')
+    source_code = "\n".join(lines) + "\n"
+    issue = _source_contract_issue(source_code, generation_context)
+    if issue is not None:
+        raise StrategyAiError("invalid_output")
+    return source_code
+
+
+def _has_complete_indicator_blueprint(
+    generation_context: Mapping[str, Any] | None,
+) -> bool:
+    return bool(
+        isinstance(generation_context, Mapping)
+        and isinstance(generation_context.get("selected_indicators"), list)
+        and generation_context.get("selected_indicators")
+        and isinstance(generation_context.get("parameter_schema"), list)
+        and generation_context.get("parameter_schema")
+        and isinstance(generation_context.get("parameter_values"), Mapping)
+    )
+
+
 def _chat_completions_source_preview(
     source_code: str,
     base_version: int,
@@ -783,12 +1045,28 @@ def _chat_completions_source_preview(
             raise StrategyAiError("timeout")
         if not 200 <= status_code < 300:
             raise StrategyAiError("upstream")
-        output = _strict_json_text(_chat_output_text(_strict_json_bytes(response_body)))
-        proposed, summary = _validate_source_model_output(output)
-        issue = _source_contract_issue(proposed, generation_context)
+        try:
+            output = _strict_json_text(_chat_output_text(_strict_json_bytes(response_body)))
+            proposed, summary = _validate_source_model_output(output)
+            issue = _source_contract_issue(proposed, generation_context)
+        except StrategyAiError as exc:
+            if exc.category != "invalid_output":
+                raise
+            issue = "模型返回格式或源码结构不符合平台约束"
         if issue is None:
             return _build_source_preview(
                 base_version, provider, source_code, proposed, summary
+            )
+        if _has_complete_indicator_blueprint(generation_context):
+            if generation_context is None:  # pragma: no cover - narrowed by helper
+                raise StrategyAiError("invalid_output")
+            platform_source = build_platform_indicator_source(generation_context)
+            return _build_source_preview(
+                base_version,
+                f"{provider}+platform_compiler",
+                source_code,
+                platform_source,
+                "模型已完成指标编排；自由源码未通过沙箱约束，平台已按同一指标蓝图编译为安全 Python 草稿。",
             )
         if attempt >= 2:
             raise StrategyAiError("invalid_output")
@@ -856,9 +1134,34 @@ def _openai_source_preview(
         raise StrategyAiError("timeout")
     if not 200 <= status_code < 300:
         raise StrategyAiError("upstream")
-    output = _strict_json_text(_responses_output_text(_strict_json_bytes(response_body)))
-    proposed, summary = _validate_source_model_output(output)
-    return _build_source_preview(base_version, "openai", source_code, proposed, summary)
+    try:
+        output = _strict_json_text(_responses_output_text(_strict_json_bytes(response_body)))
+        proposed, summary = _validate_source_model_output(output)
+        issue = (
+            _source_contract_issue(proposed, generation_context)
+            if _has_complete_indicator_blueprint(generation_context)
+            else None
+        )
+    except StrategyAiError as exc:
+        if exc.category != "invalid_output" or not _has_complete_indicator_blueprint(
+            generation_context
+        ):
+            raise
+        issue = "模型返回格式或源码结构不符合平台约束"
+    if issue is None:
+        return _build_source_preview(base_version, "openai", source_code, proposed, summary)
+    if not _has_complete_indicator_blueprint(generation_context):
+        raise StrategyAiError("invalid_output")
+    if generation_context is None:  # pragma: no cover - narrowed by helper
+        raise StrategyAiError("invalid_output")
+    platform_source = build_platform_indicator_source(generation_context)
+    return _build_source_preview(
+        base_version,
+        "openai+platform_compiler",
+        source_code,
+        platform_source,
+        "模型已完成指标编排；自由源码未通过沙箱约束，平台已按同一指标蓝图编译为安全 Python 草稿。",
+    )
 
 
 def _code_edit_messages(current_spec: Mapping[str, Any], prompt: str) -> list[dict[str, str]]:

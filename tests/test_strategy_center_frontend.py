@@ -53,15 +53,20 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'composition: this.sourceComposition',
         'this.processAiPromptQueue()',
         'this.conversationPrompt(turn.prompt)',
-        'composition = this.collectSourceComposition()',
+        'normalizeSourceAiDraft',
+        'sourceAiDraftChanges',
+        'this.api("/compose/ai-preview"',
+        'autoCompose: false',
         'this.sourceComposition = this.deriveSourceComposition(item);',
         'validation.trigger_timeframe || dataRequirements.trigger_timeframe',
-        'const actionableIntent = turn.prompt.replace',
     ):
         assert api_contract in script
 
-    assert "用自然语言生成 Python 策略" in script
-    assert "左侧指标是强约束" in script
+    assert "用自然语言编排完整策略" in script
+    assert "由 AI 根据自然语言自动选择，可人工复核" in script
+    assert "按当前选择重新生成源码" in script
+    assert "应用完整策略草稿" in script
+    assert "risk_defaults: this.collectConfig(\"risk\", this.sourceRiskDefaults)" in script
     assert script.index('data-edit-scope="source"') < script.index(
         'data-edit-scope="parameters"'
     )
@@ -88,8 +93,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260825-strategychat1" in index
-    assert index.index("/assets/strategies.js?v=20260825-strategychat1") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260825-strategycomposer3" in index
+    assert index.index("/assets/strategies.js?v=20260825-strategycomposer3") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel
@@ -108,6 +113,10 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     assert ".strategy-source-composition-block" in stylesheet
     assert ".strategy-ai-conversation" in stylesheet
     assert ".strategy-ai-process-step" in stylesheet
+    assert '#strategy-basic-block > label:last-child' in stylesheet
+    assert 'display: none' not in stylesheet.split(
+        '#strategy-basic-block > label:last-child', 1
+    )[1].split('}', 1)[0]
 
 
 def test_strategy_custom_element_initializes_after_construction() -> None:

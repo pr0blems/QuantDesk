@@ -391,7 +391,7 @@
 .strategy-editor.source-workbench #strategy-basic-block { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 10px; }
 .strategy-editor.source-workbench #strategy-basic-block .strategy-section-heading { display: none; }
 .strategy-editor.source-workbench #strategy-basic-block > .strategy-field-grid { grid-template-columns: minmax(0, 1fr) minmax(150px, .35fr); }
-.strategy-editor.source-workbench #strategy-basic-block > label:last-child { display: none; }
+.strategy-editor.source-workbench #strategy-basic-block > label:last-child textarea { min-height: 58px; max-height: 88px; resize: vertical; }
 .strategy-editor.source-workbench #strategy-code-block { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; flex: 1 1 auto; padding: 10px; }
 .strategy-editor.source-workbench #strategy-risk-block,
 .strategy-editor.source-workbench #strategy-parameters-block { display: none; }

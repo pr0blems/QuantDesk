@@ -1426,6 +1426,14 @@ class StrategySourceUpdateRequest(BaseModel):
     category: str = Field(min_length=1, max_length=32)
     language: Literal["python"] = "python"
     source_code: str = Field(min_length=1, max_length=65_536)
+    risk_defaults: dict[str, int | float] | None = Field(default=None, max_length=16)
+
+    @field_validator("risk_defaults")
+    @classmethod
+    def validate_risk_defaults(
+        cls, value: dict[str, int | float] | None
+    ) -> dict[str, int | float] | None:
+        return _bounded_numeric_map(value, "risk default") if value is not None else None
 
 
 class StrategySourceCreateRequest(BaseModel):
