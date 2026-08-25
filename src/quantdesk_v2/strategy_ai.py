@@ -11,6 +11,7 @@ from http.client import HTTPSConnection
 from typing import Any, Literal
 
 from .ai_providers import AiProviderPreset, get_ai_provider
+from .strategy_source_runtime import StrategySourceError, validate_source
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 _OPENAI_HOST = "api.openai.com"
@@ -654,6 +655,33 @@ def _source_edit_messages(
     ]
 
 
+def _source_contract_issue(
+    source_code: str, generation_context: Mapping[str, Any] | None
+) -> str | None:
+    try:
+        metadata = validate_source(source_code, "python")
+    except StrategySourceError as exc:
+        return str(exc)[:320]
+    if generation_context is None:
+        return None
+    timeframe = generation_context.get("timeframe")
+    if isinstance(timeframe, str) and metadata.trigger_timeframe != timeframe:
+        return f"TRIGGER_TIMEFRAME 必须是 {timeframe}"
+    directions = generation_context.get("directions")
+    if isinstance(directions, list) and tuple(directions) != metadata.directions:
+        return f"DIRECTIONS 必须是 {directions}"
+    required = generation_context.get("required_parameter_keys")
+    if isinstance(required, list):
+        missing = sorted(
+            key
+            for key in required
+            if isinstance(key, str) and key not in metadata.parameter_keys
+        )
+        if missing:
+            return "必须读取这些 params 参数：" + ", ".join(missing[:24])
+    return None
+
+
 def _chat_completions_source_preview(
     source_code: str,
     base_version: int,
@@ -666,46 +694,64 @@ def _chat_completions_source_preview(
     timeout_seconds: float,
     generation_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    request_payload = {
-        "model": model_name,
-        "messages": _source_edit_messages(source_code, prompt, generation_context),
-        "stream": False,
-    }
-    _configure_chat_json_response(request_payload, provider, max_tokens=8_000)
-    try:
-        request_body = json.dumps(
-            request_payload, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
-    except (UnicodeEncodeError, TypeError, ValueError):
-        raise StrategyAiError("invalid_output") from None
-    if len(request_body) > MAX_REQUEST_BYTES:
-        raise StrategyAiError("invalid_output")
-    try:
-        status_code, response_body = _chat_http_transport(
-            endpoint,
-            request_body,
-            {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            float(timeout_seconds),
+    candidate_source = source_code
+    candidate_prompt = prompt
+    for attempt in range(2):
+        request_payload = {
+            "model": model_name,
+            "messages": _source_edit_messages(
+                candidate_source, candidate_prompt, generation_context
+            ),
+            "stream": False,
+        }
+        _configure_chat_json_response(request_payload, provider, max_tokens=8_000)
+        try:
+            request_body = json.dumps(
+                request_payload, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        except (UnicodeEncodeError, TypeError, ValueError):
+            raise StrategyAiError("invalid_output") from None
+        if len(request_body) > MAX_REQUEST_BYTES:
+            raise StrategyAiError("invalid_output")
+        try:
+            status_code, response_body = _chat_http_transport(
+                endpoint,
+                request_body,
+                {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                float(timeout_seconds),
+            )
+        except StrategyAiError:
+            raise
+        except TimeoutError:
+            raise StrategyAiError("timeout") from None
+        except (HttpClientError, OSError):
+            raise StrategyAiError("upstream") from None
+        if status_code in {401, 403}:
+            raise StrategyAiError("not_configured")
+        if status_code in {408, 504}:
+            raise StrategyAiError("timeout")
+        if not 200 <= status_code < 300:
+            raise StrategyAiError("upstream")
+        output = _strict_json_text(_chat_output_text(_strict_json_bytes(response_body)))
+        proposed, summary = _validate_source_model_output(output)
+        issue = _source_contract_issue(proposed, generation_context)
+        if issue is None:
+            return _build_source_preview(
+                base_version, provider, source_code, proposed, summary
+            )
+        if attempt:
+            raise StrategyAiError("invalid_output")
+        candidate_source = proposed
+        candidate_prompt = (
+            f"原始要求：{prompt}\n"
+            f"上一版源码未通过平台校验：{issue}。"
+            "请重新输出完整源码并修复该问题；不得添加 import、属性访问或任何未授权能力。"
         )
-    except StrategyAiError:
-        raise
-    except TimeoutError:
-        raise StrategyAiError("timeout") from None
-    except (HttpClientError, OSError):
-        raise StrategyAiError("upstream") from None
-    if status_code in {401, 403}:
-        raise StrategyAiError("not_configured")
-    if status_code in {408, 504}:
-        raise StrategyAiError("timeout")
-    if not 200 <= status_code < 300:
-        raise StrategyAiError("upstream")
-    output = _strict_json_text(_chat_output_text(_strict_json_bytes(response_body)))
-    proposed, summary = _validate_source_model_output(output)
-    return _build_source_preview(base_version, provider, source_code, proposed, summary)
+    raise StrategyAiError("invalid_output")
 
 
 def _openai_source_preview(

@@ -813,6 +813,60 @@ def evaluate(context, params):
     assert preview["provider"] == "deepseek"
 
 
+def test_user_model_python_source_composer_repairs_invalid_python_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_source = '''import math
+TIMEFRAMES = ("1h",)
+TRIGGER_TIMEFRAME = "1h"
+LOOKBACK_BARS = 80
+DIRECTIONS = ("long",)
+def evaluate(context, params):
+    return {"decision": "HOLD"}
+'''
+    valid_source = '''TIMEFRAMES = ("1h",)
+TRIGGER_TIMEFRAME = "1h"
+LOOKBACK_BARS = 80
+DIRECTIONS = ("long",)
+def evaluate(context, params):
+    period = params["ema_fast_period"]
+    return {"decision": "HOLD", "evidence": {"period": period}}
+'''
+    requests: list[dict[str, Any]] = []
+
+    def transport(
+        _endpoint: Any,
+        body: bytes,
+        _headers: dict[str, str],
+        _timeout_seconds: float,
+    ) -> tuple[int, bytes]:
+        requests.append(json.loads(body))
+        source = invalid_source if len(requests) == 1 else valid_source
+        return 200, chat_completions_body(
+            {"strategy_code": source, "summary": "生成并修复策略源码。"}
+        )
+
+    monkeypatch.setattr(strategy_ai, "_chat_http_transport", transport)
+    preview = generate_user_model_strategy_source_preview(
+        {"version": 1, "source_code": valid_source},
+        "使用 EMA 生成策略",
+        provider_code="deepseek",
+        api_key="provider-key-abcdefghijklmnopqrstuvwxyz",
+        model_name=AI_PROVIDER_PRESETS["deepseek"].default_model,
+        generation_context={
+            "timeframe": "1h",
+            "directions": ["long"],
+            "required_parameter_keys": ["ema_fast_period"],
+        },
+    )
+
+    assert len(requests) == 2
+    repair_payload = json.loads(requests[1]["messages"][1]["content"])
+    assert "未通过平台校验" in repair_payload["edit_request"]
+    assert "不得添加 import" in repair_payload["edit_request"]
+    assert preview["source_code"] == valid_source
+
+
 @pytest.mark.parametrize(
     "strategy_code",
     [
