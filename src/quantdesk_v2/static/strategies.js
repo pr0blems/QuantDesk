@@ -32,6 +32,15 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestResult = null;
     this.sourceBacktestRunning = false;
     this.sourceComposition = null;
+    this.sourceCompositionDirty = false;
+    this.aiConversation = [];
+    this.aiPromptQueue = [];
+    this.aiBusy = false;
+    this.aiTurnSequence = 0;
+    this.aiWorkingSource = "";
+    this.aiWorkingSpec = null;
+    this.aiWorkingProposed = null;
+    this.aiProcessSteps = [];
   }
 
   connectedCallback() {
@@ -113,6 +122,23 @@ class StrategyCenter extends HTMLElement {
                 </div>
               </div>
 
+              <div id="strategy-source-composition-block" class="strategy-form-block strategy-source-composition-block hidden">
+                <div class="strategy-section-heading"><div><span>01</span><strong>指标与运行约束</strong></div><small>修改后由 AI 同步到 Python 源码</small></div>
+                <p class="strategy-composition-copy">勾选参与决策的指标，并维护周期、方向和指标参数。结构变化不会直接覆盖源码，必须先生成并复核源码草稿。</p>
+                <div id="strategy-source-indicator-picker" class="strategy-indicator-picker"></div>
+                <div class="strategy-compose-settings">
+                  <label>运行周期<select id="strategy-source-timeframe"><option value="15m">15 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label>
+                  <label>确认阈值 (%)<input id="strategy-source-confirmation-threshold" type="number" min="1" max="100" step="1" value="60"></label>
+                  <label>信号有效 K 线<input id="strategy-source-signal-valid-bars" type="number" min="1" max="10" step="1" value="2"></label>
+                  <fieldset class="strategy-direction-picker"><legend>允许方向</legend><label><input id="strategy-source-direction-long" type="checkbox" checked>做多</label><label><input id="strategy-source-direction-short" type="checkbox" checked>做空</label></fieldset>
+                </div>
+                <div id="strategy-source-selected-indicators" class="strategy-selected-indicators"></div>
+                <div class="strategy-composition-actions">
+                  <span id="strategy-source-composition-state">已与当前源码同步</span>
+                  <button id="strategy-source-composition-ai" class="strategy-quiet-button" type="button">让 AI 按当前指标重构源码</button>
+                </div>
+              </div>
+
               <div id="strategy-composer-block" class="strategy-form-block hidden">
                 <div class="strategy-section-heading"><div><span>01</span><strong id="strategy-create-mode-title">选择指标</strong></div><small id="strategy-create-mode-help">至少选择 2 个，参数会动态出现</small></div>
                 <div id="strategy-create-mode" class="strategy-segments strategy-create-mode" aria-label="策略创建方式">
@@ -185,13 +211,21 @@ class StrategyCenter extends HTMLElement {
                   <span id="strategy-ai-status" class="strategy-ai-status"><i></i>受约束配置</span>
                 </header>
                 <p id="strategy-ai-description">描述你想调整的逻辑或风险参数。创建策略时，模型会把已选指标与自然语言规则生成完整、可编辑的 Python 源码。</p>
+                <section class="strategy-ai-conversation" aria-label="AI 连续优化会话">
+                  <header><div><strong>连续优化会话</strong><small>每一轮都基于上一轮草稿继续调整</small></div><span id="strategy-ai-turn-count">0 轮</span></header>
+                  <div id="strategy-ai-messages" class="strategy-ai-messages" aria-live="polite"></div>
+                </section>
+                <section id="strategy-ai-process" class="strategy-ai-process hidden" aria-live="polite">
+                  <header><strong>分析与校验进度</strong><small>展示可审计处理阶段与结论摘要，不展示模型隐式推理</small></header>
+                  <div id="strategy-ai-process-steps" class="strategy-ai-process-steps"></div>
+                </section>
                 <label>自然语言要求<textarea id="strategy-ai-prompt" rows="5" maxlength="1200" placeholder="例如：做一个 1 小时趋势策略，用 EMA、MACD 和成交量确认，减少噪声并把止损控制在 3%。"></textarea></label>
                 <div class="strategy-ai-examples" aria-label="AI 编辑示例">
                   <button type="button" data-ai-example="创建 1 小时趋势策略，使用 EMA、MACD、ADX 和成交量确认，参数偏稳健。">趋势组合</button>
                   <button type="button" data-ai-example="创建 15 分钟反转策略，使用 RSI、布林带和 ATR 过滤，减少噪声。">反转组合</button>
                   <button type="button" data-ai-example="创建 4 小时突破策略，使用 Donchian、ADX 和成交量确认，只做多。">突破组合</button>
                 </div>
-                <button id="strategy-ai-preview-button" class="strategy-ai-preview-button" type="button"><span aria-hidden="true">✦</span><strong>AI 生成 Python 源码</strong></button>
+                <button id="strategy-ai-preview-button" class="strategy-ai-preview-button" type="button"><span aria-hidden="true">✦</span><strong>发送给 AI</strong></button>
                 <div class="strategy-safety-note"><span aria-hidden="true">!</span><p><strong>只生成源码预览，不执行交易</strong>。源码必须通过服务端安全校验并保存版本，之后仍需通过回测与模拟盘验证。</p></div>
 
                 <section id="strategy-ai-preview" class="strategy-ai-preview hidden" aria-live="polite">
@@ -322,6 +356,18 @@ class StrategyCenter extends HTMLElement {
     });
     this.querySelector("#strategy-form").addEventListener("submit", (event) => this.save(event));
     this.querySelector("#strategy-ai-preview-button").addEventListener("click", () => this.requestAiPreview());
+    this.querySelector("#strategy-ai-prompt").addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        this.requestAiPreview();
+      }
+    });
+    this.querySelector("#strategy-source-composition-block").addEventListener("input", () => this.markSourceCompositionDirty());
+    this.querySelector("#strategy-source-composition-block").addEventListener("change", () => this.markSourceCompositionDirty());
+    this.querySelector("#strategy-source-composition-ai").addEventListener("click", () => {
+      const prompt = "请严格按照左侧当前选择的指标、周期、方向与参数，重构完整 Python 策略源码；保留合理的入场、退出与风险提案，并确保所有 PARAMETERS 都完整声明。";
+      this.requestAiPreview({ prompt, forceMode: "source" });
+    });
     this.querySelector("#strategy-ai-discard").addEventListener("click", () => this.clearPreview());
     this.querySelector("#strategy-ai-apply").addEventListener("click", () => this.applyAiPreview());
     this.querySelectorAll("[data-ai-example]").forEach((button) => button.addEventListener("click", () => {
@@ -389,6 +435,15 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestResult = null;
     this.sourceBacktestRunning = false;
     this.sourceComposition = null;
+    this.sourceCompositionDirty = false;
+    this.aiConversation = [];
+    this.aiPromptQueue = [];
+    this.aiBusy = false;
+    this.aiTurnSequence = 0;
+    this.aiWorkingSource = "";
+    this.aiWorkingSpec = null;
+    this.aiWorkingProposed = null;
+    this.aiProcessSteps = [];
     this.querySelector("#strategy-search").value = "";
     this.querySelector("#strategy-category-filter").replaceChildren(this.option("all", "全部分类"));
     this.querySelectorAll("[data-section]").forEach((button) => {
@@ -804,9 +859,11 @@ class StrategyCenter extends HTMLElement {
     this.preview = null;
     this.codeBuffers = {};
     this.sourceComposition = null;
+    this.sourceCompositionDirty = false;
     this.sourceWorkbenchTab = "ai";
     this.sourceParameterSchema = [];
     this.sourceParameterValues = {};
+    this.resetAiConversation();
     this.resetSourceBacktestResult();
     this.querySelector("#strategy-editor-kicker").textContent = "CREATE STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = "新增策略";
@@ -822,7 +879,7 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-ai-status").lastChild.textContent = "Python 隔离运行时";
     this.querySelector("#strategy-ai-title").textContent = "用自然语言生成 Python 策略";
     this.querySelector("#strategy-ai-description").textContent = "左侧指标由你决定；自然语言负责定义入场、过滤、退出与风险逻辑。AI 会生成完整 Python 源码供你编辑和校验。";
-    this.querySelector("#strategy-ai-preview-button strong").textContent = "AI 生成 Python 源码";
+    this.querySelector("#strategy-ai-preview-button strong").textContent = "发送给 AI";
     this.querySelector("#strategy-save strong").textContent = "创建策略";
     this.populateTemplateSelect();
     this.querySelector("#strategy-form").reset();
@@ -836,7 +893,7 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-direction-long").checked = directions.includes("long");
     this.querySelector("#strategy-direction-short").checked = directions.includes("short");
     this.switchCreateMode("indicators", { resetValues: false });
-    this.setSelectedIndicators(["ema", "adx", "volume_ratio"].filter((key) => this.indicators.some((item) => item.key === key)).map((key) => ({ key })));
+    this.setSelectedIndicators(["ema", "adx", "volume_ratio"].filter((key) => this.indicators.some((item) => item.key === key)).map((key) => ({ key })), "create");
     this.renderParameterFields([], {});
     this.renderRiskFields(this.plainObject(this.indicatorDefaults.risk_defaults));
     this.querySelector("#strategy-ai-prompt").value = "";
@@ -853,11 +910,15 @@ class StrategyCenter extends HTMLElement {
       ? "source"
       : "parameters";
     this.preview = null;
+    this.sourceCompositionDirty = false;
     this.sourceWorkbenchTab = "ai";
     this.sourceParameterSchema = Array.isArray(this.activeItem.parameter_schema)
       ? this.activeItem.parameter_schema.map((definition) => ({ ...definition }))
       : [];
     this.sourceParameterValues = { ...this.plainObject(this.activeItem.parameters) };
+    this.sourceComposition = this.deriveSourceComposition(this.activeItem);
+    this.aiWorkingSource = this.activeItem.source_code || "";
+    this.resetAiConversation();
     this.resetSourceBacktestResult();
     this.querySelector("#strategy-editor-kicker").textContent = "EDIT STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = this.activeItem.name;
@@ -875,13 +936,14 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-ai-status").lastChild.textContent = "受约束配置";
     this.querySelector("#strategy-ai-title").textContent = "用自然语言修改策略";
     this.querySelector("#strategy-ai-description").textContent = "描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改。";
-    this.querySelector("#strategy-ai-preview-button strong").textContent = "生成修改预览";
+    this.querySelector("#strategy-ai-preview-button strong").textContent = "发送给 AI";
     this.querySelector("#strategy-save strong").textContent = "保存新版本";
     this.querySelector("#strategy-name").value = this.activeItem.name;
     this.querySelector("#strategy-category").value = this.activeItem.category;
     this.querySelector("#strategy-description").value = this.activeItem.description;
     this.renderParameterFields(this.activeItem.parameter_schema, this.activeItem.parameters);
     this.renderRiskFields(this.activeItem.risk_defaults);
+    this.populateSourceCompositionEditor(this.sourceComposition);
     this.querySelector("#strategy-code-editor").value = this.activeItem.strategy_kind === "source_strategy"
       ? this.activeItem.source_code
       : this.strategyCode(this.activeItem.spec);
@@ -914,6 +976,9 @@ class StrategyCenter extends HTMLElement {
     layer.classList.add("hidden");
     layer.setAttribute("aria-hidden", "true");
     document.body.classList.remove("strategy-dialog-open");
+    this.aiSessionGeneration = Number(this.aiSessionGeneration || 0) + 1;
+    this.aiPromptQueue = [];
+    this.aiBusy = false;
     this.setButtonBusy(this.querySelector("#strategy-save"), false);
     this.setButtonBusy(this.querySelector("#strategy-ai-preview-button"), false);
     this.setButtonBusy(this.querySelector("#strategy-ai-apply"), false);
@@ -1138,6 +1203,8 @@ class StrategyCenter extends HTMLElement {
       }
       const item = this.normalizeItem(result?.item ?? result);
       this.activeItem = item;
+      this.sourceComposition = this.deriveSourceComposition(item);
+      this.populateSourceCompositionEditor(this.sourceComposition);
       this.sourceParameterSchema = item.parameter_schema.map((definition) => ({ ...definition }));
       this.sourceParameterValues = { ...item.parameters };
       this.editorMode = "edit";
@@ -1418,6 +1485,7 @@ class StrategyCenter extends HTMLElement {
       sourceAvailable && ["source", "parameters"].includes(this.editScope),
     );
     this.querySelector("#strategy-code-block").classList.toggle("hidden", !codeMode);
+    this.querySelector("#strategy-source-composition-block").classList.add("hidden");
     if (codeMode) {
       this.querySelector("#strategy-parameters-block").classList.add("hidden");
       this.querySelector("#strategy-risk-block").classList.add("hidden");
@@ -1442,11 +1510,16 @@ class StrategyCenter extends HTMLElement {
         ? "描述要修改的 Python 入场、退出或指标逻辑。模型返回完整源码预览，必须通过服务端源码审查后才能保存。"
         : "描述要调整的指标组合、方向、周期、入场、退出或风险逻辑。模型只生成受控策略 DSL 配置预览。";
       this.querySelector("#strategy-ai-status").lastChild.textContent = sourceMode ? "Python 隔离运行时" : "受控策略 DSL";
-      this.querySelector("#strategy-ai-preview-button strong").textContent = "生成代码修改预览";
+      this.querySelector("#strategy-ai-preview-button strong").textContent = "发送给 AI";
       this.querySelector("#strategy-ai-prompt").placeholder = "例如：只做多，把止盈调整为 3R，盈利 1.5R 后启动移动止损，最大持仓改为 72 根 K 线。";
     } else {
       this.querySelector("#strategy-code-format").classList.remove("hidden");
       const sourceStrategy = this.activeItem?.strategy_kind === "source_strategy";
+      this.querySelector("#strategy-source-composition-block").classList.toggle("hidden", !sourceStrategy);
+      this.querySelector("#strategy-basic-index").textContent = sourceStrategy ? "02" : "01";
+      this.querySelector("#strategy-parameters-index").textContent = sourceStrategy ? "03" : "02";
+      this.querySelector("#strategy-risk-index").textContent = sourceStrategy ? "04" : "03";
+      if (sourceStrategy) this.renderIndicatorComposer("edit");
       this.renderParameterFields(
         sourceStrategy ? this.sourceParameterSchema : this.activeItem.parameter_schema,
         sourceStrategy ? this.sourceParameterValues : this.activeItem.parameters,
@@ -1459,9 +1532,11 @@ class StrategyCenter extends HTMLElement {
         ? "由 Python 源码中的 PARAMETERS 动态生成"
         : "字段范围由策略模型约束";
       this.querySelector("#strategy-ai-title").textContent = "用自然语言维护策略参数";
-      this.querySelector("#strategy-ai-description").textContent = "描述你想调整的参数或风险默认值。模型只能修改已有字段，不会改变策略结构。";
+      this.querySelector("#strategy-ai-description").textContent = sourceStrategy
+        ? "可连续讨论指标结构、源码参数与风险默认值。每轮都基于上一轮草稿继续优化，最终由你确认应用和保存。"
+        : "可连续讨论参数或风险默认值。每轮都基于上一轮草稿继续优化，不会直接保存。";
       this.querySelector("#strategy-ai-status").lastChild.textContent = "受约束参数";
-      this.querySelector("#strategy-ai-preview-button strong").textContent = "生成参数修改预览";
+      this.querySelector("#strategy-ai-preview-button strong").textContent = "发送给 AI";
       this.querySelector("#strategy-ai-prompt").placeholder = "例如：把止损改为 2%，止盈改为 6%，最大持仓改成 72 根 K 线。";
     }
     this.querySelector("#strategy-ai-prompt").value = "";
@@ -1565,6 +1640,7 @@ class StrategyCenter extends HTMLElement {
     const sourceMode = this.createMode === "source";
     this.setSourceWorkbenchActive(sourceMode);
     this.setSourceWorkbenchShellActive(sourceMode);
+    this.querySelector("#strategy-source-composition-block").classList.add("hidden");
     this.querySelector("#strategy-indicator-composer").classList.toggle("hidden", templateMode || sourceMode);
     this.querySelector("#strategy-template-composer").classList.toggle("hidden", !templateMode);
     this.querySelector("#strategy-code-block").classList.toggle("hidden", !sourceMode);
@@ -1586,14 +1662,14 @@ class StrategyCenter extends HTMLElement {
       this.querySelector("#strategy-ai-title").textContent = "用自然语言修改 Python 策略";
       this.querySelector("#strategy-ai-description").textContent = "模型生成完整 Python 源码预览，服务端通过静态审查后才可保存。";
       this.querySelector("#strategy-ai-status").lastChild.textContent = "Python 隔离运行时";
-      this.querySelector("#strategy-ai-preview-button strong").textContent = "生成源码修改预览";
+      this.querySelector("#strategy-ai-preview-button strong").textContent = "发送给 AI";
     } else {
       this.querySelector("#strategy-code-format").classList.remove("hidden");
       if (!templateMode) {
         this.querySelector("#strategy-ai-title").textContent = "用自然语言生成 Python 策略";
         this.querySelector("#strategy-ai-description").textContent = "左侧指标是强约束；描述入场、过滤、退出与风控规则后，AI 会生成完整 Python 源码。";
         this.querySelector("#strategy-ai-status").lastChild.textContent = "指标约束 + Python 沙箱";
-        this.querySelector("#strategy-ai-preview-button strong").textContent = "AI 生成 Python 源码";
+        this.querySelector("#strategy-ai-preview-button strong").textContent = "发送给 AI";
         this.querySelector("#strategy-ai-prompt").placeholder = "例如：EMA 判断趋势，ADX 过滤弱趋势，成交量确认入场；止损使用 1.5 ATR，止盈 2R，只在收盘后产生信号。";
       }
     }
@@ -1632,7 +1708,7 @@ class StrategyCenter extends HTMLElement {
     this.renderRiskFields(template.risk_defaults);
   }
 
-  setSelectedIndicators(selections) {
+  setSelectedIndicators(selections, context = "create") {
     this.selectedIndicators = new Map();
     (Array.isArray(selections) ? selections : []).forEach((selection) => {
       const key = String(selection?.key || "");
@@ -1649,32 +1725,39 @@ class StrategyCenter extends HTMLElement {
         parameters,
       });
     });
-    this.renderIndicatorComposer();
+    this.renderIndicatorComposer(context);
   }
 
-  renderIndicatorComposer() {
-    const picker = this.querySelector("#strategy-indicator-picker");
+  indicatorComposerTargets(context = "create") {
+    return context === "edit"
+      ? { picker: "#strategy-source-indicator-picker", selected: "#strategy-source-selected-indicators" }
+      : { picker: "#strategy-indicator-picker", selected: "#strategy-selected-indicators" };
+  }
+
+  renderIndicatorComposer(context = "create") {
+    const targets = this.indicatorComposerTargets(context);
+    const picker = this.querySelector(targets.picker);
     picker.replaceChildren(...this.indicators.map((indicator) => {
       const label = this.node("label", `strategy-indicator-option ${this.selectedIndicators.has(indicator.key) ? "selected" : ""}`);
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = this.selectedIndicators.has(indicator.key);
-      checkbox.addEventListener("change", () => this.toggleIndicator(indicator.key, checkbox.checked));
+      checkbox.addEventListener("change", () => this.toggleIndicator(indicator.key, checkbox.checked, context));
       const copy = this.node("span");
       copy.append(this.node("strong", "", indicator.name), this.node("small", "", `${indicator.category} · ${indicator.role === "filter" ? "过滤" : "方向"}`));
       label.append(checkbox, copy);
       return label;
     }));
-    const selected = this.querySelector("#strategy-selected-indicators");
+    const selected = this.querySelector(targets.selected);
     if (!this.selectedIndicators.size) {
       selected.replaceChildren(this.node("div", "strategy-selection-empty", "请从上方至少勾选两个指标。"));
       return;
     }
-    selected.replaceChildren(...[...this.selectedIndicators.values()].map((selection) => this.selectedIndicatorPanel(selection)));
+    selected.replaceChildren(...[...this.selectedIndicators.values()].map((selection) => this.selectedIndicatorPanel(selection, context)));
   }
 
-  toggleIndicator(key, enabled) {
-    this.syncSelectedIndicatorValues();
+  toggleIndicator(key, enabled, context = "create") {
+    this.syncSelectedIndicatorValues(context);
     if (enabled) {
       const indicator = this.indicators.find((item) => item.key === key);
       if (indicator && !this.selectedIndicators.has(key)) {
@@ -1685,10 +1768,11 @@ class StrategyCenter extends HTMLElement {
         });
       }
     } else this.selectedIndicators.delete(key);
-    this.renderIndicatorComposer();
+    this.renderIndicatorComposer(context);
+    if (context === "edit") this.markSourceCompositionDirty();
   }
 
-  selectedIndicatorPanel(selection) {
+  selectedIndicatorPanel(selection, context = "create") {
     const indicator = this.indicators.find((item) => item.key === selection.key) || {};
     const panel = this.node("section", "strategy-selected-indicator");
     const header = this.node("header");
@@ -1700,18 +1784,19 @@ class StrategyCenter extends HTMLElement {
     ];
     definitions.forEach((definition) => {
       const current = definition.key === "weight" ? selection.weight : selection.parameters?.[definition.key];
-      const field = this.configField(definition, current, "indicator");
+      const field = this.configField(definition, current, context === "edit" ? "source-indicator" : "indicator");
       const input = field.querySelector("input, select");
       input.dataset.indicatorKey = selection.key;
       input.dataset.indicatorParam = definition.key;
+      input.dataset.indicatorContext = context;
       fields.append(field);
     });
     panel.append(header, fields);
     return panel;
   }
 
-  syncSelectedIndicatorValues() {
-    this.querySelectorAll("[data-indicator-key][data-indicator-param]").forEach((input) => {
+  syncSelectedIndicatorValues(context = "create") {
+    this.querySelectorAll(`[data-indicator-context="${context}"][data-indicator-key][data-indicator-param]`).forEach((input) => {
       const selection = this.selectedIndicators.get(input.dataset.indicatorKey);
       if (!selection) return;
       const value = Number(input.value);
@@ -1721,13 +1806,95 @@ class StrategyCenter extends HTMLElement {
     });
   }
 
-  collectIndicatorSelections() {
-    this.syncSelectedIndicatorValues();
+  collectIndicatorSelections(context = "create") {
+    this.syncSelectedIndicatorValues(context);
     return [...this.selectedIndicators.values()].map((selection) => ({
       key: selection.key,
       weight: selection.weight,
       parameters: { ...selection.parameters },
     }));
+  }
+
+  deriveSourceComposition(item = {}) {
+    const source = String(item.source_code || "").toLowerCase();
+    const values = this.plainObject(item.parameters);
+    const validation = this.plainObject(item.source_validation);
+    const dataRequirements = this.plainObject(validation.data_requirements);
+    const indicatorAliases = {
+      ema: ["ema(", "ema_"], macd: ["macd", "macd_"], rsi: ["rsi(", "rsi_"],
+      bollinger: ["bollinger", "bollinger_"], adx: ["adx(", "adx_"],
+      donchian: ["donchian", "donchian_"], volume_ratio: ["volume", "volume_ratio_"],
+      atr: ["atr(", "atr_"],
+    };
+    const valueKeys = Object.keys(values);
+    const selections = this.indicators.filter((indicator) => {
+      const aliases = indicatorAliases[indicator.key] || [`${indicator.key}_`];
+      return valueKeys.some((key) => key.startsWith(`${indicator.key}_`))
+        || aliases.some((alias) => source.includes(alias));
+    }).map((indicator) => {
+      const parameters = {};
+      (indicator.parameters || []).forEach((definition) => {
+        const canonical = `${indicator.key}_${definition.key}`;
+        const genericPeriod = definition.key.includes("period") ? `${indicator.key}_period` : "";
+        parameters[definition.key] = values[canonical]
+          ?? (genericPeriod ? values[genericPeriod] : undefined)
+          ?? definition.default;
+      });
+      return {
+        key: indicator.key,
+        weight: Number(values[`${indicator.key}_weight`] ?? 1),
+        parameters,
+      };
+    });
+    return {
+      indicators: selections,
+      timeframe: String(validation.trigger_timeframe || dataRequirements.trigger_timeframe || "1h"),
+      directions: Array.isArray(validation.directions) && validation.directions.length
+        ? [...validation.directions]
+        : ["long", "short"],
+      confirmation_threshold: Number(values.confirmation_threshold ?? 60),
+      signal_valid_bars: Number(values.signal_valid_bars ?? validation.valid_for_bars ?? 2),
+    };
+  }
+
+  populateSourceCompositionEditor(composition = {}) {
+    const value = this.plainObject(composition);
+    this.setSelectedIndicators(Array.isArray(value.indicators) ? value.indicators : [], "edit");
+    this.querySelector("#strategy-source-timeframe").value = ["15m", "1h", "4h"].includes(value.timeframe) ? value.timeframe : "1h";
+    this.querySelector("#strategy-source-confirmation-threshold").value = String(value.confirmation_threshold ?? 60);
+    this.querySelector("#strategy-source-signal-valid-bars").value = String(value.signal_valid_bars ?? 2);
+    const directions = Array.isArray(value.directions) ? value.directions : ["long", "short"];
+    this.querySelector("#strategy-source-direction-long").checked = directions.includes("long");
+    this.querySelector("#strategy-source-direction-short").checked = directions.includes("short");
+    this.sourceCompositionDirty = false;
+    const state = this.querySelector("#strategy-source-composition-state");
+    state.textContent = this.selectedIndicators.size >= 2 ? "已从当前源码识别指标约束" : "未识别到完整指标组合，可重新选择";
+    state.className = this.selectedIndicators.size >= 2 ? "synced" : "warning";
+  }
+
+  collectSourceComposition() {
+    const indicators = this.collectIndicatorSelections("edit");
+    const directions = [
+      this.querySelector("#strategy-source-direction-long").checked ? "long" : null,
+      this.querySelector("#strategy-source-direction-short").checked ? "short" : null,
+    ].filter(Boolean);
+    if (indicators.length < 2) throw new Error("指标组合至少需要两个指标。");
+    if (!directions.length) throw new Error("请至少选择一个允许交易方向。");
+    return {
+      indicators,
+      timeframe: this.querySelector("#strategy-source-timeframe").value,
+      directions,
+      confirmation_threshold: Number(this.querySelector("#strategy-source-confirmation-threshold").value),
+      signal_valid_bars: Number(this.querySelector("#strategy-source-signal-valid-bars").value),
+    };
+  }
+
+  markSourceCompositionDirty() {
+    if (this.editorMode !== "edit" || this.activeItem?.strategy_kind !== "source_strategy") return;
+    this.sourceCompositionDirty = true;
+    const state = this.querySelector("#strategy-source-composition-state");
+    state.textContent = "指标约束已变化，尚未同步到源码";
+    state.className = "dirty";
   }
 
   renderParameterFields(schema, values) {
@@ -1852,6 +2019,15 @@ class StrategyCenter extends HTMLElement {
     }
     if (indicatorCreate && !directions.length) {
       this.showFormError("请至少选择一个允许交易方向。");
+      return;
+    }
+    if (
+      this.editorMode === "edit"
+      && this.editScope === "parameters"
+      && this.activeItem?.strategy_kind === "source_strategy"
+      && this.sourceCompositionDirty
+    ) {
+      this.showFormError("指标结构已经变化。请先点击“让 AI 按当前指标重构源码”，应用并校验源码草稿后再保存新版本。");
       return;
     }
     const button = this.querySelector("#strategy-save");
@@ -2062,21 +2238,195 @@ class StrategyCenter extends HTMLElement {
     document.body.classList.remove("strategy-dialog-open");
   }
 
-  async requestAiPreview() {
-    if (this.editorMode !== "create" && !this.activeItem?.public_id) return;
-    const prompt = this.querySelector("#strategy-ai-prompt").value.trim();
-    if (prompt.length < 4) {
-      this.showAiError("请先描述希望修改的参数或规则，至少输入 4 个字符。");
+  resetAiConversation() {
+    this.aiSessionGeneration = Number(this.aiSessionGeneration || 0) + 1;
+    this.aiConversation = [];
+    this.aiPromptQueue = [];
+    this.aiBusy = false;
+    this.aiTurnSequence = 0;
+    this.aiWorkingSource = this.activeItem?.source_code || this.codeBuffers.source || "";
+    this.aiWorkingSpec = null;
+    this.aiWorkingProposed = null;
+    this.aiProcessSteps = [];
+    this.renderAiConversation();
+    this.renderAiProcess();
+    this.updateAiQueueStatus();
+  }
+
+  renderAiConversation() {
+    const container = this.querySelector("#strategy-ai-messages");
+    if (!container) return;
+    this.querySelector("#strategy-ai-turn-count").textContent = `${this.aiConversation.filter((item) => item.role === "user").length} 轮`;
+    if (!this.aiConversation.length) {
+      const empty = this.node("div", "strategy-ai-message-empty");
+      empty.append(
+        this.node("strong", "", "从一个目标开始，然后继续追问"),
+        this.node("span", "", "例如先调整指标，再说“把刚才的版本改得更保守”，AI 会接着当前草稿继续。"),
+      );
+      container.replaceChildren(empty);
       return;
     }
-    const button = this.querySelector("#strategy-ai-preview-button");
-    this.setButtonBusy(button, true, "模型分析中…");
+    container.replaceChildren(...this.aiConversation.map((message) => {
+      const article = this.node("article", `strategy-ai-message ${message.role} ${message.status || "complete"}`);
+      const header = this.node("header");
+      header.append(
+        this.node("strong", "", message.role === "user" ? "你" : "AI 助手"),
+        this.node("span", "", message.status === "queued" ? "排队中" : (message.status === "processing" ? "处理中" : (message.status === "error" ? "失败" : `第 ${message.turn || "--"} 轮`))),
+      );
+      article.append(header, this.node("p", "", message.content));
+      if (message.meta) article.append(this.node("small", "", message.meta));
+      return article;
+    }));
+    container.scrollTop = container.scrollHeight;
+  }
+
+  renderAiProcess() {
+    const panel = this.querySelector("#strategy-ai-process");
+    const container = this.querySelector("#strategy-ai-process-steps");
+    if (!panel || !container) return;
+    panel.classList.toggle("hidden", !this.aiProcessSteps.length);
+    container.replaceChildren(...this.aiProcessSteps.map((step, index) => {
+      const row = this.node("article", `strategy-ai-process-step ${step.status || "pending"}`);
+      row.append(
+        this.node("span", "", String(index + 1).padStart(2, "0")),
+        this.node("div", "", ""),
+      );
+      row.lastChild.append(this.node("strong", "", step.label), this.node("small", "", step.detail || "等待处理"));
+      return row;
+    }));
+  }
+
+  setAiProcess(stage, detail = "") {
+    const definitions = [
+      ["understand", "理解本轮要求"],
+      ["context", "读取会话与当前草稿"],
+      ["generate", "生成候选策略"],
+      ["validate", "服务端安全校验"],
+    ];
+    const activeIndex = Math.max(0, definitions.findIndex(([key]) => key === stage));
+    this.aiProcessSteps = definitions.map(([key, label], index) => ({
+      key,
+      label,
+      status: index < activeIndex ? "complete" : (index === activeIndex ? "active" : "pending"),
+      detail: index === activeIndex ? detail : (index < activeIndex ? "已完成" : "等待处理"),
+    }));
+    this.renderAiProcess();
+  }
+
+  completeAiProcess(preview) {
+    const count = Array.isArray(preview?.changes) ? preview.changes.length : 0;
+    const parameterCount = Array.isArray(preview?.parameter_schema) ? preview.parameter_schema.length : 0;
+    this.aiProcessSteps = [
+      { label: "理解本轮要求", status: "complete", detail: "已结合连续会话识别本轮修改目标" },
+      { label: "读取会话与当前草稿", status: "complete", detail: "已基于上一轮未保存草稿继续调整" },
+      { label: "生成候选策略", status: "complete", detail: `生成 ${count || 1} 项候选变化` },
+      { label: "服务端安全校验", status: "complete", detail: preview?.mode === "source" ? `Python 沙箱校验通过 · ${parameterCount} 个动态参数` : "字段、范围与版本约束校验通过" },
+    ];
+    this.renderAiProcess();
+  }
+
+  updateAiQueueStatus() {
+    const status = this.querySelector("#strategy-ai-status");
+    const button = this.querySelector("#strategy-ai-preview-button strong");
+    const queued = this.aiPromptQueue.length;
+    status.classList.toggle("working", this.aiBusy);
+    status.lastChild.textContent = this.aiBusy ? `处理中${queued ? ` · 待处理 ${queued}` : ""}` : "连续会话就绪";
+    button.textContent = this.aiBusy ? (queued ? `继续发送 · 已排队 ${queued}` : "继续发送下一条") : "发送给 AI";
+  }
+
+  conversationPrompt(prompt) {
+    const history = this.aiConversation
+      .filter((item) => item.status === "complete")
+      .slice(-6)
+      .map((item) => `${item.role === "user" ? "用户" : "助手"}：${String(item.content).slice(0, 220)}`)
+      .join("\n");
+    const workingChanges = Array.isArray(this.preview?.changes)
+      ? this.preview.changes.slice(0, 12).map((item) => `${item.path || item.field}=${this.changeValue(item.after)}`).join("；")
+      : "";
+    const combined = [
+      history ? `连续会话摘要：\n${history}` : "",
+      workingChanges ? `当前未保存草稿变化：${workingChanges}` : "",
+      `本轮要求：${prompt}`,
+      "请只处理本轮要求，并保持与前序草稿一致。",
+    ].filter(Boolean).join("\n");
+    return combined.slice(-1950);
+  }
+
+  requestAiPreview({ prompt = "", forceMode = "" } = {}) {
+    if (this.editorMode !== "create" && !this.activeItem?.public_id) return;
+    const input = this.querySelector("#strategy-ai-prompt");
+    const content = String(prompt || input.value || "").trim();
+    if (content.length < 4) {
+      this.showAiError("请先描述希望修改的参数、指标或规则，至少输入 4 个字符。");
+      return;
+    }
+    const turn = ++this.aiTurnSequence;
+    const message = { id: `turn-${turn}`, turn, role: "user", content, status: this.aiBusy ? "queued" : "processing" };
+    this.aiConversation.push(message);
+    this.aiPromptQueue.push({ turn, prompt: content, forceMode, message });
+    input.value = "";
     this.showAiError("");
-    this.clearPreview();
+    this.renderAiConversation();
+    this.updateAiQueueStatus();
+    void this.processAiPromptQueue();
+  }
+
+  async processAiPromptQueue() {
+    if (this.aiBusy) return;
+    this.aiBusy = true;
+    const generation = this.aiSessionGeneration;
+    this.updateAiQueueStatus();
+    while (this.aiPromptQueue.length && generation === this.aiSessionGeneration) {
+      const turn = this.aiPromptQueue.shift();
+      turn.message.status = "processing";
+      this.renderAiConversation();
+      this.updateAiQueueStatus();
+      this.setAiProcess("understand", `正在解析第 ${turn.turn} 轮修改目标`);
+      try {
+        const preview = await this.executeAiTurn(turn);
+        if (generation !== this.aiSessionGeneration) return;
+        turn.message.status = "complete";
+        this.aiConversation.push({
+          id: `assistant-${turn.turn}`,
+          turn: turn.turn,
+          role: "assistant",
+          content: preview.summary,
+          status: "complete",
+          meta: `${this.providerLabel(preview.provider)} · ${preview.changes.length || 0} 项变化 · 待你确认应用`,
+        });
+        this.completeAiProcess(preview);
+      } catch (error) {
+        if (generation !== this.aiSessionGeneration) return;
+        turn.message.status = "error";
+        const message = String(error?.message || "AI 修改预览生成失败，请稍后重试。");
+        const friendly = /timeout|timed out|超时|Gateway Timeout/i.test(message)
+          ? "本轮生成超时，没有覆盖上一轮草稿。你可以继续发送更小的调整要求。"
+          : this.friendlyMutationError(error);
+        this.aiConversation.push({ id: `assistant-${turn.turn}`, turn: turn.turn, role: "assistant", content: friendly, status: "error" });
+        this.aiProcessSteps = this.aiProcessSteps.map((step) => step.status === "active" ? { ...step, status: "error", detail: friendly } : step);
+        this.renderAiProcess();
+        this.showAiError(friendly);
+      }
+      this.renderAiConversation();
+    }
+    this.aiBusy = false;
+    this.updateAiQueueStatus();
+  }
+
+  async executeAiTurn(turn) {
+    const prompt = this.conversationPrompt(turn.prompt);
+    this.setAiProcess("context", "正在读取最近会话、当前源码与未保存草稿");
     try {
       const codeEdit = this.editorMode === "edit" && this.editScope === "code";
       const indicatorSourceCreate = this.editorMode === "create" && this.createMode === "indicators";
-      const sourceEdit = indicatorSourceCreate || (this.editorMode === "edit" && this.editScope === "source") || (this.editorMode === "create" && this.createMode === "source");
+      const sourceStrategy = this.editorMode === "edit" && this.activeItem?.strategy_kind === "source_strategy";
+      const actionableIntent = turn.prompt.replace(/(?:不要|不需要|无需|保持)[^，。；]+/gi, "");
+      const riskOnly = /(止损|止盈|仓位|杠杆|手续费|滑点|最大持有|风险默认)/.test(actionableIntent)
+        && !/(指标|源码|逻辑|入场|退出|方向|周期|均线|EMA|RSI|MACD|ADX|ATR|布林|Donchian|成交量)/i.test(actionableIntent);
+      const sourceEdit = indicatorSourceCreate
+        || (this.editorMode === "edit" && this.editScope === "source")
+        || (this.editorMode === "create" && this.createMode === "source")
+        || (sourceStrategy && (turn.forceMode === "source" || this.sourceCompositionDirty || !riskOnly));
       let composition = null;
       if (indicatorSourceCreate) {
         const indicators = this.collectIndicatorSelections();
@@ -2093,6 +2443,8 @@ class StrategyCenter extends HTMLElement {
           confirmation_threshold: Number(this.querySelector("#strategy-confirmation-threshold").value),
           signal_valid_bars: Number(this.querySelector("#strategy-signal-valid-bars").value),
         };
+      } else if (sourceStrategy && sourceEdit) {
+        composition = this.collectSourceComposition();
       }
       const path = sourceEdit
         ? (this.editorMode === "create" ? "/runtime/python/ai-preview" : `/${encodeURIComponent(this.activeItem.public_id)}/source/ai-preview`)
@@ -2105,10 +2457,13 @@ class StrategyCenter extends HTMLElement {
             language: "python",
             source_code: indicatorSourceCreate
               ? String(this.sourceRuntime.conversion_starter_source || this.sourceRuntime.starter_source || "")
-              : this.parseStrategyCode(),
+              : (this.editScope === "source"
+                ? this.parseStrategyCode()
+                : (this.aiWorkingSource || this.codeBuffers.source || this.activeItem?.source_code || "")),
             ...(composition ? { composition } : {}),
           }
-        : (codeEdit ? { prompt, spec: this.parseStrategyCode() } : { prompt });
+        : (codeEdit ? { prompt, spec: this.aiWorkingSpec || this.parseStrategyCode() } : { prompt });
+      this.setAiProcess("generate", "模型正在生成完整候选方案；你仍可继续发送下一条要求");
       const result = await this.api(path, {
         method: "POST",
         body: JSON.stringify(requestBody),
@@ -2129,14 +2484,14 @@ class StrategyCenter extends HTMLElement {
         generated_from_composition: indicatorSourceCreate,
         mode: sourceEdit ? "source" : (codeEdit ? "code" : "parameters"),
       };
+      if (this.preview.mode === "source") this.aiWorkingSource = this.preview.source_code;
+      if (this.preview.mode === "code") this.aiWorkingSpec = this.preview.proposed_spec;
+      if (this.preview.mode === "parameters") this.aiWorkingProposed = this.preview.proposed;
+      this.setAiProcess("validate", "候选方案已返回，正在整理校验结论与变化摘要");
       this.renderPreview();
+      return this.preview;
     } catch (error) {
-      const message = String(error?.message || "AI 修改预览生成失败，请稍后重试。");
-      this.showAiError(/timeout|timed out|超时|Gateway Timeout/i.test(message)
-        ? "策略源码较长，模型生成超时。系统已为源码生成预留更长时间，请稍后重试；也可以先减少指标数量。"
-        : this.friendlyMutationError(error));
-    } finally {
-      this.setButtonBusy(button, false);
+      throw error;
     }
   }
 
@@ -2182,6 +2537,7 @@ class StrategyCenter extends HTMLElement {
       return;
     }
     if (["code", "source"].includes(this.preview.mode)) {
+      const pendingPreview = this.preview;
       const generatedFromComposition = this.editorMode === "create" && this.preview.generated_from_composition;
       const composition = this.preview.composition;
       const code = this.preview.mode === "source"
@@ -2192,12 +2548,20 @@ class StrategyCenter extends HTMLElement {
         this.switchCreateMode("source", { resetValues: false, keepComposition: true });
         this.sourceComposition = composition;
       }
-      this.querySelector("#strategy-code-editor").value = code;
       this.codeBuffers[this.preview.mode] = code;
+      if (pendingPreview.mode === "source" && this.editorMode === "edit" && this.editScope !== "source") {
+        this.sourceComposition = composition || this.sourceComposition;
+        this.sourceCompositionDirty = false;
+        this.switchEditScope("source", { resetCode: false });
+      }
+      this.querySelector("#strategy-code-editor").value = code;
       this.renderCodeLines();
-      if (this.preview.mode === "source") {
-        this.sourceParameterSchema = this.preview.parameter_schema.map((definition) => ({ ...definition }));
-        this.sourceParameterValues = { ...this.preview.parameters };
+      if (pendingPreview.mode === "source") {
+        this.sourceComposition = composition || this.sourceComposition;
+        this.sourceCompositionDirty = false;
+        this.sourceParameterSchema = pendingPreview.parameter_schema.map((definition) => ({ ...definition }));
+        this.sourceParameterValues = { ...pendingPreview.parameters };
+        this.aiWorkingSource = code;
         this.setSourceWorkbenchDirty(true);
       }
       this.querySelector("#strategy-ai-prompt").value = "";
@@ -2206,6 +2570,15 @@ class StrategyCenter extends HTMLElement {
       this.showAiError(generatedFromComposition
         ? "已根据所选指标生成 Python 源码。你可以继续编辑、让 AI 修改或直接运行校验；当前尚未保存，也不会执行交易。"
         : "代码预览已应用到编辑器，尚未保存，也不会执行交易。", "success");
+      this.aiConversation.push({
+        id: `applied-${Date.now()}`,
+        turn: this.aiTurnSequence,
+        role: "assistant",
+        content: "最新草稿已应用到编辑器。请完成源码校验和回测后再保存新版本。",
+        status: "complete",
+        meta: "仅更新未保存草稿 · 未执行交易",
+      });
+      this.renderAiConversation();
       return;
     }
     if (!this.activeItem?.public_id) return;

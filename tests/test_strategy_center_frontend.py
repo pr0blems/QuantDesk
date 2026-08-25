@@ -23,6 +23,10 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'data-workbench-tab="ai"',
         'id="strategy-runner-submit"',
         'id="strategy-runner-canvas"',
+        'id="strategy-source-composition-block"',
+        'id="strategy-source-indicator-picker"',
+        'id="strategy-ai-messages"',
+        'id="strategy-ai-process-steps"',
         'this.node("button", "strategy-edit-button secondary", "详情")',
         'this.node("button", "strategy-edit-button secondary", "验证")',
         'this.node("button", "strategy-edit-button danger", "归档")',
@@ -47,10 +51,16 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'this.persistSourceWorkbench()',
         'indicatorSourceCreate',
         'composition: this.sourceComposition',
+        'this.processAiPromptQueue()',
+        'this.conversationPrompt(turn.prompt)',
+        'composition = this.collectSourceComposition()',
+        'this.sourceComposition = this.deriveSourceComposition(item);',
+        'validation.trigger_timeframe || dataRequirements.trigger_timeframe',
+        'const actionableIntent = turn.prompt.replace',
     ):
         assert api_contract in script
 
-    assert "AI 生成 Python 源码" in script
+    assert "用自然语言生成 Python 策略" in script
     assert "左侧指标是强约束" in script
     assert script.index('data-edit-scope="source"') < script.index(
         'data-edit-scope="parameters"'
@@ -62,6 +72,10 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
     assert "由 Python 源码中的 PARAMETERS 动态生成" in script
     assert "syncSourceParameterContract" in script
     assert "setSourceWorkbenchShellActive" in script
+    assert "不展示模型隐式推理" in script
+    assert "继续发送下一条" in script
+    assert "sourceCompositionDirty" in script
+    assert "aiPromptQueue" in script
     assert 'sourceAvailable && ["source", "parameters"].includes(this.editScope)' in script
 
 
@@ -74,8 +88,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260825-workbenchshell1" in index
-    assert index.index("/assets/strategies.js?v=20260825-workbenchshell1") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260825-strategychat1" in index
+    assert index.index("/assets/strategies.js?v=20260825-strategychat1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel
@@ -91,6 +105,9 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     assert ".strategy-editor.source-workbench" in stylesheet
     assert ".strategy-editor.source-workbench-shell" in stylesheet
     assert ".strategy-runner-result" in stylesheet
+    assert ".strategy-source-composition-block" in stylesheet
+    assert ".strategy-ai-conversation" in stylesheet
+    assert ".strategy-ai-process-step" in stylesheet
 
 
 def test_strategy_custom_element_initializes_after_construction() -> None:
