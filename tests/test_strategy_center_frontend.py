@@ -59,6 +59,10 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'autoCompose: false',
         'this.sourceComposition = this.deriveSourceComposition(item);',
         'validation.trigger_timeframe || dataRequirements.trigger_timeframe',
+        'sourceTriggerTimeframe(item = this.activeItem)',
+        'dataRequirements.trigger_timeframe,',
+        'timeframe.disabled = sourceLocked',
+        'timeframe: this.sourceTriggerTimeframe() ||',
     ):
         assert api_contract in script
 
@@ -93,8 +97,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260825-strategycomposer3" in index
-    assert index.index("/assets/strategies.js?v=20260825-strategycomposer3") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260825-backtesttimeframe1" in index
+    assert index.index("/assets/strategies.js?v=20260825-backtesttimeframe1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel

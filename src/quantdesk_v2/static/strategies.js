@@ -249,7 +249,7 @@ class StrategyCenter extends HTMLElement {
                 <div id="strategy-runner-notice" class="strategy-runner-notice hidden" role="status"></div>
                 <div class="strategy-runner-fields">
                   <label>交易品种<select id="strategy-runner-symbol"><option value="">读取行情目录…</option></select></label>
-                  <label>数据周期<select id="strategy-runner-timeframe"><option value="">读取行情目录…</option></select></label>
+                  <label>触发周期（源码）<select id="strategy-runner-timeframe" title="由当前已保存 Python 源码的 TRIGGER_TIMEFRAME 决定"><option value="">读取行情目录…</option></select></label>
                   <label>开始日期<input id="strategy-runner-start" type="date"></label>
                   <label>结束日期<input id="strategy-runner-end" type="date"></label>
                   <label>初始资金<input id="strategy-runner-capital" type="number" min="1" step="100" value="10000"></label>
@@ -1098,6 +1098,17 @@ class StrategyCenter extends HTMLElement {
     Object.entries(values).forEach(([selector, value]) => { this.querySelector(selector).value = String(value); });
   }
 
+  sourceTriggerTimeframe(item = this.activeItem) {
+    const validation = this.plainObject(item?.source_validation);
+    const dataRequirements = this.plainObject(validation.data_requirements);
+    const candidates = [
+      validation.trigger_timeframe,
+      dataRequirements.trigger_timeframe,
+      this.sourceComposition?.timeframe,
+    ];
+    return candidates.map((value) => String(value || "")).find((value) => ["15m", "1h", "4h"].includes(value)) || "";
+  }
+
   async loadSourceBacktestCatalog(force = false) {
     if (!this.isSourceWorkbench()) return;
     if (this.sourceBacktestCatalog && !force) {
@@ -1139,9 +1150,14 @@ class StrategyCenter extends HTMLElement {
     };
     populate("#strategy-runner-symbol", catalog.symbols, "暂无可用行情");
     populate("#strategy-runner-timeframe", catalog.timeframes, "暂无可用周期");
-    const preferred = String(this.activeItem?.source_validation?.trigger_timeframe || "");
     const timeframe = this.querySelector("#strategy-runner-timeframe");
-    if (preferred && catalog.timeframes.some((item) => item.value === preferred)) timeframe.value = preferred;
+    const preferred = this.sourceTriggerTimeframe();
+    const sourceLocked = Boolean(preferred && catalog.timeframes.some((item) => item.value === preferred));
+    if (sourceLocked) timeframe.value = preferred;
+    timeframe.disabled = sourceLocked;
+    timeframe.title = sourceLocked
+      ? `当前源码触发周期为 ${preferred}，回测将自动使用该周期。`
+      : "请选择回测数据周期";
     this.syncSourceBacktestBounds();
   }
 
@@ -1279,7 +1295,7 @@ class StrategyCenter extends HTMLElement {
     return {
       strategy_id: this.activeItem.public_id,
       symbol: this.querySelector("#strategy-runner-symbol").value,
-      timeframe: this.querySelector("#strategy-runner-timeframe").value,
+      timeframe: this.sourceTriggerTimeframe() || this.querySelector("#strategy-runner-timeframe").value,
       start_date: this.querySelector("#strategy-runner-start").value,
       end_date: this.querySelector("#strategy-runner-end").value,
       initial_capital: Number(this.querySelector("#strategy-runner-capital").value),

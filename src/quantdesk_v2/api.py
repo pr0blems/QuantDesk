@@ -523,6 +523,23 @@ def _engine_config(payload: BacktestRunRequest, strategy: dict[str, Any]) -> dic
     }
 
 
+def _strategy_trigger_timeframe(strategy: dict[str, Any]) -> str | None:
+    value: object = None
+    if strategy.get("strategy_kind") == "source_strategy":
+        validation = strategy.get("source_validation")
+        if isinstance(validation, dict):
+            requirements = validation.get("data_requirements")
+            value = validation.get("trigger_timeframe")
+            if value is None and isinstance(requirements, dict):
+                value = requirements.get("trigger_timeframe")
+    elif strategy.get("strategy_kind") == "full_strategy":
+        spec = strategy.get("spec")
+        timeframes = spec.get("timeframes") if isinstance(spec, dict) else None
+        if isinstance(timeframes, dict):
+            value = timeframes.get("trigger")
+    return value if isinstance(value, str) and value in {"15m", "1h", "4h"} else None
+
+
 def _backtest_error_status(message: str) -> int:
     if "binance" in message.lower():
         return 502
@@ -3422,6 +3439,9 @@ def create_backtest(
                 raise HTTPException(status_code=503, detail=str(exc)) from None
             strategy = _strategy_from_catalog(catalog, payload.strategy_id)
         config = _engine_config(payload, strategy)
+        trigger_timeframe = _strategy_trigger_timeframe(strategy)
+        if trigger_timeframe is not None:
+            config["timeframe"] = trigger_timeframe
         try:
             if strategy.get("strategy_kind") == "source_strategy":
                 source_code = strategy.get("source_code")
@@ -3475,6 +3495,7 @@ def create_backtest(
         stored_config = payload.model_dump(mode="json")
         stored_config.update(
             {
+                "timeframe": config["timeframe"],
                 "start_ts": config["start_ts"],
                 "end_ts": config["end_ts"],
                 "params": _json_safe(config["params"]),
@@ -3501,7 +3522,7 @@ def create_backtest(
             strategy_id=payload.strategy_id,
             strategy_name=strategy["name"].strip(),
             symbol=payload.symbol,
-            timeframe=payload.timeframe,
+            timeframe=config["timeframe"],
             status="completed",
             start_at=_utc_datetime(config["start_ts"]),
             end_at=_utc_datetime(config["end_ts"]),

@@ -617,6 +617,7 @@ def _source_validation_response(source_code: str, language: str = "python") -> d
         "engine": metadata.runtime_version,
         "language": metadata.language,
         "source_hash": metadata.source_hash,
+        "trigger_timeframe": metadata.trigger_timeframe,
         "data_requirements": {
             "timeframes": list(metadata.timeframes),
             "trigger_timeframe": metadata.trigger_timeframe,

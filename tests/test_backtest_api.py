@@ -270,6 +270,35 @@ def test_catalog_keeps_symbols_without_local_history_for_on_demand_fetch() -> No
     assert [item["value"] for item in catalog["timeframes"]] == ["15m", "1h", "4h"]
 
 
+def test_strategy_trigger_timeframe_reads_current_and_legacy_validation_shapes() -> None:
+    assert api._strategy_trigger_timeframe(
+        {
+            "strategy_kind": "source_strategy",
+            "source_validation": {"trigger_timeframe": "1h"},
+        }
+    ) == "1h"
+    assert api._strategy_trigger_timeframe(
+        {
+            "strategy_kind": "source_strategy",
+            "source_validation": {
+                "data_requirements": {"trigger_timeframe": "4h"}
+            },
+        }
+    ) == "4h"
+    assert api._strategy_trigger_timeframe(
+        {
+            "strategy_kind": "full_strategy",
+            "spec": {"timeframes": {"trigger": "15m"}},
+        }
+    ) == "15m"
+    assert api._strategy_trigger_timeframe(
+        {
+            "strategy_kind": "source_strategy",
+            "source_validation": {"trigger_timeframe": "2h"},
+        }
+    ) is None
+
+
 def test_repository_fetches_and_persists_an_empty_local_range() -> None:
     repository = object.__new__(BacktestRepository)
     repository.symbol_set = {"AAPLUSDT"}
@@ -445,7 +474,7 @@ def test_full_strategy_uses_multitimeframe_repository_path(
         )
         payload = backtest_payload()
         payload["strategy_id"] = strategy["id"]
-        payload["timeframe"] = "15m"
+        payload["timeframe"] = "4h"
         payload["leverage"] = 5
         payload["params"] = {
             definition["key"]: definition["default"] for definition in strategy["params"]
@@ -455,6 +484,8 @@ def test_full_strategy_uses_multitimeframe_repository_path(
 
         assert response.status_code == 201
         assert repository.configs[-1]["strategy_id"] == "strategy_dsl"
+        assert repository.configs[-1]["timeframe"] == strategy["spec"]["timeframes"]["trigger"]
+        assert response.json()["run"]["timeframe"] == strategy["spec"]["timeframes"]["trigger"]
         assert repository.full_specs[-1]["strategy_type"] == "trend_pullback_continuation"
 
 

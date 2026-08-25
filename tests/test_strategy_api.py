@@ -775,6 +775,7 @@ def evaluate(context, params):
         assert response.status_code == 201
         saved = response.json()
         assert saved["strategy_kind"] == "source_strategy"
+        assert saved["source_validation"]["trigger_timeframe"] == "1h"
         assert saved["parameters"]["ema_fast_period"] == 12
         assert saved["parameters"]["volume_ratio_min_ratio"] == 1.4
         assert saved["parameters"]["confirmation_threshold"] == 65
