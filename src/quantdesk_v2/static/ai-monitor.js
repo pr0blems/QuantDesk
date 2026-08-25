@@ -740,6 +740,7 @@ class AiMonitorDashboard extends HTMLElement {
     const controller = new AbortController();
     this.updateStreamAbort = controller;
     this.state.updateStreamStatus = "connecting";
+    this.renderSignalHealth();
     this.consumeUpdateStream(controller).catch(() => {}).finally(() => {
       if (this.updateStreamAbort === controller) this.updateStreamAbort = null;
       if (!this.state.running || controller.signal.aborted) return;
@@ -1821,13 +1822,28 @@ class AiMonitorDashboard extends HTMLElement {
     const moduleCoverage = sampleCount
       ? (moduleCounts.optionFlow + moduleCounts.gex + moduleCounts.institutional) / (sampleCount * 3) * 100
       : 0;
-    const pipelineTone = this.state.lastRefreshError ? "danger" : websocketConnected || incrementalStreamConnected ? "healthy" : restHealthy ? "degraded" : "danger";
+    const lastSuccessfulRefreshMs = this.state.lastSuccessfulRefreshAt ? this.parseDate(this.state.lastSuccessfulRefreshAt).getTime() : NaN;
+    const hasRecentRestSuccess = Number.isFinite(lastSuccessfulRefreshMs) && Date.now() - lastSuccessfulRefreshMs <= 120000;
+    const pipelineInitializing = this.state.fullLoadLoading
+      || (!this.state.lastSuccessfulRefreshAt && ["idle", "connecting"].includes(this.state.updateStreamStatus));
+    const pipelineReconnecting = this.state.updateStreamStatus === "reconnecting" && (restHealthy || hasRecentRestSuccess);
+    const pipelineTone = this.state.lastRefreshError
+      ? "danger"
+      : websocketConnected || incrementalStreamConnected
+      ? "healthy"
+      : pipelineInitializing || pipelineReconnecting || restHealthy
+      ? "degraded"
+      : "danger";
     const pipelineLabel = this.state.lastRefreshError
       ? "更新异常"
       : websocketConnected
       ? "行情实时流在线"
       : incrementalStreamConnected
       ? "页面增量推送在线"
+      : pipelineInitializing
+      ? "正在连接数据"
+      : pipelineReconnecting
+      ? "增量推送重连中"
       : restHealthy
       ? "REST 轮询降级"
       : "数据源离线";
