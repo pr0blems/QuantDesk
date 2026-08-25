@@ -486,7 +486,7 @@ def _apply_edit(
     summary: str,
 ) -> None:
     if strategy.status != "active":
-        raise HTTPException(status_code=409, detail="strategy is archived")
+        raise HTTPException(status_code=409, detail="策略已归档")
     if strategy.version != expected_version:
         raise HTTPException(
             status_code=409,
@@ -567,7 +567,7 @@ def _apply_code_edit(
     summary: str,
 ) -> None:
     if strategy.status != "active":
-        raise HTTPException(status_code=409, detail="strategy is archived")
+        raise HTTPException(status_code=409, detail="策略已归档")
     if strategy.version != expected_version:
         raise HTTPException(
             status_code=409,
@@ -703,7 +703,7 @@ def _apply_source_edit(
     summary: str,
 ) -> None:
     if strategy.status != "active":
-        raise HTTPException(status_code=409, detail="strategy is archived")
+        raise HTTPException(status_code=409, detail="策略已归档")
     if strategy.version != expected_version:
         raise HTTPException(
             status_code=409,
@@ -869,7 +869,7 @@ def _commit_or_conflict(db: Session) -> None:
         ) from None
     except SQLAlchemyError:
         db.rollback()
-        raise HTTPException(status_code=503, detail="strategy could not be saved") from None
+        raise HTTPException(status_code=503, detail="策略暂时无法保存") from None
 
 
 @router.get("")
@@ -1088,7 +1088,7 @@ def get_strategy(
 ) -> dict[str, Any]:
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None:
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到该策略")
     return serialize_user_strategy(strategy)
 
 
@@ -1100,7 +1100,7 @@ def list_strategy_revisions(
 ) -> dict[str, Any]:
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None:
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到该策略")
     rows = db.scalars(
         select(StrategyRevision)
         .where(
@@ -1137,10 +1137,10 @@ def validate_full_strategy(
 ) -> dict[str, Any]:
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None:
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到该策略")
     if strategy.strategy_kind == "source_strategy":
         if not strategy.source_code or not strategy.source_language:
-            raise HTTPException(status_code=422, detail="source strategy is incomplete")
+            raise HTTPException(status_code=422, detail="源码策略不完整")
         return _source_validation_response(strategy.source_code, strategy.source_language)
     if strategy.strategy_kind != "full_strategy" or not strategy.spec_json:
         return {
@@ -1164,7 +1164,7 @@ def validate_strategy_code(
 ) -> dict[str, Any]:
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None or strategy.status != "active":
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到可用策略")
     spec, _ = _validated_code_spec(strategy, payload.spec)
     return _code_validation_response(spec)
 
@@ -1178,7 +1178,7 @@ def validate_strategy_source(
 ) -> dict[str, Any]:
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None or strategy.status != "active":
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到可用策略")
     return _source_validation_response(payload.source_code, payload.language)
 
 
@@ -1221,7 +1221,7 @@ def create_source_strategy(
         )
     )
     if int(active_count or 0) >= MAX_ACTIVE_STRATEGIES:
-        raise HTTPException(status_code=409, detail="active strategy limit reached")
+        raise HTTPException(status_code=409, detail="可用策略数量已达到上限")
     source_code = payload.source_code or default_python_source()
     validation = _source_validation_response(source_code, payload.language)
     if payload.composition is not None:
@@ -1300,7 +1300,7 @@ def create_strategy(
         )
     )
     if int(active_count or 0) >= MAX_ACTIVE_STRATEGIES:
-        raise HTTPException(status_code=409, detail="active strategy limit reached")
+        raise HTTPException(status_code=409, detail="可用策略数量已达到上限")
 
     now = utcnow()
     if payload.indicators is not None:
@@ -1337,7 +1337,7 @@ def create_strategy(
             )
         )
         if template is None:
-            raise HTTPException(status_code=422, detail="unknown strategy template")
+            raise HTTPException(status_code=422, detail="未知的策略模板")
         try:
             parameters = validate_strategy_parameters(
                 template.engine_key,
@@ -1405,7 +1405,7 @@ def update_strategy(
 ) -> dict[str, Any]:
     strategy = _locked_user_strategy(db, user.id, public_id)
     if strategy is None:
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到该策略")
     _apply_edit(
         db,
         strategy,
@@ -1436,7 +1436,7 @@ def update_strategy_code(
 ) -> dict[str, Any]:
     strategy = _locked_user_strategy(db, user.id, public_id)
     if strategy is None:
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到该策略")
     _apply_code_edit(
         db,
         strategy,
@@ -1474,7 +1474,7 @@ def update_strategy_source(
 ) -> dict[str, Any]:
     strategy = _locked_user_strategy(db, user.id, public_id)
     if strategy is None:
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到该策略")
     _apply_source_edit(
         db,
         strategy,
@@ -1510,7 +1510,7 @@ def preview_ai_strategy_edit(
 ) -> dict[str, Any]:
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None or strategy.status != "active":
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到可用策略")
     editable = strategy_snapshot(strategy)
     settings = request.app.state.settings
     user_model = get_global_ai_model_config(db, legacy_fallback_user_id=user.id)
@@ -1587,7 +1587,7 @@ def preview_ai_strategy_code_edit(
 ) -> dict[str, Any]:
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None or strategy.status != "active":
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到可用策略")
     if strategy.strategy_kind != "full_strategy" or not strategy.spec_json:
         raise HTTPException(
             status_code=409,
@@ -1669,7 +1669,7 @@ def preview_ai_strategy_source_edit(
 ) -> dict[str, Any]:
     strategy = get_user_strategy(db, user.id, public_id)
     if strategy is None or strategy.status != "active":
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到可用策略")
     return _generate_source_ai_preview(
         {"version": strategy.version, "source_code": payload.source_code},
         payload,
@@ -1690,7 +1690,7 @@ def apply_ai_strategy_edit(
 ) -> dict[str, Any]:
     strategy = _locked_user_strategy(db, user.id, public_id)
     if strategy is None:
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到该策略")
     _apply_edit(
         db,
         strategy,
@@ -1720,7 +1720,7 @@ def archive_strategy(
 ) -> dict[str, Any]:
     strategy = _locked_user_strategy(db, user.id, public_id)
     if strategy is None:
-        raise HTTPException(status_code=404, detail="strategy not found")
+        raise HTTPException(status_code=404, detail="未找到该策略")
     if strategy.status != "archived":
         strategy.status = "archived"
         strategy.lifecycle_status = "retired"

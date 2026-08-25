@@ -248,6 +248,7 @@ def indicator_composite_parameter_schema(indicator_keys: Sequence[str]) -> list[
             "default": 60,
             "min": 1,
             "max": 100,
+            "step": 1,
             "help": "方向指标的加权同意比例达到该阈值才产生信号。",
         },
         {
@@ -257,6 +258,7 @@ def indicator_composite_parameter_schema(indicator_keys: Sequence[str]) -> list[
             "default": 2,
             "min": 1,
             "max": 10,
+            "step": 1,
         },
         {
             "key": "risk_atr_period",
@@ -265,6 +267,7 @@ def indicator_composite_parameter_schema(indicator_keys: Sequence[str]) -> list[
             "default": 14,
             "min": 2,
             "max": 100,
+            "step": 1,
         },
     ]
     for key in keys:
@@ -277,6 +280,7 @@ def indicator_composite_parameter_schema(indicator_keys: Sequence[str]) -> list[
                 "default": 1,
                 "min": 0.1,
                 "max": 5,
+                "step": 0.1,
             }
         )
         for definition in indicator["parameters"]:

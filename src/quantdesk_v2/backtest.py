@@ -446,7 +446,7 @@ class BacktestRepository:
         trigger_timeframe = spec["timeframes"]["trigger"]
         if validated["timeframe"] != trigger_timeframe:
             raise BacktestUnavailable(
-                f"full strategy trigger timeframe must be {trigger_timeframe}"
+                f"完整策略触发周期必须是 {trigger_timeframe}"
             )
         if validated["leverage"] > int(spec["risk"]["max_leverage"]):
             raise BacktestUnavailable(
@@ -583,7 +583,7 @@ class BacktestRepository:
         try:
             metadata = validate_source(source_code, language)
         except StrategySourceError as exc:
-            raise BacktestUnavailable(f"invalid source strategy: {exc}") from None
+            raise BacktestUnavailable(f"源码策略无效：{exc}") from None
         config_with_engine = dict(config)
         config_with_engine["strategy_id"] = "strategy_dsl"
         dynamic_parameters = dict(config_with_engine.get("params", {}))
@@ -592,7 +592,7 @@ class BacktestRepository:
         validated["params"] = dynamic_parameters
         if validated["timeframe"] != metadata.trigger_timeframe:
             raise BacktestUnavailable(
-                f"source strategy trigger timeframe must be {metadata.trigger_timeframe}"
+                f"源码策略触发周期必须是 {metadata.trigger_timeframe}"
             )
 
         candles_by_timeframe: dict[str, list[_Candle]] = {}
@@ -667,7 +667,7 @@ class BacktestRepository:
                 )
             except (StrategySourceError, StrategySourceExecutionError) as exc:
                 raise BacktestUnavailable(
-                    f"source strategy evaluation failed: {exc}"
+                    f"源码策略执行失败：{exc}"
                 ) from None
             context_batch.clear()
 
@@ -856,10 +856,10 @@ class BacktestRepository:
         symbol = symbol.strip().upper()
         timeframe = config["timeframe"]
         if not isinstance(timeframe, str) or not timeframe.strip():
-            raise BacktestUnavailable("invalid backtest timeframe")
+            raise BacktestUnavailable("回测周期格式无效")
         timeframe = timeframe.strip()
         if _timeframe_seconds(timeframe) is None:
-            raise BacktestUnavailable("unsupported backtest timeframe")
+            raise BacktestUnavailable("暂不支持该回测周期")
 
         start_ts = _strict_integer(config["start_ts"], "start_ts", minimum=0)
         end_ts = _strict_integer(config["end_ts"], "end_ts", minimum=0)

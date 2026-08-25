@@ -767,7 +767,10 @@ def build_platform_indicator_source(
             "default": values[key],
             "min": item.get("min"),
             "max": item.get("max"),
-            "step": item.get("step", 1),
+            "step": item.get(
+                "step",
+                1 if str(item.get("type") or "number") == "integer" else 0.1,
+            ),
         }
     required = generation_context.get("required_parameter_keys")
     if not isinstance(required, list) or set(parameter_definitions) != set(required):

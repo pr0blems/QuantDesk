@@ -86,6 +86,13 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
     assert "sourceCompositionDirty" in script
     assert "aiPromptQueue" in script
     assert 'sourceAvailable && ["source", "parameters"].includes(this.editScope)' in script
+    assert 'strategyForm.addEventListener("invalid"' in script
+    assert 'strategyForm.addEventListener("input"' in script
+    assert "localizeFieldValidation" in script
+    assert "请填写此字段。" in script
+    assert "最接近的有效值是" in script
+    assert 'input.dataset.declaredStep = input.step' in script
+    assert "localizedErrorMessage" in script
 
 
 def test_react_canary_loads_the_current_strategy_component_asset() -> None:
@@ -97,8 +104,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260825-backtesttimeframe1" in index
-    assert index.index("/assets/strategies.js?v=20260825-backtesttimeframe1") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260825-strategyi18n1" in index
+    assert index.index("/assets/strategies.js?v=20260825-strategyi18n1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel

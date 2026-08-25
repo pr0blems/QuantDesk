@@ -80,6 +80,30 @@ def evaluate(context, params):
     assert metadata.parameter_schema[1]["step"] == pytest.approx(0.5)
 
 
+def test_signal_valid_bars_parameter_controls_the_runtime_validity_window() -> None:
+    source = '''TIMEFRAMES = ("1h",)
+TRIGGER_TIMEFRAME = "1h"
+LOOKBACK_BARS = 40
+DIRECTIONS = ("long",)
+VALID_FOR_BARS = 1
+PARAMETERS = {
+    "signal_valid_bars": {"label": "信号有效 K 线数", "type": "integer", "default": 2, "min": 1, "max": 10, "step": 1},
+}
+def evaluate(context, params):
+    bars = context["bars"][TRIGGER_TIMEFRAME]
+    return {"decision": "HOLD", "evidence": {"bars": len(bars), "valid": params["signal_valid_bars"]}}
+'''
+    bars = _bars(40)
+
+    decision = evaluate_source(
+        source,
+        {"symbol": "BTCUSDT", "decision_time": 1_700_400_000, "bars": {"1h": bars}},
+        {"signal_valid_bars": 3},
+    )
+
+    assert decision.valid_until == bars[-1]["open_time"] + 3 * 3_600
+
+
 def test_python_source_parameters_must_match_referenced_params() -> None:
     source = '''TIMEFRAMES = ("1h",)
 TRIGGER_TIMEFRAME = "1h"

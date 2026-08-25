@@ -497,7 +497,7 @@ def test_trade_response_is_bounded_but_keeps_json_safe_server_payload(
     ("changes", "message"),
     [
         ({"symbol": "UNKNOWN"}, "unknown backtest symbol"),
-        ({"timeframe": "1hour"}, "unsupported backtest timeframe"),
+        ({"timeframe": "1hour"}, "暂不支持该回测周期"),
         ({"leverage": 21}, "leverage must be between"),
         ({"start_ts": BASE_TS + HOUR, "end_ts": BASE_TS}, "start_ts must be earlier"),
         ({"params": {"fast_period": 20, "slow_period": 10}}, "fast_period must be smaller"),

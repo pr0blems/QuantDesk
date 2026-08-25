@@ -433,7 +433,10 @@ def evaluate_source_many(
         raise StrategySourceExecutionError("策略隔离进程返回了无效数据") from None
     if not isinstance(decoded, list) or len(decoded) != len(contexts):
         raise StrategySourceExecutionError("策略隔离进程返回数量不匹配")
-    return [_decision_from_output(item, context, metadata) for item, context in zip(decoded, contexts, strict=True)]
+    return [
+        _decision_from_output(item, context, metadata, params)
+        for item, context in zip(decoded, contexts, strict=True)
+    ]
 
 
 def default_python_source() -> str:
@@ -517,7 +520,10 @@ def _normalized_source(source_code: str) -> str:
 
 
 def _decision_from_output(
-    value: Any, context: dict[str, Any], metadata: SourceMetadata
+    value: Any,
+    context: dict[str, Any],
+    metadata: SourceMetadata,
+    params: dict[str, Any],
 ) -> SourceStrategyDecision:
     if not isinstance(value, dict):
         raise StrategySourceExecutionError("evaluate 必须返回字典")
@@ -550,8 +556,19 @@ def _decision_from_output(
     signal_time = _latest_signal_time(context, metadata.trigger_timeframe)
     interval = _timeframe_seconds(metadata.trigger_timeframe)
     scale = 1_000 if signal_time is not None and signal_time >= 100_000_000_000 else 1
+    valid_for_bars = metadata.valid_for_bars
+    if "signal_valid_bars" in metadata.parameter_keys:
+        configured_validity = params.get("signal_valid_bars")
+        if (
+            isinstance(configured_validity, bool)
+            or not isinstance(configured_validity, (int, float))
+            or not float(configured_validity).is_integer()
+            or not 1 <= int(configured_validity) <= 10
+        ):
+            raise StrategySourceExecutionError("signal_valid_bars 必须是 1 到 10 的整数")
+        valid_for_bars = int(configured_validity)
     valid_until = (
-        signal_time + interval * scale * metadata.valid_for_bars
+        signal_time + interval * scale * valid_for_bars
         if signal_time is not None
         else None
     )

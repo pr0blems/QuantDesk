@@ -352,7 +352,11 @@ class StrategyCenter extends HTMLElement {
         }
       });
     });
-    this.querySelector("#strategy-form").addEventListener("input", (event) => {
+    const strategyForm = this.querySelector("#strategy-form");
+    strategyForm.addEventListener("invalid", (event) => this.localizeFieldValidation(event.target), true);
+    strategyForm.addEventListener("input", (event) => {
+      if (typeof event.target?.setCustomValidity === "function") event.target.setCustomValidity("");
+      this.showFormError("");
       if (!this.isSourceWorkbench() || event.target?.dataset?.configGroup !== "risk") return;
       this.sourceRiskDefaults = this.collectConfig("risk", this.sourceRiskDefaults);
       this.aiWorkingProfile = {
@@ -377,7 +381,7 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-detail-layer").addEventListener("click", (event) => {
       if (event.target === event.currentTarget) this.closeDetails();
     });
-    this.querySelector("#strategy-form").addEventListener("submit", (event) => this.save(event));
+    strategyForm.addEventListener("submit", (event) => this.save(event));
     this.querySelector("#strategy-ai-preview-button").addEventListener("click", () => this.requestAiPreview());
     this.querySelector("#strategy-ai-prompt").addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -517,7 +521,7 @@ class StrategyCenter extends HTMLElement {
       this.renderSection();
     } catch (error) {
       if (generation !== this.sessionGeneration || requestVersion !== this.loadVersion) return;
-      this.renderError(error?.message || "策略列表加载失败");
+      this.renderError(this.localizedErrorMessage(error, "策略列表加载失败"));
     } finally {
       if (generation === this.sessionGeneration && requestVersion === this.loadVersion) {
         this.loading = false;
@@ -1135,7 +1139,7 @@ class StrategyCenter extends HTMLElement {
       this.setSourceRunnerStatus("可以回测", "ready");
     } catch (error) {
       this.setSourceRunnerStatus("目录不可用", "error");
-      this.showSourceRunnerNotice(`回测目录读取失败：${error?.message || "请稍后重试"}`, "error");
+      this.showSourceRunnerNotice(`回测目录读取失败：${this.localizedErrorMessage(error, "请稍后重试")}`, "error");
     }
   }
 
@@ -1350,7 +1354,7 @@ class StrategyCenter extends HTMLElement {
       this.showSourceRunnerNotice("回测完成。请优先检查交易样本、最大回撤和扣费后收益。", "success");
     } catch (error) {
       this.setSourceRunnerStatus("回测失败", "error");
-      this.showSourceRunnerNotice(`回测失败：${error?.message || "请检查行情数据与策略输出"}`, "error");
+      this.showSourceRunnerNotice(`回测失败：${this.localizedErrorMessage(error, "请检查行情数据与策略输出")}`, "error");
     } finally {
       this.sourceBacktestRunning = false;
       buttons.forEach((button) => this.setButtonBusy(button, false));
@@ -2068,9 +2072,54 @@ class StrategyCenter extends HTMLElement {
     const value = currentValue !== undefined ? currentValue : definition.default;
     if (["boolean", "bool"].includes(type)) input.value = value === false || value === "false" || value === 0 ? "false" : "true";
     else if (value !== undefined && value !== null) input.value = String(value);
+    if (type !== "integer" && input instanceof HTMLInputElement && input.type === "number" && input.validity.stepMismatch) {
+      // 兼容旧版 AI 源码里“min=0.1、step=1、default=1”这类自相矛盾的参数定义。
+      // 服务端本来只校验数值范围；这里不应让一个已保存的默认值被浏览器拒绝。
+      input.dataset.declaredStep = input.step;
+      input.step = "any";
+    }
     if (definition.help) label.append(input, this.node("small", "strategy-field-help", definition.help));
     else label.append(input);
     return label;
+  }
+
+  localizeFieldValidation(field) {
+    if (!field || typeof field.setCustomValidity !== "function") return;
+    field.setCustomValidity("");
+    const validity = field.validity;
+    let message = "";
+    if (validity.valueMissing) message = "请填写此字段。";
+    else if (validity.badInput || validity.typeMismatch) message = "请输入有效的值。";
+    else if (validity.rangeUnderflow) message = `请输入不小于 ${field.min} 的值。`;
+    else if (validity.rangeOverflow) message = `请输入不大于 ${field.max} 的值。`;
+    else if (validity.stepMismatch) {
+      const nearest = this.nearestStepValues(field);
+      message = nearest
+        ? `请输入符合步长 ${field.step} 的值。最接近的有效值是 ${nearest[0]} 和 ${nearest[1]}。`
+        : `请输入符合步长 ${field.step} 的值。`;
+    } else if (validity.tooShort) message = `请至少输入 ${field.minLength} 个字符。`;
+    else if (validity.tooLong) message = `最多只能输入 ${field.maxLength} 个字符。`;
+    else if (validity.patternMismatch) message = "输入格式不正确，请重新检查。";
+    else if (!validity.valid) message = "请输入有效的值。";
+    field.setCustomValidity(message);
+  }
+
+  nearestStepValues(field) {
+    const value = Number(field.value);
+    const step = Number(field.step);
+    const minimum = Number(field.min);
+    if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) return null;
+    const base = Number.isFinite(minimum) ? minimum : 0;
+    const ratio = (value - base) / step;
+    const precision = Math.min(10, Math.max(this.decimalPlaces(base), this.decimalPlaces(step), this.decimalPlaces(value)));
+    const format = (candidate) => Number(candidate.toFixed(precision)).toString();
+    return [format(base + Math.floor(ratio) * step), format(base + Math.ceil(ratio) * step)];
+  }
+
+  decimalPlaces(value) {
+    const text = String(value).toLowerCase();
+    if (text.includes("e-")) return Number(text.split("e-")[1]) || 0;
+    return (text.split(".")[1] || "").length;
   }
 
   humanizeKey(key) {
@@ -2853,9 +2902,32 @@ class StrategyCenter extends HTMLElement {
   }
 
   friendlyMutationError(error) {
-    const message = String(error?.message || "保存失败，请稍后重试。");
+    const message = this.localizedErrorMessage(error, "保存失败，请稍后重试。");
     if (/version|版本|conflict|冲突/i.test(message)) return "策略已在其他页面更新。请关闭编辑器并刷新列表后再修改。";
     return message;
+  }
+
+  localizedErrorMessage(error, fallback = "操作失败，请稍后重试。") {
+    const message = String(error?.message || "").trim();
+    if (!message) return fallback;
+    const replacements = [
+      [/source strategy trigger timeframe must be\s+([\w]+)/i, (_, timeframe) => `源码策略触发周期必须是 ${timeframe}。`],
+      [/full strategy trigger timeframe must be\s+([\w]+)/i, (_, timeframe) => `完整策略触发周期必须是 ${timeframe}。`],
+      [/invalid source strategy:\s*(.*)/i, (_, detail) => `源码策略无效：${detail || "请检查源码结构"}`],
+      [/source strategy evaluation failed:\s*(.*)/i, (_, detail) => `源码策略执行失败：${detail || "请检查策略输出"}`],
+      [/invalid backtest timeframe/i, () => "回测周期格式无效。"],
+      [/unsupported backtest timeframe/i, () => "暂不支持该回测周期。"],
+      [/strategy is archived/i, () => "策略已归档，不能继续修改。"],
+      [/strategy not found/i, () => "未找到该策略。"],
+      [/source strategy is incomplete/i, () => "源码策略不完整，请先补全并校验。"],
+      [/strategy revision is unavailable/i, () => "策略版本快照不可用。"],
+      [/active strategy limit reached/i, () => "可用策略数量已达到上限。"],
+      [/failed to fetch|networkerror|network request failed/i, () => "网络请求失败，请检查连接后重试。"],
+    ];
+    for (const [pattern, replacement] of replacements) {
+      if (pattern.test(message)) return message.replace(pattern, replacement);
+    }
+    return /[\u3400-\u9fff]/.test(message) ? message : fallback;
   }
 
   showNotice(message, tone = "") {

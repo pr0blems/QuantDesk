@@ -145,6 +145,9 @@ def test_platform_compiler_builds_safe_source_for_four_indicator_blueprint() -> 
     assert validation["data_requirements"]["trigger_timeframe"] == "1h"
     assert set(validation["parameter_keys"]) == set(parameters)
     assert validation["directions"] == ["long", "short"]
+    schema_by_key = {item["key"]: item for item in validation["parameter_schema"]}
+    assert schema_by_key["ema_weight"]["step"] == pytest.approx(0.1)
+    assert "'ema_weight': {'label': 'EMA 趋势组合 · 权重', 'type': 'number', 'default': 1, 'min': 0.1, 'max': 5, 'step': 0.1}" in source
 
 
 def register_and_login(client: TestClient, username: str) -> dict[str, str]:
