@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -69,6 +70,7 @@ from quantdesk_v2.interfaces.api.ai_monitor import (
     _sse_message,
     _stable_opportunity_contract,
     _utc_out,
+    ai_monitor_events,
 )
 from quantdesk_v2.market_microstructure import order_book_gate_snapshot
 from quantdesk_v2.models import (
@@ -291,6 +293,21 @@ def test_ai_monitor_sse_revision_protocol_is_resumable_and_scope_incremental() -
     assert "retry: 3000\n" in message
     assert 'data: {"scopes":["opportunities","market"]}\n\n' in message
     assert "token" not in message.lower()
+
+
+def test_ai_monitor_sse_flushes_connection_before_revision_queries() -> None:
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(database_engine=object())),
+        headers={},
+    )
+    response = ai_monitor_events(request, user_id=73)
+
+    async def read_first_chunk() -> str:
+        chunk = await anext(response.body_iterator)
+        await response.body_iterator.aclose()
+        return chunk
+
+    assert asyncio.run(read_first_chunk()) == ": connected\n\n"
 
 
 def test_ai_monitor_market_data_health_is_operational_and_secret_free() -> None:
@@ -3246,7 +3263,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260825-91"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260825-92"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3256,7 +3273,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260825-91"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260825-92"' in legacy_index
     assert 'href="/assets/ai-monitor.css?v=20260825-52"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
@@ -3349,7 +3366,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "this.virtualEntryState(item, this.virtualEntryGate(item)).tone" in component
     assert "当前机会" in component
     assert "历史机会" in component
-    assert 'this.state.updateStreamStatus = "connecting";\n    this.renderSignalHealth();' in component
+    assert 'this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "connecting";' in component
     assert 'const pipelineInitializing = this.state.fullLoadLoading' in component
     assert 'const pipelineReconnecting = this.state.updateStreamStatus === "reconnecting"' in component
     assert "const restPollingHealthy = hasRecentRestSuccess && !this.state.lastRefreshError;" in component

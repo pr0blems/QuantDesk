@@ -123,6 +123,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.newsScrollAnimationFrame = null;
     this.newsScrollLastTick = 0;
     this.updateStreamAbort = null;
+    this.updateStreamConnectTimer = null;
     this.updateStreamRetryTimer = null;
     this.updateStreamRefreshTimer = null;
     this.updateStreamScopes = new Set();
@@ -710,7 +711,9 @@ class AiMonitorDashboard extends HTMLElement {
     this.timers.forEach((timer) => window.clearInterval(timer));
     this.timers = [];
     window.clearTimeout(this.updateStreamRetryTimer);
+    window.clearTimeout(this.updateStreamConnectTimer);
     window.clearTimeout(this.updateStreamRefreshTimer);
+    this.updateStreamConnectTimer = null;
     this.updateStreamRetryTimer = null;
     this.updateStreamRefreshTimer = null;
     this.updateStreamAbort?.abort();
@@ -738,13 +741,23 @@ class AiMonitorDashboard extends HTMLElement {
   startUpdateStream() {
     if (!this.state.running || this.updateStreamAbort || typeof window.quantdeskApiStream !== "function") return;
     const controller = new AbortController();
+    let connectionTimedOut = false;
     this.updateStreamAbort = controller;
-    this.state.updateStreamStatus = "connecting";
+    this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "connecting";
     this.renderSignalHealth();
+    this.updateStreamConnectTimer = window.setTimeout(() => {
+      if (this.updateStreamAbort !== controller || this.state.updateStreamStatus === "connected") return;
+      connectionTimedOut = true;
+      this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "reconnecting";
+      this.renderSignalHealth();
+      controller.abort();
+    }, 8000);
     this.consumeUpdateStream(controller).catch(() => {}).finally(() => {
+      window.clearTimeout(this.updateStreamConnectTimer);
+      this.updateStreamConnectTimer = null;
       if (this.updateStreamAbort === controller) this.updateStreamAbort = null;
-      if (!this.state.running || controller.signal.aborted) return;
-      this.state.updateStreamStatus = "reconnecting";
+      if (!this.state.running || (controller.signal.aborted && !connectionTimedOut)) return;
+      this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "reconnecting";
       this.renderSignalHealth();
       this.updateStreamRetryTimer = window.setTimeout(() => this.startUpdateStream(), 3000);
     });
@@ -755,6 +768,8 @@ class AiMonitorDashboard extends HTMLElement {
     if (this.lastUpdateStreamEventId) headers.set("Last-Event-ID", this.lastUpdateStreamEventId);
     const response = await this.stream("/events", { signal: controller.signal, headers });
     if (!response.body) throw new Error("incremental stream is unavailable");
+    window.clearTimeout(this.updateStreamConnectTimer);
+    this.updateStreamConnectTimer = null;
     this.state.updateStreamStatus = "connected";
     this.renderSignalHealth();
     const reader = response.body.getReader();

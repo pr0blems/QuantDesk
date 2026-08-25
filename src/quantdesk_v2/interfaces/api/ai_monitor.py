@@ -2193,6 +2193,9 @@ def ai_monitor_events(
         previous: dict[str, dict[str, Any]] | None = None
         current_event_id = "unavailable"
         heartbeat_at = asyncio.get_running_loop().time()
+        # Flush response headers immediately so browsers can complete the SSE
+        # handshake before the first database revision snapshot is calculated.
+        yield ": connected\n\n"
         while True:
             if await request.is_disconnected():
                 return
