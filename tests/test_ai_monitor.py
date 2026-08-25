@@ -3263,7 +3263,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260825-93"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260825-94"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3273,7 +3273,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260825-93"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260825-94"' in legacy_index
     assert 'href="/assets/ai-monitor.css?v=20260825-52"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
@@ -3367,7 +3367,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "当前机会" in component
     assert "历史机会" in component
     assert 'this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "connecting";' in component
-    assert 'const pipelineInitializing = this.state.fullLoadLoading' in component
+    assert 'const pipelineInitializing = !this.state.lastSuccessfulRefreshAt' in component
     assert 'const pipelineReconnecting = this.state.updateStreamStatus === "reconnecting"' in component
     assert "const restPollingHealthy = hasRecentRestSuccess && !this.state.lastRefreshError;" in component
     assert "const restHealthy = this.firstValue(" not in component

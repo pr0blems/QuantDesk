@@ -1818,8 +1818,8 @@ class AiMonitorDashboard extends HTMLElement {
     const lastSuccessfulRefreshMs = transportUpdatedAt ? this.parseDate(transportUpdatedAt).getTime() : NaN;
     const hasRecentRestSuccess = Number.isFinite(lastSuccessfulRefreshMs) && Date.now() - lastSuccessfulRefreshMs <= 120000;
     const restPollingHealthy = hasRecentRestSuccess && !this.state.lastRefreshError;
-    const pipelineInitializing = this.state.fullLoadLoading
-      || (!this.state.lastSuccessfulRefreshAt && ["idle", "connecting"].includes(this.state.updateStreamStatus));
+    const pipelineInitializing = !this.state.lastSuccessfulRefreshAt
+      && (this.state.fullLoadLoading || ["idle", "connecting"].includes(this.state.updateStreamStatus));
     const pipelineReconnecting = this.state.updateStreamStatus === "reconnecting";
     const pipelineTone = this.state.lastRefreshError
       ? "danger"
