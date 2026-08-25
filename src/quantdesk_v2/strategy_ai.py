@@ -221,6 +221,7 @@ def generate_strategy_source_preview(
     model: str,
     timeout_seconds: float = 20.0,
     safety_identifier: str | None = None,
+    generation_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate a review-only edit of real Python strategy source."""
 
@@ -236,6 +237,7 @@ def generate_strategy_source_preview(
         model=model,
         timeout_seconds=timeout_seconds,
         safety_identifier=safety_identifier,
+        generation_context=generation_context,
     )
 
 
@@ -247,6 +249,7 @@ def generate_user_model_strategy_source_preview(
     api_key: str,
     model_name: str,
     timeout_seconds: float = 20.0,
+    generation_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate a Python source preview through an allowlisted provider."""
 
@@ -257,6 +260,7 @@ def generate_user_model_strategy_source_preview(
         api_key=api_key,
         model_name=model_name,
         timeout_seconds=timeout_seconds,
+        generation_context=generation_context,
     )
     return _chat_completions_source_preview(
         source_code,
@@ -594,7 +598,11 @@ def _openai_code_preview(
     )
 
 
-def _source_edit_messages(source_code: str, prompt: str) -> list[dict[str, str]]:
+def _source_edit_messages(
+    source_code: str,
+    prompt: str,
+    generation_context: Mapping[str, Any] | None = None,
+) -> list[dict[str, str]]:
     contract = (
         "The source must keep literal constants TIMEFRAMES, TRIGGER_TIMEFRAME, "
         "LOOKBACK_BARS, DIRECTIONS and optional VALID_FOR_BARS, plus "
@@ -614,13 +622,25 @@ def _source_edit_messages(source_code: str, prompt: str) -> list[dict[str, str]]
                 "file/network/system access, dynamic execution, URLs, credentials, or "
                 "deployment actions. Preserve the public runtime contract and parameter "
                 "names unless explicitly asked. Do not claim profitability. "
+                "When indicator_blueprint is present, it is a trusted platform "
+                "constraint: implement every selected indicator, keep its timeframe "
+                "and directions, and read tunable values only from the supplied "
+                "parameter keys. Do not invent unavailable parameter names. "
                 f"{contract} Summarize changes briefly in Chinese."
             ),
         },
         {
             "role": "user",
             "content": json.dumps(
-                {"current_python_source": source_code, "edit_request": prompt},
+                {
+                    "current_python_source": source_code,
+                    "edit_request": prompt,
+                    "indicator_blueprint": (
+                        deepcopy(dict(generation_context))
+                        if generation_context is not None
+                        else None
+                    ),
+                },
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -638,10 +658,11 @@ def _chat_completions_source_preview(
     api_key: str,
     model_name: str,
     timeout_seconds: float,
+    generation_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     request_payload = {
         "model": model_name,
-        "messages": _source_edit_messages(source_code, prompt),
+        "messages": _source_edit_messages(source_code, prompt, generation_context),
         "stream": False,
     }
     if provider == "minimax":
@@ -699,13 +720,14 @@ def _openai_source_preview(
     model: str,
     timeout_seconds: float,
     safety_identifier: str | None,
+    generation_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     _validate_openai_settings(api_key, model, timeout_seconds)
     request_payload: dict[str, Any] = {
         "model": model,
         "store": False,
         "max_output_tokens": 8_000,
-        "input": _source_edit_messages(source_code, prompt),
+        "input": _source_edit_messages(source_code, prompt, generation_context),
         "text": {"format": _code_output_format()},
     }
     if safety_identifier is not None:

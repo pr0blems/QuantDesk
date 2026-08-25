@@ -2099,6 +2099,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/strategies/runtime/python/ai-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview New Strategy Source */
+        post: operations["preview_new_strategy_source_api_v2_strategies_runtime_python_ai_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/strategies/runtime/python/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate New Strategy Source */
+        post: operations["validate_new_strategy_source_api_v2_strategies_runtime_python_validate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/strategies/signals": {
         parameters: {
             query?: never;
@@ -2110,6 +2144,23 @@ export interface paths {
         get: operations["list_strategy_signals_api_v2_strategies_signals_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/strategies/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Source Strategy */
+        post: operations["create_source_strategy_api_v2_strategies_source_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2231,6 +2282,57 @@ export interface paths {
         get: operations["list_strategy_revisions_api_v2_strategies__public_id__revisions_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/strategies/{public_id}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Strategy Source */
+        put: operations["update_strategy_source_api_v2_strategies__public_id__source_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/strategies/{public_id}/source/ai-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview Ai Strategy Source Edit */
+        post: operations["preview_ai_strategy_source_edit_api_v2_strategies__public_id__source_ai_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/strategies/{public_id}/source/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate Strategy Source */
+        post: operations["validate_strategy_source_api_v2_strategies__public_id__source_validate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4043,6 +4145,122 @@ export interface components {
              * @default 1
              */
             weight: number;
+        };
+        /**
+         * StrategySourceAiPreviewRequest
+         * @description Modify the visible source buffer and return a review-only preview.
+         */
+        StrategySourceAiPreviewRequest: {
+            composition?: components["schemas"]["StrategySourceComposition"] | null;
+            /**
+             * Language
+             * @default python
+             * @constant
+             */
+            language: "python";
+            /** Prompt */
+            prompt: string;
+            /** Source Code */
+            source_code: string;
+        };
+        /**
+         * StrategySourceComposition
+         * @description Indicator constraints used when AI generates executable Python source.
+         */
+        StrategySourceComposition: {
+            /**
+             * Confirmation Threshold
+             * @default 60
+             */
+            confirmation_threshold: number;
+            /** Directions */
+            directions?: ("long" | "short")[];
+            /** Indicators */
+            indicators: components["schemas"]["StrategyIndicatorSelection"][];
+            /**
+             * Signal Valid Bars
+             * @default 2
+             */
+            signal_valid_bars: number;
+            /**
+             * Timeframe
+             * @default 1h
+             * @enum {string}
+             */
+            timeframe: "15m" | "1h" | "4h";
+        };
+        /**
+         * StrategySourceCreateRequest
+         * @description Create a user-owned Python strategy with separate editable parameters.
+         */
+        StrategySourceCreateRequest: {
+            /**
+             * Category
+             * @default 源码策略
+             */
+            category: string;
+            composition?: components["schemas"]["StrategySourceComposition"] | null;
+            /**
+             * Description
+             * @default 可编辑 Python 源码策略
+             */
+            description: string;
+            /**
+             * Language
+             * @default python
+             * @constant
+             */
+            language: "python";
+            /**
+             * Name
+             * @default Python EMA 策略
+             */
+            name: string;
+            /** Risk Defaults */
+            risk_defaults?: {
+                [key: string]: number;
+            } | null;
+            /** Source Code */
+            source_code?: string | null;
+        };
+        /**
+         * StrategySourceUpdateRequest
+         * @description Publish one immutable executable source revision.
+         */
+        StrategySourceUpdateRequest: {
+            /** Category */
+            category: string;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
+             * Language
+             * @default python
+             * @constant
+             */
+            language: "python";
+            /** Name */
+            name: string;
+            /** Source Code */
+            source_code: string;
+            /** Version */
+            version: number;
+        };
+        /**
+         * StrategySourceValidateRequest
+         * @description Validate executable strategy source without persisting it.
+         */
+        StrategySourceValidateRequest: {
+            /**
+             * Language
+             * @default python
+             * @constant
+             */
+            language: "python";
+            /** Source Code */
+            source_code: string;
         };
         /**
          * StrategyUpdateRequest
@@ -6009,6 +6227,7 @@ export interface operations {
                 min_data_coverage?: number;
                 feature_version?: string;
                 decision_version?: string;
+                settlement_version?: string;
                 direction?: "all" | "long" | "short";
                 market_session?: "all" | "premarket" | "regular" | "postmarket" | "closed" | "unknown";
                 quote_quality?: "all" | "passed" | "partial" | "blocked" | "missing";
@@ -8310,6 +8529,76 @@ export interface operations {
             };
         };
     };
+    preview_new_strategy_source_api_v2_strategies_runtime_python_ai_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategySourceAiPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_new_strategy_source_api_v2_strategies_runtime_python_validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategySourceValidateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_strategy_signals_api_v2_strategies_signals_get: {
         parameters: {
             query?: {
@@ -8323,6 +8612,41 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_source_strategy_api_v2_strategies_source_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategySourceCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8641,6 +8965,117 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_strategy_source_api_v2_strategies__public_id__source_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategySourceUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_ai_strategy_source_edit_api_v2_strategies__public_id__source_ai_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategySourceAiPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_strategy_source_api_v2_strategies__public_id__source_validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategySourceValidateRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

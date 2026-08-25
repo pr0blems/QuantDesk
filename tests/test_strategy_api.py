@@ -16,6 +16,7 @@ from quantdesk_v2.config import Settings
 from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
 from quantdesk_v2.models import AiModelConfig, StrategyRevision, User, UserStrategy
+from quantdesk_v2.schemas import StrategySourceComposition
 from quantdesk_v2.security import CredentialCipher, api_key_fingerprint
 from quantdesk_v2.strategy_ai import generate_local_strategy_preview
 
@@ -48,6 +49,43 @@ def build_test_client(mysql_test_engine: Engine):
 
     app.dependency_overrides[get_db] = override_db
     return TestClient(app), test_session
+
+
+def test_source_composition_builds_a_parameter_contract_for_generated_code() -> None:
+    composition = StrategySourceComposition.model_validate(
+        {
+            "indicators": [
+                {
+                    "key": "ema",
+                    "weight": 1.2,
+                    "parameters": {"fast_period": 12, "slow_period": 36},
+                },
+                {
+                    "key": "volume_ratio",
+                    "weight": 0.8,
+                    "parameters": {"period": 24, "min_ratio": 1.4},
+                },
+            ],
+            "timeframe": "1h",
+            "directions": ["long", "short"],
+            "confirmation_threshold": 65,
+            "signal_valid_bars": 2,
+        }
+    )
+
+    context, schema, parameters = strategy_routes._source_composition_context(
+        composition
+    )
+
+    assert context["timeframe"] == "1h"
+    assert [item["key"] for item in context["selected_indicators"]] == [
+        "ema",
+        "volume_ratio",
+    ]
+    assert parameters["ema_fast_period"] == 12
+    assert parameters["volume_ratio_min_ratio"] == 1.4
+    assert context["required_parameter_keys"] == sorted(parameters)
+    assert {item["key"] for item in schema} == set(parameters)
 
 
 def register_and_login(client: TestClient, username: str) -> dict[str, str]:
@@ -572,3 +610,91 @@ def test_ai_strategy_code_preview_is_validated_before_reaching_the_editor(
             "spec.exit.take_profit_r",
             "spec.exit.max_holding_bars",
         }
+
+
+def test_source_strategy_created_from_indicator_composition_keeps_tunable_parameters(
+    mysql_test_engine: Engine,
+) -> None:
+    client, session_factory = build_test_client(mysql_test_engine)
+    source = '''"""EMA 与成交量确认的可编辑策略。"""
+TIMEFRAMES = ("1h",)
+TRIGGER_TIMEFRAME = "1h"
+LOOKBACK_BARS = 120
+DIRECTIONS = ("long", "short")
+VALID_FOR_BARS = 2
+
+def evaluate(context, params):
+    bars = context["bars"][TRIGGER_TIMEFRAME]
+    closes = [bar["close"] for bar in bars]
+    volumes = [bar["volume"] for bar in bars]
+    fast = ema(closes, int(params["ema_fast_period"]))
+    slow = ema(closes, int(params["ema_slow_period"]))
+    volume_period = int(params["volume_ratio_period"])
+    average_volume = sma(volumes[:-1], volume_period)
+    volume_ratio = volumes[-1] / average_volume if average_volume > 0 else 0
+    score = float(params["ema_weight"]) if fast > slow else 0
+    passed = volume_ratio >= float(params["volume_ratio_min_ratio"])
+    if passed:
+        score = score + float(params["volume_ratio_weight"])
+    threshold = float(params["confirmation_threshold"])
+    risk_atr = atr(bars, int(params["risk_atr_period"]))
+    evidence = {"score": score, "threshold": threshold, "atr": risk_atr, "valid": params["signal_valid_bars"]}
+    if fast > slow and passed:
+        return {"decision": "LONG_ENTRY", "confidence": 0.7, "evidence": evidence}
+    if fast < slow and passed:
+        return {"decision": "SHORT_ENTRY", "confidence": 0.7, "evidence": evidence}
+    return {"decision": "HOLD", "evidence": evidence}
+'''
+    with client:
+        headers = register_and_login(client, "strategy-source-composer")
+        response = client.post(
+            "/api/v2/strategies/source",
+            headers=headers,
+            json={
+                "name": "EMA 成交量 Python 策略",
+                "description": "由指标选择与自然语言生成。",
+                "category": "源码策略",
+                "language": "python",
+                "source_code": source,
+                "composition": {
+                    "indicators": [
+                        {
+                            "key": "ema",
+                            "weight": 1.2,
+                            "parameters": {"fast_period": 12, "slow_period": 36},
+                        },
+                        {
+                            "key": "volume_ratio",
+                            "weight": 0.8,
+                            "parameters": {"period": 24, "min_ratio": 1.4},
+                        },
+                    ],
+                    "timeframe": "1h",
+                    "directions": ["long", "short"],
+                    "confirmation_threshold": 65,
+                    "signal_valid_bars": 2,
+                },
+            },
+        )
+
+        assert response.status_code == 201
+        saved = response.json()
+        assert saved["strategy_kind"] == "source_strategy"
+        assert saved["parameters"]["ema_fast_period"] == 12
+        assert saved["parameters"]["volume_ratio_min_ratio"] == 1.4
+        assert saved["parameters"]["confirmation_threshold"] == 65
+        assert set(saved["source_validation"]["parameter_keys"]) == set(saved["parameters"])
+
+        with session_factory() as db:
+            row = db.scalar(
+                select(UserStrategy).where(UserStrategy.public_id == saved["id"])
+            )
+            assert row is not None
+            revision = db.scalar(
+                select(StrategyRevision).where(
+                    StrategyRevision.user_strategy_id == row.id,
+                    StrategyRevision.version == 1,
+                )
+            )
+            assert revision is not None
+            assert revision.change_source == "ai"

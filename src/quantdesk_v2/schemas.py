@@ -1233,6 +1233,28 @@ class StrategyIndicatorSelection(BaseModel):
         return _bounded_numeric_map(value, "indicator parameter")
 
 
+class StrategySourceComposition(BaseModel):
+    """Indicator constraints used when AI generates executable Python source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    indicators: list[StrategyIndicatorSelection] = Field(min_length=2, max_length=8)
+    timeframe: Literal["15m", "1h", "4h"] = "1h"
+    directions: list[Literal["long", "short"]] = Field(
+        default_factory=lambda: ["long", "short"], min_length=1, max_length=2
+    )
+    confirmation_threshold: float = Field(default=60, ge=1, le=100)
+    signal_valid_bars: int = Field(default=2, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def validate_composition(self) -> Self:
+        keys = [item.key for item in self.indicators]
+        if len(set(keys)) != len(keys):
+            raise ValueError("indicator selections must be unique")
+        self.directions = list(dict.fromkeys(self.directions))
+        return self
+
+
 class StrategyCreateRequest(BaseModel):
     """Create one user-owned template copy or executable indicator composition."""
 
@@ -1390,6 +1412,7 @@ class StrategySourceAiPreviewRequest(StrategyAiPreviewRequest):
 
     language: Literal["python"] = "python"
     source_code: str = Field(min_length=1, max_length=65_536)
+    composition: StrategySourceComposition | None = None
 
 
 class StrategySourceUpdateRequest(BaseModel):
@@ -1416,6 +1439,7 @@ class StrategySourceCreateRequest(BaseModel):
     language: Literal["python"] = "python"
     source_code: str | None = Field(default=None, min_length=1, max_length=65_536)
     risk_defaults: dict[str, int | float] | None = Field(default=None, max_length=16)
+    composition: StrategySourceComposition | None = None
 
     @field_validator("risk_defaults")
     @classmethod

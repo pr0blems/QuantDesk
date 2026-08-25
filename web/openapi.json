@@ -4370,6 +4370,254 @@
         "title": "StrategyIndicatorSelection",
         "type": "object"
       },
+      "StrategySourceAiPreviewRequest": {
+        "additionalProperties": false,
+        "description": "Modify the visible source buffer and return a review-only preview.",
+        "properties": {
+          "composition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StrategySourceComposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "language": {
+            "const": "python",
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "prompt": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "source_code": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Source Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt",
+          "source_code"
+        ],
+        "title": "StrategySourceAiPreviewRequest",
+        "type": "object"
+      },
+      "StrategySourceComposition": {
+        "additionalProperties": false,
+        "description": "Indicator constraints used when AI generates executable Python source.",
+        "properties": {
+          "confirmation_threshold": {
+            "default": 60,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Confirmation Threshold",
+            "type": "number"
+          },
+          "directions": {
+            "items": {
+              "enum": [
+                "long",
+                "short"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Directions",
+            "type": "array"
+          },
+          "indicators": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyIndicatorSelection"
+            },
+            "maxItems": 8,
+            "minItems": 2,
+            "title": "Indicators",
+            "type": "array"
+          },
+          "signal_valid_bars": {
+            "default": 2,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Signal Valid Bars",
+            "type": "integer"
+          },
+          "timeframe": {
+            "default": "1h",
+            "enum": [
+              "15m",
+              "1h",
+              "4h"
+            ],
+            "title": "Timeframe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "indicators"
+        ],
+        "title": "StrategySourceComposition",
+        "type": "object"
+      },
+      "StrategySourceCreateRequest": {
+        "additionalProperties": false,
+        "description": "Create a user-owned Python strategy with separate editable parameters.",
+        "properties": {
+          "category": {
+            "default": "源码策略",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Category",
+            "type": "string"
+          },
+          "composition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StrategySourceComposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "default": "可编辑 Python 源码策略",
+            "maxLength": 600,
+            "title": "Description",
+            "type": "string"
+          },
+          "language": {
+            "const": "python",
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "name": {
+            "default": "Python EMA 策略",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "risk_defaults": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ]
+                },
+                "maxProperties": 16,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk Defaults"
+          },
+          "source_code": {
+            "anyOf": [
+              {
+                "maxLength": 65536,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Code"
+          }
+        },
+        "title": "StrategySourceCreateRequest",
+        "type": "object"
+      },
+      "StrategySourceUpdateRequest": {
+        "additionalProperties": false,
+        "description": "Publish one immutable executable source revision.",
+        "properties": {
+          "category": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Category",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "maxLength": 600,
+            "title": "Description",
+            "type": "string"
+          },
+          "language": {
+            "const": "python",
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "source_code": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Source Code",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "name",
+          "category",
+          "source_code"
+        ],
+        "title": "StrategySourceUpdateRequest",
+        "type": "object"
+      },
+      "StrategySourceValidateRequest": {
+        "additionalProperties": false,
+        "description": "Validate executable strategy source without persisting it.",
+        "properties": {
+          "language": {
+            "const": "python",
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "source_code": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Source Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_code"
+        ],
+        "title": "StrategySourceValidateRequest",
+        "type": "object"
+      },
       "StrategyUpdateRequest": {
         "additionalProperties": false,
         "description": "Replace editable strategy fields using optimistic concurrency control.",
@@ -7822,6 +8070,17 @@
           },
           {
             "in": "query",
+            "name": "settlement_version",
+            "required": false,
+            "schema": {
+              "default": "current",
+              "maxLength": 32,
+              "title": "Settlement Version",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "direction",
             "required": false,
             "schema": {
@@ -11233,6 +11492,102 @@
         ]
       }
     },
+    "/api/v2/strategies/runtime/python/ai-preview": {
+      "post": {
+        "operationId": "preview_new_strategy_source_api_v2_strategies_runtime_python_ai_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategySourceAiPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Preview New Strategy Source Api V2 Strategies Runtime Python Ai Preview Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Preview New Strategy Source",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/runtime/python/validate": {
+      "post": {
+        "operationId": "validate_new_strategy_source_api_v2_strategies_runtime_python_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategySourceValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate New Strategy Source Api V2 Strategies Runtime Python Validate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Validate New Strategy Source",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
     "/api/v2/strategies/signals": {
       "get": {
         "operationId": "list_strategy_signals_api_v2_strategies_signals_get",
@@ -11278,6 +11633,54 @@
           }
         ],
         "summary": "List Strategy Signals",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/source": {
+      "post": {
+        "operationId": "create_source_strategy_api_v2_strategies_source_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategySourceCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Source Strategy Api V2 Strategies Source Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Source Strategy",
         "tags": [
           "strategies"
         ]
@@ -11775,6 +12178,183 @@
           }
         ],
         "summary": "List Strategy Revisions",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/source": {
+      "put": {
+        "operationId": "update_strategy_source_api_v2_strategies__public_id__source_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategySourceUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Strategy Source Api V2 Strategies  Public Id  Source Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Strategy Source",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/source/ai-preview": {
+      "post": {
+        "operationId": "preview_ai_strategy_source_edit_api_v2_strategies__public_id__source_ai_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategySourceAiPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Preview Ai Strategy Source Edit Api V2 Strategies  Public Id  Source Ai Preview Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Preview Ai Strategy Source Edit",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/source/validate": {
+      "post": {
+        "operationId": "validate_strategy_source_api_v2_strategies__public_id__source_validate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategySourceValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate Strategy Source Api V2 Strategies  Public Id  Source Validate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Validate Strategy Source",
         "tags": [
           "strategies"
         ]

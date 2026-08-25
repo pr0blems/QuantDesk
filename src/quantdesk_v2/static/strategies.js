@@ -29,6 +29,7 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestCatalog = null;
     this.sourceBacktestResult = null;
     this.sourceBacktestRunning = false;
+    this.sourceComposition = null;
   }
 
   connectedCallback() {
@@ -181,15 +182,15 @@ class StrategyCenter extends HTMLElement {
                   <div><span>AI STRATEGY COMPOSER</span><h3 id="strategy-ai-title">用自然语言修改策略</h3></div>
                   <span id="strategy-ai-status" class="strategy-ai-status"><i></i>受约束配置</span>
                 </header>
-                <p id="strategy-ai-description">描述你想调整的逻辑或风险参数。模型只能提出结构化配置修改，不会生成或执行任意代码。</p>
+                <p id="strategy-ai-description">描述你想调整的逻辑或风险参数。创建策略时，模型会把已选指标与自然语言规则生成完整、可编辑的 Python 源码。</p>
                 <label>自然语言要求<textarea id="strategy-ai-prompt" rows="5" maxlength="1200" placeholder="例如：做一个 1 小时趋势策略，用 EMA、MACD 和成交量确认，减少噪声并把止损控制在 3%。"></textarea></label>
                 <div class="strategy-ai-examples" aria-label="AI 编辑示例">
                   <button type="button" data-ai-example="创建 1 小时趋势策略，使用 EMA、MACD、ADX 和成交量确认，参数偏稳健。">趋势组合</button>
                   <button type="button" data-ai-example="创建 15 分钟反转策略，使用 RSI、布林带和 ATR 过滤，减少噪声。">反转组合</button>
                   <button type="button" data-ai-example="创建 4 小时突破策略，使用 Donchian、ADX 和成交量确认，只做多。">突破组合</button>
                 </div>
-                <button id="strategy-ai-preview-button" class="strategy-ai-preview-button" type="button"><span aria-hidden="true">✦</span><strong>AI 生成指标方案</strong></button>
-                <div class="strategy-safety-note"><span aria-hidden="true">!</span><p><strong>仅生成预览，不执行交易</strong>。采用方案后只会回填表单，点击“创建策略”才保存，之后仍需通过回测与模拟盘验证。</p></div>
+                <button id="strategy-ai-preview-button" class="strategy-ai-preview-button" type="button"><span aria-hidden="true">✦</span><strong>AI 生成 Python 源码</strong></button>
+                <div class="strategy-safety-note"><span aria-hidden="true">!</span><p><strong>只生成源码预览，不执行交易</strong>。源码必须通过服务端安全校验并保存版本，之后仍需通过回测与模拟盘验证。</p></div>
 
                 <section id="strategy-ai-preview" class="strategy-ai-preview hidden" aria-live="polite">
                   <header><div><span id="strategy-ai-provider">--</span><strong>修改预览</strong></div><span id="strategy-ai-base-version">--</span></header>
@@ -383,6 +384,7 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestCatalog = null;
     this.sourceBacktestResult = null;
     this.sourceBacktestRunning = false;
+    this.sourceComposition = null;
     this.querySelector("#strategy-search").value = "";
     this.querySelector("#strategy-category-filter").replaceChildren(this.option("all", "全部分类"));
     this.querySelectorAll("[data-section]").forEach((button) => {
@@ -797,10 +799,11 @@ class StrategyCenter extends HTMLElement {
     this.activeItem = null;
     this.preview = null;
     this.codeBuffers = {};
+    this.sourceComposition = null;
     this.resetSourceBacktestResult();
     this.querySelector("#strategy-editor-kicker").textContent = "CREATE STRATEGY";
     this.querySelector("#strategy-editor-title").textContent = "新增策略";
-    this.querySelector("#strategy-editor-subtitle").textContent = "勾选多个标准指标并配置参数，保存为可执行的完整策略。";
+    this.querySelector("#strategy-editor-subtitle").textContent = "选择指标并描述规则，由 AI 生成可编辑、可校验、可回测的 Python 策略源码。";
     this.querySelector("#strategy-version-strip").classList.add("hidden");
     this.querySelector("#strategy-edit-scope-block").classList.add("hidden");
     this.querySelector("#strategy-code-block").classList.add("hidden");
@@ -809,10 +812,10 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-parameters-index").textContent = "--";
     this.querySelector("#strategy-risk-index").textContent = "03";
     this.querySelector("#strategy-ai-panel").classList.remove("hidden");
-    this.querySelector("#strategy-ai-status").lastChild.textContent = "受约束配置";
-    this.querySelector("#strategy-ai-title").textContent = "用自然语言生成指标组合";
-    this.querySelector("#strategy-ai-description").textContent = "描述周期、风格和风险偏好。AI 会从指标库选择多个指标并调整参数，只生成结构化方案。";
-    this.querySelector("#strategy-ai-preview-button strong").textContent = "AI 生成指标方案";
+    this.querySelector("#strategy-ai-status").lastChild.textContent = "Python 隔离运行时";
+    this.querySelector("#strategy-ai-title").textContent = "用自然语言生成 Python 策略";
+    this.querySelector("#strategy-ai-description").textContent = "左侧指标由你决定；自然语言负责定义入场、过滤、退出与风险逻辑。AI 会生成完整 Python 源码供你编辑和校验。";
+    this.querySelector("#strategy-ai-preview-button strong").textContent = "AI 生成 Python 源码";
     this.querySelector("#strategy-save strong").textContent = "创建策略";
     this.populateTemplateSelect();
     this.querySelector("#strategy-form").reset();
@@ -1105,6 +1108,7 @@ class StrategyCenter extends HTMLElement {
               fee_bps: Number(this.querySelector("#strategy-runner-fee").value),
               slippage_bps: Number(this.querySelector("#strategy-runner-slippage").value),
             },
+            ...(this.sourceComposition ? { composition: this.sourceComposition } : {}),
           }),
         });
       } else {
@@ -1451,10 +1455,11 @@ class StrategyCenter extends HTMLElement {
     select.replaceChildren(...ordered.map((template) => this.option(template.template_key, `${template.template_kind === "strategy" ? "完整策略" : "旧版信号"} · ${template.name}`)));
   }
 
-  switchCreateMode(mode, { resetValues = true } = {}) {
+  switchCreateMode(mode, { resetValues = true, keepComposition = false } = {}) {
     if (this.editorMode !== "create") return;
     if (this.createMode === "source") this.codeBuffers.source = this.querySelector("#strategy-code-editor").value;
     this.createMode = ["template", "source"].includes(mode) ? mode : "indicators";
+    if (this.createMode === "source" && !keepComposition) this.sourceComposition = null;
     this.querySelectorAll("[data-create-mode]").forEach((button) => {
       const active = button.dataset.createMode === this.createMode;
       button.classList.toggle("active", active);
@@ -1487,6 +1492,13 @@ class StrategyCenter extends HTMLElement {
       this.querySelector("#strategy-ai-preview-button strong").textContent = "生成源码修改预览";
     } else {
       this.querySelector("#strategy-code-format").classList.remove("hidden");
+      if (!templateMode) {
+        this.querySelector("#strategy-ai-title").textContent = "用自然语言生成 Python 策略";
+        this.querySelector("#strategy-ai-description").textContent = "左侧指标是强约束；描述入场、过滤、退出与风控规则后，AI 会生成完整 Python 源码。";
+        this.querySelector("#strategy-ai-status").lastChild.textContent = "指标约束 + Python 沙箱";
+        this.querySelector("#strategy-ai-preview-button strong").textContent = "AI 生成 Python 源码";
+        this.querySelector("#strategy-ai-prompt").placeholder = "例如：EMA 判断趋势，ADX 过滤弱趋势，成交量确认入场；止损使用 1.5 ATR，止盈 2R，只在收盘后产生信号。";
+      }
     }
     if (!resetValues) return;
     if (sourceMode) {
@@ -1761,6 +1773,7 @@ class StrategyCenter extends HTMLElement {
               language: "python",
               source_code: codeSpec,
               risk_defaults: this.collectConfig("risk", this.plainObject(this.indicatorDefaults.risk_defaults)),
+              ...(this.sourceComposition ? { composition: this.sourceComposition } : {}),
             }),
           });
         } else {
@@ -1962,14 +1975,39 @@ class StrategyCenter extends HTMLElement {
     this.clearPreview();
     try {
       const codeEdit = this.editorMode === "edit" && this.editScope === "code";
-      const sourceEdit = (this.editorMode === "edit" && this.editScope === "source") || (this.editorMode === "create" && this.createMode === "source");
+      const indicatorSourceCreate = this.editorMode === "create" && this.createMode === "indicators";
+      const sourceEdit = indicatorSourceCreate || (this.editorMode === "edit" && this.editScope === "source") || (this.editorMode === "create" && this.createMode === "source");
+      let composition = null;
+      if (indicatorSourceCreate) {
+        const indicators = this.collectIndicatorSelections();
+        const directions = [
+          this.querySelector("#strategy-direction-long").checked ? "long" : null,
+          this.querySelector("#strategy-direction-short").checked ? "short" : null,
+        ].filter(Boolean);
+        if (indicators.length < 2) throw new Error("请至少选择两个指标，再生成 Python 源码。");
+        if (!directions.length) throw new Error("请至少选择一个允许交易方向。");
+        composition = {
+          indicators,
+          timeframe: this.querySelector("#strategy-timeframe").value,
+          directions,
+          confirmation_threshold: Number(this.querySelector("#strategy-confirmation-threshold").value),
+          signal_valid_bars: Number(this.querySelector("#strategy-signal-valid-bars").value),
+        };
+      }
       const path = sourceEdit
         ? (this.editorMode === "create" ? "/runtime/python/ai-preview" : `/${encodeURIComponent(this.activeItem.public_id)}/source/ai-preview`)
         : (this.editorMode === "create"
           ? "/compose/ai-preview"
           : `/${encodeURIComponent(this.activeItem.public_id)}${codeEdit ? "/code/ai-preview" : "/ai-preview"}`);
       const requestBody = sourceEdit
-        ? { prompt, language: "python", source_code: this.parseStrategyCode() }
+        ? {
+            prompt,
+            language: "python",
+            source_code: indicatorSourceCreate
+              ? String(this.sourceRuntime.conversion_starter_source || this.sourceRuntime.starter_source || "")
+              : this.parseStrategyCode(),
+            ...(composition ? { composition } : {}),
+          }
         : (codeEdit ? { prompt, spec: this.parseStrategyCode() } : { prompt });
       const result = await this.api(path, {
         method: "POST",
@@ -1985,6 +2023,10 @@ class StrategyCenter extends HTMLElement {
         strategy_code: String(result?.strategy_code ?? ""),
         source_code: String(result?.source_code ?? ""),
         draft: this.plainObject(result?.draft),
+        composition: result?.composition ? this.plainObject(result.composition) : composition,
+        parameter_schema: Array.isArray(result?.parameter_schema) ? result.parameter_schema : [],
+        parameters: this.plainObject(result?.parameters),
+        generated_from_composition: indicatorSourceCreate,
         mode: sourceEdit ? "source" : (codeEdit ? "code" : "parameters"),
       };
       this.renderPreview();
@@ -2037,17 +2079,26 @@ class StrategyCenter extends HTMLElement {
       return;
     }
     if (["code", "source"].includes(this.preview.mode)) {
+      const generatedFromComposition = this.editorMode === "create" && this.preview.generated_from_composition;
+      const composition = this.preview.composition;
       const code = this.preview.mode === "source"
         ? this.preview.source_code
         : (this.preview.strategy_code || this.strategyCode(this.preview.proposed_spec));
+      if (generatedFromComposition) {
+        this.sourceWorkbenchTab = "ai";
+        this.switchCreateMode("source", { resetValues: false, keepComposition: true });
+        this.sourceComposition = composition;
+      }
       this.querySelector("#strategy-code-editor").value = code;
       this.codeBuffers[this.preview.mode] = code;
       this.renderCodeLines();
       if (this.preview.mode === "source") this.setSourceWorkbenchDirty(true);
       this.querySelector("#strategy-ai-prompt").value = "";
       this.clearPreview();
-      this.setCodeStatus("AI 修改已写入编辑器，请校验后保存新版本");
-      this.showAiError("代码预览已应用到编辑器，尚未保存，也不会执行交易。", "success");
+      this.setCodeStatus(generatedFromComposition ? "AI 源码已通过服务端静态审查，请复核后保存" : "AI 修改已写入编辑器，请校验后保存新版本", "success");
+      this.showAiError(generatedFromComposition
+        ? "已根据所选指标生成 Python 源码。你可以继续编辑、让 AI 修改或直接运行校验；当前尚未保存，也不会执行交易。"
+        : "代码预览已应用到编辑器，尚未保存，也不会执行交易。", "success");
       return;
     }
     if (!this.activeItem?.public_id) return;

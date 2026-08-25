@@ -35,6 +35,7 @@ from .schemas import (
     StrategyCodeValidateRequest,
     StrategyCreateRequest,
     StrategySourceAiPreviewRequest,
+    StrategySourceComposition,
     StrategySourceCreateRequest,
     StrategySourceUpdateRequest,
     StrategySourceValidateRequest,
@@ -337,6 +338,54 @@ def _indicator_draft_from_proposed(
     }
 
 
+def _source_composition_context(
+    composition: StrategySourceComposition,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int | float]]:
+    selections = [item.model_dump(mode="python") for item in composition.indicators]
+    try:
+        _, parameter_schema, parameters = build_indicator_composite_spec(
+            selections,
+            timeframe=composition.timeframe,
+            directions=composition.directions,
+            confirmation_threshold=composition.confirmation_threshold,
+            signal_valid_bars=composition.signal_valid_bars,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    selected_indicators = []
+    for selection in selections:
+        definition = INDICATOR_BY_KEY[selection["key"]]
+        selected_indicators.append(
+            {
+                "key": selection["key"],
+                "name": definition["name"],
+                "role": definition["role"],
+                "description": definition["description"],
+                "weight": selection["weight"],
+                "parameters": copy.deepcopy(selection["parameters"]),
+                "parameter_keys": [
+                    f"{selection['key']}_weight",
+                    *[
+                        f"{selection['key']}_{item['key']}"
+                        for item in definition["parameters"]
+                    ],
+                ],
+            }
+        )
+    context = {
+        "timeframe": composition.timeframe,
+        "directions": list(composition.directions),
+        "confirmation_threshold": composition.confirmation_threshold,
+        "signal_valid_bars": composition.signal_valid_bars,
+        "selected_indicators": selected_indicators,
+        "parameter_values": copy.deepcopy(parameters),
+        "required_parameter_keys": sorted(parameters),
+        "available_helpers": ["sma", "ema", "rsi", "atr", "sqrt", "log", "exp"],
+        "bar_fields": ["open_time", "open", "high", "low", "close", "volume"],
+    }
+    return context, parameter_schema, parameters
+
+
 def _locked_user_strategy(db: Session, user_id: int, public_id: str) -> UserStrategy | None:
     return db.scalar(
         select(UserStrategy)
@@ -619,6 +668,13 @@ def _generate_source_ai_preview(
     # rechecks ownership, version and the complete AST in a later request.
     editable = dict(strategy_dict)
     editable["source_code"] = payload.source_code
+    generation_context: dict[str, Any] | None = None
+    parameter_schema: list[dict[str, Any]] | None = None
+    parameters: dict[str, int | float] | None = None
+    if payload.composition is not None:
+        generation_context, parameter_schema, parameters = _source_composition_context(
+            payload.composition
+        )
     settings = request.app.state.settings
     user_model = get_global_ai_model_config(db, legacy_fallback_user_id=user.id)
     user_model_runtime: tuple[str, str, str] | None = None
@@ -650,6 +706,7 @@ def _generate_source_ai_preview(
                 api_key=api_key,
                 model_name=model_name,
                 timeout_seconds=settings.openai_strategy_timeout_seconds,
+                generation_context=generation_context,
             )
         else:
             preview = generate_strategy_source_preview(
@@ -659,6 +716,7 @@ def _generate_source_ai_preview(
                 settings.openai_strategy_model,
                 settings.openai_strategy_timeout_seconds,
                 safety_identifier,
+                generation_context=generation_context,
             )
     except StrategyAiError as exc:
         raise _strategy_ai_http_error(exc) from None
@@ -666,8 +724,29 @@ def _generate_source_ai_preview(
     if not isinstance(proposed, str):
         raise _strategy_ai_http_error(StrategyAiError("invalid_output"))
     validation = _source_validation_response(proposed, payload.language)
+    if generation_context is not None and parameters is not None:
+        if validation["data_requirements"]["trigger_timeframe"] != generation_context["timeframe"]:
+            raise _strategy_ai_http_error(StrategyAiError("invalid_output"))
+        if validation["directions"] != generation_context["directions"]:
+            raise _strategy_ai_http_error(StrategyAiError("invalid_output"))
+        missing_parameters = sorted(
+            set(parameters) - set(validation["parameter_keys"])
+        )
+        if missing_parameters:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "AI 生成的源码没有完整使用所选指标参数",
+                    "category": "invalid_output",
+                    "missing_parameter_keys": missing_parameters,
+                },
+            )
     preview["source_hash"] = validation["source_hash"]
     preview["validation"] = validation
+    if payload.composition is not None:
+        preview["composition"] = payload.composition.model_dump(mode="json")
+        preview["parameter_schema"] = parameter_schema
+        preview["parameters"] = parameters
     return preview
 
 
@@ -1031,7 +1110,10 @@ def create_source_strategy(
         raise HTTPException(status_code=409, detail="active strategy limit reached")
     source_code = payload.source_code or default_python_source()
     validation = _source_validation_response(source_code, payload.language)
-    parameter_schema, parameters = default_python_parameters()
+    if payload.composition is not None:
+        _, parameter_schema, parameters = _source_composition_context(payload.composition)
+    else:
+        parameter_schema, parameters = default_python_parameters()
     unknown_parameters = sorted(set(validation["parameter_keys"]) - set(parameters))
     if unknown_parameters:
         raise HTTPException(
@@ -1067,13 +1149,22 @@ def create_source_strategy(
         parameter_schema_json=parameter_schema,
         parameters_json=parameters,
         risk_defaults_json=risks,
-        created_via="manual",
+        created_via="ai" if payload.composition is not None else "manual",
         created_at=now,
         updated_at=now,
     )
     db.add(strategy)
     db.flush()
-    _record_revision(db, strategy, source="manual", summary="新增 Python 源码策略")
+    _record_revision(
+        db,
+        strategy,
+        source="ai" if payload.composition is not None else "manual",
+        summary=(
+            "通过指标组合与自然语言生成 Python 源码策略"
+            if payload.composition is not None
+            else "新增 Python 源码策略"
+        ),
+    )
     _audit(db, request, "strategy.source_create", user.id, strategy.public_id)
     _commit_or_conflict(db)
     return serialize_user_strategy(strategy)

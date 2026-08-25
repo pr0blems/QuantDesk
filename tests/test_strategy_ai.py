@@ -11,6 +11,7 @@ from quantdesk_v2.strategy_ai import (
     StrategyAiError,
     generate_strategy_code_preview,
     generate_strategy_preview,
+    generate_strategy_source_preview,
     generate_user_model_strategy_code_preview,
     generate_user_model_strategy_preview,
 )
@@ -713,6 +714,52 @@ def test_user_model_strategy_code_preview_uses_allowlisted_provider(
     assert captured["payload"]["response_format"] == {"type": "json_object"}
     assert preview["provider"] == "deepseek"
     assert preview["proposed_spec"]["directions"] == ["short"]
+
+
+def test_python_source_composer_sends_selected_indicators_as_trusted_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = '''TIMEFRAMES = ("15m",)
+TRIGGER_TIMEFRAME = "15m"
+LOOKBACK_BARS = 80
+DIRECTIONS = ("long",)
+def evaluate(context, params):
+    return {"decision": "HOLD", "evidence": {"period": params["ema_fast_period"]}}
+'''
+    captured: dict[str, Any] = {}
+
+    def transport(
+        body: bytes, _headers: dict[str, str], _timeout_seconds: float
+    ) -> tuple[int, bytes]:
+        captured["payload"] = json.loads(body)
+        return 200, responses_body(
+            {"strategy_code": source, "summary": "按所选 EMA 与成交量生成源码。"}
+        )
+
+    monkeypatch.setattr(strategy_ai, "_http_transport", transport)
+    preview = generate_strategy_source_preview(
+        {"version": 1, "source_code": source},
+        "EMA 趋势向上且成交量确认时做多",
+        api_key="sk-test-abcdefghijklmnopqrstuvwxyz",
+        model="gpt-5.6-luna",
+        generation_context={
+            "timeframe": "15m",
+            "directions": ["long"],
+            "selected_indicators": [
+                {"key": "ema", "parameter_keys": ["ema_fast_period"]},
+                {"key": "volume_ratio", "parameter_keys": ["volume_ratio_period"]},
+            ],
+            "required_parameter_keys": ["ema_fast_period", "volume_ratio_period"],
+        },
+    )
+
+    user_payload = json.loads(captured["payload"]["input"][1]["content"])
+    assert user_payload["indicator_blueprint"]["timeframe"] == "15m"
+    assert [item["key"] for item in user_payload["indicator_blueprint"]["selected_indicators"]] == [
+        "ema",
+        "volume_ratio",
+    ]
+    assert preview["source_code"] == source
 
 
 @pytest.mark.parametrize(
