@@ -115,6 +115,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.orderBookPreviousSnapshot = null;
     this.orderBookLimit = 100;
     this.orderBookPaused = false;
+    this.orderBookView = "depth";
     this.orderBookRequestId = 0;
     this.orderBookTimer = null;
     this.predictionAnalyticsAbortController = null;
@@ -398,19 +399,20 @@ class AiMonitorDashboard extends HTMLElement {
         </section>
       </div>
       <div id="order-book-modal" class="order-book-modal hidden" aria-hidden="true">
-        <button class="order-book-backdrop" type="button" data-order-book-close aria-label="关闭实时盘口"></button>
+        <button class="order-book-backdrop" type="button" data-order-book-close aria-label="关闭盘口与资金分析"></button>
         <section class="order-book-dialog" role="dialog" aria-modal="true" aria-labelledby="order-book-title">
           <header class="order-book-head">
-            <div><span class="eyebrow">BINANCE FUTURES LIVE DEPTH</span><h2 id="order-book-title">实时100档盘口</h2><p id="order-book-subtitle">读取 Binance Futures 本地同步订单簿。</p></div>
+            <div><span class="eyebrow">LIVE DEPTH &amp; MARKET FLOW</span><h2 id="order-book-title">盘口与资金分析</h2><p id="order-book-subtitle">同一窗口查看实时100档与资金盘口趋势。</p></div>
             <div class="order-book-actions">
+              <div class="order-book-view-tabs" role="tablist" aria-label="盘口分析视图"><button class="active" type="button" role="tab" aria-selected="true" data-order-book-view="depth">实时100档</button><button type="button" role="tab" aria-selected="false" data-order-book-view="flow">资金盘口</button></div>
               <span id="order-book-live-state" class="order-book-live-state syncing">同步中</span>
               <div class="order-book-limit" role="group" aria-label="盘口档位"><button type="button" data-order-book-limit="20">20档</button><button type="button" data-order-book-limit="50">50档</button><button class="active" type="button" data-order-book-limit="100">100档</button></div>
               <button id="order-book-pause" type="button">暂停刷新</button>
-              <button id="order-book-close" class="ai-conclusion-close" type="button" data-order-book-close aria-label="关闭实时盘口">×</button>
+              <button id="order-book-close" class="ai-conclusion-close" type="button" data-order-book-close aria-label="关闭盘口与资金分析">×</button>
             </div>
           </header>
-          <div id="order-book-body" class="order-book-body"><div class="order-book-loading">正在同步 Binance 实时盘口…</div></div>
-          <footer class="order-book-foot"><span>页面每秒读取一次本地 WebSocket 订单簿，底层深度流约 500ms 更新</span><strong>金额为 Binance 合约可见限价单名义金额，不代表真实主力资金</strong></footer>
+          <div class="order-book-content"><div id="order-book-body" class="order-book-body" role="tabpanel"><div class="order-book-loading">正在同步 Binance 实时盘口…</div></div><div id="order-book-flow-body" class="order-book-flow-body hidden" role="tabpanel"></div></div>
+          <footer class="order-book-foot"><span id="order-book-foot-copy">页面每秒读取一次本地 WebSocket 订单簿，底层深度流约 500ms 更新</span><strong>可见挂单与资金盘口评分用于研究，不代表真实主力资金</strong></footer>
         </section>
       </div>
       <div id="ai-conclusion-modal" class="ai-conclusion-modal hidden" aria-hidden="true">
@@ -578,11 +580,6 @@ class AiMonitorDashboard extends HTMLElement {
         this.openOrderBook(orderBookButton.dataset.orderBook, orderBookButton);
         return;
       }
-      const marketFlowButton = event.target.closest("[data-market-flow-trend]");
-      if (marketFlowButton) {
-        this.openMarketFlowTrend(marketFlowButton.dataset.marketFlowTrend, marketFlowButton);
-        return;
-      }
       const scoreButton = event.target.closest("[data-score-trend]");
       if (scoreButton) {
         this.openScoreTrend(scoreButton.dataset.scoreTrend, scoreButton);
@@ -620,6 +617,7 @@ class AiMonitorDashboard extends HTMLElement {
       } : null);
     });
     this.qa("[data-order-book-close]").forEach((button) => button.addEventListener("click", () => this.closeOrderBook()));
+    this.qa("[data-order-book-view]").forEach((button) => button.addEventListener("click", () => this.setOrderBookView(button.dataset.orderBookView)));
     this.qa("[data-order-book-limit]").forEach((button) => button.addEventListener("click", () => this.setOrderBookLimit(Number(button.dataset.orderBookLimit))));
     this.q("#order-book-pause").addEventListener("click", () => this.toggleOrderBookPause());
     this.q("#order-book-body").addEventListener("click", (event) => {
@@ -2926,7 +2924,7 @@ class AiMonitorDashboard extends HTMLElement {
       <section class="score-trend-ledger"><header><strong>最近评分明细</strong><small>分项缺失显示 --；最多保留 96 个扫描点</small></header><div><table><thead><tr><th>计算时间</th><th>组合分</th><th>变化</th>${series.filter((definition) => definition.key !== "combined").map((definition) => `<th>${definition.label}</th>`).join("")}</tr></thead><tbody>${recentRows}</tbody></table></div></section>`;
   }
 
-  async openOrderBook(opportunityId, trigger) {
+  async openOrderBook(opportunityId, trigger, initialView = "depth") {
     const item = this.state.opportunities.find((opportunity) => opportunity.id === opportunityId);
     if (!item) return;
     this.orderBookOpportunity = item;
@@ -2935,16 +2933,45 @@ class AiMonitorDashboard extends HTMLElement {
     this.orderBookPreviousSnapshot = null;
     this.orderBookLimit = 100;
     this.orderBookPaused = false;
-    this.q("#order-book-title").textContent = `${item.symbol} · 实时100档盘口`;
-    this.q("#order-book-subtitle").textContent = `${item.contract_symbol} · Binance Futures 映射合约 · 买卖各 100 档`;
+    this.q("#order-book-title").textContent = `${item.symbol} · 盘口与资金分析`;
+    this.q("#order-book-subtitle").textContent = `${item.contract_symbol} · 实时买卖各100档 · ${item.timeframe} 资金盘口趋势`;
     this.q("#order-book-body").innerHTML = '<div class="order-book-loading">正在同步 Binance 实时盘口…</div>';
+    this.renderOrderBookFlow();
     const modal = this.q("#order-book-modal");
     modal.classList.remove("hidden");
     modal.setAttribute("aria-hidden", "false");
+    this.setOrderBookView(initialView);
     this.syncOrderBookControls();
     this.q("#order-book-close").focus({ preventScroll: true });
     await this.loadOrderBook();
     this.startOrderBookPolling();
+  }
+
+  setOrderBookView(view) {
+    if (!["depth", "flow"].includes(view)) return;
+    this.orderBookView = view;
+    const flowView = view === "flow";
+    const modal = this.q("#order-book-modal");
+    modal?.classList.toggle("flow-view", flowView);
+    this.qa("[data-order-book-view]").forEach((button) => {
+      const active = button.dataset.orderBookView === view;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    this.q("#order-book-body")?.classList.toggle("hidden", flowView);
+    this.q("#order-book-flow-body")?.classList.toggle("hidden", !flowView);
+    const footCopy = this.q("#order-book-foot-copy");
+    if (footCopy) footCopy.textContent = flowView
+      ? "资金盘口评分与买卖盘名义金额按机会扫描点保存"
+      : "页面每秒读取一次本地 WebSocket 订单簿，底层深度流约 500ms 更新";
+  }
+
+  renderOrderBookFlow() {
+    const target = this.q("#order-book-flow-body");
+    const item = this.orderBookOpportunity;
+    if (!target || !item) return;
+    const history = this.opportunityScoreHistory(item);
+    target.innerHTML = this.renderMarketFlowTrendChart(item, history);
   }
 
   closeOrderBook(restoreFocus = true) {
@@ -3135,20 +3162,7 @@ class AiMonitorDashboard extends HTMLElement {
   }
 
   openMarketFlowTrend(opportunityId, trigger) {
-    const item = this.state.opportunities.find((opportunity) => opportunity.id === opportunityId);
-    if (!item) return;
-    const history = this.opportunityScoreHistory(item);
-    const state = this.marketFlowTrendState(history);
-    const modal = this.q("#score-trend-modal");
-    this.scoreTrendOpportunity = item;
-    this.scoreTrendFocus = trigger || null;
-    this.q("#score-trend-title").textContent = `${item.symbol} · 资金盘口变化`;
-    this.q("#score-trend-subtitle").textContent = `${item.contract_symbol} · ${item.timeframe} 周期 · ${state.points.length} 个资金扫描点`;
-    this.q("#score-trend-body").innerHTML = this.renderMarketFlowTrendChart(item, history);
-    this.q(".score-trend-foot").innerHTML = "<span>盘口评分与买卖盘名义资金量随扫描更新</span><strong>不把评分冒充真实资金金额</strong>";
-    modal.classList.remove("hidden");
-    modal.setAttribute("aria-hidden", "false");
-    this.q("#score-trend-close").focus({ preventScroll: true });
+    return this.openOrderBook(opportunityId, trigger, "flow");
   }
 
   closeScoreTrend() {
@@ -3550,7 +3564,7 @@ class AiMonitorDashboard extends HTMLElement {
           // 行情流会频繁改变评分。只更新评分按钮，保留头部交互按钮的 DOM 身份，
           // 否则按钮会在 pointerdown/click 之间被替换，表现为偶发“点击无反应”。
           syncAttributes(currentSection, nextSection);
-          ["[data-order-book]", "[data-market-flow-trend]", "[data-score-trend]"].forEach((selector) => {
+          ["[data-order-book]", "[data-score-trend]"].forEach((selector) => {
             const currentScore = currentSection.querySelector(selector);
             const nextScore = nextSection.querySelector(selector);
             if (!currentScore || !nextScore) return;
@@ -3743,9 +3757,8 @@ class AiMonitorDashboard extends HTMLElement {
       const marketFlowDepthLabel = Number.isFinite(Number(marketFlowBidDepth)) || Number.isFinite(Number(marketFlowAskDepth))
         ? `买 ${Number.isFinite(Number(marketFlowBidDepth)) ? this.compactNumber(Number(marketFlowBidDepth)) : "--"} · 卖 ${Number.isFinite(Number(marketFlowAskDepth)) ? this.compactNumber(Number(marketFlowAskDepth)) : "--"}`
         : "等待资金量快照";
-      const marketFlowControl = `<button class="market-flow-score ${marketFlowTrend.direction}" type="button" data-market-flow-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 资金盘口变化走势"><span>资金盘口</span><strong><i>${marketFlowTrend.arrow}</i>${Number.isFinite(displayedMarketFlowScore) ? displayedMarketFlowScore.toFixed(1) : "--"}</strong><small>${this.escape(marketFlowDepthLabel)}</small><em>${marketFlowTrend.badge}</em></button>`;
       const liveBookRatio = Number(marketFlowAskDepth) > 0 && Number.isFinite(Number(marketFlowBidDepth)) ? Number(marketFlowBidDepth) / Number(marketFlowAskDepth) : null;
-      const orderBookControl = marketAvailable ? `<button class="order-book-trigger" type="button" data-order-book="${this.escape(item.id)}" title="查看 ${this.escape(item.contract_symbol)} Binance 实时买卖各100档"><span>盘口100档</span><small>${liveBookRatio == null ? "实时买卖梯形表" : `买卖比 ${liveBookRatio.toFixed(2)}`}</small></button>` : "";
+      const marketDepthControl = `<button class="market-depth-control ${marketFlowTrend.direction}" type="button" data-order-book="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 实时100档盘口与资金盘口趋势 · ${this.escape(marketFlowDepthLabel)}"><span>盘口与资金</span><strong><i>${marketFlowTrend.arrow}</i>${Number.isFinite(displayedMarketFlowScore) ? displayedMarketFlowScore.toFixed(1) : "--"}</strong><small>${marketAvailable ? `100档 · ${liveBookRatio == null ? "实时盘口" : `买卖比 ${liveBookRatio.toFixed(2)}`}` : "100档暂不可用 · 资金趋势"}</small><em>${marketFlowTrend.badge}</em></button>`;
       const displayedCombinedScore = Number(this.firstValue(item.combined_score, item.score_components?.combined));
       const displayedNewsScore = Number(this.firstValue(item.news_score, item.score_components?.news));
       const displayedIndicatorScore = Number(this.firstValue(item.indicator_score, item.score_components?.technical));
@@ -3928,7 +3941,7 @@ class AiMonitorDashboard extends HTMLElement {
         <small>${this.escape(basisExplanation)}</small>
       </section>`;
       return `<article class="opportunity-item ${this.escape(item.status)} state-${this.escape(entryState.tone)} ${expanded ? "is-expanded" : ""} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}" data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:${historicalTab ? "history" : "current"}">
-        <header data-patch-key="header"><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${orderBookControl}${detailControl}${conclusionControl}</div>${marketFlowControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
+        <header data-patch-key="header"><div><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small>${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${detailControl}${conclusionControl}</div>${marketDepthControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>当前组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></header>
         ${basisPanel}
         ${virtualEntryPanel}
         ${macroReference}

@@ -3246,7 +3246,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260824-87"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260825-88"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3256,7 +3256,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260824-87"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260825-88"' in legacy_index
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -3391,13 +3391,21 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "const unique = new Map()" in component
     assert "renderScoreTrendChart(item, history)" in component
     assert "openScoreTrend(opportunityId, trigger)" in component
-    assert 'data-market-flow-trend="${this.escape(item.id)}"' in component
+    assert 'class="market-depth-control ${marketFlowTrend.direction}"' in component
+    assert 'data-market-flow-trend="${this.escape(item.id)}"' not in component
     assert "openMarketFlowTrend(opportunityId, trigger)" in component
+    assert 'return this.openOrderBook(opportunityId, trigger, "flow")' in component
     assert "renderMarketFlowTrendChart(item, history)" in component
-    assert "资金盘口变化" in component
+    assert "盘口与资金分析" in component
+    assert 'data-order-book-view="depth"' in component
+    assert 'data-order-book-view="flow"' in component
+    assert 'id="order-book-flow-body"' in component
+    assert "renderOrderBookFlow()" in component
     assert "买卖盘名义资金量变化" in component
-    assert "不把评分冒充真实资金金额" in component
-    assert ".market-flow-score" in stylesheet
+    assert "可见挂单与资金盘口评分用于研究" in component
+    assert ".market-depth-control" in stylesheet
+    assert ".order-book-view-tabs" in stylesheet
+    assert ".market-flow-score" not in stylesheet
     assert "evidence.score_history" in component
     assert 'class="score-trend-chart"' in component
     assert 'class="score-line ${definition.key}"' in component
