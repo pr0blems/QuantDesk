@@ -22,6 +22,7 @@ def test_ai_monitor_uses_authenticated_incremental_stream_with_polling_fallback(
     assert "connectionTimedOut" in component
     assert "}, 8000);" in component
     assert 'this.state.lastSuccessfulRefreshAt ? "polling" : "reconnecting"' in component
+    assert component.count('if (this.state.updateStreamStatus === "connecting") this.state.updateStreamStatus = "polling";') == 2
     assert 'this.state.updateStreamStatus === "connected"' in component
     assert '"页面增量推送在线"' in component
     assert '"REST 轮询降级"' in component

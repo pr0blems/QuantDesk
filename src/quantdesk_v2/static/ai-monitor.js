@@ -894,6 +894,7 @@ class AiMonitorDashboard extends HTMLElement {
       await viewRequest;
       this.state.lastSuccessfulRefreshAt = new Date().toISOString();
       this.state.lastRefreshError = "";
+      if (this.state.updateStreamStatus === "connecting") this.state.updateStreamStatus = "polling";
       this.renderSignalHealth();
       if (showSuccess) this.showBanner("发现机会数据已刷新。", "success");
     } catch (error) {
@@ -931,6 +932,7 @@ class AiMonitorDashboard extends HTMLElement {
       if (this.state.view === "predictions") await this.loadPredictionAnalytics({ background: true });
       this.state.lastSuccessfulRefreshAt = new Date().toISOString();
       this.state.lastRefreshError = "";
+      if (this.state.updateStreamStatus === "connecting") this.state.updateStreamStatus = "polling";
       this.state.incrementalUpdateCount += 1;
       this.renderSignalHealth();
     } catch (error) {
