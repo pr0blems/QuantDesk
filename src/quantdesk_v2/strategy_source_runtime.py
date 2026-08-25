@@ -51,6 +51,7 @@ SAFE_CALLS = frozenset(
     {
         "abs",
         "all",
+        "adx",
         "any",
         "atr",
         "bool",
@@ -517,6 +518,52 @@ def _atr(bars: list[dict[str, Any]], period: int) -> float:
     return sum(ranges) / len(ranges)
 
 
+def _adx(bars: list[dict[str, Any]], period: int) -> tuple[float, float, float]:
+    """Return ADX, +DI and -DI using rolling Wilder-style directional ranges."""
+
+    if period <= 0 or len(bars) <= period * 2:
+        return math.nan, math.nan, math.nan
+    dx_values: list[float] = []
+    latest_plus_di = math.nan
+    latest_minus_di = math.nan
+    first_end = len(bars) - period + 1
+    for end in range(first_end, len(bars) + 1):
+        relevant = bars[end - period - 1 : end]
+        true_range_total = 0.0
+        plus_dm_total = 0.0
+        minus_dm_total = 0.0
+        for index in range(1, len(relevant)):
+            current = relevant[index]
+            previous = relevant[index - 1]
+            high = float(current["high"])
+            low = float(current["low"])
+            previous_high = float(previous["high"])
+            previous_low = float(previous["low"])
+            previous_close = float(previous["close"])
+            true_range_total += max(
+                high - low,
+                abs(high - previous_close),
+                abs(low - previous_close),
+            )
+            upward = high - previous_high
+            downward = previous_low - low
+            plus_dm_total += upward if upward > downward and upward > 0 else 0.0
+            minus_dm_total += downward if downward > upward and downward > 0 else 0.0
+        if true_range_total <= 0:
+            continue
+        latest_plus_di = 100.0 * plus_dm_total / true_range_total
+        latest_minus_di = 100.0 * minus_dm_total / true_range_total
+        denominator = latest_plus_di + latest_minus_di
+        dx_values.append(
+            0.0
+            if denominator <= 0
+            else 100.0 * abs(latest_plus_di - latest_minus_di) / denominator
+        )
+    if not dx_values:
+        return math.nan, math.nan, math.nan
+    return sum(dx_values) / len(dx_values), latest_plus_di, latest_minus_di
+
+
 def _safe_globals() -> dict[str, Any]:
     builtins = {
         "abs": abs,
@@ -540,6 +587,7 @@ def _safe_globals() -> dict[str, Any]:
     }
     return {
         "__builtins__": builtins,
+        "adx": _adx,
         "atr": _atr,
         "ema": _ema,
         "exp": math.exp,

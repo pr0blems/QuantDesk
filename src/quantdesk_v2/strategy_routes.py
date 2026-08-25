@@ -380,7 +380,17 @@ def _source_composition_context(
         "selected_indicators": selected_indicators,
         "parameter_values": copy.deepcopy(parameters),
         "required_parameter_keys": sorted(parameters),
-        "available_helpers": ["sma", "ema", "rsi", "atr", "sqrt", "log", "exp"],
+        "available_helpers": ["sma", "ema", "rsi", "adx", "atr", "sqrt", "log", "exp"],
+        "helper_contracts": {
+            "sma": "sma(values, period) -> float",
+            "ema": "ema(values, period) -> float",
+            "rsi": "rsi(values, period) -> float",
+            "adx": "adx(bars, period) -> (adx_value, plus_di, minus_di)",
+            "atr": "atr(bars, period) -> float",
+            "sqrt": "sqrt(value) -> float",
+            "log": "log(value) -> float",
+            "exp": "exp(value) -> float",
+        },
         "bar_fields": ["open_time", "open", "high", "low", "close", "volume"],
     }
     return context, parameter_schema, parameters

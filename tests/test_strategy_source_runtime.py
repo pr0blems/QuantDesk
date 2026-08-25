@@ -49,6 +49,29 @@ def test_default_python_source_is_real_executable_strategy_code() -> None:
     assert decision.evidence["atr"] == pytest.approx(2.0)
 
 
+def test_python_source_runtime_exposes_adx_as_a_pure_helper() -> None:
+    source = '''TIMEFRAMES = ("1h",)
+TRIGGER_TIMEFRAME = "1h"
+LOOKBACK_BARS = 40
+DIRECTIONS = ("long",)
+def evaluate(context, params):
+    bars = context["bars"][TRIGGER_TIMEFRAME]
+    adx_value, plus_di, minus_di = adx(bars, int(params["adx_period"]))
+    decision = "LONG_ENTRY" if adx_value > 20 and plus_di > minus_di else "HOLD"
+    return {"decision": decision, "evidence": {"adx": adx_value, "plus_di": plus_di, "minus_di": minus_di}}
+'''
+
+    decision = evaluate_source(
+        source,
+        {"symbol": "BTCUSDT", "decision_time": 1_700_400_000, "bars": {"1h": _bars()}},
+        {"adx_period": 14},
+    )
+
+    assert decision.decision == "LONG_ENTRY"
+    assert decision.evidence["adx"] > 20
+    assert decision.evidence["plus_di"] > decision.evidence["minus_di"]
+
+
 @pytest.mark.parametrize(
     "unsafe_line",
     [

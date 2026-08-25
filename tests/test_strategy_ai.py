@@ -864,6 +864,7 @@ def evaluate(context, params):
     repair_payload = json.loads(requests[1]["messages"][1]["content"])
     assert "未通过平台校验" in repair_payload["edit_request"]
     assert "不得添加 import" in repair_payload["edit_request"]
+    assert "禁止 .get、.append" in repair_payload["edit_request"]
     assert preview["source_code"] == valid_source
 
 

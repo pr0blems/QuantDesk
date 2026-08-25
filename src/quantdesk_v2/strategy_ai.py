@@ -615,7 +615,10 @@ def _source_edit_messages(
         "LOOKBACK_BARS, DIRECTIONS and optional VALID_FOR_BARS, plus "
         "evaluate(context, params). evaluate returns a dict with decision, optional "
         "confidence, reason_codes, evidence and risk_proposal. Available pure helpers: "
-        "sma, ema, rsi, atr, sqrt, log, exp and basic Python builtins."
+        "sma(values, period), ema(values, period), rsi(values, period), "
+        "adx(bars, period), atr(bars, period), sqrt, log, exp and basic "
+        "Python builtins. sma, ema, rsi and atr return one float; adx returns "
+        "exactly (adx_value, plus_di, minus_di)."
     )
     return [
         {
@@ -629,6 +632,11 @@ def _source_edit_messages(
                 "file/network/system access, dynamic execution, URLs, credentials, or "
                 "deployment actions. Preserve the public runtime contract and parameter "
                 "names unless explicitly asked. Do not claim profitability. "
+                "The AST validator forbids every attribute and method call. Access "
+                "dictionaries only with brackets: params[\"key\"] and bar[\"close\"]. "
+                "Never use params.get, dict.get, list.append, dotted names, or an "
+                "invented helper such as compute_adx. Build a new list with + [item] "
+                "when needed. Never subscript the float returned by sma/ema/rsi/atr. "
                 "When indicator_blueprint is present, it is a trusted platform "
                 "constraint: implement every selected indicator, keep its timeframe "
                 "and directions, and read tunable values only from the supplied "
@@ -647,6 +655,14 @@ def _source_edit_messages(
                         if generation_context is not None
                         else None
                     ),
+                    "sandbox_examples": {
+                        "parameter": 'period = int(params["ema_fast_period"])',
+                        "bar_series": 'closes = [bar["close"] for bar in bars]',
+                        "ema": "fast_now = ema(closes, period)",
+                        "adx": "adx_value, plus_di, minus_di = adx(bars, period)",
+                        "atr": "atr_value = atr(bars, period)",
+                        "reason_list": 'reasons = reasons + ["EMA_LONG"]',
+                    },
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -696,7 +712,7 @@ def _chat_completions_source_preview(
 ) -> dict[str, Any]:
     candidate_source = source_code
     candidate_prompt = prompt
-    for attempt in range(2):
+    for attempt in range(3):
         request_payload = {
             "model": model_name,
             "messages": _source_edit_messages(
@@ -743,13 +759,15 @@ def _chat_completions_source_preview(
             return _build_source_preview(
                 base_version, provider, source_code, proposed, summary
             )
-        if attempt:
+        if attempt >= 2:
             raise StrategyAiError("invalid_output")
-        candidate_source = proposed
+        candidate_source = source_code
         candidate_prompt = (
             f"原始要求：{prompt}\n"
             f"上一版源码未通过平台校验：{issue}。"
-            "请重新输出完整源码并修复该问题；不得添加 import、属性访问或任何未授权能力。"
+            "丢弃上一版实现，从平台起始源码重新生成。所有字典必须使用方括号索引，"
+            "禁止 .get、.append 和任何属性访问；只能调用蓝图列出的直接函数名，"
+            "不得添加 import 或任何未授权能力。"
         )
     raise StrategyAiError("invalid_output")
 
