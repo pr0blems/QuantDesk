@@ -939,6 +939,7 @@ def _ai_monitor_live_adapter(
             change_summary="创建 AI 机会独立执行适配器",
             snapshot_json=snapshot,
             validation_json={"execution_adapter": True, "ordinary_strategy": False},
+            lifecycle_status="retired",
             published_at=utcnow(),
         )
         db.add(revision)

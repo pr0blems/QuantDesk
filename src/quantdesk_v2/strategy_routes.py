@@ -34,6 +34,7 @@ from .schemas import (
     StrategyCodeUpdateRequest,
     StrategyCodeValidateRequest,
     StrategyCreateRequest,
+    StrategyPromotionRequest,
     StrategySourceAiPreviewRequest,
     StrategySourceComposition,
     StrategySourceCreateRequest,
@@ -61,6 +62,7 @@ from .strategy_catalog import (
     strategy_snapshot,
     validate_strategy_parameters,
 )
+from .strategy_lifecycle import promote_current_revision, strategy_readiness
 from .strategy_runtime import (
     INDICATOR_BY_KEY,
     INDICATOR_CATALOG,
@@ -470,7 +472,12 @@ def _record_revision(
                     else {"valid": True, "legacy": True}
                 )
             ),
-            published_at=utcnow() if strategy.lifecycle_status == "published" else None,
+            lifecycle_status=strategy.lifecycle_status,
+            published_at=(
+                utcnow()
+                if strategy.lifecycle_status not in {"draft", "retired"}
+                else None
+            ),
             created_at=utcnow(),
         )
     )
@@ -529,6 +536,7 @@ def _apply_edit(
             raise HTTPException(status_code=422, detail=str(exc)) from None
         strategy.spec_schema_version = int(strategy.spec_json["schema_version"])
         strategy.spec_hash = strategy_spec_hash(strategy.spec_json)
+    strategy.lifecycle_status = "draft"
     strategy.version += 1
     strategy.updated_at = utcnow()
     _record_revision(db, strategy, source=source, summary=summary)
@@ -585,6 +593,7 @@ def _apply_code_edit(
     strategy.spec_hash = strategy_spec_hash(spec)
     strategy.parameter_schema_json = parameter_schema
     strategy.parameters_json = copy.deepcopy(spec["parameters"])
+    strategy.lifecycle_status = "draft"
     strategy.version += 1
     strategy.updated_at = utcnow()
     _record_revision(db, strategy, source=source, summary=summary)
@@ -739,6 +748,7 @@ def _apply_source_edit(
             base=strategy.risk_defaults_json,
             require_same_keys=True,
         )
+    strategy.lifecycle_status = "draft"
     strategy.version += 1
     strategy.updated_at = utcnow()
     _record_revision(db, strategy, source=source, summary=summary)
@@ -1092,6 +1102,81 @@ def get_strategy(
     return serialize_user_strategy(strategy)
 
 
+@router.get("/{public_id}/readiness")
+def get_strategy_readiness(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = get_user_strategy(db, user.id, public_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="未找到该策略")
+    return strategy_readiness(db, strategy)
+
+
+@router.post("/{public_id}/promote")
+def promote_strategy(
+    public_id: str,
+    payload: StrategyPromotionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = _locked_user_strategy(db, user.id, public_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="未找到该策略")
+    try:
+        revision, prior_readiness, previous_status = promote_current_revision(
+            db,
+            strategy,
+            expected_version=payload.expected_version,
+            target_status=payload.target_status,
+        )
+    except RuntimeError as exc:
+        if str(exc) != "strategy_version_conflict":
+            raise
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "策略版本已变化，请刷新后重试",
+                "current_version": strategy.version,
+            },
+        ) from None
+    except PermissionError:
+        readiness = strategy_readiness(db, strategy)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "当前修订尚未满足晋级条件",
+                "target_status": payload.target_status,
+                "blockers": readiness["blockers"],
+                "checks": readiness["promotion_checks"],
+            },
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    _audit(
+        db,
+        request,
+        "strategy.revision.promote",
+        user.id,
+        strategy.public_id,
+        metadata={
+            "revision_id": revision.id,
+            "version": revision.version,
+            "from_status": previous_status,
+            "to_status": payload.target_status,
+            "approval_note": payload.approval_note,
+            "evidence": prior_readiness["promotion_checks"],
+        },
+    )
+    _commit_or_conflict(db)
+    return {
+        "strategy": serialize_user_strategy(strategy),
+        "readiness": strategy_readiness(db, strategy),
+    }
+
+
 @router.get("/{public_id}/revisions")
 def list_strategy_revisions(
     public_id: str,
@@ -1121,6 +1206,7 @@ def list_strategy_revisions(
                 "source_hash": row.source_hash,
                 "source_runtime_version": row.source_runtime_version,
                 "validation": row.validation_json,
+                "lifecycle_status": row.lifecycle_status,
                 "published_at": row.published_at.isoformat() + "Z" if row.published_at else None,
                 "created_at": row.created_at.isoformat() + "Z",
             }
@@ -1251,7 +1337,7 @@ def create_source_strategy(
         version=1,
         engine_key="python_source",
         strategy_kind="source_strategy",
-        lifecycle_status="published",
+        lifecycle_status="draft",
         spec_schema_version=None,
         spec_json=None,
         spec_hash=None,
@@ -1375,7 +1461,7 @@ def create_strategy(
         version=1,
         engine_key=engine_key,
         strategy_kind=strategy_kind,
-        lifecycle_status="published",
+        lifecycle_status="draft",
         spec_schema_version=(int(strategy_spec["schema_version"]) if strategy_spec else None),
         spec_json=strategy_spec,
         spec_hash=strategy_spec_hash(strategy_spec) if strategy_spec else None,

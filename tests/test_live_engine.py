@@ -53,6 +53,25 @@ def _account(position_mode: str = "hedge") -> dict:
     }
 
 
+def test_new_live_exposure_is_fenced_by_revision_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def query(sql: str, params: tuple[int, int, int]) -> list[dict]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(live_engine.store, "query", query)
+
+    assert live_engine._execution_enabled(_account()) is False
+    assert "JOIN strategy_revisions" in str(captured["sql"])
+    assert "r.lifecycle_status IN ('micro_live','live')" in str(captured["sql"])
+    assert "execution_scope" in str(captured["sql"])
+    assert captured["params"] == (3, 1, 2)
+
+
 def test_hedge_open_and_protection_are_bound_to_long_side(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

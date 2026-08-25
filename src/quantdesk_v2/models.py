@@ -2252,7 +2252,8 @@ class UserStrategy(Base):
             name="valid_strategy_kind",
         ),
         CheckConstraint(
-            "lifecycle_status IN ('draft', 'published', 'retired')",
+            "lifecycle_status IN ('draft', 'validated', 'backtested', 'shadow', "
+            "'paper', 'micro_live', 'live', 'published', 'retired')",
             name="valid_lifecycle_status",
         ),
         CheckConstraint("risk_level IN ('low', 'medium', 'high')", name="valid_risk_level"),
@@ -2317,9 +2318,9 @@ class UserStrategy(Base):
     )
     lifecycle_status: Mapped[str] = mapped_column(
         String(16),
-        default="published",
+        default="draft",
         nullable=False,
-        comment="策略生命周期：draft、published 或 retired",
+        comment="当前策略修订的受控生命周期；published 仅保留旧数据兼容",
     )
     spec_schema_version: Mapped[int | None] = mapped_column(
         Integer, comment="完整策略 DSL 结构版本"
@@ -2393,6 +2394,11 @@ class StrategyRevision(Base):
         CheckConstraint(
             "change_source IN ('system_default', 'manual', 'ai')", name="valid_change_source"
         ),
+        CheckConstraint(
+            "lifecycle_status IN ('draft', 'validated', 'backtested', 'shadow', "
+            "'paper', 'micro_live', 'live', 'published', 'retired')",
+            name="valid_lifecycle_status",
+        ),
         ForeignKeyConstraint(
             ["user_strategy_id", "user_id"],
             ["user_strategies.id", "user_strategies.user_id"],
@@ -2404,6 +2410,11 @@ class StrategyRevision(Base):
         ),
         UniqueConstraint("id", "user_id", name="uq_strategy_revisions_id_user_id"),
         Index("ix_strategy_revisions_user_created", "user_id", "created_at"),
+        Index(
+            "ix_strategy_revisions_strategy_lifecycle",
+            "user_strategy_id",
+            "lifecycle_status",
+        ),
         {
             "comment": "用户策略每次修改后的不可变版本快照",
             "mysql_engine": "InnoDB",
@@ -2455,6 +2466,12 @@ class StrategyRevision(Base):
     )
     validation_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, comment="发布时的静态校验、数据依赖和风险提示"
+    )
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(16),
+        default="draft",
+        nullable=False,
+        comment="该不可变修订独立的受控生命周期；published 仅保留旧数据兼容",
     )
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="该修订正式发布时间（UTC）；草稿为空"

@@ -7,6 +7,7 @@ import type {
   StrategyCreateRequest,
   StrategyDeploymentsResponse,
   StrategyListResponse,
+  StrategyReadiness,
   StrategyUpdateRequest,
 } from "../api/types";
 import {
@@ -35,9 +36,23 @@ const defaultIndicators = JSON.stringify([
 ], null, 2);
 
 function strategyTone(status: string): "success" | "warning" | "neutral" {
-  if (status === "active") return "success";
-  if (status === "paused" || status === "draft") return "warning";
+  if (["validated", "backtested", "shadow", "paper", "micro_live", "live"].includes(status)) return "success";
+  if (["draft", "published"].includes(status)) return "warning";
   return "neutral";
+}
+
+function lifecycleLabel(status: string): string {
+  return ({
+    draft: "草稿",
+    validated: "已校验",
+    backtested: "已回测",
+    shadow: "影子运行",
+    paper: "模拟盘",
+    micro_live: "微型实盘",
+    live: "正式实盘",
+    published: "旧版已发布",
+    retired: "已退役",
+  } as Record<string, string>)[status] ?? status;
 }
 
 function numberRecord(value: unknown): Record<string, number> {
@@ -55,6 +70,7 @@ export function StrategiesPage() {
   const [selectedId, setSelectedId] = useState("");
   const [detail, setDetail] = useState<ApiObject | null>(null);
   const [revisions, setRevisions] = useState<ApiObject | null>(null);
+  const [readiness, setReadiness] = useState<StrategyReadiness | null>(null);
   const [signals, setSignals] = useState<ApiObject | null>(null);
   const [indicatorCatalog, setIndicatorCatalog] = useState<ApiObject | null>(null);
   const [aiPreview, setAiPreview] = useState<ApiObject | null>(null);
@@ -100,17 +116,20 @@ export function StrategiesPage() {
     if (!publicId) {
       setDetail(null);
       setRevisions(null);
+      setReadiness(null);
       return;
     }
     setWorking(true);
     setError("");
     try {
-      const [nextDetail, nextRevisions] = await Promise.all([
+      const [nextDetail, nextRevisions, nextReadiness] = await Promise.all([
         strategyApi.detail(publicId),
         strategyApi.revisions(publicId),
+        strategyApi.readiness(publicId),
       ]);
       setDetail(nextDetail);
       setRevisions(nextRevisions);
+      setReadiness(nextReadiness);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "策略详情读取失败");
     } finally {
@@ -195,6 +214,28 @@ export function StrategiesPage() {
     }
   }
 
+  async function promoteSelected(): Promise<void> {
+    if (!selected || !readiness?.can_promote || !readiness.next_status) return;
+    let approvalNote: string | undefined;
+    if (["micro_live", "live"].includes(readiness.next_status)) {
+      approvalNote = window.prompt(
+        "请输入审批说明（至少 10 个字符）：",
+        "已复核当前修订证据与资金风险边界",
+      ) ?? undefined;
+      if (!approvalNote) return;
+    }
+    await perform(
+      () => strategyApi.promote(selected.public_id, {
+        expected_version: selected.version,
+        target_status: readiness.next_status as "validated" | "backtested" | "shadow" | "paper" | "micro_live" | "live",
+        confirmed: true,
+        ...(approvalNote ? { approval_note: approvalNote } : {}),
+      }),
+      `策略已晋级到${lifecycleLabel(readiness.next_status)}`,
+    );
+    await loadDetail(selected.public_id);
+  }
+
   async function previewAi(event: FormEvent): Promise<void> {
     event.preventDefault();
     if (!aiPrompt.trim()) return;
@@ -275,7 +316,7 @@ export function StrategiesPage() {
 
       {view ? <section className="metric-grid metric-grid--three" aria-label="策略统计">
         <MetricCard label="个人策略" value={view.catalog.items.length} note={`启用上限 ${view.catalog.limits.max_active_strategies}`} />
-        <MetricCard label="当前启用" value={activeStrategies} note="可绑定模拟或实盘账户" tone="success" />
+        <MetricCard label="当前启用" value={activeStrategies} note="实际部署资格由 revision 生命周期决定" tone="success" />
         <MetricCard label="运行部署" value={runningDeployments} note={`${view.deployments.items.length} 个部署记录`} tone={runningDeployments ? "info" : "neutral"} />
       </section> : null}
 
@@ -283,9 +324,9 @@ export function StrategiesPage() {
         <Panel eyebrow="MY STRATEGIES" title="策略目录" actions={<button className="button button--primary button--small" type="button" onClick={() => setTab("editor")}>创建策略</button>}>
           {view.catalog.items.length === 0 ? <EmptyState title="尚无个人策略" description="从模板复制，或创建至少包含两个指标的组合策略。" /> : <div className="strategy-list">
             {view.catalog.items.map((item) => <article className={`strategy-card${selectedId === item.public_id ? " strategy-card--selected" : ""}`} key={item.public_id}>
-              <div className="strategy-card__top"><span className="strategy-card__index">v{item.version}</span><StatusPill tone={strategyTone(item.status)}>{item.status}</StatusPill></div>
+              <div className="strategy-card__top"><span className="strategy-card__index">v{item.version}</span><StatusPill tone={strategyTone(item.lifecycle_status)}>{lifecycleLabel(item.lifecycle_status)}</StatusPill></div>
               <h3>{item.name}</h3><p>{item.description || "尚未填写策略说明。"}</p>
-              <dl><div><dt>类别</dt><dd>{item.category}</dd></div><div><dt>引擎</dt><dd>{item.engine_key}</dd></div><div><dt>生命周期</dt><dd>{item.lifecycle_status}</dd></div><div><dt>风险等级</dt><dd>{item.risk_level}</dd></div></dl>
+              <dl><div><dt>类别</dt><dd>{item.category}</dd></div><div><dt>引擎</dt><dd>{item.engine_key}</dd></div><div><dt>生命周期</dt><dd>{lifecycleLabel(item.lifecycle_status)}</dd></div><div><dt>风险等级</dt><dd>{item.risk_level}</dd></div></dl>
               <FormActions>
                 <button className="button button--secondary button--small" type="button" onClick={() => startEdit(item)}>详情 / 编辑</button>
                 <button className="button button--secondary button--small" type="button" disabled={working} onClick={() => void perform(() => strategyApi.validate(item.public_id), "策略验证完成")}>验证</button>
@@ -319,17 +360,17 @@ export function StrategiesPage() {
 
       {view && tab === "detail" ? <div className="two-column-layout">
         <Panel eyebrow="EDITABLE VERSION" title="版本化参数">
-          {!selected ? <EmptyState title="请选择策略" description="从策略目录选择一个策略进入编辑。" /> : <form className="stack-form panel-form" onSubmit={(event) => void updateSelected(event)} key={`${selected.public_id}-${selected.version}`}>
+          {!selected ? <EmptyState title="请选择策略" description="从策略目录选择一个策略进入编辑。" /> : <><Notice tone={readiness?.can_promote ? "success" : "warning"}>当前修订：{lifecycleLabel(selected.lifecycle_status)}。{readiness?.next_status ? `下一阶段为${lifecycleLabel(readiness.next_status)}；${readiness.can_promote ? "证据已满足。" : "请先补齐晋级证据。"}` : "没有后续晋级阶段。"}</Notice>{readiness?.can_promote && readiness.next_status ? <FormActions><button className="button button--primary" type="button" disabled={working} onClick={() => void promoteSelected()}>晋级到{lifecycleLabel(readiness.next_status)}</button></FormActions> : null}<form className="stack-form panel-form" onSubmit={(event) => void updateSelected(event)} key={`${selected.public_id}-${selected.version}`}>
             <label><span>当前策略</span><select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{view.catalog.items.map((item) => <option key={item.public_id} value={item.public_id}>{item.name} · v{item.version}</option>)}</select></label>
             <div className="form-grid"><label><span>名称</span><input name="name" defaultValue={selected.name} required /></label><label><span>类别</span><input name="category" defaultValue={selected.category} required /></label></div>
             <label><span>描述</span><textarea name="description" rows={3} defaultValue={selected.description} /></label>
             <label><span>参数 JSON</span><textarea className="code-input" name="parameters" rows={7} defaultValue={JSON.stringify(selected.parameters, null, 2)} /></label>
             <label><span>风险默认值 JSON</span><textarea className="code-input" name="risk_defaults" rows={7} defaultValue={JSON.stringify(selected.risk_defaults, null, 2)} /></label>
             <FormActions><button className="button button--primary" type="submit" disabled={working}>保存为 v{selected.version + 1}</button><button className="button button--secondary" type="button" disabled={working} onClick={() => void perform(() => strategyApi.validate(selected.public_id), "策略验证完成", false)}>运行验证</button></FormActions>
-          </form>}
+          </form></>}
         </Panel>
         <div className="stack-panels">
-          <Panel eyebrow="REVISION LEDGER" title="历史版本"><DataTable rows={firstList(revisions ?? {}, "items", "revisions")} columns={[{ key: "version", label: "版本" }, { key: "status", label: "状态" }, { key: "spec_hash", label: "规格哈希" }, { key: "created_at", label: "创建时间", render: (row) => formatDate(stringValue(row.created_at)) }]} /></Panel>
+          <Panel eyebrow="REVISION LEDGER" title="历史版本"><DataTable rows={firstList(revisions ?? {}, "items", "revisions")} columns={[{ key: "version", label: "版本" }, { key: "lifecycle_status", label: "生命周期", render: (row) => lifecycleLabel(stringValue(row.lifecycle_status)) }, { key: "spec_hash", label: "规格哈希" }, { key: "created_at", label: "创建时间", render: (row) => formatDate(stringValue(row.created_at)) }]} /></Panel>
           <Panel eyebrow="SIGNALS" title="最近信号"><DataTable rows={firstList(signals ?? {}, "items", "signals").filter((row) => !selected || stringValue(row.strategy_id ?? row.strategy_public_id) === selected.public_id).slice(0, 20)} columns={[{ key: "symbol", label: "标的" }, { key: "direction", label: "方向" }, { key: "status", label: "状态" }, { key: "created_at", label: "时间", render: (row) => formatDate(stringValue(row.created_at)) }]} /></Panel>
           {detail ? <JsonPreview value={detail} label="完整策略证据" /> : null}
         </div>

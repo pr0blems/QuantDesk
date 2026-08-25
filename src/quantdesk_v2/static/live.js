@@ -364,7 +364,7 @@ class LiveDashboard extends HTMLElement {
   async loadCatalog() {
     if (!this.catalog.length) {
       const data = await window.quantdeskApi("/api/v2/strategies");
-      this.catalog = (data.items || []).filter((item) => item.status === "active" && item.lifecycle_status === "published");
+      this.catalog = (data.items || []).filter((item) => item.status === "active" && ["micro_live", "live"].includes(item.lifecycle_status));
     }
     if (!this.catalog.length) throw new Error("请先在策略中心创建并发布策略");
     this.q("#live-strategy").innerHTML = this.catalog.map((item) => `<option value="${this.escape(item.id)}">${this.escape(item.name)}</option>`).join("");

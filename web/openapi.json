@@ -4370,6 +4370,53 @@
         "title": "StrategyIndicatorSelection",
         "type": "object"
       },
+      "StrategyPromotionRequest": {
+        "additionalProperties": false,
+        "description": "Promote only the current immutable revision by one lifecycle stage.",
+        "properties": {
+          "approval_note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Note"
+          },
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "target_status": {
+            "enum": [
+              "validated",
+              "backtested",
+              "shadow",
+              "paper",
+              "micro_live",
+              "live"
+            ],
+            "title": "Target Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_version",
+          "target_status",
+          "confirmed"
+        ],
+        "title": "StrategyPromotionRequest",
+        "type": "object"
+      },
       "StrategySourceAiPreviewRequest": {
         "additionalProperties": false,
         "description": "Modify the visible source buffer and return a review-only preview.",
@@ -4573,6 +4620,28 @@
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "risk_defaults": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ]
+                },
+                "maxProperties": 16,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk Defaults"
           },
           "source_code": {
             "maxLength": 65536,
@@ -12129,6 +12198,114 @@
           }
         ],
         "summary": "Validate Strategy Code",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/promote": {
+      "post": {
+        "operationId": "promote_strategy_api_v2_strategies__public_id__promote_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyPromotionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Promote Strategy Api V2 Strategies  Public Id  Promote Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Promote Strategy",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/readiness": {
+      "get": {
+        "operationId": "get_strategy_readiness_api_v2_strategies__public_id__readiness_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Strategy Readiness Api V2 Strategies  Public Id  Readiness Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Strategy Readiness",
         "tags": [
           "strategies"
         ]

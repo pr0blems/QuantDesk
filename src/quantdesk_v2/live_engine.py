@@ -795,8 +795,14 @@ def _execution_enabled(account: dict[str, Any]) -> bool:
            JOIN strategy_deployments d
              ON d.id=? AND d.user_id=l.user_id AND d.mode='live'
                 AND d.target_account_id=l.id
+           JOIN strategy_revisions r
+             ON r.id=d.strategy_revision_id AND r.user_id=d.user_id
            WHERE l.id=? AND l.user_id=?
              AND l.status='active' AND d.status='running'
+             AND (
+                 JSON_UNQUOTE(JSON_EXTRACT(l.config_json, '$.execution_scope'))='ai_monitor'
+                 OR r.lifecycle_status IN ('micro_live','live')
+             )
            LIMIT 1""",
         (account["deployment_id"], account["id"], account["user_id"]),
     )

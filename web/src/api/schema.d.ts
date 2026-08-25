@@ -2271,6 +2271,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/strategies/{public_id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Promote Strategy */
+        post: operations["promote_strategy_api_v2_strategies__public_id__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/strategies/{public_id}/readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Strategy Readiness */
+        get: operations["get_strategy_readiness_api_v2_strategies__public_id__readiness_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/strategies/{public_id}/revisions": {
         parameters: {
             query?: never;
@@ -4147,6 +4181,26 @@ export interface components {
             weight: number;
         };
         /**
+         * StrategyPromotionRequest
+         * @description Promote only the current immutable revision by one lifecycle stage.
+         */
+        StrategyPromotionRequest: {
+            /** Approval Note */
+            approval_note?: string | null;
+            /**
+             * Confirmed
+             * @constant
+             */
+            confirmed: true;
+            /** Expected Version */
+            expected_version: number;
+            /**
+             * Target Status
+             * @enum {string}
+             */
+            target_status: "validated" | "backtested" | "shadow" | "paper" | "micro_live" | "live";
+        };
+        /**
          * StrategySourceAiPreviewRequest
          * @description Modify the visible source buffer and return a review-only preview.
          */
@@ -4243,6 +4297,10 @@ export interface components {
             language: "python";
             /** Name */
             name: string;
+            /** Risk Defaults */
+            risk_defaults?: {
+                [key: string]: number;
+            } | null;
             /** Source Code */
             source_code: string;
             /** Version */
@@ -8932,6 +8990,76 @@ export interface operations {
                 "application/json": components["schemas"]["StrategyCodeValidateRequest"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    promote_strategy_api_v2_strategies__public_id__promote_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategyPromotionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_strategy_readiness_api_v2_strategies__public_id__readiness_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

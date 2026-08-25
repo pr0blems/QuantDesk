@@ -21,6 +21,7 @@ export type PaperAccountStatusUpdate = components["schemas"]["PaperAccountStatus
 export type PaperAccountStrategyUpdate = components["schemas"]["PaperAccountStrategyUpdate"];
 export type StrategyCreateRequest = components["schemas"]["StrategyCreateRequest"];
 export type StrategyUpdateRequest = components["schemas"]["StrategyUpdateRequest"];
+export type StrategyPromotionRequest = components["schemas"]["StrategyPromotionRequest"];
 export type StrategyAiPreviewRequest = components["schemas"]["StrategyAiPreviewRequest"];
 export type StrategyAiApplyRequest = components["schemas"]["StrategyAiApplyRequest"];
 export type LiveAccountCreateRequest = components["schemas"]["LiveAccountCreateRequest"];
@@ -108,6 +109,27 @@ export interface StrategyDeployment {
 
 export interface StrategyDeploymentsResponse {
   items: StrategyDeployment[];
+}
+
+export interface StrategyReadinessCheck {
+  code: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+  evidence_id?: number | null;
+}
+
+export interface StrategyReadiness {
+  strategy_id: string;
+  strategy_version: number;
+  revision_id: number | null;
+  revision_status: string;
+  next_status: string | null;
+  can_promote: boolean;
+  blockers: string[];
+  checks: StrategyReadinessCheck[];
+  promotion_checks: StrategyReadinessCheck[];
+  eligibility: { backtest: boolean; paper: boolean; live: boolean };
 }
 
 export interface LiveAccount {

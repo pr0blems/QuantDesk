@@ -544,7 +544,7 @@ class StrategyCenter extends HTMLElement {
       version: Number(item.version ?? 1),
       engine_key: String(item.engine_key ?? "rule_engine"),
       strategy_kind: String(item.strategy_kind ?? "legacy_signal"),
-      lifecycle_status: String(item.lifecycle_status ?? "published"),
+      lifecycle_status: String(item.lifecycle_status ?? "draft"),
       spec: this.plainObject(item.spec),
       source_language: String(item.source_language ?? ""),
       source_code: String(item.source_code ?? ""),
@@ -577,6 +577,36 @@ class StrategyCenter extends HTMLElement {
 
   plainObject(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
+  }
+
+  lifecycleLabel(status) {
+    return {
+      draft: "草稿",
+      validated: "已校验",
+      backtested: "已回测",
+      shadow: "影子运行",
+      paper: "模拟盘",
+      micro_live: "微型实盘",
+      live: "正式实盘",
+      published: "旧版已发布",
+      retired: "已退役",
+    }[String(status || "")] || String(status || "未知");
+  }
+
+  async promoteLifecycle(item, targetStatus, approvalNote = null) {
+    const payload = await this.api(`/${encodeURIComponent(item.public_id)}/promote`, {
+      method: "POST",
+      body: JSON.stringify({
+        expected_version: item.version,
+        target_status: targetStatus,
+        confirmed: true,
+        ...(approvalNote ? { approval_note: approvalNote } : {}),
+      }),
+    });
+    const promoted = this.normalizeItem(payload?.strategy ?? item);
+    this.upsertItem(promoted);
+    if (this.activeItem?.public_id === promoted.public_id) this.activeItem = promoted;
+    return { item: promoted, readiness: this.plainObject(payload?.readiness) };
   }
 
   option(value, label) {
@@ -735,7 +765,8 @@ class StrategyCenter extends HTMLElement {
     const icon = this.node("span", "strategy-card-icon", this.strategyInitial(item.name));
     const title = this.node("div", "strategy-card-title");
     title.append(this.node("strong", "", item.name), this.node("small", "", `${item.category} · ${isSource ? "Python 源码策略" : (isFull ? "完整策略" : "旧版信号")}`));
-    const state = this.node("span", `strategy-state ${item.status === "active" ? "active" : "draft"}`, item.status === "active" ? "已启用" : "草稿");
+    const lifecycleReady = ["validated", "backtested", "shadow", "paper", "micro_live", "live"].includes(item.lifecycle_status);
+    const state = this.node("span", `strategy-state ${lifecycleReady ? "active" : "draft"}`, this.lifecycleLabel(item.lifecycle_status));
     head.append(icon, title, state);
 
     const description = this.node("p", "strategy-card-description", item.description || "尚未填写策略说明");
@@ -1250,7 +1281,11 @@ class StrategyCenter extends HTMLElement {
           body: JSON.stringify({ ...body, version: this.activeItem.version }),
         });
       }
-      const item = this.normalizeItem(result?.item ?? result);
+      let item = this.normalizeItem(result?.item ?? result);
+      if (["draft", "published"].includes(item.lifecycle_status)) {
+        const promoted = await this.promoteLifecycle(item, "validated");
+        item = promoted.item;
+      }
       this.activeItem = item;
       this.sourceComposition = this.deriveSourceComposition(item);
       this.populateSourceCompositionEditor(this.sourceComposition);
@@ -1349,6 +1384,10 @@ class StrategyCenter extends HTMLElement {
         data_quality: this.plainObject(run.data_quality_json),
       };
       this.sourceBacktestResult = { run, result };
+      if (this.activeItem?.lifecycle_status === "validated") {
+        const promoted = await this.promoteLifecycle(this.activeItem, "backtested");
+        this.activeItem = promoted.item;
+      }
       this.renderSourceBacktestResult(run, result);
       this.setSourceRunnerStatus("回测完成", "ready");
       this.showSourceRunnerNotice("回测完成。请优先检查交易样本、最大回撤和扣费后收益。", "success");
@@ -2287,6 +2326,11 @@ class StrategyCenter extends HTMLElement {
     this.showNotice("");
     try {
       const result = await this.api(`/${encodeURIComponent(item.public_id)}/validate`, { method: "POST", body: "{}" });
+      if (["draft", "published"].includes(item.lifecycle_status)) {
+        const promoted = await this.promoteLifecycle(item, "validated");
+        item = promoted.item;
+        this.renderCards();
+      }
       const warnings = Array.isArray(result?.warnings) ? result.warnings.filter(Boolean) : [];
       const suffix = warnings.length ? `；${warnings.join("；")}` : "；数据要求和策略规格均有效";
       this.showNotice(`策略“${item.name}”验证通过${suffix}。`, "success");
@@ -2326,15 +2370,16 @@ class StrategyCenter extends HTMLElement {
     layer.setAttribute("aria-hidden", "false");
     document.body.classList.add("strategy-dialog-open");
     try {
-      const [detailPayload, revisionPayload, validation] = await Promise.all([
+      const [detailPayload, revisionPayload, validation, readiness] = await Promise.all([
         this.api(`/${encodeURIComponent(item.public_id)}`),
         this.api(`/${encodeURIComponent(item.public_id)}/revisions`),
         this.api(`/${encodeURIComponent(item.public_id)}/validate`, { method: "POST", body: "{}" }),
+        this.api(`/${encodeURIComponent(item.public_id)}/readiness`),
       ]);
       const detail = this.normalizeItem(detailPayload?.item ?? detailPayload);
       const revisions = Array.isArray(revisionPayload?.items) ? revisionPayload.items : [];
-      this.querySelector("#strategy-detail-subtitle").textContent = `当前 v${detail.version} · ${detail.lifecycle_status} · ${detail.engine_key}`;
-      content.replaceChildren(this.detailSummary(detail, validation), this.revisionLedger(revisions));
+      this.querySelector("#strategy-detail-subtitle").textContent = `当前 v${detail.version} · ${this.lifecycleLabel(detail.lifecycle_status)} · ${detail.engine_key}`;
+      content.replaceChildren(this.detailSummary(detail, validation, readiness), this.revisionLedger(revisions));
     } catch (error) {
       const state = this.node("div", "strategy-grid-state error");
       state.append(this.node("span", "strategy-state-icon", "!"), this.node("strong", "", "策略详情暂不可用"), this.node("small", "", error?.message || "读取失败，请稍后重试。"));
@@ -2342,14 +2387,14 @@ class StrategyCenter extends HTMLElement {
     }
   }
 
-  detailSummary(item, validation = {}) {
+  detailSummary(item, validation = {}, readiness = {}) {
     const section = this.node("section", "strategy-detail-summary");
     const heading = this.node("header", "strategy-detail-section-head");
     heading.append(this.node("div", "", "CURRENT SNAPSHOT"), this.node("strong", "", "当前策略快照"));
     const grid = this.node("div", "strategy-detail-metrics");
     const values = [
       ["版本", `v${item.version}`],
-      ["生命周期", item.lifecycle_status],
+      ["生命周期", this.lifecycleLabel(item.lifecycle_status)],
       ["策略引擎", item.engine_key],
       ["验证状态", validation?.valid ? "通过" : "未通过"],
     ];
@@ -2367,7 +2412,45 @@ class StrategyCenter extends HTMLElement {
     );
     const warnings = Array.isArray(validation?.warnings) ? validation.warnings : [];
     if (warnings.length) specs.append(this.node("span", "warning", warnings.join("；")));
-    section.append(heading, grid, description, specs);
+    const readinessBox = this.node("div", "strategy-detail-readiness");
+    const promotionChecks = Array.isArray(readiness?.promotion_checks) ? readiness.promotion_checks : [];
+    readinessBox.append(this.node(
+      "p",
+      "strategy-detail-description",
+      readiness?.next_status
+        ? `下一阶段：${this.lifecycleLabel(readiness.next_status)}。${readiness?.can_promote ? "当前证据已满足晋级条件。" : "仍有晋级条件未满足。"}`
+        : "当前修订没有后续自动晋级阶段。",
+    ));
+    if (promotionChecks.length) {
+      const checkList = this.node("div", "strategy-card-tags");
+      promotionChecks.forEach((check) => checkList.append(
+        this.node("span", check?.passed ? "" : "warning", `${check?.passed ? "✓" : "×"} ${check?.label || check?.code}`),
+      ));
+      readinessBox.append(checkList);
+    }
+    if (readiness?.can_promote && readiness?.next_status) {
+      const promote = this.node("button", "strategy-save-button", `晋级到${this.lifecycleLabel(readiness.next_status)}`);
+      promote.type = "button";
+      promote.addEventListener("click", async () => {
+        let approvalNote = null;
+        if (["micro_live", "live"].includes(readiness.next_status)) {
+          approvalNote = window.prompt("请输入审批说明（至少 10 个字符）：", "已复核当前修订证据与资金风险边界");
+          if (!approvalNote) return;
+        }
+        this.setButtonBusy(promote, true, "晋级中…");
+        try {
+          const promoted = await this.promoteLifecycle(item, readiness.next_status, approvalNote);
+          this.showNotice(`策略“${item.name}”已晋级到${this.lifecycleLabel(readiness.next_status)}。`, "success");
+          await this.openDetails(promoted.item);
+        } catch (error) {
+          this.showNotice(this.friendlyMutationError(error));
+        } finally {
+          this.setButtonBusy(promote, false);
+        }
+      });
+      readinessBox.append(promote);
+    }
+    section.append(heading, grid, description, specs, readinessBox);
     return section;
   }
 
@@ -2381,7 +2464,7 @@ class StrategyCenter extends HTMLElement {
       const row = this.node("article", "strategy-revision-row");
       const version = this.node("span", "strategy-revision-version", `v${revision.version ?? "--"}`);
       const copy = this.node("div");
-      copy.append(this.node("strong", "", revision.change_summary || "策略配置更新"), this.node("small", "", `${revision.change_source || "manual"} · ${this.shortDateTime(revision.created_at)}`));
+      copy.append(this.node("strong", "", revision.change_summary || "策略配置更新"), this.node("small", "", `${this.lifecycleLabel(revision.lifecycle_status)} · ${revision.change_source || "manual"} · ${this.shortDateTime(revision.created_at)}`));
       const hash = this.node("code", "", String(revision.spec_hash || "--").slice(0, 14));
       row.append(version, copy, hash);
       list.append(row);

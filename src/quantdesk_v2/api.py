@@ -116,6 +116,12 @@ from .strategy_evaluator import (
     StrategyEvaluationError,
     resolve_legacy_strategy_timeframe,
 )
+from .strategy_lifecycle import (
+    BACKTEST_ELIGIBLE_STATUSES,
+    LIVE_ELIGIBLE_STATUSES,
+    PAPER_ELIGIBLE_STATUSES,
+    current_strategy_revision,
+)
 
 router = APIRouter(prefix="/api/v2")
 MIN_PERSISTED_QUANTITY = Decimal("0.000000000000000001")
@@ -1920,7 +1926,7 @@ def _matching_strategies(db: Session, user_id: int) -> dict[str, list[dict[str, 
             UserStrategy.user_id == user_id,
             UserStrategy.status == "active",
             UserStrategy.strategy_kind.in_(("full_strategy", "source_strategy")),
-            UserStrategy.lifecycle_status == "published",
+            UserStrategy.lifecycle_status.in_(BACKTEST_ELIGIBLE_STATUSES),
         )
     ).all()
     for strategy in strategies:
@@ -2223,7 +2229,19 @@ def _active_paper_strategies(
     for strategy_id in strategy_ids:
         strategy = get_user_strategy(db, user_id, strategy_id)
         if strategy is None or strategy.status != "active":
-            raise HTTPException(status_code=404, detail="active strategy not found")
+            raise HTTPException(status_code=404, detail="未找到可用策略")
+        revision = current_strategy_revision(db, strategy)
+        if revision is None:
+            raise HTTPException(status_code=409, detail="当前策略版本缺少不可变修订记录")
+        if revision.lifecycle_status not in PAPER_ELIGIBLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "当前策略修订尚未取得模拟盘资格",
+                    "lifecycle_status": revision.lifecycle_status,
+                    "required_statuses": sorted(PAPER_ELIGIBLE_STATUSES),
+                },
+            )
         selected.append(strategy)
     return selected
 
@@ -2820,8 +2838,8 @@ def create_live_account(
     if existing_count >= 10:
         raise HTTPException(status_code=409, detail="live account limit reached")
     strategy = get_user_strategy(db, user.id, payload.strategy_id)
-    if strategy is None or strategy.status != "active" or strategy.lifecycle_status != "published":
-        raise HTTPException(status_code=404, detail="published active strategy not found")
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="未找到可用策略")
     revision = db.scalar(
         select(StrategyRevision).where(
             StrategyRevision.user_strategy_id == strategy.id,
@@ -2830,7 +2848,16 @@ def create_live_account(
         )
     )
     if revision is None:
-        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+        raise HTTPException(status_code=409, detail="当前策略版本缺少不可变修订记录")
+    if revision.lifecycle_status not in LIVE_ELIGIBLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "当前策略修订尚未取得实盘资格",
+                "lifecycle_status": revision.lifecycle_status,
+                "required_statuses": sorted(LIVE_ELIGIBLE_STATUSES),
+            },
+        )
     universe = tradfi_symbols()
     if not universe:
         raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
@@ -3013,6 +3040,28 @@ def arm_live_account(
     )
     if deployment is None:
         raise HTTPException(status_code=409, detail="live deployment is unavailable")
+    deployment_revision = db.scalar(
+        select(StrategyRevision).where(
+            StrategyRevision.id == deployment.strategy_revision_id,
+            StrategyRevision.user_id == user.id,
+        )
+    )
+    if (
+        deployment_revision is None
+        or deployment_revision.lifecycle_status not in LIVE_ELIGIBLE_STATUSES
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "该实盘部署绑定的策略修订尚未取得实盘资格",
+                "lifecycle_status": (
+                    deployment_revision.lifecycle_status
+                    if deployment_revision is not None
+                    else None
+                ),
+                "required_statuses": sorted(LIVE_ELIGIBLE_STATUSES),
+            },
+        )
     deployment.universe_override_json = {
         "universe_key": TRADFI_UNIVERSE_KEY,
         "symbols": symbols,
@@ -3116,8 +3165,8 @@ def update_live_account_strategy(
             detail="resolve managed orders before adjusting the live strategy",
         )
     strategy = get_user_strategy(db, user.id, payload.strategy_id)
-    if strategy is None or strategy.status != "active" or strategy.lifecycle_status != "published":
-        raise HTTPException(status_code=404, detail="published active strategy not found")
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="未找到可用策略")
     revision = db.scalar(
         select(StrategyRevision).where(
             StrategyRevision.user_strategy_id == strategy.id,
@@ -3126,7 +3175,16 @@ def update_live_account_strategy(
         )
     )
     if revision is None:
-        raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+        raise HTTPException(status_code=409, detail="当前策略版本缺少不可变修订记录")
+    if revision.lifecycle_status not in LIVE_ELIGIBLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "当前策略修订尚未取得实盘资格",
+                "lifecycle_status": revision.lifecycle_status,
+                "required_statuses": sorted(LIVE_ELIGIBLE_STATUSES),
+            },
+        )
     universe = tradfi_symbols()
     if not universe:
         raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
@@ -3360,7 +3418,7 @@ def backtest_catalog(
         for strategy in ensure_user_default_strategies(db, user.id)
         if strategy.status == "active"
         and strategy.strategy_kind in {"full_strategy", "source_strategy"}
-        and strategy.lifecycle_status == "published"
+        and strategy.lifecycle_status in BACKTEST_ELIGIBLE_STATUSES
         and (
             isinstance(strategy.spec_json, dict)
             or (
@@ -3391,10 +3449,12 @@ def create_backtest(
     user_id = user.id
     ensure_user_default_strategies(db, user_id)
     selected = get_user_strategy(db, user_id, payload.strategy_id)
+    selected_revision = current_strategy_revision(db, selected) if selected is not None else None
     if selected is not None and not (
         selected.status == "active"
         and selected.strategy_kind in {"full_strategy", "source_strategy"}
-        and selected.lifecycle_status == "published"
+        and selected_revision is not None
+        and selected_revision.lifecycle_status in BACKTEST_ELIGIBLE_STATUSES
         and (
             isinstance(selected.spec_json, dict)
             or (
@@ -3406,21 +3466,13 @@ def create_backtest(
     ):
         raise HTTPException(
             status_code=422,
-            detail="only active published full strategies can be backtested",
+            detail="只有已通过校验并取得回测资格的当前策略修订才能运行回测",
         )
     database_strategy = strategy_to_catalog_item(selected) if selected is not None else None
     selected_strategy_id = selected.id if database_strategy is not None else None
-    selected_revision_id = None
-    if selected_strategy_id is not None:
-        selected_revision_id = db.scalar(
-            select(StrategyRevision.id).where(
-                StrategyRevision.user_strategy_id == selected_strategy_id,
-                StrategyRevision.user_id == user_id,
-                StrategyRevision.version == selected.version,
-            )
-        )
-        if selected_revision_id is None:
-            raise HTTPException(status_code=409, detail="strategy revision is unavailable")
+    selected_revision_id = selected_revision.id if selected_revision is not None else None
+    if selected_strategy_id is not None and selected_revision_id is None:
+        raise HTTPException(status_code=409, detail="当前策略版本缺少不可变修订记录")
     db.commit()
     # Authentication only reads from MySQL. End that transaction before the CPU-heavy
     # synchronous replay so a pooled database connection is not held for the whole run.

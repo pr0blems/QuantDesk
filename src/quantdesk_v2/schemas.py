@@ -1330,6 +1330,27 @@ class StrategyUpdateRequest(BaseModel):
         return _bounded_numeric_map(value, "risk default")
 
 
+class StrategyPromotionRequest(BaseModel):
+    """Promote only the current immutable revision by one lifecycle stage."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    target_status: Literal[
+        "validated", "backtested", "shadow", "paper", "micro_live", "live"
+    ]
+    confirmed: Literal[True]
+    approval_note: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def require_live_approval_note(self) -> Self:
+        if self.target_status in {"micro_live", "live"} and len(
+            (self.approval_note or "").strip()
+        ) < 10:
+            raise ValueError("微型实盘或正式实盘晋级必须填写至少 10 个字符的审批说明")
+        return self
+
+
 class StrategyAiPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

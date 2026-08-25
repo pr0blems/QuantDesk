@@ -593,7 +593,7 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
                 "strategy_kind": (
                     "full_strategy" if template.template_kind == "strategy" else "legacy_signal"
                 ),
-                "lifecycle_status": "published",
+                "lifecycle_status": "validated",
                 "spec_schema_version": template.spec_schema_version,
                 "spec_json": copy.deepcopy(template.spec_json),
                 "spec_hash": (
@@ -645,6 +645,7 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
                 if strategy.strategy_kind == "full_strategy"
                 else {"valid": True, "legacy": True}
             ),
+            "lifecycle_status": "validated",
             "published_at": now,
             "created_at": now,
         }

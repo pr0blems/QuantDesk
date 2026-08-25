@@ -41,6 +41,8 @@ import type {
   StrategyCreateRequest,
   StrategyDeploymentsResponse,
   StrategyListResponse,
+  StrategyPromotionRequest,
+  StrategyReadiness,
   StrategyUpdateRequest,
   TokenPair,
 } from "./types";
@@ -118,6 +120,10 @@ export const strategyApi = {
   signals: (limit = 100) => apiRequest<ApiObject>(withQuery("/strategies/signals", { limit })),
   detail: (publicId: string) => apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}`),
   revisions: (publicId: string) => apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}/revisions`),
+  readiness: (publicId: string) =>
+    apiRequest<StrategyReadiness>(`/strategies/${encodeURIComponent(publicId)}/readiness`),
+  promote: (publicId: string, input: StrategyPromotionRequest) =>
+    apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}/promote`, { method: "POST", body: jsonBody(input) }),
   create: (input: StrategyCreateRequest) => apiRequest<ApiObject>("/strategies", { method: "POST", body: jsonBody(input) }),
   update: (publicId: string, input: StrategyUpdateRequest) =>
     apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}`, { method: "PUT", body: jsonBody(input) }),

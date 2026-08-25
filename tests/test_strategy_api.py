@@ -15,7 +15,7 @@ from quantdesk_v2 import strategy_routes
 from quantdesk_v2.config import Settings
 from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
-from quantdesk_v2.models import AiModelConfig, StrategyRevision, User, UserStrategy
+from quantdesk_v2.models import AiModelConfig, AuditLog, StrategyRevision, User, UserStrategy
 from quantdesk_v2.schemas import StrategySourceComposition
 from quantdesk_v2.security import CredentialCipher, api_key_fingerprint
 from quantdesk_v2.strategy_ai import (
@@ -226,6 +226,7 @@ def test_first_login_copies_all_defaults_and_list_is_tenant_isolated(
         assert "2.5×ATR 固定止盈" in paper_strategy["description"]
         assert all(item["public_id"] == item["id"] for item in body["items"])
         assert all(item["is_default"] is True for item in body["items"])
+        assert all(item["lifecycle_status"] == "validated" for item in body["items"])
 
         bob_headers = register_and_login(client, "strategy-bob")
         bob = client.get("/api/v2/strategies", headers=bob_headers).json()
@@ -261,6 +262,7 @@ def test_create_manual_edit_ai_preview_apply_and_archive_are_versioned(
         assert strategy["version"] == 1
         assert strategy["engine_key"] == "ma_cross"
         assert strategy["is_default"] is False
+        assert strategy["lifecycle_status"] == "draft"
 
         update_payload = {
             "version": 1,
@@ -276,6 +278,7 @@ def test_create_manual_edit_ai_preview_apply_and_archive_are_versioned(
         assert updated.status_code == 200
         assert updated.json()["version"] == 2
         assert updated.json()["parameters"] == {"fast_period": 8, "slow_period": 34}
+        assert updated.json()["lifecycle_status"] == "draft"
 
         stale = client.put(
             f"/api/v2/strategies/{strategy_id}", headers=headers, json=update_payload
@@ -457,6 +460,7 @@ def test_create_indicator_composition_persists_executable_strategy(
         strategy = response.json()
         assert strategy["strategy_kind"] == "full_strategy"
         assert strategy["engine_key"] == "strategy_dsl"
+        assert strategy["lifecycle_status"] == "draft"
         assert strategy["spec"]["strategy_type"] == "indicator_composite"
         assert strategy["spec"]["timeframes"]["trigger"] == "15m"
         assert strategy["parameters"]["ema_fast_period"] == 8
@@ -621,6 +625,7 @@ def test_full_strategy_code_can_be_validated_and_published_as_a_revision(
         assert saved["spec"]["exit"]["take_profit_r"] == 3.25
         assert saved["parameters"] == saved["spec"]["parameters"]
         assert saved["spec_hash"] == validation.json()["spec_hash"]
+        assert saved["lifecycle_status"] == "draft"
 
         with session_factory() as db:
             row = db.scalar(
@@ -778,6 +783,7 @@ def evaluate(context, params):
         assert response.status_code == 201
         saved = response.json()
         assert saved["strategy_kind"] == "source_strategy"
+        assert saved["lifecycle_status"] == "draft"
         assert saved["source_validation"]["trigger_timeframe"] == "1h"
         assert saved["parameters"]["ema_fast_period"] == 12
         assert saved["parameters"]["volume_ratio_min_ratio"] == 1.4
@@ -821,4 +827,131 @@ def evaluate(context, params):
             )
             assert revision is not None
             assert revision.change_source == "ai"
+            assert revision.lifecycle_status == "draft"
             assert row.risk_defaults_json["stop_loss_pct"] == 1.5
+
+
+def test_strategy_revision_lifecycle_is_server_controlled_and_edit_resets_to_draft(
+    mysql_test_engine: Engine,
+) -> None:
+    client, session_factory = build_test_client(mysql_test_engine)
+    with client:
+        headers = register_and_login(client, "strategy-lifecycle-owner")
+        response = client.post(
+            "/api/v2/strategies",
+            headers=headers,
+            json={
+                "name": "生命周期门禁策略",
+                "description": "验证 revision 级晋级和编辑失效规则",
+                "category": "安全测试",
+                "timeframe": "1h",
+                "directions": ["long"],
+                "confirmation_threshold": 60,
+                "signal_valid_bars": 2,
+                "indicators": [
+                    {
+                        "key": "ema",
+                        "weight": 1,
+                        "parameters": {"fast_period": 12, "slow_period": 36},
+                    },
+                    {
+                        "key": "volume_ratio",
+                        "weight": 1,
+                        "parameters": {"period": 20, "min_ratio": 1.2},
+                    },
+                ],
+            },
+        )
+        assert response.status_code == 201
+        strategy = response.json()
+        assert strategy["lifecycle_status"] == "draft"
+
+        readiness = client.get(
+            f"/api/v2/strategies/{strategy['id']}/readiness", headers=headers
+        )
+        assert readiness.status_code == 200
+        assert readiness.json()["next_status"] == "validated"
+        assert readiness.json()["can_promote"] is True
+        assert readiness.json()["eligibility"] == {
+            "backtest": False,
+            "paper": False,
+            "live": False,
+        }
+
+        promoted = client.post(
+            f"/api/v2/strategies/{strategy['id']}/promote",
+            headers=headers,
+            json={
+                "expected_version": strategy["version"],
+                "target_status": "validated",
+                "confirmed": True,
+            },
+        )
+        assert promoted.status_code == 200
+        validated = promoted.json()["strategy"]
+        assert validated["version"] == strategy["version"]
+        assert validated["lifecycle_status"] == "validated"
+        assert promoted.json()["readiness"]["next_status"] == "backtested"
+
+        skipped = client.post(
+            f"/api/v2/strategies/{strategy['id']}/promote",
+            headers=headers,
+            json={
+                "expected_version": strategy["version"],
+                "target_status": "shadow",
+                "confirmed": True,
+            },
+        )
+        assert skipped.status_code == 409
+
+        without_backtest = client.post(
+            f"/api/v2/strategies/{strategy['id']}/promote",
+            headers=headers,
+            json={
+                "expected_version": strategy["version"],
+                "target_status": "backtested",
+                "confirmed": True,
+            },
+        )
+        assert without_backtest.status_code == 409
+        assert "current_revision_backtested" in without_backtest.json()["detail"]["blockers"]
+
+        edited = client.put(
+            f"/api/v2/strategies/{strategy['id']}",
+            headers=headers,
+            json={
+                "version": validated["version"],
+                "name": validated["name"] + " v2",
+                "description": validated["description"],
+                "category": validated["category"],
+                "parameters": validated["parameters"],
+                "risk_defaults": validated["risk_defaults"],
+            },
+        )
+        assert edited.status_code == 200
+        assert edited.json()["version"] == validated["version"] + 1
+        assert edited.json()["lifecycle_status"] == "draft"
+
+        with session_factory() as db:
+            row = db.scalar(
+                select(UserStrategy).where(UserStrategy.public_id == strategy["id"])
+            )
+            assert row is not None
+            revisions = db.scalars(
+                select(StrategyRevision)
+                .where(StrategyRevision.user_strategy_id == row.id)
+                .order_by(StrategyRevision.version)
+            ).all()
+            assert [revision.lifecycle_status for revision in revisions] == [
+                "validated",
+                "draft",
+            ]
+            audit = db.scalar(
+                select(AuditLog).where(
+                    AuditLog.action == "strategy.revision.promote",
+                    AuditLog.resource_id == strategy["id"],
+                )
+            )
+            assert audit is not None
+            assert audit.metadata_json["from_status"] == "draft"
+            assert audit.metadata_json["to_status"] == "validated"

@@ -443,7 +443,7 @@ def test_backtest_catalog_only_exposes_current_users_full_strategies(
         strategies = catalog_response.json()["strategies"]
         assert len(strategies) == 1
         assert strategies[0]["strategy_kind"] == "full_strategy"
-        assert strategies[0]["lifecycle_status"] == "published"
+        assert strategies[0]["lifecycle_status"] == "validated"
         assert strategies[0]["name"] == "多周期趋势回踩延续"
 
         with test_session() as db:
@@ -456,7 +456,7 @@ def test_backtest_catalog_only_exposes_current_users_full_strategies(
         payload["strategy_id"] = legacy.public_id
         rejected = client.post("/api/v2/backtests", headers=headers, json=payload)
         assert rejected.status_code == 422
-        assert "full strategies" in rejected.json()["detail"]
+        assert "回测资格" in rejected.json()["detail"]
 
 
 def test_full_strategy_uses_multitimeframe_repository_path(
@@ -487,6 +487,18 @@ def test_full_strategy_uses_multitimeframe_repository_path(
         assert repository.configs[-1]["timeframe"] == strategy["spec"]["timeframes"]["trigger"]
         assert response.json()["run"]["timeframe"] == strategy["spec"]["timeframes"]["trigger"]
         assert repository.full_specs[-1]["strategy_type"] == "trend_pullback_continuation"
+
+        promoted = client.post(
+            f"/api/v2/strategies/{strategy['id']}/promote",
+            headers=headers,
+            json={
+                "expected_version": strategy["version"],
+                "target_status": "backtested",
+                "confirmed": True,
+            },
+        )
+        assert promoted.status_code == 200
+        assert promoted.json()["strategy"]["lifecycle_status"] == "backtested"
 
 
 def test_backtest_engine_validation_and_service_errors_are_mapped(
