@@ -3457,7 +3457,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260826-macro-tooltip1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260826-opportunity-card2"' in entrypoint
     assert '"/assets/monitor.js?v=20260826-research-ws1"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3467,8 +3467,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260826-macro-tooltip1"' in legacy_index
-    assert 'href="/assets/ai-monitor.css?v=20260826-macro-tooltip1"' in component
+    assert 'src="/assets/ai-monitor.js?v=20260826-opportunity-card2"' in legacy_index
+    assert 'href="/assets/ai-monitor.css?v=20260826-opportunity-card2"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -3616,15 +3616,19 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
         in component
     )
     assert 'const nextExpanded = !card.classList.contains("is-expanded")' in component
-    assert (
-        'key === "header" && currentSection.querySelector("[data-toggle-opportunity-details]")'
-        in component
-    )
+    assert 'if (key === "header")' in component
+    assert 'currentSection.querySelector(".opportunity-identity")' in component
     assert (
         'data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:'
         in component
     )
-    assert ".opportunity-item:not(.is-expanded) .opportunity-feature-grid" in stylesheet
+    assert 'class="opportunity-details-shell opportunity-details-primary"' in component
+    assert 'class="opportunity-details-shell opportunity-details-secondary"' in component
+    assert 'data-patch-key="details-primary"' in component
+    assert 'data-patch-key="details-secondary"' in component
+    assert 'card.querySelectorAll(".opportunity-details-shell").forEach((details) =>' in component
+    assert 'class="opportunity-card-footer"' in component
+    assert ".opportunity-item.is-expanded .opportunity-details-shell" in stylesheet
     assert 'id="score-trend-modal"' in component
     assert 'data-score-trend="${this.escape(item.id)}"' in component
     assert "opportunityScoreHistory(item)" in component
@@ -3677,8 +3681,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "ENTRY GATE" in component
     assert "冻结触发价格" in component
     assert "真实订单关闭" in component
-    assert component.index("${symbolControl}<small>") < component.index(
-        "${conclusionControl}</div>"
+    assert component.index('class="opportunity-symbol-line"') < component.index(
+        'class="opportunity-card-actions"'
     )
     assert "AI分析结论" in component
     assert 'id="ai-conclusion-modal"' in component
