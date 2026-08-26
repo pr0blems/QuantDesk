@@ -39,6 +39,8 @@ def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert "grid-template-rows: 0fr" in STYLES
     assert ".opportunity-item.is-expanded .opportunity-details-shell" in STYLES
     assert "grid-template-rows: 1fr" in STYLES
+    assert ".opportunity-list { align-items: start" in STYLES
+    assert "grid-column: 1 / -1" in STYLES
     assert ".opportunity-item.has-position:not(.is-expanded) > .opportunity-signal" in STYLES
     assert ".opportunity-item > .virtual-position" in STYLES
     assert ".opportunity-item > .opportunity-card-footer" in STYLES
