@@ -32,6 +32,10 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestCatalog = null;
     this.sourceBacktestResult = null;
     this.sourceBacktestRunning = false;
+    this.sourceBacktestScope = "single";
+    this.sourceBacktestSuite = [];
+    this.sourceBacktestFailures = [];
+    this.sourceBacktestAnalysis = null;
     this.sourceComposition = null;
     this.sourceCompositionDirty = false;
     this.aiConversation = [];
@@ -247,8 +251,12 @@ class StrategyCenter extends HTMLElement {
                 <header class="strategy-runner-head"><div><span>STRATEGY REPLAY</span><h3>源码回测</h3></div><span id="strategy-runner-status" class="strategy-runner-status idle"><i></i>等候配置</span></header>
                 <p class="strategy-runner-copy">运行前会校验并保存当前源码为不可变版本，再使用历史 K 线按下一根开盘价撮合。</p>
                 <div id="strategy-runner-notice" class="strategy-runner-notice hidden" role="status"></div>
+                <div class="strategy-runner-scope" aria-label="回测品种范围">
+                  <button class="active" type="button" data-runner-scope="single" aria-pressed="true"><strong>单品种</strong><small>搜索并测试一个合约</small></button>
+                  <button type="button" data-runner-scope="all" aria-pressed="false"><strong>全品种</strong><small id="strategy-runner-universe-count">读取可用品种…</small></button>
+                </div>
                 <div class="strategy-runner-fields">
-                  <label>交易品种<select id="strategy-runner-symbol"><option value="">读取行情目录…</option></select></label>
+                  <label id="strategy-runner-symbol-field" class="strategy-runner-symbol-field"><span>交易品种</span><input id="strategy-runner-symbol-search" type="search" autocomplete="off" placeholder="输入代码搜索，例如 NVDA" aria-label="搜索回测品种"><select id="strategy-runner-symbol" size="1" aria-label="交易品种"><option value="">读取行情目录…</option></select><small id="strategy-runner-symbol-match">等待行情目录</small></label>
                   <label>触发周期（源码）<select id="strategy-runner-timeframe" title="由当前已保存 Python 源码的 TRIGGER_TIMEFRAME 决定"><option value="">读取行情目录…</option></select></label>
                   <label>开始日期<input id="strategy-runner-start" type="date"></label>
                   <label>结束日期<input id="strategy-runner-end" type="date"></label>
@@ -263,6 +271,14 @@ class StrategyCenter extends HTMLElement {
                 </div>
                 <button id="strategy-runner-submit" class="strategy-runner-submit" type="button"><span aria-hidden="true">▶</span><strong>保存当前版本并运行回测</strong></button>
                 <div id="strategy-runner-empty" class="strategy-runner-empty"><span aria-hidden="true">⌁</span><strong>尚未运行当前源码</strong><small>回测完成后将在这里显示收益、回撤、胜率、权益曲线与最近成交。</small></div>
+                <section id="strategy-runner-analysis" class="strategy-runner-analysis hidden">
+                  <header><div><span>CROSS-MARKET ANALYSIS</span><strong>结果分析</strong></div><b id="strategy-runner-verdict">--</b></header>
+                  <div id="strategy-runner-analysis-metrics" class="strategy-runner-analysis-metrics"></div>
+                  <div id="strategy-runner-insights" class="strategy-runner-insights"></div>
+                  <div id="strategy-runner-ranking" class="strategy-runner-ranking"></div>
+                  <button id="strategy-runner-ai-optimize" class="strategy-runner-ai-optimize" type="button"><span aria-hidden="true">✦</span><strong>AI 分析并生成优化参数</strong></button>
+                  <p>AI 只生成符合当前 PARAMETERS 范围的候选参数，不会自动部署；应用后请再次运行全品种回测复验。</p>
+                </section>
                 <section id="strategy-runner-result" class="strategy-runner-result hidden">
                   <header><div><span id="strategy-runner-result-meta">BACKTEST COMPLETE</span><strong id="strategy-runner-result-title">--</strong></div><b id="strategy-runner-return">--</b></header>
                   <div id="strategy-runner-metrics" class="strategy-runner-metrics"></div>
@@ -371,8 +387,13 @@ class StrategyCenter extends HTMLElement {
     this.querySelector("#strategy-workbench-save").addEventListener("click", () => this.persistSourceWorkbench());
     this.querySelector("#strategy-workbench-run").addEventListener("click", () => this.runSourceBacktest());
     this.querySelector("#strategy-runner-submit").addEventListener("click", () => this.runSourceBacktest());
+    this.querySelector("#strategy-runner-ai-optimize").addEventListener("click", () => this.optimizeSourceBacktestParameters());
+    this.querySelector("#strategy-runner-symbol-search").addEventListener("input", (event) => this.filterSourceBacktestSymbols(event.target.value));
     this.querySelector("#strategy-runner-symbol").addEventListener("change", () => this.syncSourceBacktestBounds());
     this.querySelector("#strategy-runner-timeframe").addEventListener("change", () => this.syncSourceBacktestBounds());
+    this.querySelectorAll("[data-runner-scope]").forEach((button) => button.addEventListener("click", () => {
+      this.setSourceBacktestScope(button.dataset.runnerScope || "single");
+    }));
     this.querySelectorAll("[data-workbench-tab]").forEach((button) => button.addEventListener("click", () => {
       this.switchSourceWorkbenchTab(button.dataset.workbenchTab || "backtest");
     }));
@@ -462,6 +483,10 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestCatalog = null;
     this.sourceBacktestResult = null;
     this.sourceBacktestRunning = false;
+    this.sourceBacktestScope = "single";
+    this.sourceBacktestSuite = [];
+    this.sourceBacktestFailures = [];
+    this.sourceBacktestAnalysis = null;
     this.sourceComposition = null;
     this.sourceCompositionDirty = false;
     this.aiConversation = [];
@@ -1087,11 +1112,57 @@ class StrategyCenter extends HTMLElement {
 
   resetSourceBacktestResult() {
     this.sourceBacktestResult = null;
+    this.sourceBacktestSuite = [];
+    this.sourceBacktestFailures = [];
+    this.sourceBacktestAnalysis = null;
     const empty = this.querySelector("#strategy-runner-empty");
     const result = this.querySelector("#strategy-runner-result");
     if (empty) empty.classList.remove("hidden");
     if (result) result.classList.add("hidden");
+    const analysis = this.querySelector("#strategy-runner-analysis");
+    if (analysis) analysis.classList.add("hidden");
+    if (this.querySelector("#strategy-runner-symbol-search")) this.querySelector("#strategy-runner-symbol-search").value = "";
+    if (this.querySelector("[data-runner-scope]")) this.setSourceBacktestScope("single");
     if (this.querySelector("#strategy-runner-notice")) this.showSourceRunnerNotice("");
+  }
+
+  setSourceBacktestScope(scope) {
+    this.sourceBacktestScope = scope === "all" ? "all" : "single";
+    this.querySelectorAll("[data-runner-scope]").forEach((button) => {
+      const active = button.dataset.runnerScope === this.sourceBacktestScope;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    const allSymbols = this.sourceBacktestScope === "all";
+    this.querySelector("#strategy-runner-symbol-field").classList.toggle("disabled", allSymbols);
+    this.querySelector("#strategy-runner-symbol-search").disabled = allSymbols;
+    this.querySelector("#strategy-runner-symbol").disabled = allSymbols;
+    this.querySelector("#strategy-runner-submit strong").textContent = allSymbols
+      ? "保存当前版本并运行全品种回测"
+      : "保存当前版本并运行回测";
+    const count = this.sourceBacktestCatalog?.symbols?.length || 0;
+    if (allSymbols && count) this.showSourceRunnerNotice(`将按最多 2 路并发测试 ${count} 个品种，并逐项保留成功结果与失败原因。`);
+    else if (!this.sourceBacktestRunning) this.showSourceRunnerNotice("");
+    if (this.sourceBacktestCatalog) this.syncSourceBacktestBounds();
+  }
+
+  filterSourceBacktestSymbols(query = "") {
+    const catalog = this.sourceBacktestCatalog || { symbols: [] };
+    const normalized = String(query || "").trim().toLocaleUpperCase("zh-CN");
+    const matches = catalog.symbols.filter((item) => !normalized
+      || item.value.toLocaleUpperCase("zh-CN").includes(normalized)
+      || item.label.toLocaleUpperCase("zh-CN").includes(normalized));
+    const select = this.querySelector("#strategy-runner-symbol");
+    const previous = select.value;
+    select.replaceChildren(...(matches.length
+      ? matches.map((item) => this.option(item.value, item.label))
+      : [this.option("", "没有匹配的品种")]));
+    if (matches.some((item) => item.value === previous)) select.value = previous;
+    else if (matches.length) select.value = matches[0].value;
+    this.querySelector("#strategy-runner-symbol-match").textContent = normalized
+      ? `匹配 ${matches.length} / ${catalog.symbols.length} 个品种`
+      : `共 ${catalog.symbols.length} 个可测试品种`;
+    this.syncSourceBacktestBounds();
   }
 
   renderCodeLines() {
@@ -1159,6 +1230,8 @@ class StrategyCenter extends HTMLElement {
         symbols: (Array.isArray(payload?.symbols) ? payload.symbols : []).map((item) => ({
           value: String(item?.value ?? item?.symbol ?? item ?? ""),
           label: String(item?.label ?? item?.name ?? item?.symbol ?? item ?? ""),
+          available: item?.available !== false,
+          timeframes: Array.isArray(item?.timeframes) ? item.timeframes : [],
         })).filter((item) => item.value),
         timeframes: (Array.isArray(payload?.timeframes) ? payload.timeframes : []).map((item) => ({
           value: String(item?.value ?? item?.timeframe ?? item ?? ""),
@@ -1183,8 +1256,9 @@ class StrategyCenter extends HTMLElement {
       if (items.some((item) => item.value === previous)) select.value = previous;
       else if (items.length) select.value = items[0].value;
     };
-    populate("#strategy-runner-symbol", catalog.symbols, "暂无可用行情");
+    this.filterSourceBacktestSymbols(this.querySelector("#strategy-runner-symbol-search").value);
     populate("#strategy-runner-timeframe", catalog.timeframes, "暂无可用周期");
+    this.querySelector("#strategy-runner-universe-count").textContent = `${catalog.symbols.length} 个可测试品种`;
     const timeframe = this.querySelector("#strategy-runner-timeframe");
     const preferred = this.sourceTriggerTimeframe();
     const sourceLocked = Boolean(preferred && catalog.timeframes.some((item) => item.value === preferred));
@@ -1193,13 +1267,24 @@ class StrategyCenter extends HTMLElement {
     timeframe.title = sourceLocked
       ? `当前源码触发周期为 ${preferred}，回测将自动使用该周期。`
       : "请选择回测数据周期";
+    this.setSourceBacktestScope(this.sourceBacktestScope);
     this.syncSourceBacktestBounds();
   }
 
   syncSourceBacktestBounds() {
     const symbol = this.querySelector("#strategy-runner-symbol").value;
     const timeframe = this.querySelector("#strategy-runner-timeframe").value;
-    const bound = this.plainObject(this.sourceBacktestCatalog?.bounds?.[symbol]?.[timeframe]);
+    let bound = this.plainObject(this.sourceBacktestCatalog?.bounds?.[symbol]?.[timeframe]);
+    if (this.sourceBacktestScope === "all") {
+      const availableBounds = Object.values(this.plainObject(this.sourceBacktestCatalog?.bounds))
+        .map((item) => this.plainObject(this.plainObject(item)[timeframe]))
+        .filter((item) => item.min_date || item.start || item.max_date || item.end);
+      const commonMin = availableBounds.map((item) => String(item.min_date || item.start || "")).filter(Boolean).sort().at(-1) || "";
+      const commonMax = availableBounds.map((item) => String(item.max_date || item.end || "")).filter(Boolean).sort().at(0) || "";
+      bound = commonMin && commonMax && commonMin <= commonMax
+        ? { min_date: commonMin, max_date: commonMax }
+        : {};
+    }
     const min = String(bound.min_date || bound.start || "");
     const max = String(bound.max_date || bound.end || "");
     const start = this.querySelector("#strategy-runner-start");
@@ -1325,7 +1410,7 @@ class StrategyCenter extends HTMLElement {
     }
   }
 
-  sourceBacktestPayload() {
+  sourceBacktestPayload(symbol = "") {
     const numericParameters = {};
     Object.entries(this.plainObject(this.activeItem?.parameters)).forEach(([key, value]) => {
       const number = Number(value);
@@ -1333,7 +1418,7 @@ class StrategyCenter extends HTMLElement {
     });
     return {
       strategy_id: this.activeItem.public_id,
-      symbol: this.querySelector("#strategy-runner-symbol").value,
+      symbol: symbol || this.querySelector("#strategy-runner-symbol").value,
       timeframe: this.sourceTriggerTimeframe() || this.querySelector("#strategy-runner-timeframe").value,
       start_date: this.querySelector("#strategy-runner-start").value,
       end_date: this.querySelector("#strategy-runner-end").value,
@@ -1347,6 +1432,176 @@ class StrategyCenter extends HTMLElement {
       max_holding_bars: Number(this.querySelector("#strategy-runner-holding").value),
       params: numericParameters,
     };
+  }
+
+  async executeSourceBacktest(payload) {
+    let detail = await this.backtestApi("", { method: "POST", body: JSON.stringify(payload) });
+    const id = detail?.run?.id ?? detail?.run?.run_id ?? detail?.id ?? detail?.run_id;
+    if (!detail?.result && id != null) detail = await this.backtestApi(`/${encodeURIComponent(id)}`);
+    const run = detail?.run || detail || {};
+    const result = detail?.result || {
+      account: { initial_capital: run.initial_capital, final_equity: run.final_equity },
+      metrics: this.plainObject(run.metrics_json),
+      equity_curve: Array.isArray(run.equity_curve_json) ? run.equity_curve_json : [],
+      trades: Array.isArray(run.trades) ? run.trades : [],
+      data_quality: this.plainObject(run.data_quality_json),
+    };
+    return { run, result, symbol: String(run.symbol || payload.symbol) };
+  }
+
+  async runSourceBacktestSuite(basePayload, symbols) {
+    const completed = [];
+    const failures = [];
+    let cursor = 0;
+    const updateProgress = () => {
+      const finished = completed.length + failures.length;
+      this.setSourceRunnerStatus(`${finished} / ${symbols.length}`, "loading");
+      this.showSourceRunnerNotice(`全品种回测进行中：已完成 ${finished} / ${symbols.length}，成功 ${completed.length}，失败 ${failures.length}。`);
+    };
+    const worker = async () => {
+      while (cursor < symbols.length) {
+        const index = cursor;
+        cursor += 1;
+        const symbol = symbols[index];
+        try {
+          completed.push(await this.executeSourceBacktest({ ...basePayload, symbol }));
+        } catch (error) {
+          failures.push({ symbol, message: this.localizedErrorMessage(error, "行情或策略执行失败") });
+        }
+        updateProgress();
+      }
+    };
+    updateProgress();
+    await Promise.all(Array.from({ length: Math.min(2, symbols.length) }, () => worker()));
+    return { completed, failures };
+  }
+
+  sourceBacktestMetric(entry) {
+    const metrics = this.plainObject(entry?.result?.metrics || entry?.run?.metrics_json);
+    const quality = this.plainObject(entry?.result?.data_quality || entry?.run?.data_quality_json);
+    const read = (...keys) => {
+      for (const key of keys) if (metrics[key] != null && Number.isFinite(Number(metrics[key]))) return Number(metrics[key]);
+      return NaN;
+    };
+    return {
+      symbol: String(entry?.symbol || entry?.run?.symbol || "--"),
+      returnPct: read("total_return_pct", "return_pct", "total_return"),
+      drawdownPct: Math.abs(read("max_drawdown_pct", "max_drawdown")),
+      sharpe: read("sharpe_ratio", "sharpe"),
+      winRate: read("win_rate_pct", "win_rate"),
+      profitFactor: read("profit_factor", "payoff_ratio"),
+      trades: Math.max(0, Math.round(read("trade_count", "total_trades", "trades") || 0)),
+      coverage: Number(quality.coverage_pct ?? quality.coverage),
+    };
+  }
+
+  buildSourceBacktestAnalysis(entries, failures = [], expectedCount = entries.length) {
+    const rows = entries.map((entry) => this.sourceBacktestMetric(entry));
+    const finite = (values) => values.filter(Number.isFinite);
+    const average = (values) => {
+      const usable = finite(values);
+      return usable.length ? usable.reduce((sum, value) => sum + value, 0) / usable.length : NaN;
+    };
+    const median = (values) => {
+      const usable = finite(values).sort((left, right) => left - right);
+      if (!usable.length) return NaN;
+      const middle = Math.floor(usable.length / 2);
+      return usable.length % 2 ? usable[middle] : (usable[middle - 1] + usable[middle]) / 2;
+    };
+    rows.forEach((row) => {
+      row.score = (Number.isFinite(row.returnPct) ? row.returnPct : -100)
+        - (Number.isFinite(row.drawdownPct) ? row.drawdownPct * 0.35 : 0)
+        + (Number.isFinite(row.sharpe) ? Math.max(-3, Math.min(3, row.sharpe)) * 0.2 : 0);
+    });
+    const totalTrades = rows.reduce((sum, row) => sum + row.trades, 0);
+    const positiveCount = rows.filter((row) => row.returnPct > 0).length;
+    const positiveRate = rows.length ? positiveCount / rows.length * 100 : 0;
+    const averageReturn = average(rows.map((row) => row.returnPct));
+    const medianReturn = median(rows.map((row) => row.returnPct));
+    const worstDrawdown = Math.max(0, ...finite(rows.map((row) => row.drawdownPct)));
+    const averageSharpe = average(rows.map((row) => row.sharpe));
+    const weightedWinRate = totalTrades
+      ? rows.reduce((sum, row) => sum + (Number.isFinite(row.winRate) ? row.winRate * row.trades : 0), 0) / totalTrades
+      : NaN;
+    let verdict = "需要优化";
+    if (!rows.length) verdict = "无有效结果";
+    else if (rows.length < Math.min(5, expectedCount) || totalTrades < Math.max(10, rows.length * 2)) verdict = "样本不足";
+    else if (averageReturn > 0 && medianReturn > 0 && positiveRate >= 60 && worstDrawdown <= 20) verdict = "跨品种较稳";
+    else if (averageReturn > 0 && positiveRate >= 45) verdict = "收益较集中";
+    const insights = [];
+    if (rows.length) insights.push(`成功覆盖 ${rows.length} / ${expectedCount} 个品种，${failures.length} 个失败。`);
+    if (Number.isFinite(averageReturn)) insights.push(`平均收益 ${averageReturn.toFixed(2)}%，中位数 ${medianReturn.toFixed(2)}%，正收益品种占比 ${positiveRate.toFixed(1)}%。`);
+    if (Number.isFinite(worstDrawdown)) insights.push(`最差回撤 ${worstDrawdown.toFixed(2)}%；共 ${totalTrades} 笔交易，避免只凭少数品种判断。`);
+    if (verdict === "收益较集中") insights.push("平均收益为正但分布不均，参数可能依赖少数强势品种。建议优先降低过拟合和回撤。 ");
+    if (verdict === "需要优化") insights.push("当前参数在跨品种样本上的收益或稳定性不足，可让 AI 在既有参数边界内生成候选后重新复验。 ");
+    if (verdict === "样本不足") insights.push("有效品种或成交样本不足，暂不适合据此放大仓位或判断策略有效。 ");
+    return {
+      verdict,
+      expectedCount,
+      successCount: rows.length,
+      failureCount: failures.length,
+      positiveRate,
+      averageReturn,
+      medianReturn,
+      worstDrawdown,
+      averageSharpe,
+      weightedWinRate,
+      totalTrades,
+      rows: rows.sort((left, right) => right.score - left.score),
+      failures,
+      insights,
+    };
+  }
+
+  renderSourceBacktestAnalysis(analysis) {
+    this.sourceBacktestAnalysis = analysis;
+    const panel = this.querySelector("#strategy-runner-analysis");
+    panel.classList.remove("hidden");
+    this.querySelector("#strategy-runner-empty").classList.add("hidden");
+    this.querySelector("#strategy-runner-verdict").textContent = analysis.verdict;
+    const format = (value, suffix = "", digits = 2) => Number.isFinite(Number(value))
+      ? `${Number(value).toLocaleString("zh-CN", { maximumFractionDigits: digits })}${suffix}`
+      : "--";
+    const definitions = [
+      ["成功 / 总数", `${analysis.successCount} / ${analysis.expectedCount}`],
+      ["正收益品种", format(analysis.positiveRate, "%", 1)],
+      ["平均收益", format(analysis.averageReturn, "%")],
+      ["收益中位数", format(analysis.medianReturn, "%")],
+      ["最差回撤", format(-Math.abs(analysis.worstDrawdown), "%")],
+      ["总交易数", format(analysis.totalTrades, "", 0)],
+    ];
+    this.querySelector("#strategy-runner-analysis-metrics").replaceChildren(...definitions.map(([label, value]) => {
+      const node = this.node("article");
+      node.append(this.node("span", "", label), this.node("strong", "", value));
+      return node;
+    }));
+    this.querySelector("#strategy-runner-insights").replaceChildren(...analysis.insights.map((message, index) => {
+      const row = this.node("p");
+      row.append(this.node("span", "", String(index + 1).padStart(2, "0")), this.node("strong", "", message));
+      return row;
+    }));
+    const ranking = this.querySelector("#strategy-runner-ranking");
+    const visibleRows = analysis.rows.slice(0, 5);
+    const worstRows = analysis.rows.length > 5 ? analysis.rows.slice(-5).reverse() : [];
+    const ranked = [...visibleRows, ...worstRows.filter((row) => !visibleRows.includes(row))];
+    const head = this.node("header");
+    head.append(this.node("strong", "", "品种表现"), this.node("span", "", `显示最佳与最弱 ${ranked.length} 项`));
+    ranking.replaceChildren(head, ...ranked.map((row, index) => {
+      const item = this.node("article");
+      item.append(
+        this.node("span", "", String(index + 1).padStart(2, "0")),
+        this.node("strong", "", row.symbol),
+        this.node("b", row.returnPct > 0 ? "positive" : (row.returnPct < 0 ? "negative" : ""), format(row.returnPct, "%")),
+        this.node("small", "", `${row.trades} 笔 · 回撤 ${format(-Math.abs(row.drawdownPct), "%")}`),
+      );
+      return item;
+    }));
+    if (analysis.failures.length) {
+      const failed = this.node("details", "strategy-runner-failures");
+      failed.append(this.node("summary", "", `失败品种 ${analysis.failures.length} 个`));
+      analysis.failures.slice(0, 30).forEach((item) => failed.append(this.node("p", "", `${item.symbol} · ${item.message}`)));
+      ranking.append(failed);
+    }
   }
 
   async ensureSourceBacktestEligibility() {
@@ -1380,7 +1635,10 @@ class StrategyCenter extends HTMLElement {
     }
     if (!this.sourceBacktestCatalog) await this.loadSourceBacktestCatalog(true);
     const payload = this.sourceBacktestPayload();
-    if (!payload.symbol || !payload.timeframe || !payload.start_date || !payload.end_date) {
+    const symbols = this.sourceBacktestScope === "all"
+      ? (this.sourceBacktestCatalog?.symbols || []).map((item) => item.value)
+      : [payload.symbol].filter(Boolean);
+    if (!symbols.length || !payload.timeframe || !payload.start_date || !payload.end_date) {
       this.showSourceRunnerNotice("请选择可用的交易品种、周期和回测区间。", "error");
       return;
     }
@@ -1391,28 +1649,39 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestRunning = true;
     const buttons = [this.querySelector("#strategy-workbench-run"), this.querySelector("#strategy-runner-submit")];
     buttons.forEach((button) => this.setButtonBusy(button, true, "回放中…"));
-    this.setSourceRunnerStatus("回放行情", "loading");
-    this.showSourceRunnerNotice("正在使用当前不可变源码版本回放历史行情，请稍候…");
+    this.setSourceRunnerStatus(this.sourceBacktestScope === "all" ? `0 / ${symbols.length}` : "回放行情", "loading");
+    this.showSourceRunnerNotice(this.sourceBacktestScope === "all"
+      ? `正在对 ${symbols.length} 个品种执行同参数回测，请保持页面打开。`
+      : "正在使用当前不可变源码版本回放历史行情，请稍候…");
     try {
-      let detail = await this.backtestApi("", { method: "POST", body: JSON.stringify(payload) });
-      const id = detail?.run?.id ?? detail?.run?.run_id ?? detail?.id ?? detail?.run_id;
-      if (!detail?.result && id != null) detail = await this.backtestApi(`/${encodeURIComponent(id)}`);
-      const run = detail?.run || detail || {};
-      const result = detail?.result || {
-        account: { initial_capital: run.initial_capital, final_equity: run.final_equity },
-        metrics: this.plainObject(run.metrics_json),
-        equity_curve: Array.isArray(run.equity_curve_json) ? run.equity_curve_json : [],
-        trades: Array.isArray(run.trades) ? run.trades : [],
-        data_quality: this.plainObject(run.data_quality_json),
-      };
-      this.sourceBacktestResult = { run, result };
-      if (this.activeItem?.lifecycle_status === "validated") {
+      let completed;
+      let failures;
+      if (this.sourceBacktestScope === "all") {
+        const suite = await this.runSourceBacktestSuite(payload, symbols);
+        completed = suite.completed;
+        failures = suite.failures;
+      } else {
+        completed = [await this.executeSourceBacktest({ ...payload, symbol: symbols[0] })];
+        failures = [];
+      }
+      this.sourceBacktestSuite = completed;
+      this.sourceBacktestFailures = failures;
+      this.sourceBacktestResult = completed[0] || null;
+      if (completed.length && this.activeItem?.lifecycle_status === "validated") {
         const promoted = await this.promoteLifecycle(this.activeItem, "backtested");
         this.activeItem = promoted.item;
       }
-      this.renderSourceBacktestResult(run, result);
+      if (this.sourceBacktestScope === "single" && completed[0]) {
+        this.renderSourceBacktestResult(completed[0].run, completed[0].result);
+      } else {
+        this.querySelector("#strategy-runner-result").classList.add("hidden");
+      }
+      const analysis = this.buildSourceBacktestAnalysis(completed, failures, symbols.length);
+      this.renderSourceBacktestAnalysis(analysis);
       this.setSourceRunnerStatus("回测完成", "ready");
-      this.showSourceRunnerNotice("回测完成。请优先检查交易样本、最大回撤和扣费后收益。", "success");
+      this.showSourceRunnerNotice(this.sourceBacktestScope === "all"
+        ? `全品种回测完成：成功 ${completed.length}，失败 ${failures.length}。请先看跨品种分布，再决定是否优化参数。`
+        : "回测完成。已生成结果分析，可让 AI 在当前参数边界内提出优化候选。", "success");
     } catch (error) {
       this.setSourceRunnerStatus("回测失败", "error");
       this.showSourceRunnerNotice(`回测失败：${this.localizedErrorMessage(error, "请检查行情数据与策略输出")}`, "error");
@@ -1420,6 +1689,147 @@ class StrategyCenter extends HTMLElement {
       this.sourceBacktestRunning = false;
       buttons.forEach((button) => this.setButtonBusy(button, false));
     }
+  }
+
+  async optimizeSourceBacktestParameters() {
+    const analysis = this.sourceBacktestAnalysis;
+    if (!analysis || !this.activeItem?.public_id) return;
+    const button = this.querySelector("#strategy-runner-ai-optimize");
+    this.setButtonBusy(button, true, "AI 分析中…");
+    this.showSourceRunnerNotice("AI 正在读取跨品种分布、回撤和成交样本，并在现有参数范围内生成候选…");
+    try {
+      const compactRows = [
+        ...analysis.rows.slice(0, 3),
+        ...analysis.rows.slice(-3),
+      ].map((row) => ({
+        symbol: row.symbol,
+        return_pct: Number.isFinite(row.returnPct) ? Number(row.returnPct.toFixed(3)) : null,
+        drawdown_pct: Number.isFinite(row.drawdownPct) ? Number(row.drawdownPct.toFixed(3)) : null,
+        sharpe: Number.isFinite(row.sharpe) ? Number(row.sharpe.toFixed(3)) : null,
+        trades: row.trades,
+      }));
+      const parameterBounds = this.activeItem.parameter_schema.slice(0, 40).map((definition) => ({
+        key: definition.key,
+        type: definition.type,
+        min: definition.min,
+        max: definition.max,
+        step: definition.step,
+      }));
+      const prompt = [
+        "你是参数优化助手。仅修改当前已有 parameters，以及止损、止盈、最大持有K线；不改名称、分类、说明、源码、仓位、杠杆、手续费和滑点，不新增或删除参数。",
+        "目标是提高跨品种中位数收益、正收益品种占比与稳定性，同时控制最差回撤；不要追逐单一最佳品种，也不要承诺盈利。",
+        `当前参数：${JSON.stringify(this.activeItem.parameters)}`,
+        `参数约束：${JSON.stringify(parameterBounds)}`,
+        `当前风险：${JSON.stringify(this.activeItem.risk_defaults)}`,
+        `汇总：${JSON.stringify({
+          tested: analysis.expectedCount,
+          success: analysis.successCount,
+          failed: analysis.failureCount,
+          average_return_pct: analysis.averageReturn,
+          median_return_pct: analysis.medianReturn,
+          positive_symbol_pct: analysis.positiveRate,
+          worst_drawdown_pct: analysis.worstDrawdown,
+          average_sharpe: analysis.averageSharpe,
+          total_trades: analysis.totalTrades,
+        })}`,
+        `代表品种：${JSON.stringify(compactRows)}`,
+        "给出一组保守、可解释的候选参数。变化幅度应小，成交样本不足时优先减少复杂度而不是激进调参。",
+      ].join("\n").slice(0, 1950);
+      const result = await this.api(`/${encodeURIComponent(this.activeItem.public_id)}/ai-preview`, {
+        method: "POST",
+        body: JSON.stringify({ prompt }),
+      });
+      const normalized = this.normalizeBacktestOptimizationProposal(result?.proposed);
+      this.preview = {
+        base_version: Number(result?.base_version ?? this.activeItem.version),
+        provider: String(result?.provider ?? "AI model"),
+        summary: String(result?.summary ?? "AI 已根据回测分布生成参数候选。"),
+        changes: normalized.changes,
+        proposed: normalized.proposed,
+        proposed_spec: {},
+        strategy_code: "",
+        source_code: "",
+        draft: {},
+        profile: null,
+        risk_defaults: null,
+        composition: null,
+        parameter_schema: [],
+        parameters: {},
+        generated_from_composition: false,
+        mode: "parameters",
+      };
+      this.aiWorkingProposed = this.preview.proposed;
+      const turn = ++this.aiTurnSequence;
+      this.aiConversation.push(
+        { id: `optimizer-user-${turn}`, turn, role: "user", content: `基于 ${analysis.successCount} 个成功品种的回测结果优化参数`, status: "complete" },
+        { id: `optimizer-ai-${turn}`, turn, role: "assistant", content: this.preview.summary, status: "complete", meta: `${this.providerLabel(this.preview.provider)} · ${this.preview.changes.length} 项候选变化 · 待确认` },
+      );
+      this.completeAiProcess(this.preview);
+      this.renderAiConversation();
+      this.renderPreview();
+      this.switchSourceWorkbenchTab("ai");
+      this.showAiError("AI 参数候选已生成。请检查变化并确认应用；应用后必须重新运行全品种回测。", "success");
+    } catch (error) {
+      this.showSourceRunnerNotice(`AI 参数优化失败：${this.friendlyMutationError(error)}`, "error");
+    } finally {
+      this.setButtonBusy(button, false);
+    }
+  }
+
+  normalizeBacktestOptimizationProposal(candidate) {
+    const proposed = this.plainObject(candidate);
+    const rawParameters = this.plainObject(proposed.parameters);
+    const currentParameters = this.plainObject(this.activeItem?.parameters);
+    const parameters = {};
+    const quantize = (rawValue, definition, fallback) => {
+      let value = Number(rawValue);
+      if (!Number.isFinite(value)) value = Number(fallback);
+      const minimum = Number(definition.min);
+      const maximum = Number(definition.max);
+      const step = Number(definition.step);
+      if (Number.isFinite(minimum)) value = Math.max(minimum, value);
+      if (Number.isFinite(maximum)) value = Math.min(maximum, value);
+      if (Number.isFinite(step) && step > 0) {
+        const origin = Number.isFinite(minimum) ? minimum : 0;
+        value = origin + Math.round((value - origin) / step) * step;
+      }
+      if (definition.type === "integer") value = Math.round(value);
+      return Number(value.toFixed(8));
+    };
+    this.activeItem.parameter_schema.forEach((definition) => {
+      const key = String(definition.key || "");
+      if (!key) return;
+      parameters[key] = quantize(rawParameters[key], definition, currentParameters[key] ?? definition.default);
+    });
+    const currentRisk = this.plainObject(this.activeItem?.risk_defaults);
+    const rawRisk = this.plainObject(proposed.risk_defaults);
+    const riskDefaults = { ...currentRisk };
+    const riskBounds = {
+      stop_loss_pct: [0, 99.9, false],
+      take_profit_pct: [0, 99.9, false],
+      max_holding_bars: [0, 50000, true],
+    };
+    Object.entries(riskBounds).forEach(([key, [minimum, maximum, integer]]) => {
+      const candidateValue = Number(rawRisk[key]);
+      if (!Number.isFinite(candidateValue)) return;
+      const bounded = Math.max(minimum, Math.min(maximum, candidateValue));
+      riskDefaults[key] = integer ? Math.round(bounded) : Number(bounded.toFixed(6));
+    });
+    const safeProposed = {
+      name: this.activeItem.name,
+      description: this.activeItem.description,
+      category: this.activeItem.category,
+      parameters,
+      risk_defaults: riskDefaults,
+    };
+    const changes = [];
+    Object.entries(parameters).forEach(([key, value]) => {
+      if (Number(currentParameters[key]) !== Number(value)) changes.push({ path: `parameters.${key}`, before: currentParameters[key], after: value });
+    });
+    Object.entries(riskDefaults).forEach(([key, value]) => {
+      if (Number(currentRisk[key]) !== Number(value)) changes.push({ path: `risk_defaults.${key}`, before: currentRisk[key], after: value });
+    });
+    return { proposed: safeProposed, changes };
   }
 
   renderSourceBacktestResult(run, result) {
@@ -2916,6 +3326,16 @@ class StrategyCenter extends HTMLElement {
       const item = this.normalizeItem(result?.item ?? result);
       this.upsertItem(item);
       this.activeItem = item;
+      if (item.strategy_kind === "source_strategy") {
+        const priorScope = this.sourceBacktestScope;
+        this.sourceParameterSchema = item.parameter_schema.map((definition) => ({ ...definition }));
+        this.sourceParameterValues = { ...item.parameters };
+        this.sourceRiskDefaults = { ...this.plainObject(item.risk_defaults) };
+        this.applySourceRiskDefaults();
+        this.resetSourceBacktestResult();
+        this.setSourceBacktestScope(priorScope);
+        this.setSourceWorkbenchDirty(false);
+      }
       this.querySelector("#strategy-editor-title").textContent = item.name;
       this.querySelector("#strategy-editor-version").textContent = `v${item.version}`;
       this.querySelector("#strategy-name").value = item.name;

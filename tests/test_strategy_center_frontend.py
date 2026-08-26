@@ -23,6 +23,10 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'data-workbench-tab="ai"',
         'id="strategy-runner-submit"',
         'id="strategy-runner-canvas"',
+        'id="strategy-runner-symbol-search"',
+        'data-runner-scope="all"',
+        'id="strategy-runner-analysis"',
+        'id="strategy-runner-ai-optimize"',
         'id="strategy-source-composition-block"',
         'id="strategy-source-indicator-picker"',
         'id="strategy-ai-messages"',
@@ -65,6 +69,9 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'timeframe: this.sourceTriggerTimeframe() ||',
         'this.ensureSourceBacktestEligibility()',
         'this.promoteLifecycle(item, "validated")',
+        'this.runSourceBacktestSuite(payload, symbols)',
+        'this.buildSourceBacktestAnalysis(completed, failures, symbols.length)',
+        'this.optimizeSourceBacktestParameters()',
     ):
         assert api_contract in script
 
@@ -99,6 +106,8 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         "const payload = this.sourceBacktestPayload()"
     )
     assert "正在校验当前源码并取得回测资格" in script
+    assert "最多 2 路并发" in script
+    assert "AI 只生成符合当前 PARAMETERS 范围的候选参数" in script
 
 
 def test_react_canary_loads_the_current_strategy_component_asset() -> None:
@@ -110,8 +119,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260826-backtest-eligibility1" in index
-    assert index.index("/assets/strategies.js?v=20260826-backtest-eligibility1") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260826-strategy-suite1" in index
+    assert index.index("/assets/strategies.js?v=20260826-strategy-suite1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel
@@ -127,6 +136,10 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     assert ".strategy-editor.source-workbench" in stylesheet
     assert ".strategy-editor.source-workbench-shell" in stylesheet
     assert ".strategy-runner-result" in stylesheet
+    assert ".strategy-runner-scope" in stylesheet
+    assert ".strategy-runner-symbol-field" in stylesheet
+    assert ".strategy-runner-analysis" in stylesheet
+    assert ".strategy-runner-ai-optimize" in stylesheet
     assert ".strategy-source-composition-block" in stylesheet
     assert ".strategy-ai-conversation" in stylesheet
     assert ".strategy-ai-process-step" in stylesheet
@@ -139,7 +152,7 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
 def test_legacy_shell_busts_the_current_strategy_asset_cache() -> None:
     index = (ROOT / "src/quantdesk_v2/static/index.html").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260826-backtest-eligibility1" in index
+    assert "/assets/strategies.js?v=20260826-strategy-suite1" in index
 
 
 def test_strategy_custom_element_initializes_after_construction() -> None:
