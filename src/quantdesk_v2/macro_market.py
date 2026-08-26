@@ -2463,7 +2463,7 @@ def opportunity_market_context(
                 "the candidate remains research-only."
             )
         return {
-            "version": "macro_directional_adjustment_v3",
+            "version": "macro_directional_adjustment_v4",
             "available": False,
             "adjustment": 0.0,
             "resonance": "unknown",
@@ -2585,13 +2585,11 @@ def opportunity_market_context(
         blocked_reasons.append("GLOBAL_RISK_POLICY")
     if session_blocked:
         blocked_reasons.append("NON_REGULAR_US_SESSION")
-    if opposed:
-        blocked_reasons.append("MACRO_DIRECTION_DIVERGENT")
     blocked_reason_labels = {
         "GLOBAL_RISK_POLICY": "重大事件或信用压力环境暂停新增顺势多单",
         "NON_REGULAR_US_SESSION": "当前不是美股常规交易时段，仅保留扫描与研究记录",
-        "MACRO_DIRECTION_DIVERGENT": "候选方向与当前大盘方向相反",
     }
+    warnings = ["MACRO_DIRECTION_DIVERGENT"] if opposed else []
     direction_blocked = bool(blocked_reasons)
     entry_policy = {
         **global_policy,
@@ -2599,12 +2597,14 @@ def opportunity_market_context(
         "position_multiplier": position_multiplier if position_multiplier is not None else 1.0,
         "entry_allowed": not direction_blocked,
         "blocked_reasons": blocked_reasons,
+        "warnings": warnings,
+        "directional_divergence": opposed,
         "blocked_reason": "；".join(
             blocked_reason_labels[item] for item in blocked_reasons
         ) or None,
     }
     return {
-        "version": "macro_directional_adjustment_v3",
+        "version": "macro_directional_adjustment_v4",
         "available": True,
         "adjustment": round(adjustment, 4),
         "resonance": resonance,

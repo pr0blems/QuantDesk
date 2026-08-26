@@ -1520,11 +1520,41 @@ def test_prediction_actionability_gate_blocks_non_actionable_correlated_entry() 
     assert set(summary["blocking_reasons"]) == {
         "EXECUTION_MARKET_QUALITY_BLOCKED",
         "NON_REGULAR_US_SESSION",
-        "MACRO_DIRECTION_DIVERGENT",
         "NEWS_NOT_ACTIONABLE",
         "CORRELATED_EVENT_ALREADY_SELECTED",
         "ORDER_BOOK_DIRECTION_NOT_CONFIRMED",
     }
+    assert "OBSERVED_ONLY:MACRO_DIRECTION_DIVERGENT" in summary["warnings"]
+    assert summary["decision_checks"]["macro_direction_aligned"] is False
+
+
+def test_prediction_actionability_keeps_macro_divergence_as_scored_warning() -> None:
+    summary = prediction_actionability_gate_summary(
+        {
+            "status": "passed",
+            "passed": True,
+            "market_quality_passed": True,
+            "decision_checks": {},
+            "blocking_reasons": [],
+            "warnings": [],
+        },
+        market_quality={"passed": True},
+        market_environment={
+            "resonance": "divergent",
+            "market_session": {"key": "regular", "allows_new_entries": True},
+        },
+        news_trigger={
+            "has_actionable_new_news": True,
+            "event_cluster": {"selected": True},
+        },
+        order_book_gate={"quality_passed": True, "confirms_direction": True},
+        require_new_news=True,
+    )
+
+    assert summary["passed"] is True
+    assert summary["status"] == "degraded"
+    assert summary["blocking_reasons"] == []
+    assert "OBSERVED_ONLY:MACRO_DIRECTION_DIVERGENT" in summary["warnings"]
 
 
 def test_prediction_actionability_uses_binance_execution_quality_not_cash_reference() -> None:

@@ -200,8 +200,10 @@ def test_long_signal_is_penalized_and_marked_divergent_in_fear_regime() -> None:
 
     assert context["resonance"] == "divergent"
     assert context["adjustment"] == -20
-    assert context["entry_policy"]["entry_allowed"] is False
-    assert "MACRO_DIRECTION_DIVERGENT" in context["entry_policy"]["blocked_reasons"]
+    assert context["entry_policy"]["entry_allowed"] is True
+    assert "MACRO_DIRECTION_DIVERGENT" not in context["entry_policy"]["blocked_reasons"]
+    assert "MACRO_DIRECTION_DIVERGENT" in context["entry_policy"]["warnings"]
+    assert context["entry_policy"]["directional_divergence"] is True
     assert apply_market_adjustment(82.0, context) == 62.0
     assert {factor["key"] for factor in context["factors"]} >= {
         "ndx_trend",

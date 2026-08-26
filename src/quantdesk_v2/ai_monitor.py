@@ -107,7 +107,7 @@ PREDICTION_SCORE_EXIT_POLICY_VERSION = "horizon_aligned_closed_bar_v3"
 PREDICTION_SOFT_EXIT_MIN_HORIZON_FRACTION = 0.5
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
-OPPORTUNITY_DECISION_VERSION = "actionable_entry_v6"
+OPPORTUNITY_DECISION_VERSION = "actionable_entry_v7"
 OPPORTUNITY_API_VERSION = "ai_opportunity.v3"
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
@@ -4474,15 +4474,14 @@ def prediction_actionability_gate_summary(
         result.get("market_quality_passed", market_quality.get("passed"))
     )
     raw_market_quality = bool(market_quality.get("passed"))
+    macro_direction_aligned = str(
+        market_environment.get("resonance") or "unknown"
+    ).lower() != "divergent"
     actionable_checks = {
         "execution_market_quality": execution_market_quality,
         "regular_us_session": bool(
             session_key == "regular" and session.get("allows_new_entries") is not False
         ),
-        "macro_direction_aligned": str(
-            market_environment.get("resonance") or "unknown"
-        ).lower()
-        != "divergent",
         "actionable_news_trigger": bool(
             not require_new_news or news_trigger.get("has_actionable_new_news")
         ),
@@ -4497,10 +4496,10 @@ def prediction_actionability_gate_summary(
             and frozen_order_book.get("confirms_direction")
         )
     decision_checks.update(actionable_checks)
+    decision_checks["macro_direction_aligned"] = macro_direction_aligned
     failure_codes = {
         "execution_market_quality": "EXECUTION_MARKET_QUALITY_BLOCKED",
         "regular_us_session": "NON_REGULAR_US_SESSION",
-        "macro_direction_aligned": "MACRO_DIRECTION_DIVERGENT",
         "actionable_news_trigger": "NEWS_NOT_ACTIONABLE",
         "event_cluster_selected": "CORRELATED_EVENT_ALREADY_SELECTED",
         "order_book_confirms_direction": "ORDER_BOOK_DIRECTION_NOT_CONFIRMED",
@@ -4519,6 +4518,8 @@ def prediction_actionability_gate_summary(
     warnings = list(result.get("warnings") or [])
     if execution_market_quality and not raw_market_quality:
         warnings.append("OBSERVED_ONLY:RAW_MARKET_QUALITY_BLOCKED")
+    if not macro_direction_aligned:
+        warnings.append("OBSERVED_ONLY:MACRO_DIRECTION_DIVERGENT")
     warnings = list(dict.fromkeys(warnings))
     result.update(
         {
