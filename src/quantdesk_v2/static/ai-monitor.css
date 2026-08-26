@@ -2075,7 +2075,7 @@ td.negative { color: var(--ai-red); }
   border-radius: 10px 10px 0 0;
   background: #101813;
 }
-.opportunity-item > header > .opportunity-identity { min-width: 0; display: grid; align-content: center; gap: 10px; }
+.opportunity-list .opportunity-item > header > .opportunity-identity { min-width: 0; display: grid; align-content: center; align-items: start; gap: 10px; }
 .opportunity-symbol-line { min-width: 0; display: flex; align-items: baseline; gap: 9px; }
 .opportunity-symbol-line .opportunity-symbol { font-size: 31px; line-height: 1; letter-spacing: -.025em; }
 .opportunity-symbol-line > small { color: var(--ai-dim); font: 700 11px/1.2 Consolas, monospace; }
@@ -2084,7 +2084,7 @@ td.negative { color: var(--ai-red); }
 .opportunity-badges .direction-badge.long { border-color: rgba(91, 214, 170, .62); color: var(--ai-green); background: rgba(91, 214, 170, .045); }
 .opportunity-badges .direction-badge.short { border-color: rgba(255, 120, 136, .62); color: var(--ai-red); background: rgba(255, 120, 136, .045); }
 .opportunity-quotes .provider-quote-badge { min-height: 23px; border-color: transparent; background: rgba(255, 255, 255, .018); }
-.opportunity-top-metrics { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.opportunity-top-metrics { min-width: 0; height: 96px; align-self: center; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .opportunity-top-metrics .market-depth-control,
 .opportunity-top-metrics .opportunity-score {
   width: 100%;

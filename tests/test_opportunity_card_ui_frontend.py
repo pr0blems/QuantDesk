@@ -45,6 +45,7 @@ def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert "grid-column: 1 / -1" in STYLES
     assert ".opportunity-item:is(.has-position, .has-candidate-summary):not(.is-expanded) > .opportunity-signal" in STYLES
     assert ".opportunity-item > .virtual-position" in STYLES
+    assert ".opportunity-list .opportunity-item > header > .opportunity-identity" in STYLES
     assert ".virtual-position.direction-long .virtual-position-title" in STYLES
     assert ".virtual-position.direction-short .virtual-position-title" in STYLES
     assert ".opportunity-item > .opportunity-card-footer" in STYLES
