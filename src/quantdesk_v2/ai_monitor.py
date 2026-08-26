@@ -107,7 +107,7 @@ PREDICTION_SCORE_EXIT_POLICY_VERSION = "horizon_aligned_closed_bar_v3"
 PREDICTION_SOFT_EXIT_MIN_HORIZON_FRACTION = 0.5
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
-OPPORTUNITY_DECISION_VERSION = "actionable_entry_v5"
+OPPORTUNITY_DECISION_VERSION = "actionable_entry_v6"
 OPPORTUNITY_API_VERSION = "ai_opportunity.v3"
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
@@ -4455,15 +4455,27 @@ def prediction_actionability_gate_summary(
     order_book_gate: Mapping[str, Any] | None,
     require_new_news: bool,
 ) -> dict[str, Any]:
-    """Add prediction-specific hard gates without stopping all-hours scans."""
+    """Add the canonical simulated-entry gates to the execution summary.
+
+    ``market_quality['passed']`` also contains cross-venue cash NBBO checks.
+    Those inputs are useful observations, but the simulated Binance entry must
+    not be stopped merely because Finnhub/UW is delayed or the cash quote is
+    unavailable.  ``stable_gate_summary`` already separates Binance execution
+    quality from those reference observations, so this layer must consume that
+    exact decision instead of reintroducing the raw aggregate as a hard gate.
+    """
 
     result = dict(stable_summary or {})
     decision_checks = dict(result.get("decision_checks") or {})
     session = dict(market_environment.get("market_session") or {})
     session_key = str(session.get("key") or "unknown").lower()
     event_cluster = dict(news_trigger.get("event_cluster") or {})
+    execution_market_quality = bool(
+        result.get("market_quality_passed", market_quality.get("passed"))
+    )
+    raw_market_quality = bool(market_quality.get("passed"))
     actionable_checks = {
-        "raw_market_quality": bool(market_quality.get("passed")),
+        "execution_market_quality": execution_market_quality,
         "regular_us_session": bool(
             session_key == "regular" and session.get("allows_new_entries") is not False
         ),
@@ -4486,7 +4498,7 @@ def prediction_actionability_gate_summary(
         )
     decision_checks.update(actionable_checks)
     failure_codes = {
-        "raw_market_quality": "RAW_MARKET_QUALITY_BLOCKED",
+        "execution_market_quality": "EXECUTION_MARKET_QUALITY_BLOCKED",
         "regular_us_session": "NON_REGULAR_US_SESSION",
         "macro_direction_aligned": "MACRO_DIRECTION_DIVERGENT",
         "actionable_news_trigger": "NEWS_NOT_ACTIONABLE",
@@ -4505,13 +4517,18 @@ def prediction_actionability_gate_summary(
     )
     passed = not blocking_reasons
     warnings = list(result.get("warnings") or [])
+    if execution_market_quality and not raw_market_quality:
+        warnings.append("OBSERVED_ONLY:RAW_MARKET_QUALITY_BLOCKED")
+    warnings = list(dict.fromkeys(warnings))
     result.update(
         {
             "status": "blocked" if not passed else "degraded" if warnings else "passed",
             "passed": passed,
             "decision_checks": decision_checks,
             "blocking_reasons": blocking_reasons,
-            "market_quality_passed": bool(market_quality.get("passed")),
+            "warnings": warnings,
+            "market_quality_passed": execution_market_quality,
+            "raw_market_quality_passed": raw_market_quality,
             "prediction_actionability_checks": actionable_checks,
             "hard_gate_applied": True,
             "decision_version": OPPORTUNITY_DECISION_VERSION,
@@ -9262,8 +9279,12 @@ def _scan_opportunities(
             order_book_gate=order_book_gate,
             require_new_news=require_new_news,
         )
+        # This is the Binance execution-quality decision produced by the same
+        # canonical gate used below and exposed to the UI.  Cash-market NBBO is
+        # retained in warnings/score evidence, but cannot independently block
+        # the simulated entry record.
         decision_market_quality_passed = bool(
-            market_quality.get("passed")
+            gate_summary.get("market_quality_passed")
         )
         decision_hard_conflict = not bool(
             dict(gate_summary.get("decision_checks") or {}).get(
@@ -9326,6 +9347,11 @@ def _scan_opportunities(
             macro_policy=macro_entry_policy,
             order_book_gate=order_book_gate,
         )
+        # One source of truth: opportunity lifecycle, simulated entry creation
+        # and the frontend all consume this exact immutable gate snapshot.
+        # Live-copy account state is deliberately absent; live trading is only
+        # a downstream consumer of a committed prediction record.
+        signal_confirmed = bool(virtual_entry_gate.get("entry_ready"))
         max_holding_seconds = (
             _TIMEFRAME_SECONDS[timeframe] * prediction_max_holding_bars
         )

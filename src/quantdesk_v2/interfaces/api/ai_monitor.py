@@ -1625,6 +1625,22 @@ def _stable_opportunity_contract(
                 evaluated_at=datetime.now(UTC),
                 policy_mode=policy_mode,
             )
+            if isinstance(evidence.get("virtual_entry_gate"), Mapping):
+                market_environment = dict(evidence.get("market_environment") or {})
+                news_trigger = dict(evidence.get("news_trigger") or {})
+                order_book_gate = market_flow.get("order_book_gate")
+                gate_summary = ai_monitor.prediction_actionability_gate_summary(
+                    gate_summary,
+                    market_quality=market_quality,
+                    market_environment=market_environment,
+                    news_trigger=news_trigger,
+                    order_book_gate=(
+                        dict(order_book_gate)
+                        if isinstance(order_book_gate, Mapping)
+                        else None
+                    ),
+                    require_new_news=bool(news_trigger.get("required", False)),
+                )
             version["decision"] = gate_summary.get(
                 "decision_version", ai_monitor.OPPORTUNITY_DECISION_VERSION
             )
@@ -1727,6 +1743,9 @@ def _stable_opportunity_contract(
         "gex": gex,
         "data_quality": data_quality,
         "version": version,
+        "simulation_entry_gate": (
+            dict(evidence.get("virtual_entry_gate") or {}) or None
+        ),
         "signal_snapshot": (
             {
                 "id": snapshot.id,
@@ -1959,6 +1978,11 @@ def _opportunity_out(
         reused_news_count=int(news_trigger.get("reused_news_count") or 0),
         memory_window_hours=int(news_trigger.get("memory_window_hours") or 168),
     )
+    prediction_entry_gate = (
+        ai_monitor.prediction_entry_gate_snapshot(prediction)
+        if prediction is not None
+        else None
+    )
     return {
         **stable_contract,
         "id": item.public_id,
@@ -2001,10 +2025,14 @@ def _opportunity_out(
             if prediction_market_flow_score is not None
             else None
         ),
-        "prediction_entry_gate": (
-            ai_monitor.prediction_entry_gate_snapshot(prediction)
-            if prediction is not None
-            else None
+        "prediction_entry_gate": prediction_entry_gate,
+        "simulation_entry_gate": (
+            prediction_entry_gate
+            if prediction_entry_gate is not None
+            else stable_contract.get("simulation_entry_gate")
+        ),
+        "simulation_entry_recorded": bool(
+            prediction is not None and prediction.entry_price is not None
         ),
         "virtual_position": (
             ai_monitor.virtual_position_snapshot(prediction, live_market)

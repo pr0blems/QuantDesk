@@ -79,3 +79,17 @@ def test_live_candidate_summary_is_honest_and_uses_real_fields() -> None:
     assert "实时观察价，尚未冻结入场" in SCRIPT
     assert "当前参考价" in SCRIPT
     assert "触发进度" in SCRIPT
+
+
+def test_simulation_entry_ui_uses_the_scanner_gate_and_never_claims_unrecorded_ready() -> None:
+    assert "item?.simulation_entry_gate || evidence.virtual_entry_gate" in SCRIPT
+    assert 'if (gate?.entry_ready) return "data_error"' in SCRIPT
+    assert "模拟准入已通过，但预测入场记录缺失" in SCRIPT
+    assert "模拟引擎真实订单关闭，实盘仅在开启时跟单" in SCRIPT
+    assert 'label: "条件已满足"' not in SCRIPT
+
+
+def test_opportunity_macro_card_names_signal_snapshot_and_exact_index_basis() -> None:
+    assert "纳指 100 · 信号快照" in SCRIPT
+    assert "真实指数" in SCRIPT
+    assert "ETF 代理" in SCRIPT

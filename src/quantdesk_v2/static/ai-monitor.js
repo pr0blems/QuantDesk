@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260826-macro-index-tooltips1">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260827-simulation-gate1">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -1634,7 +1634,7 @@ class AiMonitorDashboard extends HTMLElement {
       </dl>
     </section>` : "";
     const isolation = `<section class="live-copy-isolation"><span>ISOLATED SIGNAL SOURCE</span><strong>不读取、不启停、不改写实盘交易页的其他策略</strong><p>本执行域只消费“发现机会”信号，并维护独立的账户记录、部署状态、幂等订单键和风控快照。Binance API 凭据及交易所总权益仍属于同一用户账户。</p></section>`;
-    const guarantees = `<section class="live-copy-guarantees"><strong>执行边界</strong><ul><li>只接收开启后生成、入场条件全部通过的本页新信号</li><li>第一阶段仅在美股常规交易时段允许新开仓；交易、盈亏和结算价格均以 Binance 映射合约为准</li><li>Finnhub、Unusual Whales、新闻、期权/GEX 与暗池只参与辅助评分和风控，不作为执行价格</li><li>普通实盘策略暂停、启用或修改，不影响这里的跟单开关</li><li>同一预测使用唯一订单键，重复刷新不会重复开仓</li><li>成交后必须建立交易所止损与止盈；保护失败会平仓并停机</li><li>关闭跟单只停止新开仓，不会擅自平掉已有持仓</li></ul></section>`;
+    const guarantees = `<section class="live-copy-guarantees"><strong>执行边界</strong><ul><li>模拟准入与记录始终独立运行；实盘关闭、暂停或账户异常不会阻断模拟记录</li><li>只接收开启后生成、入场条件全部通过的本页新模拟信号</li><li>第一阶段仅在美股常规交易时段允许新开仓；交易、盈亏和结算价格均以 Binance 映射合约为准</li><li>Finnhub、Unusual Whales、新闻、期权/GEX 与暗池只参与辅助评分和风控，不作为执行价格</li><li>普通实盘策略暂停、启用或修改，不影响这里的跟单开关</li><li>同一预测使用唯一订单键，重复刷新不会重复开仓</li><li>成交后必须建立交易所止损与止盈；保护失败会平仓并停机</li><li>关闭跟单只停止新开仓，不会擅自平掉已有持仓</li></ul></section>`;
     if (status.enabled) {
       target.innerHTML = `<div class="live-copy-danger"><span>REAL FUNDS ACTIVE</span><strong>发现机会独立跟单已开启</strong><p>仅本页满足准入条件的新 AI 信号会自动提交 Binance 订单。</p></div>${isolation}${riskMarkup}${guarantees}<form class="live-copy-form" data-live-copy-mode="disable"><input type="hidden" name="account_id" value="${this.escape(account?.id || "")}"><div class="live-copy-disable-note">停止后不再开新仓；本执行域已有仓位的止损、止盈和退出管理继续运行。</div><button class="danger" type="submit" ${this.state.liveCopyLoading ? "disabled" : ""}>停止独立实盘跟单</button></form>`;
       return;
@@ -3502,15 +3502,11 @@ class AiMonitorDashboard extends HTMLElement {
   virtualEntryGate(item) {
     const evidence = item?.evidence || {};
     const frozenGate = item?.prediction_entry_gate;
-    const liveGate = evidence.virtual_entry_gate;
+    const liveGate = item?.simulation_entry_gate || evidence.virtual_entry_gate;
     const stableGate = item?.gate_summary && typeof item.gate_summary === "object" ? item.gate_summary : null;
-    const hasCurrentDecisionChecks = stableGate
-      && stableGate.decision_checks
-      && typeof stableGate.decision_checks === "object"
-      && Object.keys(stableGate.decision_checks).length > 0;
     const source = frozenGate && Array.isArray(frozenGate.checks)
       ? frozenGate
-      : !hasCurrentDecisionChecks && liveGate && Array.isArray(liveGate.checks)
+      : liveGate && Array.isArray(liveGate.checks)
       ? liveGate
       : null;
     if (source) return { ...source, frozen: source === frozenGate };
@@ -3548,6 +3544,12 @@ class AiMonitorDashboard extends HTMLElement {
       data_coverage: ["数据覆盖", "关键行情输入必须达到覆盖门槛"],
       event_window_clear: ["事件窗口", "不得处于高影响事件窗口"],
       directional_conflict_clear: ["盘口冲突", "资金方向不得与候选方向强冲突"],
+      execution_market_quality: ["合约执行行情", "Binance 实时价格、K 线与执行特征必须可用"],
+      regular_us_session: ["美股常规时段", "模拟入场仅在配置的常规交易时段触发"],
+      macro_direction_aligned: ["大盘方向", "统一指数口径后的宏观方向不得与候选方向冲突"],
+      actionable_news_trigger: ["有效新事件", "新闻必须是尚未消费且可行动的新事件"],
+      event_cluster_selected: ["事件去重", "同一事件簇只选择最强候选标的"],
+      order_book_confirms_direction: ["盘口方向", "Binance 实时盘口必须确认候选方向"],
     };
     const stableChecksSource = stableGate?.decision_checks || stableGate?.checks || {};
     const stableChecks = stableGate
@@ -3615,7 +3617,7 @@ class AiMonitorDashboard extends HTMLElement {
     const entryPrice = Number(item?.prediction_entry_price || 0);
     if (explicitMap[explicit]) {
       if (hasPrediction && entryPrice > 0 && ["candidate", "ready"].includes(explicitMap[explicit])) return "triggered";
-      if (explicit === "confirmed" && gate?.entry_ready) return "ready";
+      if (explicitMap[explicit] === "ready" && !hasPrediction) return "data_error";
       if (!["candidate", "confirmed", "discovered"].includes(explicit)) return explicitMap[explicit];
     }
     if (hasPrediction && entryPrice > 0) return "triggered";
@@ -3635,7 +3637,7 @@ class AiMonitorDashboard extends HTMLElement {
     const hardGateFailure = (gate?.checks || []).some((check) => !check.passed && hardFailedKeys.has(check.key));
     const stableGateBlocked = String(item?.gate_summary?.status || "").toLowerCase() === "blocked" || item?.gate_summary?.passed === false && Array.isArray(item?.gate_summary?.blocking_reasons) && item.gate_summary.blocking_reasons.length > 0;
     if (hardRiskBlock || hardGateFailure || stableGateBlocked) return "blocked";
-    if (gate?.entry_ready) return "ready";
+    if (gate?.entry_ready) return "data_error";
     return "candidate";
   }
 
@@ -3653,7 +3655,7 @@ class AiMonitorDashboard extends HTMLElement {
       return { tone: "triggered", label: direction, detail: suffix, triggered: true };
     }
     if (lifecycle === "data_error") {
-      return { tone: "data_error", label: "数据异常", detail: hasPrediction ? "已生成记录但缺少有效入场价格" : "关键数据无效，系统已停止触发", triggered: false };
+      return { tone: "data_error", label: "记录异常", detail: hasPrediction ? "已生成记录但缺少有效入场价格" : gate?.entry_ready ? "模拟准入已通过，但预测入场记录缺失；系统将自动重试" : "关键数据无效，系统已停止触发", triggered: false };
     }
     if (lifecycle === "blocked") {
       const failed = (gate.checks || []).filter((check) => !check.passed);
@@ -3683,9 +3685,6 @@ class AiMonitorDashboard extends HTMLElement {
         triggered: false,
         retryable,
       };
-    }
-    if (lifecycle === "ready") {
-      return { tone: "ready", label: "条件已满足", detail: "等待预测记录写入", triggered: false };
     }
     const failed = (gate.checks || []).filter((check) => !check.passed);
     return { tone: "candidate", label: "候选观察", detail: failed.length ? `仍有 ${failed.length} 项条件未满足` : "等待下一轮扫描", triggered: false };
@@ -4032,9 +4031,10 @@ class AiMonitorDashboard extends HTMLElement {
       const signalTide = marketEnvironment.market_tide || macroSnapshot.market_tide || {};
       const signalTideLabel = signalTide.bias === "bull" ? "资金潮偏多" : signalTide.bias === "bear" ? "资金潮偏空" : "资金潮中性";
       const macroFactors = (marketEnvironment.factors || []).slice(0, 3).map((factor) => `${factor.label} ${Number(factor.points) >= 0 ? "+" : ""}${Number(factor.points).toFixed(0)}`).join(" · ");
+      const macroNdxSource = macroNdx.proxy ? `${macroNdx.provider_symbol || "QQQ"} ETF 代理` : `${macroNdx.provider_symbol || "^NDX"} 真实指数`;
       const macroReference = marketEnvironment.available ? `<section class="opportunity-macro ${this.escape(macroResonance)}" data-patch-key="macro-context" aria-label="大盘环境参考">
         <span class="macro-resonance"><i>${macroResonance === "resonant" ? "✓" : macroResonance === "divergent" ? "⚠" : "•"}</i><b>${this.escape(marketEnvironment.resonance_label || "大盘中性")}</b><small>信号时：${this.escape(signalSession.label || "时段未知")} · 大盘环境</small></span>
-        <span><em>纳指 100</em><b class="${Number(macroNdx.change_percent) >= 0 ? "positive" : "negative"}">${Number.isFinite(Number(macroNdx.change_percent)) ? `${Number(macroNdx.change_percent) >= 0 ? "+" : ""}${Number(macroNdx.change_percent).toFixed(2)}%` : "--"}</b><small>RSI ${marketEnvironment.market_rsi == null ? "--" : Number(marketEnvironment.market_rsi).toFixed(1)} · ${this.escape(macroNdx.provider_symbol || "QQQ")} ${macroNdx.proxy ? "代理" : "指数"}</small></span>
+        <span><em>纳指 100 · 信号快照</em><b class="${Number(macroNdx.change_percent) >= 0 ? "positive" : "negative"}">${Number.isFinite(Number(macroNdx.change_percent)) ? `${Number(macroNdx.change_percent) >= 0 ? "+" : ""}${Number(macroNdx.change_percent).toFixed(2)}%` : "--"}</b><small>RSI ${marketEnvironment.market_rsi == null ? "--" : Number(marketEnvironment.market_rsi).toFixed(1)} · ${this.escape(macroNdxSource)}</small></span>
         <span><em>VIX / 板块</em><b>VIX ${marketEnvironment.vix == null ? "--" : Number(marketEnvironment.vix).toFixed(1)}</b><small>${this.escape(marketEnvironment.sector_label || "大盘")} ${Number.isFinite(Number(macroSector.change_percent)) ? `${Number(macroSector.change_percent) >= 0 ? "+" : ""}${Number(macroSector.change_percent).toFixed(2)}%` : "--"} · ${this.escape(signalTide.available ? signalTideLabel : "资金潮缺失")}</small></span>
         <span class="macro-adjustment ${macroAdjustment > 0 ? "positive" : macroAdjustment < 0 ? "negative" : "flat"}"><em>评分调整</em><b>${macroAdjustment > 0 ? "+" : ""}${macroAdjustment.toFixed(1)} 分</b><small>${this.escape(macroFactors || "当前无宏观加减分")}</small></span>
       </section>` : `<section class="opportunity-macro unavailable" data-patch-key="macro-context" aria-label="大盘环境参考"><span class="macro-resonance"><i>--</i><b>大盘数据不足</b><small>该条信号未应用宏观调整</small></span></section>`;
@@ -4124,7 +4124,7 @@ class AiMonitorDashboard extends HTMLElement {
       const gateScope = entryGate.frozen ? "触发时条件已冻结" : "当前扫描条件";
       const triggeredPosition = entryState.triggered && !historicalTab;
       const virtualEntryPanel = `<section class="virtual-entry-gate ${entryState.tone} ${triggeredPosition ? "position-active" : ""}" data-patch-key="entry-gate" aria-label="买入触发条件与状态">
-        <div class="virtual-entry-state"><span>ENTRY GATE</span><strong>${this.escape(entryState.label)}</strong><small>${this.escape(entryState.detail)} · ${gateScope} · 真实订单关闭</small></div>
+        <div class="virtual-entry-state"><span>SIMULATION ENTRY · ENTRY GATE</span><strong>${this.escape(entryState.label)}</strong><small>${this.escape(entryState.detail)} · ${gateScope} · 模拟引擎真实订单关闭，实盘仅在开启时跟单</small></div>
         <div class="virtual-entry-checks">${entryGateChecks}</div>
         ${triggeredPosition ? "" : `<div class="virtual-entry-price"><span>${entryPriceLabel}</span><b>${displayedEntryPrice > 0 ? this.escape(this.compactNumber(displayedEntryPrice)) : "--"}</b><small>${entryState.triggered ? `触发 ${this.formatDate(entryTime)}` : `检查 ${this.formatDate(entryTime)}`}</small></div>`}
       </section>`;
@@ -4163,7 +4163,7 @@ class AiMonitorDashboard extends HTMLElement {
         </div>
       </section>` : "";
       const waitingDetail = entryState.tone === "ready"
-        ? "条件已满足，等待预测写入"
+        ? "模拟准入已通过，正在写入记录"
         : `${signalGateChecks.length - passedGateCount} 项条件未满足 · 尚未入场`;
       const candidateSummaryVisible = !historicalTab && !triggeredPosition;
       const candidatePositionPanel = candidateSummaryVisible ? `<section class="virtual-position candidate-position direction-${directionClass}" data-patch-key="candidate-position" aria-label="候选信号摘要">

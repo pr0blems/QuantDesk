@@ -426,6 +426,47 @@ def test_current_opportunity_recomputes_cash_reference_failures_as_observations(
     assert frozen["gate_summary"]["passed"] is False
 
 
+def test_current_opportunity_keeps_prediction_specific_gate_when_recomputing() -> None:
+    evidence = {
+        "market_quality": {
+            "passed": False,
+            "quote_available": False,
+            "data_status": "degraded",
+            "checks": {
+                "price_available": True,
+                "ticker_fresh": True,
+                "kline_fresh": True,
+                "feature_quality": True,
+                "reference_quote_available": False,
+            },
+        },
+        "market_flow": {"hard_conflict": False, "legacy_hard_conflict": False},
+        "unusual_whales_policy": {"effective_mode": "record"},
+        "market_environment": {
+            "resonance": "resonant",
+            "market_session": {"key": "regular", "allows_new_entries": True},
+        },
+        "news_trigger": {
+            "required": True,
+            "has_actionable_new_news": True,
+            "event_cluster": {"selected": True},
+        },
+        "virtual_entry_gate": {"entry_ready": True, "checks": []},
+    }
+
+    contract = _stable_opportunity_contract(
+        evidence,
+        None,
+        recompute_current_gate=True,
+    )
+
+    assert contract["gate_summary"]["passed"] is True
+    assert contract["gate_summary"]["decision_checks"]["execution_market_quality"] is True
+    assert contract["gate_summary"]["raw_market_quality_passed"] is False
+    assert "OBSERVED_ONLY:RAW_MARKET_QUALITY_BLOCKED" in contract["gate_summary"]["warnings"]
+    assert contract["simulation_entry_gate"]["entry_ready"] is True
+
+
 def test_prediction_settlement_metadata_explains_pending_market_retry() -> None:
     now = datetime.now(UTC).replace(tzinfo=None)
     item = SimpleNamespace(
@@ -1477,13 +1518,51 @@ def test_prediction_actionability_gate_blocks_non_actionable_correlated_entry() 
     assert summary["status"] == "blocked"
     assert summary["passed"] is False
     assert set(summary["blocking_reasons"]) == {
-        "RAW_MARKET_QUALITY_BLOCKED",
+        "EXECUTION_MARKET_QUALITY_BLOCKED",
         "NON_REGULAR_US_SESSION",
         "MACRO_DIRECTION_DIVERGENT",
         "NEWS_NOT_ACTIONABLE",
         "CORRELATED_EVENT_ALREADY_SELECTED",
         "ORDER_BOOK_DIRECTION_NOT_CONFIRMED",
     }
+
+
+def test_prediction_actionability_uses_binance_execution_quality_not_cash_reference() -> None:
+    summary = prediction_actionability_gate_summary(
+        {
+            "status": "degraded",
+            "passed": True,
+            "market_quality_passed": True,
+            "decision_checks": {
+                "price_available": True,
+                "ticker_fresh": True,
+                "kline_fresh": True,
+                "feature_quality": True,
+            },
+            "blocking_reasons": [],
+            "warnings": ["REFERENCE_QUOTE_UNAVAILABLE"],
+        },
+        market_quality={"passed": False},
+        market_environment={
+            "resonance": "resonant",
+            "market_session": {"key": "regular", "allows_new_entries": True},
+        },
+        news_trigger={
+            "has_actionable_new_news": True,
+            "event_cluster": {"selected": True},
+        },
+        order_book_gate={
+            "quality_passed": True,
+            "confirms_direction": True,
+        },
+        require_new_news=True,
+    )
+
+    assert summary["passed"] is True
+    assert summary["market_quality_passed"] is True
+    assert summary["raw_market_quality_passed"] is False
+    assert summary["blocking_reasons"] == []
+    assert "OBSERVED_ONLY:RAW_MARKET_QUALITY_BLOCKED" in summary["warnings"]
 
 
 def test_closing_recap_news_is_evidence_but_not_a_new_catalyst() -> None:
@@ -3457,7 +3536,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260826-macro-index-tooltips1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260827-simulation-gate1"' in entrypoint
     assert '"/assets/monitor.js?v=20260826-research-ws1"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3467,8 +3546,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260826-macro-index-tooltips1"' in legacy_index
-    assert 'href="/assets/ai-monitor.css?v=20260826-macro-index-tooltips1"' in component
+    assert 'src="/assets/ai-monitor.js?v=20260827-simulation-gate1"' in legacy_index
+    assert 'href="/assets/ai-monitor.css?v=20260827-simulation-gate1"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
