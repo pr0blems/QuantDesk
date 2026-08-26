@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260826-opportunity-card6">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260826-opportunity-card7">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -3985,6 +3985,11 @@ class AiMonitorDashboard extends HTMLElement {
       const manualFollowControl = !historicalTab && ["long", "short"].includes(String(item.direction))
         ? `<button class="manual-follow-trigger" type="button" data-manual-follow="${this.escape(item.id)}" ${this.state.manualFollowLoading ? "disabled" : ""} title="按当前${item.direction === "short" ? "做空" : "做多"}方向提交一次真实 Binance 合约订单；待评估机会将由人工确认覆盖研究准入门槛">${this.state.manualFollowLoading && this.state.manualFollowOpportunityId === String(item.id) ? "提交中…" : "立即跟买"}</button>`
         : "";
+      const conclusionControl = `<button class="ai-conclusion-trigger" type="button" data-ai-conclusion="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 的 AI 分析结论">AI分析结论</button>`;
+      const detailControl = `<button class="opportunity-detail-toggle" type="button" data-toggle-opportunity-details="${this.escape(item.id)}" data-state="${expanded ? "expanded" : "collapsed"}" aria-expanded="${expanded}" aria-label="${expanded ? "收起" : "展开"} ${this.escape(item.symbol)} 详情"><span>${expanded ? "收起详情" : "展开详情"}</span></button>`;
+      const liveSummaryActions = manualFollowControl
+        ? `<div class="virtual-position-action">${manualFollowControl}${conclusionControl}${detailControl}</div>`
+        : "";
       const signalGateChecks = (entryGate.checks || []).filter((check) => check.key !== "entry_price");
       const passedGateCount = signalGateChecks.filter((check) => check.passed).length;
       const entryGateChecks = signalGateChecks.map((check) => {
@@ -4038,7 +4043,7 @@ class AiMonitorDashboard extends HTMLElement {
         ? "预测已结算"
         : "持仓观察中";
       const positionPanel = triggeredPosition ? `<section class="virtual-position ${positionTone} direction-${directionClass}" data-patch-key="position" aria-label="持仓实时盈亏">
-        <div class="virtual-position-head"><div class="virtual-position-title"><span>POSITION · ${this.state.displayLeverage}X DISPLAY</span><strong>${directionLabel} · ${targetStateLabel}</strong><small>触发 ${this.formatDate(entryTime)} · 有效至 ${signalEnd} · 不会发送真实订单</small></div>${manualFollowControl ? `<div class="virtual-position-action">${manualFollowControl}</div>` : ""}</div>
+        <div class="virtual-position-head"><div class="virtual-position-title"><span>POSITION · ${this.state.displayLeverage}X DISPLAY</span><strong>${directionLabel} · ${targetStateLabel}</strong><small>触发 ${this.formatDate(entryTime)} · 有效至 ${signalEnd} · 不会发送真实订单</small></div>${liveSummaryActions}</div>
         <div class="virtual-position-metrics">
           <span><em>冻结入场价</em><b>${position.entry_price > 0 ? this.escape(this.compactNumber(position.entry_price)) : "--"}</b><small>触发时价格，不随行情变化</small></span>
           <span class="live-mark"><em>${markLabel}</em><b>${position.current_price > 0 ? this.escape(this.compactNumber(position.current_price)) : "--"}</b><small>${position.market_at ? this.formatDate(position.market_at) : "等待最新行情"}</small></span>
@@ -4053,7 +4058,7 @@ class AiMonitorDashboard extends HTMLElement {
         : `${signalGateChecks.length - passedGateCount} 项条件未满足 · 尚未入场`;
       const candidateSummaryVisible = !historicalTab && !triggeredPosition;
       const candidatePositionPanel = candidateSummaryVisible ? `<section class="virtual-position candidate-position direction-${directionClass}" data-patch-key="candidate-position" aria-label="候选信号摘要">
-        <div class="virtual-position-head"><div class="virtual-position-title"><span>SIGNAL · ${this.escape(item.timeframe)} CANDIDATE</span><strong>${directionLabel} · ${this.escape(entryState.label)}</strong><small>发现 ${signalStart} · 有效至 ${signalEnd} · 尚未入场</small></div>${manualFollowControl ? `<div class="virtual-position-action">${manualFollowControl}</div>` : ""}</div>
+        <div class="virtual-position-head"><div class="virtual-position-title"><span>SIGNAL · ${this.escape(item.timeframe)} CANDIDATE</span><strong>${directionLabel} · ${this.escape(entryState.label)}</strong><small>发现 ${signalStart} · 有效至 ${signalEnd} · 尚未入场</small></div>${liveSummaryActions}</div>
         <div class="virtual-position-metrics">
           <span><em>当前参考价</em><b>${displayedEntryPrice > 0 ? this.escape(this.compactNumber(displayedEntryPrice)) : "--"}</b><small>实时观察价，尚未冻结入场</small></span>
           <span><em>新闻评分</em><b>${Number.isFinite(displayedNewsScore) ? displayedNewsScore.toFixed(1) : "--"}</b><small>${newsTrigger.version ? `${Number(newsTrigger.new_news_ids?.length || 0)} 条新事件` : "等待新闻快照"}</small></span>
@@ -4104,8 +4109,6 @@ class AiMonitorDashboard extends HTMLElement {
       const symbolControl = marketAvailable
         ? `<button class="opportunity-symbol" type="button" data-opportunity-id="${this.escape(item.id)}" data-open-contract="${this.escape(item.contract_symbol)}" data-timeframe="${this.escape(item.timeframe)}" title="打开 ${this.escape(item.symbol)} 的合约 K 线研究与预测模拟">${this.escape(item.symbol)}</button>`
         : `<button class="opportunity-symbol unavailable" type="button" disabled title="该股票暂无对应的合约技术行情">${this.escape(item.symbol)}</button>`;
-      const conclusionControl = `<button class="ai-conclusion-trigger" type="button" data-ai-conclusion="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 的 AI 分析结论">AI分析结论</button>`;
-      const detailControl = `<button class="opportunity-detail-toggle" type="button" data-toggle-opportunity-details="${this.escape(item.id)}" data-state="${expanded ? "expanded" : "collapsed"}" aria-expanded="${expanded}" aria-label="${expanded ? "收起" : "展开"} ${this.escape(item.symbol)} 详情"><span>${expanded ? "收起详情" : "展开详情"}</span></button>`;
       const providerQuoteBadge = (source, tone, liveLabel) => source?.available && Number(source.price) > 0
         ? `<span class="provider-quote-badge ${tone} ${source.fresh ? "live" : "stale"}" title="${this.escape(liveLabel)} · ${source.fresh ? "新鲜" : "延迟/休市"} · ${this.formatDate(source.observed_at)}"><i>${this.escape(source.label || "--")}</i><b>${this.escape(this.compactNumber(Number(source.price)))}</b><small>${source.fresh ? "实时" : "延迟"}</small></span>`
         : "";
@@ -4196,7 +4199,7 @@ class AiMonitorDashboard extends HTMLElement {
           <ul class="opportunity-news" data-patch-key="news-evidence">${news}</ul>
           <div class="opportunity-footer-meta"><span>发现 ${this.formatDate(item.discovered_at)}</span><span>评分更新 ${this.formatDate(scoreUpdatedAt)}</span><span>有效至 ${this.formatDate(item.expires_at)}</span><em>${historicalTab ? `历史机会 · ${outcomeLabel}` : entryState.tone === "blocked" ? `已阻断 · ${this.escape(entryState.detail)}` : entryState.tone === "data_error" ? `数据异常 · ${this.escape(entryState.detail)}` : shadowReady ? "影子候选 · 仍不执行交易" : confirmed ? `研究预测 · ${(readiness.failed_reasons || ["未通过影子准入"]).slice(0, 1).join("")}` : item.status === "candidate" ? marketAvailable ? "等待策略组与评分确认" : "新闻候选 · 暂无技术行情" : "历史机会"}</em></div>
         </div></div>
-        <footer class="opportunity-card-footer" data-patch-key="card-actions"><span class="opportunity-card-note">预测仅供研判，不构成投资建议</span><div class="opportunity-card-actions">${conclusionControl}${detailControl}</div></footer>
+        <footer class="opportunity-card-footer" data-patch-key="card-actions"><span class="opportunity-card-note">预测仅供研判，不构成投资建议</span>${liveSummaryActions ? "" : `<div class="opportunity-card-actions">${conclusionControl}${detailControl}</div>`}</footer>
       </article>`;
     }).join("");
     this.patchOpportunityCards(target, markup + this.opportunityPaginationMarkup());

@@ -26,6 +26,14 @@ def test_opportunity_card_has_distinct_summary_details_and_actions() -> None:
     assert '${compactSummaryPanel}' in SCRIPT
     assert '${expandedSignalSummaryPanel}' in SCRIPT
     assert '${conclusionControl}${detailControl}' in SCRIPT
+    assert 'const liveSummaryActions = manualFollowControl' in SCRIPT
+    assert '${manualFollowControl}${conclusionControl}${detailControl}' in SCRIPT
+
+    live_actions = SCRIPT.index('const liveSummaryActions = manualFollowControl')
+    follow = SCRIPT.index('${manualFollowControl}', live_actions)
+    conclusion = SCRIPT.index('${conclusionControl}', follow)
+    details = SCRIPT.index('${detailControl}', conclusion)
+    assert live_actions < follow < conclusion < details
 
 
 def test_opportunity_details_toggle_updates_accessible_state() -> None:
@@ -48,6 +56,9 @@ def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert ".opportunity-list .opportunity-item > header > .opportunity-identity" in STYLES
     assert ".virtual-position.direction-long .virtual-position-title" in STYLES
     assert ".virtual-position.direction-short .virtual-position-title" in STYLES
+    assert ".virtual-position-action .ai-conclusion-trigger" in STYLES
+    assert ".virtual-position-action .opportunity-detail-toggle" in STYLES
+    assert ".opportunity-quotes .provider-quote-badge b" in STYLES
     assert ".opportunity-item > .opportunity-card-footer" in STYLES
     assert "@container (max-width: 680px)" in STYLES
     assert "@container (max-width: 520px)" in STYLES
