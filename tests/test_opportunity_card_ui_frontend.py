@@ -48,6 +48,7 @@ def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert ".virtual-position.direction-short .virtual-position-title" in STYLES
     assert ".opportunity-item > .opportunity-card-footer" in STYLES
     assert "@container (max-width: 680px)" in STYLES
+    assert "@container (max-width: 520px)" in STYLES
 
 
 def test_expanded_card_keeps_compact_summary_before_details() -> None:
