@@ -89,6 +89,18 @@ def test_simulation_entry_ui_uses_the_scanner_gate_and_never_claims_unrecorded_r
     assert 'label: "条件已满足"' not in SCRIPT
 
 
+def test_normal_entry_conditions_are_not_mislabeled_as_data_blocked() -> None:
+    assert "const dataBlockingCodes = new Set([" in SCRIPT
+    assert '"EXECUTION_PRICE_STALE"' in SCRIPT
+    assert '"EXECUTION_MARKET_QUALITY_BLOCKED"' in SCRIPT
+    hard_keys = SCRIPT.split("const hardFailedKeys = new Set([", 1)[1].split(
+        "]);", 1
+    )[0]
+    assert '"market_flow_conflict"' not in hard_keys
+    assert '"order_book_direction"' not in hard_keys
+    assert '"directional_conflict_clear"' not in hard_keys
+
+
 def test_opportunity_macro_card_names_signal_snapshot_and_exact_index_basis() -> None:
     assert "纳指 100 · 信号快照" in SCRIPT
     assert "真实指数" in SCRIPT

@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260827-simulation-gate1">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260827-entry-state2">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -3633,9 +3633,15 @@ class AiMonitorDashboard extends HTMLElement {
       || evidence.event_gate?.blocked === true
       || evidence.halt?.active === true
       || snapshot.riskEvents.some((event) => event?.blocked === true || ["critical", "blocked"].includes(String(event?.risk_level || event?.severity || "").toLowerCase()));
-    const hardFailedKeys = new Set(["market_quality", "market_flow_conflict", "order_book_quality", "order_book_direction", "order_book_usable", "quote_freshness", "quote_spread", "halt", "risk_event", "event_gate", "price_available", "ticker_fresh", "kline_fresh", "feature_quality", "quote_fresh", "spread_acceptable", "quote_sane", "not_halted", "data_coverage", "event_window_clear", "directional_conflict_clear"]);
+    // Reserve the data-blocked bucket for unusable execution inputs or an
+    // explicit halt/event risk. Score, macro alignment, event selection and
+    // order-book direction are ordinary entry conditions, so a miss remains a
+    // candidate instead of being presented as broken data.
+    const hardFailedKeys = new Set(["market_quality", "execution_market_quality", "order_book_quality", "order_book_usable", "quote_freshness", "quote_spread", "halt", "risk_event", "event_gate", "price_available", "ticker_fresh", "kline_fresh", "feature_quality", "quote_fresh", "spread_acceptable", "quote_sane", "not_halted", "data_coverage", "event_window_clear"]);
     const hardGateFailure = (gate?.checks || []).some((check) => !check.passed && hardFailedKeys.has(check.key));
-    const stableGateBlocked = String(item?.gate_summary?.status || "").toLowerCase() === "blocked" || item?.gate_summary?.passed === false && Array.isArray(item?.gate_summary?.blocking_reasons) && item.gate_summary.blocking_reasons.length > 0;
+    const dataBlockingCodes = new Set(["QUOTE_PRICE_MISSING", "EXECUTION_PRICE_STALE", "TECHNICAL_BAR_STALE", "TECHNICAL_FEATURE_QUALITY_LOW", "BINANCE_ORDER_BOOK_NOT_USABLE", "EXECUTION_MARKET_QUALITY_BLOCKED", "SYMBOL_HALTED_OR_COOLDOWN", "HIGH_IMPACT_EVENT_WINDOW"]);
+    const blockingReasons = Array.isArray(item?.gate_summary?.blocking_reasons) ? item.gate_summary.blocking_reasons : [];
+    const stableGateBlocked = blockingReasons.some((code) => dataBlockingCodes.has(String(code)));
     if (hardRiskBlock || hardGateFailure || stableGateBlocked) return "blocked";
     if (gate?.entry_ready) return "data_error";
     return "candidate";

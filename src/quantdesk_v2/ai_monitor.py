@@ -8794,15 +8794,25 @@ def _scan_opportunities(
     now = utcnow()
     uw_signal_policy = unusual_whales_signal_policy(db)
     uw_thresholds = dict(uw_signal_policy["thresholds"])
-    db.execute(
-        update(AiMonitorOpportunity)
-        .where(
-            AiMonitorOpportunity.user_id == run.user_id,
-            AiMonitorOpportunity.status.in_(("candidate", "discovered")),
-            AiMonitorOpportunity.expires_at <= now,
-        )
-        .values(status="expired", updated_at=now)
+    # Resolve the small due set before taking write locks.  The former range
+    # UPDATE could lock every active row when MySQL selected the
+    # (user_id, status, score) index, so a concurrent refresh made an otherwise
+    # empty expiry update time out and left that user's gate snapshots stale.
+    expired_opportunity_ids = list(
+        db.scalars(
+            select(AiMonitorOpportunity.id).where(
+                AiMonitorOpportunity.user_id == run.user_id,
+                AiMonitorOpportunity.status.in_(("candidate", "discovered")),
+                AiMonitorOpportunity.expires_at <= now,
+            )
+        ).all()
     )
+    if expired_opportunity_ids:
+        db.execute(
+            update(AiMonitorOpportunity)
+            .where(AiMonitorOpportunity.id.in_(expired_opportunity_ids))
+            .values(status="expired", updated_at=now)
+        )
     cleanup = cleanup_unpredicted_opportunities(db, run.user_id)
     risk_plan_backfill = backfill_prediction_risk_plans(db, run.user_id)
     # Pending predictions may have been created with a longer lookback than the
@@ -9790,7 +9800,7 @@ def execute_opportunity_run(
             db.commit()
     except Exception as exc:
         error_type = type(exc).__name__
-        print(f"[ai-monitor] opportunity run internal error: {error_type}")
+        print(f"[ai-monitor] opportunity run internal error: {error_type}: {exc}")
         _fail_run(factory, run_public_id, f"机会扫描执行失败（{error_type}）")
 
 

@@ -940,6 +940,12 @@ class AiMonitorOpportunity(Base):
             "status",
             "combined_score",
         ),
+        Index(
+            "ix_ai_monitor_opportunities_user_status_expires",
+            "user_id",
+            "status",
+            "expires_at",
+        ),
         Index("ix_ai_monitor_opportunities_user_created", "user_id", "created_at"),
         Index(
             "ix_ai_monitor_opportunities_user_discovered",

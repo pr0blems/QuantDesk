@@ -3437,6 +3437,20 @@ def test_opportunity_scan_cleans_only_unpredicted_transient_rows() -> None:
     assert '"opportunity_cleanup": cleanup' in monitor
 
 
+def test_opportunity_expiry_update_targets_due_primary_keys() -> None:
+    monitor = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    migration = (
+        ROOT / "migrations/versions/0072_opportunity_expiry_index.py"
+    ).read_text(encoding="utf-8")
+    index_names = {index.name for index in AiMonitorOpportunity.__table__.indexes}
+
+    assert "expired_opportunity_ids = list(" in monitor
+    assert "AiMonitorOpportunity.id.in_(expired_opportunity_ids)" in monitor
+    assert "ix_ai_monitor_opportunities_user_status_expires" in index_names
+    assert 'down_revision: str | None = "0071_runtime_incidents"' in migration
+    assert '["user_id", "status", "expires_at"]' in migration
+
+
 def test_opportunity_related_news_endpoint_is_tenant_scoped() -> None:
     api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
     endpoint = api[api.index('@router.get("/opportunities/{opportunity_id}/news")') :]
@@ -3536,7 +3550,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260827-simulation-gate1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260827-entry-state2"' in entrypoint
     assert '"/assets/monitor.js?v=20260826-research-ws1"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3546,8 +3560,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260827-simulation-gate1"' in legacy_index
-    assert 'href="/assets/ai-monitor.css?v=20260827-simulation-gate1"' in component
+    assert 'src="/assets/ai-monitor.js?v=20260827-entry-state2"' in legacy_index
+    assert 'href="/assets/ai-monitor.css?v=20260827-entry-state2"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
