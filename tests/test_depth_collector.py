@@ -91,9 +91,7 @@ def test_depth_book_retains_deeper_snapshot_but_exports_exact_top_100() -> None:
     assert initial.bid_depth_notional == pytest.approx(95_050)
     assert initial.ask_depth_notional == pytest.approx(105_050)
 
-    after_delete = book.feed(
-        _event(101, 101, 100, bids=[["1000", "0"]], asks=[["1001", "0"]])
-    )
+    after_delete = book.feed(_event(101, 101, 100, bids=[["1000", "0"]], asks=[["1001", "0"]]))
 
     assert after_delete is not None
     assert after_delete.depth_levels == 100
@@ -169,6 +167,12 @@ def empty_rest_depth_cache():
         ws_depth._REST_BOOK_REFRESH_LOCKS.clear()
 
 
+@pytest.fixture
+def shared_depth_snapshot_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(ws_depth, "SHARED_DEPTH_SNAPSHOT_DIR", tmp_path)
+    return tmp_path
+
+
 def test_order_book_snapshot_prefers_process_local_websocket(monkeypatch) -> None:
     monkeypatch.setattr(
         ws_depth,
@@ -201,6 +205,7 @@ def test_order_book_snapshot_rest_fallback_is_cached_and_relimited(
     bids = [[str(1_000 - index), "1"] for index in range(120)]
     asks = [[str(1_001 + index), "1"] for index in range(120)]
     monkeypatch.setattr(ws_depth, "live_order_book_snapshot", lambda *_args: None)
+    monkeypatch.setattr(ws_depth, "shared_order_book_snapshot", lambda *_args: None)
 
     def fetch(symbol: str, limit: int) -> dict:
         calls.append((symbol, limit))
@@ -226,6 +231,7 @@ def test_order_book_snapshot_uses_brief_stale_cache_during_rest_failure(
     attempts = 0
     monkeypatch.setattr(ws_depth.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(ws_depth, "live_order_book_snapshot", lambda *_args: None)
+    monkeypatch.setattr(ws_depth, "shared_order_book_snapshot", lambda *_args: None)
 
     def fetch(_symbol: str, _limit: int) -> dict:
         nonlocal attempts
@@ -248,6 +254,7 @@ def test_order_book_snapshot_reports_chinese_error_without_any_source(
     monkeypatch, empty_rest_depth_cache
 ) -> None:
     monkeypatch.setattr(ws_depth, "live_order_book_snapshot", lambda *_args: None)
+    monkeypatch.setattr(ws_depth, "shared_order_book_snapshot", lambda *_args: None)
     monkeypatch.setattr(
         ws_depth,
         "fetch_depth_snapshot",
@@ -256,6 +263,117 @@ def test_order_book_snapshot_reports_chinese_error_without_any_source(
 
     with pytest.raises(ws_depth.OrderBookUnavailableError, match="盘口快照暂不可用"):
         ws_depth.order_book_snapshot("BTCUSDT", 100)
+
+
+def test_shared_websocket_snapshot_round_trip_and_relimit(
+    shared_depth_snapshot_dir,
+) -> None:
+    now_ms = int(time.time() * 1_000)
+    bids = [[str(1_000 - index), "1"] for index in range(100)]
+    asks = [[str(1_001 + index), "1"] for index in range(100)]
+    book = DepthOrderBook("BTCUSDT")
+    assert book.load_snapshot({**_snapshot(bids=bids, asks=asks), "E": now_ms}) is not None
+    live = book.level_snapshot(100)
+
+    assert live is not None
+    assert ws_depth._publish_shared_order_book_snapshot(live) is True
+
+    shared = ws_depth.shared_order_book_snapshot("btcusdt", 20)
+
+    assert shared is not None
+    assert shared["source"] == "binance_futures_shared_ws_depth"
+    assert shared["transport"] == "websocket_shared"
+    assert shared["stale_fallback"] is False
+    assert len(shared["bids"]) == len(shared["asks"]) == 20
+    assert shared["last_update_id"] == live["last_update_id"]
+
+
+def test_order_book_snapshot_prefers_shared_websocket_over_rest(
+    monkeypatch, shared_depth_snapshot_dir
+) -> None:
+    now_ms = int(time.time() * 1_000)
+    book = DepthOrderBook("BTCUSDT")
+    assert book.load_snapshot({**_snapshot(), "E": now_ms}) is not None
+    live = book.level_snapshot(100)
+    assert live is not None
+    assert ws_depth._publish_shared_order_book_snapshot(live) is True
+    monkeypatch.setattr(ws_depth, "live_order_book_snapshot", lambda *_args: None)
+    monkeypatch.setattr(
+        ws_depth,
+        "_cached_rest_order_book_snapshot",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("REST fallback must not run while shared WS is fresh")
+        ),
+    )
+
+    snapshot = ws_depth.order_book_snapshot("BTCUSDT", 20)
+
+    assert snapshot["transport"] == "websocket_shared"
+
+
+def test_shared_websocket_snapshot_expires_before_rest_fallback(
+    monkeypatch, shared_depth_snapshot_dir
+) -> None:
+    book = DepthOrderBook("BTCUSDT")
+    stale_ms = int((time.time() - ws_depth.SHARED_SNAPSHOT_MAX_AGE_SECONDS - 2) * 1_000)
+    assert book.load_snapshot({**_snapshot(), "E": stale_ms}) is not None
+    live = book.level_snapshot(100)
+    assert live is not None
+    assert ws_depth._publish_shared_order_book_snapshot(live) is True
+    monkeypatch.setattr(ws_depth, "live_order_book_snapshot", lambda *_args: None)
+    monkeypatch.setattr(
+        ws_depth,
+        "_cached_rest_order_book_snapshot",
+        lambda symbol, limit: {"symbol": symbol, "limit": limit, "transport": "rest_cache"},
+    )
+
+    snapshot = ws_depth.order_book_snapshot("BTCUSDT", 50)
+
+    assert snapshot["transport"] == "rest_cache"
+
+
+def test_shared_websocket_snapshot_rejects_invalid_metric(
+    shared_depth_snapshot_dir,
+) -> None:
+    path = shared_depth_snapshot_dir / "BTCUSDT.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "symbol": "BTCUSDT",
+                "captured_at": int(time.time()),
+                "last_update_id": 100,
+                "bids": [["100", "1"]],
+                "asks": [["101", "1"]],
+                "bid_depth_change_5s_pct": "not-a-number",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert ws_depth.shared_order_book_snapshot("BTCUSDT", 20) is None
+
+
+def test_collector_heartbeat_publishes_shared_websocket_snapshot(monkeypatch) -> None:
+    emitted = []
+    published = []
+    collector = DepthStreamCollector(["BTCUSDT"], emitted.append)
+    generation = collector._activate_session()
+    assert (
+        collector.books["BTCUSDT"].load_snapshot({**_snapshot(), "E": int(time.time() * 1_000)})
+        is not None
+    )
+    monkeypatch.setattr(
+        ws_depth,
+        "_publish_shared_order_book_snapshot",
+        lambda snapshot: published.append(snapshot) or True,
+    )
+
+    collector._emit_heartbeats(generation)
+
+    assert len(published) == 1
+    assert published[0]["symbol"] == "BTCUSDT"
+    assert len(emitted) == 1
 
 
 def test_depth_gap_invalidates_until_fresh_snapshot_bridges_it() -> None:
@@ -410,15 +528,11 @@ def test_fetch_depth_snapshot_uses_default_500_and_bounded_endpoint(monkeypatch)
 
 
 @pytest.mark.parametrize("limit", [0, 99, 101, 2_000, True])
-def test_fetch_depth_snapshot_rejects_unsupported_limit_without_network(
-    limit, monkeypatch
-) -> None:
+def test_fetch_depth_snapshot_rejects_unsupported_limit_without_network(limit, monkeypatch) -> None:
     monkeypatch.setattr(
         market_data_client,
         "_get",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("network must not run")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network must not run")),
     )
     with pytest.raises(ValueError):
         market_data_client.fetch_depth_snapshot("BTCUSDT", limit)
@@ -428,9 +542,7 @@ def test_fetch_depth_snapshot_rejects_non_string_symbol_without_network(monkeypa
     monkeypatch.setattr(
         market_data_client,
         "_get",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("network must not run")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network must not run")),
     )
     with pytest.raises(ValueError):
         market_data_client.fetch_depth_snapshot(None)  # type: ignore[arg-type]
@@ -452,9 +564,7 @@ def test_depth_symbols_are_deduplicated_and_split_into_50_symbol_groups() -> Non
     assert [len(group) for group in groups] == [50, 50, 20]
     assert groups[0][0] == "S0USDT"
     assert groups[-1][-1] == "S119USDT"
-    assert _depth_uri(groups[0]).startswith(
-        "wss://fstream.binance.com/public/stream?streams="
-    )
+    assert _depth_uri(groups[0]).startswith("wss://fstream.binance.com/public/stream?streams=")
     assert "@depth@500ms" in _depth_uri(groups[0])
 
 
@@ -476,9 +586,7 @@ def test_collector_resyncs_only_invalid_symbol_without_raising() -> None:
 
     invalid_btc = _event(101, 101, 100, bids=[["NaN", "1"]])
     collector._process_message(
-        json.dumps(
-            {"stream": "btcusdt@depth@500ms", "data": invalid_btc}
-        ),
+        json.dumps({"stream": "btcusdt@depth@500ms", "data": invalid_btc}),
         generation,
     )
 
@@ -514,7 +622,9 @@ def test_heartbeat_requeues_unsynced_book_after_transient_full_queue() -> None:
     assert (generation, "BTCUSDT") in collector._queued
 
 
-def test_collector_accepts_combined_stream_and_heartbeat_emits_storage_rows() -> None:
+def test_collector_accepts_combined_stream_and_heartbeat_emits_storage_rows(
+    shared_depth_snapshot_dir,
+) -> None:
     emitted = []
     collector = DepthStreamCollector(["BTCUSDT"], emitted.append)
     generation = collector._activate_session()

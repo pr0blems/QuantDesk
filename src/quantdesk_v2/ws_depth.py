@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import queue
+import tempfile
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Protocol
 
 from websockets.sync.client import connect
@@ -31,6 +34,8 @@ TOP_LEVELS = 100
 HEARTBEAT_SECONDS = 2.0
 REST_SNAPSHOT_CACHE_SECONDS = 2.0
 REST_SNAPSHOT_STALE_SECONDS = 15.0
+SHARED_SNAPSHOT_MAX_AGE_SECONDS = 6.0
+SHARED_SNAPSHOT_FUTURE_SKEW_SECONDS = 3.0
 
 _MAX_GROUP_SIZE = 50
 _MAX_TOTAL_SYMBOLS = 1_000
@@ -41,6 +46,18 @@ _MAX_STORED_LEVELS = 1_000
 _MAX_PENDING_EVENTS = 2_048
 _MAX_NUMBER = Decimal("1e30")
 _MAX_UPDATE_ID = 2**63 - 1
+_MAX_SHARED_SNAPSHOT_BYTES = 512 * 1024
+_SHARED_SNAPSHOT_SCHEMA_VERSION = 1
+
+
+def _default_shared_snapshot_dir() -> Path:
+    shared_memory = Path("/dev/shm")  # noqa: S108 - cross-service shared-memory IPC
+    if os.name == "posix" and shared_memory.is_dir():
+        return shared_memory / "quantdesk-depth"
+    return Path(tempfile.gettempdir()) / "quantdesk-depth"
+
+
+SHARED_DEPTH_SNAPSHOT_DIR = _default_shared_snapshot_dir()
 
 _LIVE_BOOKS_LOCK = threading.RLock()
 _LIVE_BOOKS: dict[str, DepthOrderBook] = {}
@@ -174,9 +191,7 @@ def _parse_event(payload: Any, expected_symbol: str) -> _DepthEvent:
         raise ValueError("Binance depth event symbol mismatch")
     first_update_id = _bounded_integer(payload.get("U"), "first update id", positive=True)
     final_update_id = _bounded_integer(payload.get("u"), "final update id", positive=True)
-    previous_final_update_id = _bounded_integer(
-        payload.get("pu"), "previous final update id"
-    )
+    previous_final_update_id = _bounded_integer(payload.get("pu"), "previous final update id")
     if first_update_id > final_update_id:
         raise ValueError("Binance depth update id range is reversed")
     event_timestamp = payload.get("E", payload.get("T"))
@@ -304,16 +319,18 @@ class DepthOrderBook:
         snapshot_id = _bounded_integer(
             payload.get("lastUpdateId"), "snapshot update id", positive=True
         )
-        bids = {price: quantity for price, quantity in _levels(payload.get("bids"), "bid") if quantity}
-        asks = {price: quantity for price, quantity in _levels(payload.get("asks"), "ask") if quantity}
+        bids = {
+            price: quantity for price, quantity in _levels(payload.get("bids"), "bid") if quantity
+        }
+        asks = {
+            price: quantity for price, quantity in _levels(payload.get("asks"), "ask") if quantity
+        }
         if not bids or not asks:
             raise ValueError("Binance depth snapshot must contain both sides")
         if max(bids) >= min(asks):
             raise ValueError("Binance depth snapshot is crossed")
         now = int(time.time())
-        snapshot_timestamp = _timestamp_seconds(
-            payload.get("E", payload.get("T")), fallback=now
-        )
+        snapshot_timestamp = _timestamp_seconds(payload.get("E", payload.get("T")), fallback=now)
 
         with self._lock:
             pending = list(self._pending)
@@ -422,9 +439,7 @@ class DepthOrderBook:
                 "bid_depth_notional": bid_total,
                 "ask_depth_notional": ask_total,
                 "bid_ask_ratio": bid_total / ask_total if ask_total > 0 else None,
-                "book_imbalance": _imbalance(
-                    Decimal(str(bid_total)), Decimal(str(ask_total))
-                ),
+                "book_imbalance": _imbalance(Decimal(str(bid_total)), Decimal(str(ask_total))),
                 "bid_depth_change_5s_pct": metrics.bid_depth_change_5s_pct,
                 "ask_depth_change_5s_pct": metrics.ask_depth_change_5s_pct,
                 "bid_depth_change_30s_pct": metrics.bid_depth_change_30s_pct,
@@ -438,7 +453,9 @@ class DepthOrderBook:
     def heartbeat(self, timestamp: int | None = None) -> DepthMetrics | None:
         """Refresh freshness while a live stream still owns this synchronized book."""
 
-        if isinstance(timestamp, bool) or (timestamp is not None and not isinstance(timestamp, int)):
+        if isinstance(timestamp, bool) or (
+            timestamp is not None and not isinstance(timestamp, int)
+        ):
             raise ValueError("depth heartbeat timestamp must be an integer")
         now = int(time.time()) if timestamp is None else timestamp
         if now <= 0 or now > _MAX_UPDATE_ID:
@@ -478,10 +495,14 @@ class DepthOrderBook:
     def _prune_unlocked(self) -> None:
         if len(self._bids) > self._max_stored_levels:
             keep = set(sorted(self._bids, reverse=True)[: self._max_stored_levels])
-            self._bids = {price: quantity for price, quantity in self._bids.items() if price in keep}
+            self._bids = {
+                price: quantity for price, quantity in self._bids.items() if price in keep
+            }
         if len(self._asks) > self._max_stored_levels:
             keep = set(sorted(self._asks)[: self._max_stored_levels])
-            self._asks = {price: quantity for price, quantity in self._asks.items() if price in keep}
+            self._asks = {
+                price: quantity for price, quantity in self._asks.items() if price in keep
+            }
 
     def _is_crossed_unlocked(self) -> bool:
         return not self._bids or not self._asks or max(self._bids) >= min(self._asks)
@@ -543,14 +564,10 @@ class DepthOrderBook:
         prior_bid = prior[1]
         prior_ask = prior[2]
         bid_change = (
-            float((bid_notional - prior_bid) / prior_bid * Decimal(100))
-            if prior_bid > 0
-            else None
+            float((bid_notional - prior_bid) / prior_bid * Decimal(100)) if prior_bid > 0 else None
         )
         ask_change = (
-            float((ask_notional - prior_ask) / prior_ask * Decimal(100))
-            if prior_ask > 0
-            else None
+            float((ask_notional - prior_ask) / prior_ask * Decimal(100)) if prior_ask > 0 else None
         )
         if bid_change is not None:
             bid_change = max(-1_000_000.0, min(1_000_000.0, bid_change))
@@ -574,6 +591,130 @@ def live_order_book_snapshot(symbol: str, limit: int = TOP_LEVELS) -> dict[str, 
     with _LIVE_BOOKS_LOCK:
         book = _LIVE_BOOKS.get(normalized)
     return book.level_snapshot(limit) if book is not None else None
+
+
+def _shared_snapshot_path(symbol: str) -> Path:
+    return SHARED_DEPTH_SNAPSHOT_DIR / f"{_normalize_symbol(symbol)}.json"
+
+
+def _publish_shared_order_book_snapshot(snapshot: Mapping[str, Any]) -> bool:
+    """Atomically publish one worker-owned WebSocket book into shared memory."""
+
+    try:
+        symbol = _normalize_symbol(snapshot.get("symbol"))
+        bids = list(snapshot.get("bids") or [])[:TOP_LEVELS]
+        asks = list(snapshot.get("asks") or [])[:TOP_LEVELS]
+        if not bids or not asks:
+            return False
+        payload = {
+            "schema_version": _SHARED_SNAPSHOT_SCHEMA_VERSION,
+            "symbol": symbol,
+            "captured_at": int(snapshot.get("captured_at") or 0),
+            "last_update_id": int(snapshot.get("last_update_id") or 0),
+            "bids": [[row.get("price"), row.get("quantity")] for row in bids],
+            "asks": [[row.get("price"), row.get("quantity")] for row in asks],
+            "bid_depth_change_5s_pct": snapshot.get("bid_depth_change_5s_pct"),
+            "ask_depth_change_5s_pct": snapshot.get("ask_depth_change_5s_pct"),
+            "bid_depth_change_30s_pct": snapshot.get("bid_depth_change_30s_pct"),
+            "ask_depth_change_30s_pct": snapshot.get("ask_depth_change_30s_pct"),
+        }
+        encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if len(encoded) > _MAX_SHARED_SNAPSHOT_BYTES:
+            return False
+
+        directory = SHARED_DEPTH_SNAPSHOT_DIR
+        directory.mkdir(mode=0o750, parents=True, exist_ok=True)
+        if directory.is_symlink() or not directory.is_dir():
+            return False
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{symbol}.", suffix=".tmp", dir=directory
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(file_descriptor, 0o640)
+            else:
+                temporary_path.chmod(0o640)
+            with os.fdopen(file_descriptor, "wb") as handle:
+                file_descriptor = -1
+                handle.write(encoded)
+            os.replace(temporary_path, _shared_snapshot_path(symbol))
+        finally:
+            if file_descriptor >= 0:
+                os.close(file_descriptor)
+            temporary_path.unlink(missing_ok=True)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def shared_order_book_snapshot(symbol: str, limit: int = TOP_LEVELS) -> dict[str, Any] | None:
+    """Read the market worker's recent WebSocket book from shared memory."""
+
+    normalized = _normalize_symbol(symbol)
+    if isinstance(limit, bool) or limit not in {20, 50, 100}:
+        raise ValueError("depth level snapshot limit must be 20, 50, or 100")
+    path = _shared_snapshot_path(normalized)
+    try:
+        if path.is_symlink() or path.stat().st_size > _MAX_SHARED_SNAPSHOT_BYTES:
+            return None
+        with path.open("rb") as handle:
+            encoded = handle.read(_MAX_SHARED_SNAPSHOT_BYTES + 1)
+    except OSError:
+        return None
+    if len(encoded) > _MAX_SHARED_SNAPSHOT_BYTES:
+        return None
+    try:
+        payload = json.loads(encoded)
+        if not isinstance(payload, Mapping):
+            return None
+        if payload.get("schema_version") != _SHARED_SNAPSHOT_SCHEMA_VERSION:
+            return None
+        if _normalize_symbol(payload.get("symbol")) != normalized:
+            return None
+        captured_at = _bounded_integer(payload.get("captured_at"), "captured timestamp")
+        now = time.time()
+        if captured_at > now + SHARED_SNAPSHOT_FUTURE_SKEW_SECONDS:
+            return None
+        shared_age = max(0.0, now - captured_at)
+        if shared_age > SHARED_SNAPSHOT_MAX_AGE_SECONDS:
+            return None
+        book = DepthOrderBook(normalized)
+        book.load_snapshot(
+            {
+                "lastUpdateId": payload.get("last_update_id"),
+                "E": captured_at * 1_000,
+                "bids": payload.get("bids"),
+                "asks": payload.get("asks"),
+            }
+        )
+        snapshot = book.level_snapshot(limit)
+        if snapshot is None:
+            return None
+        for key in (
+            "bid_depth_change_5s_pct",
+            "ask_depth_change_5s_pct",
+            "bid_depth_change_30s_pct",
+            "ask_depth_change_30s_pct",
+        ):
+            value = payload.get(key)
+            if value is None:
+                snapshot[key] = None
+                continue
+            if isinstance(value, bool):
+                return None
+            normalized_value = float(value)
+            if not math.isfinite(normalized_value):
+                return None
+            snapshot[key] = normalized_value
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    snapshot["source"] = "binance_futures_shared_ws_depth"
+    snapshot["transport"] = "websocket_shared"
+    snapshot["shared_snapshot_age_seconds"] = round(shared_age, 3)
+    snapshot["server_cache_age_seconds"] = 0.0
+    snapshot["stale_fallback"] = False
+    return snapshot
 
 
 class OrderBookUnavailableError(RuntimeError):
@@ -600,9 +741,7 @@ def _decorate_rest_snapshot(
     return snapshot
 
 
-def _cached_rest_order_book_snapshot(
-    symbol: str, limit: int = TOP_LEVELS
-) -> dict[str, Any]:
+def _cached_rest_order_book_snapshot(symbol: str, limit: int = TOP_LEVELS) -> dict[str, Any]:
     """Return a rate-limited REST book for API processes without the market stream.
 
     The depth collector intentionally lives in the dedicated market worker, while
@@ -619,15 +758,11 @@ def _cached_rest_order_book_snapshot(
     now = time.monotonic()
     with _REST_BOOK_CACHE_LOCK:
         cached = _REST_BOOK_CACHE.get(normalized)
-        refresh_lock = _REST_BOOK_REFRESH_LOCKS.setdefault(
-            normalized, threading.Lock()
-        )
+        refresh_lock = _REST_BOOK_REFRESH_LOCKS.setdefault(normalized, threading.Lock())
     if cached is not None and now - cached[0] <= REST_SNAPSHOT_CACHE_SECONDS:
         snapshot = cached[1].level_snapshot(limit)
         if snapshot is not None:
-            return _decorate_rest_snapshot(
-                snapshot, cached_at=cached[0], now=now
-            )
+            return _decorate_rest_snapshot(snapshot, cached_at=cached[0], now=now)
 
     with refresh_lock:
         now = time.monotonic()
@@ -636,9 +771,7 @@ def _cached_rest_order_book_snapshot(
         if cached is not None and now - cached[0] <= REST_SNAPSHOT_CACHE_SECONDS:
             snapshot = cached[1].level_snapshot(limit)
             if snapshot is not None:
-                return _decorate_rest_snapshot(
-                    snapshot, cached_at=cached[0], now=now
-                )
+                return _decorate_rest_snapshot(snapshot, cached_at=cached[0], now=now)
 
         try:
             payload = fetch_depth_snapshot(normalized, TOP_LEVELS)
@@ -657,9 +790,7 @@ def _cached_rest_order_book_snapshot(
                         now=now,
                         stale_fallback=True,
                     )
-            raise OrderBookUnavailableError(
-                "Binance 盘口快照暂不可用，请稍后重试"
-            ) from exc
+            raise OrderBookUnavailableError("Binance 盘口快照暂不可用，请稍后重试") from exc
 
         cached_at = time.monotonic()
         with _REST_BOOK_CACHE_LOCK:
@@ -671,13 +802,11 @@ def _cached_rest_order_book_snapshot(
                 )[: len(_REST_BOOK_CACHE) - _MAX_REST_BOOK_CACHE_ENTRIES]
                 for cached_symbol in oldest_symbols:
                     _REST_BOOK_CACHE.pop(cached_symbol, None)
-        return _decorate_rest_snapshot(
-            snapshot, cached_at=cached_at, now=cached_at
-        )
+        return _decorate_rest_snapshot(snapshot, cached_at=cached_at, now=cached_at)
 
 
 def order_book_snapshot(symbol: str, limit: int = TOP_LEVELS) -> dict[str, Any]:
-    """Prefer the in-process WebSocket book, then use the bounded REST cache."""
+    """Prefer local/shared WebSocket books, then use the bounded REST cache."""
 
     live_snapshot = live_order_book_snapshot(symbol, limit)
     if live_snapshot is not None:
@@ -685,6 +814,9 @@ def order_book_snapshot(symbol: str, limit: int = TOP_LEVELS) -> dict[str, Any]:
         live_snapshot["server_cache_age_seconds"] = 0.0
         live_snapshot["stale_fallback"] = False
         return live_snapshot
+    shared_snapshot = shared_order_book_snapshot(symbol, limit)
+    if shared_snapshot is not None:
+        return shared_snapshot
     return _cached_rest_order_book_snapshot(symbol, limit)
 
 
@@ -726,8 +858,7 @@ def depth_symbol_groups(
     if len(normalized) > _MAX_TOTAL_SYMBOLS:
         raise ValueError("Binance depth symbol count exceeds the safety limit")
     return tuple(
-        normalized[index : index + group_size]
-        for index in range(0, len(normalized), group_size)
+        normalized[index : index + group_size] for index in range(0, len(normalized), group_size)
     )
 
 
@@ -773,7 +904,11 @@ class DepthStreamCollector:
             raise ValueError("one DepthStreamCollector may contain at most 50 symbols")
         if snapshot_limit not in {100, 500, 1_000}:
             raise ValueError("depth collector snapshot limit must be 100, 500, or 1000")
-        if not callable(on_metrics) or not callable(snapshot_fetcher) or not callable(connect_factory):
+        if (
+            not callable(on_metrics)
+            or not callable(snapshot_fetcher)
+            or not callable(connect_factory)
+        ):
             raise TypeError("depth collector callbacks must be callable")
         self.symbols = groups[0]
         self.books = {symbol: DepthOrderBook(symbol) for symbol in self.symbols}
@@ -903,9 +1038,7 @@ class DepthStreamCollector:
             except queue.Full:
                 self._queued.discard(task)
 
-    def _snapshot_worker(
-        self, stop: threading.Event, should_pause: Callable[[], bool]
-    ) -> None:
+    def _snapshot_worker(self, stop: threading.Event, should_pause: Callable[[], bool]) -> None:
         while not stop.is_set():
             try:
                 task = self._tasks.get(timeout=0.25)
@@ -926,6 +1059,9 @@ class DepthStreamCollector:
                     continue
                 metrics = self.books[symbol].load_snapshot(payload)
                 if metrics is not None:
+                    live_snapshot = self.books[symbol].level_snapshot(TOP_LEVELS)
+                    if live_snapshot is not None:
+                        _publish_shared_order_book_snapshot(live_snapshot)
                     self._emit(metrics)
                 else:
                     retry_delay = 0.5
@@ -1002,6 +1138,9 @@ class DepthStreamCollector:
                 continue
             metrics = book.heartbeat(timestamp)
             if metrics is not None:
+                live_snapshot = book.level_snapshot(TOP_LEVELS)
+                if live_snapshot is not None:
+                    _publish_shared_order_book_snapshot(live_snapshot)
                 self._emit(metrics)
 
     def _emit(self, metrics: DepthMetrics) -> None:
@@ -1028,8 +1167,7 @@ def ws_depth_loop(
     groups = depth_symbol_groups(symbols, group_size)
     stop = stop_event or threading.Event()
     collectors = [
-        DepthStreamCollector(group, on_metrics, snapshot_limit=snapshot_limit)
-        for group in groups
+        DepthStreamCollector(group, on_metrics, snapshot_limit=snapshot_limit) for group in groups
     ]
     _register_live_books(collectors)
     try:

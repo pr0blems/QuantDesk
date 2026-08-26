@@ -3103,7 +3103,7 @@ class AiMonitorDashboard extends HTMLElement {
     const asks = Array.isArray(snapshot.asks) ? snapshot.asks : [];
     const age = Number(snapshot.age_seconds);
     const live = Number.isFinite(age) && age <= 4;
-    const transportLabel = snapshot.transport === "websocket"
+    const transportLabel = String(snapshot.transport || "").startsWith("websocket")
       ? "WS 实时"
       : snapshot.stale_fallback
         ? "REST 降级"

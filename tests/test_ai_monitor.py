@@ -254,14 +254,10 @@ def test_ai_monitor_revision_snapshot_scopes_private_rows_to_user() -> None:
     revisions = _ai_monitor_revisions(Database(), 73)  # type: ignore[arg-type]
 
     opportunity_sql = str(
-        statements[0].compile(
-            dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}
-        )
+        statements[0].compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
     )
     run_sql = str(
-        statements[1].compile(
-            dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}
-        )
+        statements[1].compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
     )
     assert "ai_monitor_opportunities.user_id = 73" in opportunity_sql
     assert "ai_monitor_runs.user_id = 73" in run_sql
@@ -330,14 +326,10 @@ def test_ai_monitor_market_data_health_is_operational_and_secret_free() -> None:
             "retention": {"status": "ready", "last_run_at_ms": 1_776_336_000_200},
             "api_key": "must-not-leak",
         },
-        channel_health_snapshot=lambda: {
-            "price": {"age_ms": 420, "status": "live"}
-        },
+        channel_health_snapshot=lambda: {"price": {"age_ms": 420, "status": "live"}},
     )
     request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(unusual_whales_runtime=runtime)
-        )
+        app=SimpleNamespace(state=SimpleNamespace(unusual_whales_runtime=runtime))
     )
 
     health = _safe_market_data_health(request)  # type: ignore[arg-type]
@@ -504,19 +496,14 @@ def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None
     assert item.exit_price is None
     assert item.exit_reason is None
     assert item.settlement_version == "repair_pending_v4"
-    assert (
-        item.evidence_json["risk_plan"]["settlement_version"]
-        == "cost_consistent_exit_v7"
-    )
+    assert item.evidence_json["risk_plan"]["settlement_version"] == "cost_consistent_exit_v7"
     assert item.evidence_json["settlement_repair"]["status"] == "pending_recalculation"
     assert database.flushed is True
     assert "FOR UPDATE SKIP LOCKED" in mysql_sql
     assert "FOR UPDATE" not in sqlite_sql
     assert "ai_monitor_predictions.status = %s" in mysql_sql
     assert "ai_monitor_predictions.exit_reason = %s" in mysql_sql
-    assert {"completed", "legacy_horizon_close"}.issubset(
-        set(mysql_compiled.params.values())
-    )
+    assert {"completed", "legacy_horizon_close"}.issubset(set(mysql_compiled.params.values()))
     assert "cost_consistent_exit_v8" not in set(mysql_compiled.params.values())
     assert database.statement.get_execution_options()["populate_existing"] is True
 
@@ -725,9 +712,7 @@ def test_news_candidates_reject_generic_crypto_mstr_association() -> None:
                 "title": "Ethereum and Solana staking update",
                 "summary": "The report only discusses altcoin supply.",
                 "ai_confidence": 0.9,
-                "related_us_stocks": [
-                    {"symbol": "MSTR", "relevance": 0.9, "direction": "bull"}
-                ],
+                "related_us_stocks": [{"symbol": "MSTR", "relevance": 0.9, "direction": "bull"}],
             },
             {
                 "id": "bitcoin-news",
@@ -735,9 +720,7 @@ def test_news_candidates_reject_generic_crypto_mstr_association() -> None:
                 "title": "Bitcoin falls as institutional demand weakens",
                 "summary": "BTC volatility rises.",
                 "ai_confidence": 0.9,
-                "related_us_stocks": [
-                    {"symbol": "MSTR", "relevance": 0.8, "direction": "bear"}
-                ],
+                "related_us_stocks": [{"symbol": "MSTR", "relevance": 0.8, "direction": "bear"}],
             },
         ],
         {"MSTR": "MSTRUSDT"},
@@ -963,27 +946,36 @@ def test_live_rescoring_does_not_slide_signal_expiration() -> None:
     current = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
     proposed = datetime(2026, 8, 12, 11, 0, tzinfo=UTC)
 
-    assert merged_opportunity_expiration(
-        current,
-        proposed,
-        has_prediction=False,
-        has_new_material_news=False,
-        newly_confirmed=False,
-    ) == current
-    assert merged_opportunity_expiration(
-        current,
-        proposed,
-        has_prediction=False,
-        has_new_material_news=True,
-        newly_confirmed=False,
-    ) == proposed
-    assert merged_opportunity_expiration(
-        current,
-        proposed,
-        has_prediction=True,
-        has_new_material_news=True,
-        newly_confirmed=False,
-    ) == current
+    assert (
+        merged_opportunity_expiration(
+            current,
+            proposed,
+            has_prediction=False,
+            has_new_material_news=False,
+            newly_confirmed=False,
+        )
+        == current
+    )
+    assert (
+        merged_opportunity_expiration(
+            current,
+            proposed,
+            has_prediction=False,
+            has_new_material_news=True,
+            newly_confirmed=False,
+        )
+        == proposed
+    )
+    assert (
+        merged_opportunity_expiration(
+            current,
+            proposed,
+            has_prediction=True,
+            has_new_material_news=True,
+            newly_confirmed=False,
+        )
+        == current
+    )
 
 
 def test_live_score_history_seeds_legacy_snapshot_and_is_bounded() -> None:
@@ -1179,9 +1171,7 @@ def test_pending_rescore_aggregates_raw_news_with_frozen_threshold_and_side() ->
             title_zh=None,
             ai_reason="frozen policy candidate",
             ai_confidence=0.9,
-            related_us_stocks=[
-                {"symbol": "TEST", "direction": "short", "relevance": 1.0}
-            ],
+            related_us_stocks=[{"symbol": "TEST", "direction": "short", "relevance": 1.0}],
         )
         for index in (1, 2)
     ]
@@ -1193,11 +1183,7 @@ def test_pending_rescore_aggregates_raw_news_with_frozen_threshold_and_side() ->
         news_rows=news_rows,
         symbol_map={"TEST": "TESTUSDT"},
         repository=Repository(),
-        market_flow_inputs={
-            "ticker": {
-                "TESTUSDT": {"price": 101.0, "ts": int(now.timestamp())}
-            }
-        },
+        market_flow_inputs={"ticker": {"TESTUSDT": {"price": 101.0, "ts": int(now.timestamp())}}},
         now=now,
     )
 
@@ -1264,9 +1250,7 @@ def test_two_empty_frozen_news_scans_confirm_score_breakdown() -> None:
                 "prediction_features": {"items": []},
             }
 
-    market_inputs = {
-        "ticker": {"TESTUSDT": {"price": 101.0, "ts": int(start.timestamp())}}
-    }
+    market_inputs = {"ticker": {"TESTUSDT": {"price": 101.0, "ts": int(start.timestamp())}}}
     expired_opposite_news = [
         SimpleNamespace(
             id=f"old-{index}",
@@ -1276,9 +1260,7 @@ def test_two_empty_frozen_news_scans_confirm_score_breakdown() -> None:
             title_zh=None,
             ai_reason="outside frozen lookback",
             ai_confidence=0.99,
-            related_us_stocks=[
-                {"symbol": "TEST", "direction": "short", "relevance": 1.0}
-            ],
+            related_us_stocks=[{"symbol": "TEST", "direction": "short", "relevance": 1.0}],
         )
         for index in (1, 2)
     ]
@@ -1413,9 +1395,10 @@ def test_virtual_entry_gate_requires_every_signal_condition_and_a_real_price() -
     )
     assert quality_blocked["signal_confirmed"] is False
     assert quality_blocked["entry_ready"] is False
-    assert {
-        item["key"] for item in quality_blocked["checks"] if not item["passed"]
-    } == {"new_news_trigger", "market_quality"}
+    assert {item["key"] for item in quality_blocked["checks"] if not item["passed"]} == {
+        "new_news_trigger",
+        "market_quality",
+    }
 
 
 def test_virtual_entry_gate_requires_order_book_direction_confirmation() -> None:
@@ -1442,9 +1425,10 @@ def test_virtual_entry_gate_requires_order_book_direction_confirmation() -> None
     )
 
     assert blocked["signal_confirmed"] is False
-    assert next(
-        item for item in blocked["checks"] if item["key"] == "order_book_direction"
-    )["passed"] is False
+    assert (
+        next(item for item in blocked["checks"] if item["key"] == "order_book_direction")["passed"]
+        is False
+    )
 
 
 def test_prediction_actionability_gate_blocks_non_actionable_correlated_entry() -> None:
@@ -1524,8 +1508,7 @@ def test_shared_news_event_only_selects_the_strongest_symbol() -> None:
 
     annotated = annotate_event_cluster_selection(candidates)
     selected = {
-        item["symbol"]: item["news_trigger"]["event_cluster"]["selected"]
-        for item in annotated
+        item["symbol"]: item["news_trigger"]["event_cluster"]["selected"] for item in annotated
     }
 
     assert selected == {"MSFT": False, "META": True, "AMZN": True}
@@ -1802,10 +1785,7 @@ def test_new_risk_plan_uses_r_normalized_profit_protection() -> None:
     assert plan["failed_follow_through"]["maximum_adverse_r"] == 0.2
     assert plan["failed_follow_through"]["minimum_adverse_bps"] == 15
     assert plan["failed_follow_through"]["confirmation_closes"] == 2
-    assert (
-        plan["failed_follow_through"]["minimum_hold_policy"]
-        == "horizon_aligned"
-    )
+    assert plan["failed_follow_through"]["minimum_hold_policy"] == "horizon_aligned"
 
 
 def test_risk_unit_profit_guard_is_not_delayed_by_signal_soft_exit_window() -> None:
@@ -2054,22 +2034,28 @@ def test_v8_failed_follow_through_uses_r_threshold_and_two_closed_bars() -> None
 
 
 def test_gap_loss_is_not_classified_as_successful_profit_protection() -> None:
-    assert settlement_exit_subreason(
-        {
-            "reason": "take_profit",
-            "exit_subreason": "profit_lock",
-            "gap_execution": True,
-        },
-        net_result="loss",
-    ) == "profit_lock_gap_loss"
-    assert settlement_exit_subreason(
-        {
-            "reason": "take_profit",
-            "exit_subreason": "profit_lock",
-            "gap_execution": False,
-        },
-        net_result="win",
-    ) == "profit_lock"
+    assert (
+        settlement_exit_subreason(
+            {
+                "reason": "take_profit",
+                "exit_subreason": "profit_lock",
+                "gap_execution": True,
+            },
+            net_result="loss",
+        )
+        == "profit_lock_gap_loss"
+    )
+    assert (
+        settlement_exit_subreason(
+            {
+                "reason": "take_profit",
+                "exit_subreason": "profit_lock",
+                "gap_execution": False,
+            },
+            net_result="win",
+        )
+        == "profit_lock"
+    )
 
 
 def test_settlement_keeps_stop_loss_when_profit_guard_ties_on_same_bar() -> None:
@@ -2208,7 +2194,7 @@ def test_prediction_score_exit_requires_distinct_closed_bars_for_breakdown_and_r
                     "calculated_at": (start + timedelta(minutes=30)).isoformat(),
                     "combined": 80,
                     "direction": "short",
-                }
+                },
             ]
         },
         "long",
@@ -2335,9 +2321,7 @@ def test_prediction_score_exit_waits_for_minimum_hold_after_two_closed_bars() ->
     assert before_warmup is None
     assert after_warmup is not None
     assert after_warmup["reason"] == "score_breakdown"
-    assert after_warmup["price_time_ms"] == int(
-        (start + timedelta(minutes=31)).timestamp() * 1000
-    )
+    assert after_warmup["price_time_ms"] == int((start + timedelta(minutes=31)).timestamp() * 1000)
 
 
 def test_hourly_soft_exit_policy_waits_for_half_of_four_hour_horizon() -> None:
@@ -2470,10 +2454,30 @@ def test_historical_opportunity_analytics_uses_expiry_price_and_summarizes_hits(
 
     summary = summarize_historical_opportunities(
         [
-            {"result": "win", "direction": "long", "directional_return_bps": 100, "technical_confirmed": True},
-            {"result": "loss", "direction": "short", "directional_return_bps": -50, "technical_confirmed": False},
-            {"result": "flat", "direction": "long", "directional_return_bps": 0, "technical_confirmed": False},
-            {"result": "unavailable", "direction": "short", "directional_return_bps": None, "technical_confirmed": False},
+            {
+                "result": "win",
+                "direction": "long",
+                "directional_return_bps": 100,
+                "technical_confirmed": True,
+            },
+            {
+                "result": "loss",
+                "direction": "short",
+                "directional_return_bps": -50,
+                "technical_confirmed": False,
+            },
+            {
+                "result": "flat",
+                "direction": "long",
+                "directional_return_bps": 0,
+                "technical_confirmed": False,
+            },
+            {
+                "result": "unavailable",
+                "direction": "short",
+                "directional_return_bps": None,
+                "technical_confirmed": False,
+            },
         ]
     )
 
@@ -2699,9 +2703,7 @@ def test_ai_monitor_score_weights_are_validated_and_applied() -> None:
         "technical": 0.6,
         "market_flow": 0.0,
     }
-    assert weighted_opportunity_score(
-        80, 60, 50, config.model_dump(), missing_flow
-    ) == 68
+    assert weighted_opportunity_score(80, 60, 50, config.model_dump(), missing_flow) == 68
 
     with pytest.raises(ValueError, match="权重合计必须为 100%"):
         AiMonitorConfigUpdate(
@@ -2857,30 +2859,26 @@ def test_strategy_readiness_uses_the_latest_bounded_prediction_window() -> None:
 
 
 def test_prediction_surfaces_only_expose_the_current_settlement_policy() -> None:
-    analytics_source = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(
+    analytics_source = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    api_source = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
         encoding="utf-8"
     )
-    api_source = (
-        ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py"
-    ).read_text(encoding="utf-8")
-    frontend = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
-        encoding="utf-8"
-    )
+    frontend = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
     fact_analytics = analytics_source[
-        analytics_source.index("def historical_opportunity_fact_analytics(") :
-        analytics_source.index("def historical_opportunity_analytics(")
+        analytics_source.index(
+            "def historical_opportunity_fact_analytics("
+        ) : analytics_source.index("def historical_opportunity_analytics(")
     ]
     historical_analytics = analytics_source[
-        analytics_source.index("def historical_opportunity_analytics(") :
-        analytics_source.index("def settle_due_predictions(")
+        analytics_source.index("def historical_opportunity_analytics(") : analytics_source.index(
+            "def settle_due_predictions("
+        )
     ]
     overview = api_source[
         api_source.index("def overview(") : api_source.index("def ai_monitor_events(")
     ]
     prediction_records = api_source[
-        api_source.index("def prediction_records(") : api_source.index(
-            "def opportunity_analytics("
-        )
+        api_source.index("def prediction_records(") : api_source.index("def opportunity_analytics(")
     ]
 
     assert "AiMonitorPredictionFact.settlement_version" in fact_analytics
@@ -2924,9 +2922,7 @@ def test_market_flow_snapshot_combines_real_inputs_and_blocks_opposite_direction
                 "taker_sell_volume": 200,
             }
         },
-        "ticker": {
-            "TESTUSDT": {"quote_volume": 50_000_000, "pct_24h": 1.2, "ts": now_seconds}
-        },
+        "ticker": {"TESTUSDT": {"quote_volume": 50_000_000, "pct_24h": 1.2, "ts": now_seconds}},
         "underlying": {"TESTUSDT": {"volume": 1_000_000}},
         "profile": {
             "TEST": {
@@ -3114,9 +3110,7 @@ def test_ai_monitor_prediction_table_is_separate_from_trading_orders() -> None:
         "net_directional_return_bps",
         "max_favorable_bps",
         "max_adverse_bps",
-    } <= {
-        column.name for column in table.columns
-    }
+    } <= {column.name for column in table.columns}
     assert {foreign_key.target_fullname for foreign_key in table.foreign_keys} == {
         "users.id",
         "ai_monitor_opportunities.id",
@@ -3182,7 +3176,7 @@ def test_news_ai_model_call_audit_schema_follows_concurrency_revision() -> None:
     assert AiMonitorOpportunity.__table__.c.news_ai_batch_ids_json.nullable is True
     assert AiMonitorOpportunity.__table__.c.news_ai_model_call_ids_json.nullable is True
     assert 'down_revision: str | None = "0043_ai_monitor_claims"' in migration
-    assert 'mysql.LONGTEXT()' in migration
+    assert "mysql.LONGTEXT()" in migration
     assert '"news_ai_model_call_items"' in migration
     assert '"news_ai_batch_ids_json"' in migration
     assert '"news_ai_model_call_ids_json"' in migration
@@ -3199,9 +3193,9 @@ def test_ai_monitor_prediction_migration_follows_workspace_revision() -> None:
 
 
 def test_ai_monitor_execution_metrics_migration_follows_model_call_audit() -> None:
-    migration = (
-        ROOT / "migrations/versions/0045_ai_prediction_execution_metrics.py"
-    ).read_text(encoding="utf-8")
+    migration = (ROOT / "migrations/versions/0045_ai_prediction_execution_metrics.py").read_text(
+        encoding="utf-8"
+    )
 
     assert 'down_revision: str | None = "0044_news_ai_call_audit"' in migration
     for column in (
@@ -3286,7 +3280,9 @@ def test_ai_monitor_score_weight_migration_follows_market_flow_metrics() -> None
         "market_flow_score_weight",
     ):
         assert f'"{column}"' in migration
-    assert '"news_score_weight + technical_score_weight + market_flow_score_weight = 100"' in migration
+    assert (
+        '"news_score_weight + technical_score_weight + market_flow_score_weight = 100"' in migration
+    )
     assert '"valid_news_score_weight"' in migration
     assert '"ck_ai_monitor_configs_news_score_weight"' not in migration
 
@@ -3309,9 +3305,9 @@ def test_news_ai_industry_migration_follows_prediction_revision() -> None:
 
 
 def test_ai_monitor_pipeline_migration_adds_pending_news_index() -> None:
-    migration = (
-        ROOT / "migrations/versions/0041_ai_monitor_pipeline_optimization.py"
-    ).read_text(encoding="utf-8")
+    migration = (ROOT / "migrations/versions/0041_ai_monitor_pipeline_optimization.py").read_text(
+        encoding="utf-8"
+    )
 
     assert 'down_revision: str | None = "0040_ai_monitor_candidates"' in migration
     assert '"ix_news_ai_pending_ts"' in migration
@@ -3358,9 +3354,7 @@ def test_opportunity_related_news_endpoint_is_tenant_scoped() -> None:
 
 
 def test_opportunity_live_order_book_endpoint_is_tenant_scoped() -> None:
-    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
-        encoding="utf-8"
-    )
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
     endpoint = api[
         api.index('@router.get("/opportunities/{opportunity_id}/order-book")') : api.index(
             '@router.get("/opportunities/{opportunity_id}/news")'
@@ -3371,14 +3365,12 @@ def test_opportunity_live_order_book_endpoint_is_tenant_scoped() -> None:
     assert "AiMonitorOpportunity.user_id == user.id" in endpoint
     assert "ws_depth.order_book_snapshot(contract_symbol, limit)" in endpoint
     assert "except ws_depth.OrderBookUnavailableError as exc" in endpoint
-    assert 'status_code=503' in endpoint
+    assert "status_code=503" in endpoint
     assert 'raise HTTPException(status_code=404, detail="opportunity not found")' in endpoint
 
 
 def test_opportunities_are_ordered_by_signal_time_descending() -> None:
-    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
-        encoding="utf-8"
-    )
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
     endpoint = api[
         api.index('@router.get("/opportunities")') : api.index(
             '@router.get("/opportunities/{opportunity_id}/news")'
@@ -3393,7 +3385,7 @@ def test_opportunities_are_ordered_by_signal_time_descending() -> None:
     assert "AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id" in endpoint
     assert 'scope: Literal["legacy", "current", "history"]' in endpoint
     assert '"pagination"' in endpoint
-    assert "live_tickers.get((item.contract_symbol or \"\").upper())" in endpoint
+    assert 'live_tickers.get((item.contract_symbol or "").upper())' in endpoint
     assert '"prediction_entry_price"' in api
     assert '"prediction_combined_score"' in api
     assert '"prediction_market_flow_score"' in api
@@ -3405,9 +3397,7 @@ def test_opportunities_are_ordered_by_signal_time_descending() -> None:
 
 
 def test_opportunity_model_call_endpoint_is_tenant_scoped_and_returns_raw_audit() -> None:
-    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
-        encoding="utf-8"
-    )
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
     endpoint = api[api.index('@router.get("/opportunities/{opportunity_id}/model-calls")') :]
 
     assert "AiMonitorOpportunity.user_id == user.id" in endpoint
@@ -3452,7 +3442,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260826-depth1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260826-depth2"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3462,7 +3452,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260826-depth1"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260826-depth2"' in legacy_index
     assert 'href="/assets/ai-monitor.css?v=20260825-52"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
@@ -3492,7 +3482,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "新相关新闻分析完成后自动刷新" in component
     assert "用最近现货快照、当前 BN 价格和" not in component
     assert 'value != null && value !== ""' in component
-    assert '这是开盘概率预判，不是无风险套利' in component
+    assert "这是开盘概率预判，不是无风险套利" in component
     assert ".cross-venue-basis.opening_gap_watch" in stylesheet
     assert component.index('class="ai-nav-root active"') < component.index(
         'class="ai-subnav-group"'
@@ -3502,9 +3492,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     for label in ("新闻列表", "分析记录", "指标配置", "发现机会", "预测统计分析"):
         assert label in component
     assert component.index('id="run-opportunity"') < component.index('id="open-config"')
-    assert component.index('id="run-opportunity"') < component.index(
-        'id="open-weight-config"'
-    )
+    assert component.index('id="run-opportunity"') < component.index('id="open-weight-config"')
     assert component.index('id="open-weight-config"') < component.index('id="open-config"')
     assert component.index('id="open-config"') < component.index('id="ai-refresh"')
     assert (
@@ -3523,9 +3511,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
         "weight-total-state",
     ):
         assert f'id="{field}"' in component
-    assert (
-        'Number(config.minimum_market_flow_quality ?? 0.5) * 100' in component
-    )
+    assert "Number(config.minimum_market_flow_quality ?? 0.5) * 100" in component
     assert (
         'minimum_market_flow_quality: Number(this.q("#config-market-flow-quality").value) / 100'
         in component
@@ -3555,18 +3541,32 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "this.virtualEntryState(item, this.virtualEntryGate(item)).tone" in component
     assert "当前机会" in component
     assert "历史机会" in component
-    assert 'this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "connecting";' in component
-    assert 'const pipelineInitializing = !this.state.lastSuccessfulRefreshAt' in component
-    assert 'const pipelineReconnecting = this.state.updateStreamStatus === "reconnecting"' in component
-    assert "const restPollingHealthy = hasRecentRestSuccess && !this.state.lastRefreshError;" in component
+    assert (
+        'this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "connecting";'
+        in component
+    )
+    assert "const pipelineInitializing = !this.state.lastSuccessfulRefreshAt" in component
+    assert (
+        'const pipelineReconnecting = this.state.updateStreamStatus === "reconnecting"' in component
+    )
+    assert (
+        "const restPollingHealthy = hasRecentRestSuccess && !this.state.lastRefreshError;"
+        in component
+    )
     assert "const restHealthy = this.firstValue(" not in component
     assert "最后刷新 ${this.formatDate(transportUpdatedAt)}" in component
     assert '"正在连接数据"' in component
     assert '"增量推送重连中"' in component
     assert 'id="include-expired"' not in component
     assert "const bySignalTimeDesc = (left, right) =>" in component
-    assert 'const isAwaitingSettlement = (item) => ["pending", "unavailable"].includes(String(item.prediction_status || ""))' in component
-    assert 'items.filter((item) => isActive(item) && item.prediction_status !== "completed").sort(bySignalTimeDesc)' in component
+    assert (
+        'const isAwaitingSettlement = (item) => ["pending", "unavailable"].includes(String(item.prediction_status || ""))'
+        in component
+    )
+    assert (
+        'items.filter((item) => isActive(item) && item.prediction_status !== "completed").sort(bySignalTimeDesc)'
+        in component
+    )
     assert "items.filter(isAwaitingSettlement).sort(bySignalTimeDesc)" in component
     assert "this.parseDate(item.expires_at).getTime() > now" in component
     assert "`${raw}Z`" in component
@@ -3594,10 +3594,19 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'class="ai-settings-menu"' in component
     assert 'data-toggle-opportunity-details="${this.escape(item.id)}"' in component
     assert "expandedOpportunityIds: new Set()" in component
-    assert 'event.composedPath().find((node) => node?.matches?.("[data-toggle-opportunity-details]"))' in component
+    assert (
+        'event.composedPath().find((node) => node?.matches?.("[data-toggle-opportunity-details]"))'
+        in component
+    )
     assert 'const nextExpanded = !card.classList.contains("is-expanded")' in component
-    assert 'key === "header" && currentSection.querySelector("[data-toggle-opportunity-details]")' in component
-    assert 'data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:' in component
+    assert (
+        'key === "header" && currentSection.querySelector("[data-toggle-opportunity-details]")'
+        in component
+    )
+    assert (
+        'data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:'
+        in component
+    )
     assert ".opportunity-item:not(.is-expanded) .opportunity-feature-grid" in stylesheet
     assert 'id="score-trend-modal"' in component
     assert 'data-score-trend="${this.escape(item.id)}"' in component
@@ -3644,11 +3653,16 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "仅为研判方向，尚未买入" in component
     assert "尚未入场" in component
     assert ".opportunity-signal .trigger-progress" in stylesheet
-    assert 'class="virtual-entry-gate ${entryState.tone} ${triggeredPosition ? "position-active" : ""}"' in component
+    assert (
+        'class="virtual-entry-gate ${entryState.tone} ${triggeredPosition ? "position-active" : ""}"'
+        in component
+    )
     assert "ENTRY GATE" in component
     assert "冻结触发价格" in component
     assert "真实订单关闭" in component
-    assert component.index('${symbolControl}<small>') < component.index('${conclusionControl}</div>')
+    assert component.index("${symbolControl}<small>") < component.index(
+        "${conclusionControl}</div>"
+    )
     assert "AI分析结论" in component
     assert 'id="ai-conclusion-modal"' in component
     assert "openAiConclusion(opportunityId, trigger)" in component
@@ -3663,7 +3677,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "新闻分析逻辑" in component
     assert "openNewsAnalysisLogic(trigger)" in component
     assert "renderNewsAnalysisLogic()" in component
-    assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/model-calls`)' in component
+    assert "this.api(`/opportunities/${encodeURIComponent(item.id)}/model-calls`)" in component
     assert "System 提示词" in component
     assert "User 提示词 / 新闻输入" in component
     assert "模型返回原始文本" in component
@@ -3687,8 +3701,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "资金盘口指标" in component
     assert "主力量比" in component
     assert "5秒挂单增速" in component
-    assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/news`)' in component
-    assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/fundamentals`)' in component
+    assert "this.api(`/opportunities/${encodeURIComponent(item.id)}/news`)" in component
+    assert "this.api(`/opportunities/${encodeURIComponent(item.id)}/fundamentals`)" in component
     assert "renderAiRelatedNewsList(items, opportunity" in component
     assert "renderAiFundamentals(data, opportunity)" in component
     assert "完整基本面" in component
@@ -3708,8 +3722,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".score-trend-chart" in stylesheet
     assert 'id="order-book-modal"' in component
     assert 'data-order-book="${this.escape(item.id)}"' in component
-    assert '/order-book?limit=${this.orderBookLimit}' in component
-    assert 'snapshot.transport === "websocket"' in component
+    assert "/order-book?limit=${this.orderBookLimit}" in component
+    assert 'String(snapshot.transport || "").startsWith("websocket")' in component
     assert '"REST 快照"' in component
     assert "跨进程时由短缓存 REST 快照补齐" in component
     assert "买卖盘口梯形表" in component
@@ -3729,7 +3743,10 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "historical_analysis_memory" in component
     assert 'id="news-system-prompt-modal"' in component
     assert 'data-conclusion-view="memory"' in component
-    assert 'this.api(`/opportunities/${encodeURIComponent(item.id)}/news-analysis-records`)' in component
+    assert (
+        "this.api(`/opportunities/${encodeURIComponent(item.id)}/news-analysis-records`)"
+        in component
+    )
     assert "一周新闻研判追踪" in component
     assert "7天记忆" in component
     assert "当前机会关联" in component
@@ -3770,7 +3787,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert ".history-result.win" in stylesheet
     assert ".history-result.not_created" in stylesheet
     assert ".history-result.pending" in stylesheet
-    assert 'const data = await this.api("/opportunities?limit=300&include_expired=true")' in component
+    assert (
+        'const data = await this.api("/opportunities?limit=300&include_expired=true")' in component
+    )
     assert 'this.api("/opportunity-analytics?limit=300")' not in component
     assert 'id="historical-replay"' not in component
     assert 'id="replay-form"' not in component
@@ -3784,30 +3803,30 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'id="prediction-slippage-enabled"' in component
     assert 'id="prediction-funding-enabled"' in component
     assert 'this.api("/cost-config"' in component
-    assert 'news_score_min: String(filters.newsScoreMin)' in component
-    assert 'indicator_score_min: String(filters.indicatorScoreMin)' in component
-    assert 'combined_score_min: String(filters.combinedScoreMin)' in component
-    assert 'option_flow_score_min: String(filters.optionFlowScoreMin)' in component
-    assert 'gex_score_min: String(filters.gexScoreMin)' in component
-    assert 'direction: filters.direction' in component
-    assert 'market_session: filters.marketSession' in component
-    assert 'quote_quality: filters.quoteQuality' in component
-    assert 'event_risk: filters.eventRisk' in component
-    assert 'exit_reason: filters.exitReason' in component
-    assert 'item?.lifecycle_status' in component
-    assert 'item?.gate_summary' in component
-    assert 'item?.score_components' in component
+    assert "news_score_min: String(filters.newsScoreMin)" in component
+    assert "indicator_score_min: String(filters.indicatorScoreMin)" in component
+    assert "combined_score_min: String(filters.combinedScoreMin)" in component
+    assert "option_flow_score_min: String(filters.optionFlowScoreMin)" in component
+    assert "gex_score_min: String(filters.gexScoreMin)" in component
+    assert "direction: filters.direction" in component
+    assert "market_session: filters.marketSession" in component
+    assert "quote_quality: filters.quoteQuality" in component
+    assert "event_risk: filters.eventRisk" in component
+    assert "exit_reason: filters.exitReason" in component
+    assert "item?.lifecycle_status" in component
+    assert "item?.gate_summary" in component
+    assert "item?.score_components" in component
     assert 'item?.flow && typeof item.flow === "object"' in component
-    assert 'stableFlow.option_flow' in component
-    assert 'stableFlow.institutional_flow' in component
-    assert 'item?.data_quality' in component
-    assert 'item?.api_version' in component
-    assert 'item?.version?.api' in component
-    assert 'item?.signal_snapshot' in component
-    assert '无数据：尚未完成行情与风险门控评估' in component
-    assert '无数据 · 未参与门控' in component
-    assert 'flow.score ?? 50' not in component
-    assert '.virtual-entry-check.missing' in stylesheet
+    assert "stableFlow.option_flow" in component
+    assert "stableFlow.institutional_flow" in component
+    assert "item?.data_quality" in component
+    assert "item?.api_version" in component
+    assert "item?.version?.api" in component
+    assert "item?.signal_snapshot" in component
+    assert "无数据：尚未完成行情与风险门控评估" in component
+    assert "无数据 · 未参与门控" in component
+    assert "flow.score ?? 50" not in component
+    assert ".virtual-entry-check.missing" in stylesheet
     assert "筛选样本" in component
     assert "多 / 空方向" in component
     assert 'this.api("/prediction-records?limit=200")' not in component
@@ -3815,8 +3834,14 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
         assert label in component
     for label in ("x 成本后 ROE", "毛利润率", "MFE / MAE", "成本后结果", "成本计算"):
         assert label in component
-    assert '${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)}<small>毛利润率' in component
-    assert '${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净仓位ROE' not in component
+    assert (
+        "${this.formatLeveragedReturnFromBps(item.net_directional_return_bps)}<small>毛利润率"
+        in component
+    )
+    assert (
+        "${this.formatLeveragedReturnFromBps(item.gross_directional_return_bps)}<small>净仓位ROE"
+        not in component
+    )
     assert "RISK UNIT EXIT GUARD V7" in component
     assert 'id="prediction-settlement-version"' in component
     assert "settlement_version: filters.settlementVersion" in component
@@ -3833,7 +3858,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'id="strategy-readiness"' in component
     assert 'readiness.status === "shadow_ready"' in component
     assert ".strategy-readiness" in stylesheet
-    assert "不会执行任何交易" in (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    assert "不会执行任何交易" in (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(
+        encoding="utf-8"
+    )
     analytics_source = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
     assert "OpportunityMarketSnapshot," in analytics_source
     assert ".outerjoin(\n            OpportunityMarketSnapshot," in analytics_source
