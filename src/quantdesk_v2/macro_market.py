@@ -2451,16 +2451,27 @@ def opportunity_market_context(
             or session_key in {"premarket", "postmarket", "closed"}
         )
         entry_policy = dict((snapshot or {}).get("entry_policy") or {})
-        entry_policy["entry_allowed"] = bool(
-            entry_policy.get("entry_allowed", True) and not session_blocked
+        simulation_entry_allowed = bool(entry_policy.get("entry_allowed", True))
+        entry_policy["entry_allowed"] = simulation_entry_allowed
+        entry_policy["simulation_entry_allowed"] = simulation_entry_allowed
+        entry_policy["live_entry_allowed"] = bool(
+            simulation_entry_allowed and not session_blocked
         )
-        entry_policy["blocked_reasons"] = (
-            ["NON_REGULAR_US_SESSION"] if session_blocked else []
+        entry_policy["blocked_reasons"] = list(
+            entry_policy.get("blocked_reasons") or []
         )
+        entry_policy["live_blocked_reasons"] = [
+            *entry_policy["blocked_reasons"],
+            *(["NON_REGULAR_US_SESSION"] if session_blocked else []),
+        ]
+        entry_policy["warnings"] = [
+            *list(entry_policy.get("warnings") or []),
+            *(["NON_REGULAR_US_SESSION"] if session_blocked else []),
+        ]
         if session_blocked:
-            entry_policy["blocked_reason"] = (
+            entry_policy["live_blocked_reason"] = (
                 "Current session is outside regular US market hours; "
-                "the candidate remains research-only."
+                "the research prediction remains enabled but live copy stays gated."
             )
         return {
             "version": "macro_directional_adjustment_v4",
@@ -2583,25 +2594,37 @@ def opportunity_market_context(
     blocked_reasons: list[str] = []
     if global_direction_blocked:
         blocked_reasons.append("GLOBAL_RISK_POLICY")
-    if session_blocked:
-        blocked_reasons.append("NON_REGULAR_US_SESSION")
     blocked_reason_labels = {
         "GLOBAL_RISK_POLICY": "重大事件或信用压力环境暂停新增顺势多单",
-        "NON_REGULAR_US_SESSION": "当前不是美股常规交易时段，仅保留扫描与研究记录",
     }
-    warnings = ["MACRO_DIRECTION_DIVERGENT"] if opposed else []
+    warnings = [
+        *(["MACRO_DIRECTION_DIVERGENT"] if opposed else []),
+        *(["NON_REGULAR_US_SESSION"] if session_blocked else []),
+    ]
     direction_blocked = bool(blocked_reasons)
+    live_blocked_reasons = [
+        *blocked_reasons,
+        *(["NON_REGULAR_US_SESSION"] if session_blocked else []),
+    ]
     entry_policy = {
         **global_policy,
         "direction": direction,
         "position_multiplier": position_multiplier if position_multiplier is not None else 1.0,
         "entry_allowed": not direction_blocked,
+        "simulation_entry_allowed": not direction_blocked,
+        "live_entry_allowed": not live_blocked_reasons,
         "blocked_reasons": blocked_reasons,
+        "live_blocked_reasons": live_blocked_reasons,
         "warnings": warnings,
         "directional_divergence": opposed,
         "blocked_reason": "；".join(
             blocked_reason_labels[item] for item in blocked_reasons
         ) or None,
+        "live_blocked_reason": (
+            "当前不是美股常规交易时段；研究预测继续记录，实盘跟单保持时段门控"
+            if session_blocked
+            else None
+        ),
     }
     return {
         "version": "macro_directional_adjustment_v4",

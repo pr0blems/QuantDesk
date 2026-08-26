@@ -321,7 +321,14 @@ def _ai_monitor_signal(
     if not isinstance(macro_policy, dict):
         macro_policy = market_environment.get("entry_policy")
     macro_policy = macro_policy if isinstance(macro_policy, dict) else {}
-    if not bool(macro_policy.get("entry_allowed", True)):
+    macro_allowed_key = "entry_allowed" if manual_selection else "live_entry_allowed"
+    macro_entry_allowed = bool(
+        macro_policy.get(
+            macro_allowed_key,
+            macro_policy.get("entry_allowed", True),
+        )
+    )
+    if not macro_entry_allowed:
         return 0, None, [], None, {}
     try:
         macro_position_multiplier = float(

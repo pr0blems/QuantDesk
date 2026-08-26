@@ -265,7 +265,7 @@ def test_market_session_countdown_skips_weekend_and_nyse_holiday() -> None:
     assert independence_observed["next_open_at"].startswith("2026-07-06T09:30:00")
 
 
-def test_closed_session_applies_a_transparent_liquidity_discount() -> None:
+def test_closed_session_keeps_research_enabled_and_live_copy_gated() -> None:
     snapshot = {**_market_snapshot(), "market_session": {"key": "closed"}}
 
     context = opportunity_market_context(
@@ -275,8 +275,12 @@ def test_closed_session_applies_a_transparent_liquidity_discount() -> None:
     )
 
     assert any(item["key"] == "market_session" for item in context["factors"])
-    assert context["entry_policy"]["entry_allowed"] is False
-    assert "NON_REGULAR_US_SESSION" in context["entry_policy"]["blocked_reasons"]
+    assert context["entry_policy"]["entry_allowed"] is True
+    assert context["entry_policy"]["simulation_entry_allowed"] is True
+    assert context["entry_policy"]["live_entry_allowed"] is False
+    assert "NON_REGULAR_US_SESSION" not in context["entry_policy"]["blocked_reasons"]
+    assert "NON_REGULAR_US_SESSION" in context["entry_policy"]["live_blocked_reasons"]
+    assert "NON_REGULAR_US_SESSION" in context["entry_policy"]["warnings"]
 
 
 def test_direct_treasury_curve_classifies_long_end_term_premium_pressure() -> None:

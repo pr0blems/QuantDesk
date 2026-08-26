@@ -307,6 +307,33 @@ def test_ai_monitor_live_signal_applies_frozen_macro_position_multiplier(
     assert evidence["risk_proposal"]["macro_position_multiplier"] == 0.25
 
 
+def test_ai_monitor_live_signal_uses_separate_live_session_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 17, 10, 1, tzinfo=UTC).timestamp()
+    row = _prediction_row()
+    row["evidence_json"]["macro_entry_policy"] = {
+        "entry_allowed": True,
+        "simulation_entry_allowed": True,
+        "live_entry_allowed": False,
+        "position_multiplier": 1.0,
+    }
+    monkeypatch.setattr(live_engine.store, "query", lambda *_args, **_kwargs: [row])
+    monkeypatch.setattr(live_engine.time, "time", lambda: now)
+
+    assert live_engine._ai_monitor_signal(_account(), "AAPLUSDT", price=102)[0] == 0
+    assert (
+        live_engine._ai_monitor_signal(
+            _account(),
+            "AAPLUSDT",
+            price=102,
+            prediction_public_id="prediction-public-id",
+            opportunity_public_id="opportunity-public-id",
+        )[0]
+        == 1
+    )
+
+
 def test_ai_monitor_auto_signal_rechecks_current_book_but_manual_follow_bypasses_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
