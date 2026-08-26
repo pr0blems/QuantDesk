@@ -228,6 +228,39 @@ def test_short_signal_can_benefit_from_bear_regime_but_adjustment_is_capped() ->
     assert apply_market_adjustment(96.0, context) == 100.0
 
 
+def test_market_sentiment_direction_scores_short_and_penalizes_long() -> None:
+    snapshot = {
+        "available": True,
+        "indices": [],
+        "vix": {"available": False},
+        "breadth": {"available": False},
+        "sectors": [],
+        "sentiment": {"direction": "bear", "label": "偏空"},
+        "events": {"risk_level": "normal"},
+        "entry_policy": {},
+    }
+
+    long_context = opportunity_market_context(
+        snapshot,
+        direction="long",
+        symbol="AAPL",
+    )
+    short_context = opportunity_market_context(
+        snapshot,
+        direction="short",
+        symbol="AAPL",
+    )
+
+    assert long_context["adjustment"] == -5
+    assert long_context["resonance"] == "divergent"
+    assert short_context["adjustment"] == 4
+    assert short_context["resonance"] == "resonant"
+    assert any(
+        item["key"] == "market_sentiment_direction"
+        for item in short_context["factors"]
+    )
+
+
 def test_sector_mapping_uses_symbol_and_company_profile() -> None:
     assert sector_key("MSTR") == "CRYPTO"
     assert sector_key("NVDA", industry="Semiconductors") == "SEMIS"

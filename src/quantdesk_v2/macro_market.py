@@ -2474,7 +2474,7 @@ def opportunity_market_context(
                 "the research prediction remains enabled but live copy stays gated."
             )
         return {
-            "version": "macro_directional_adjustment_v4",
+            "version": "macro_directional_adjustment_v5",
             "available": False,
             "adjustment": 0.0,
             "resonance": "unknown",
@@ -2573,10 +2573,17 @@ def opportunity_market_context(
             tide_bias,
         )
 
-    adjustment = _clamp(sum(float(item["points"]) for item in factors), -20, 10)
     market_direction = str((snapshot.get("sentiment") or {}).get("direction") or "neutral")
     aligned = (long_side and market_direction == "bull") or (not long_side and market_direction == "bear")
     opposed = (long_side and market_direction == "bear") or (not long_side and market_direction == "bull")
+    if market_direction in {"bull", "bear"}:
+        add(
+            "market_sentiment_direction",
+            "大盘情绪方向共振" if aligned else "大盘情绪方向逆势",
+            4 if aligned else -5,
+            market_direction,
+        )
+    adjustment = _clamp(sum(float(item["points"]) for item in factors), -20, 10)
     resonance = "resonant" if aligned else "divergent" if opposed else "neutral"
     global_policy = dict(snapshot.get("entry_policy") or {})
     position_multiplier = _number(
@@ -2627,7 +2634,7 @@ def opportunity_market_context(
         ),
     }
     return {
-        "version": "macro_directional_adjustment_v4",
+        "version": "macro_directional_adjustment_v5",
         "available": True,
         "adjustment": round(adjustment, 4),
         "resonance": resonance,
