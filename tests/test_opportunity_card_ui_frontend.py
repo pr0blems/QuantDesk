@@ -37,6 +37,7 @@ def test_opportunity_details_toggle_updates_accessible_state() -> None:
 
 def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert ".opportunity-details-shell" in STYLES
+    assert '.opportunity-details-shell[aria-hidden="true"] .opportunity-details-content' in STYLES
     assert "grid-template-rows: 0fr" in STYLES
     assert ".opportunity-item.is-expanded .opportunity-details-shell" in STYLES
     assert "grid-template-rows: 1fr" in STYLES

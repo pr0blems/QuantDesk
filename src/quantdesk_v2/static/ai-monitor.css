@@ -2151,6 +2151,7 @@ td.negative { color: var(--ai-red); }
   transition: grid-template-rows .32s ease, opacity .22s ease, visibility 0s linear .32s;
 }
 .opportunity-details-content { min-height: 0; display: grid; gap: 10px; overflow: hidden; padding: 12px 18px 0; }
+.opportunity-details-shell[aria-hidden="true"] .opportunity-details-content { padding-top: 0; }
 .opportunity-item.is-expanded .opportunity-details-shell { grid-template-rows: 1fr; opacity: 1; visibility: visible; transition: grid-template-rows .36s ease, opacity .24s ease; }
 .opportunity-details-content > :where(.cross-venue-basis, .virtual-entry-gate, .opportunity-macro, .opportunity-feature-grid, .opportunity-metrics, .settlement-detail, .evidence-chips, .opportunity-news) { margin: 0; }
 .opportunity-details-content .virtual-entry-gate { border-radius: 7px; overflow: hidden; }
