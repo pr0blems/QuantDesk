@@ -63,6 +63,8 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         'dataRequirements.trigger_timeframe,',
         'timeframe.disabled = sourceLocked',
         'timeframe: this.sourceTriggerTimeframe() ||',
+        'this.ensureSourceBacktestEligibility()',
+        'this.promoteLifecycle(item, "validated")',
     ):
         assert api_contract in script
 
@@ -93,6 +95,10 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
     assert "最接近的有效值是" in script
     assert 'input.dataset.declaredStep = input.step' in script
     assert "localizedErrorMessage" in script
+    assert script.index("await this.ensureSourceBacktestEligibility()") < script.index(
+        "const payload = this.sourceBacktestPayload()"
+    )
+    assert "正在校验当前源码并取得回测资格" in script
 
 
 def test_react_canary_loads_the_current_strategy_component_asset() -> None:
@@ -104,8 +110,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260825-strategyi18n1" in index
-    assert index.index("/assets/strategies.js?v=20260825-strategyi18n1") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260826-backtest-eligibility1" in index
+    assert index.index("/assets/strategies.js?v=20260826-backtest-eligibility1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel

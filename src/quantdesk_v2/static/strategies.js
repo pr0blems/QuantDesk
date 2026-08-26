@@ -1349,12 +1349,34 @@ class StrategyCenter extends HTMLElement {
     };
   }
 
+  async ensureSourceBacktestEligibility() {
+    const item = this.activeItem;
+    if (!item?.public_id) throw new Error("请先保存当前策略，再运行回测。");
+    const eligibleStatuses = ["validated", "backtested", "shadow", "paper", "micro_live", "live"];
+    if (eligibleStatuses.includes(item.lifecycle_status)) return item;
+    if (!["draft", "published"].includes(item.lifecycle_status)) {
+      throw new Error(`当前策略状态“${this.lifecycleLabel(item.lifecycle_status)}”不能运行回测。`);
+    }
+    this.setSourceRunnerStatus("校验当前版本", "loading");
+    this.showSourceRunnerNotice("正在校验当前源码并取得回测资格…");
+    const promoted = await this.promoteLifecycle(item, "validated");
+    this.activeItem = promoted.item;
+    return promoted.item;
+  }
+
   async runSourceBacktest() {
     if (!this.isSourceWorkbench() || this.sourceBacktestRunning) return;
     this.switchSourceWorkbenchTab("backtest");
     if (this.sourceWorkbenchDirty || this.editorMode === "create" || !this.activeItem?.public_id) {
       const saved = await this.persistSourceWorkbench();
       if (!saved) return;
+    }
+    try {
+      await this.ensureSourceBacktestEligibility();
+    } catch (error) {
+      this.setSourceRunnerStatus("校验失败", "error");
+      this.showSourceRunnerNotice(`回测准备失败：${this.localizedErrorMessage(error, "当前策略未通过源码校验")}`, "error");
+      return;
     }
     if (!this.sourceBacktestCatalog) await this.loadSourceBacktestCatalog(true);
     const payload = this.sourceBacktestPayload();
