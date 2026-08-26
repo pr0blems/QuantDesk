@@ -13,13 +13,14 @@ from datetime import time as datetime_time
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response, StreamingResponse
+from starlette.websockets import WebSocketDisconnect
 
 from ... import ai_monitor, historical_replay, live_engine, macro_ai, news_ai, ws_depth
 from ...ai_model_config import global_ai_model_configured
@@ -81,6 +82,8 @@ router = APIRouter(prefix="/ai-monitor")
 _STREAM_POLL_SECONDS = 2.0
 _STREAM_HEARTBEAT_SECONDS = 15.0
 _STREAM_RETRY_MILLISECONDS = 3000
+_WS_PROTOCOL = "quantdesk.ai-monitor.v1"
+_WS_AUTH_PROTOCOL_PREFIX = "quantdesk.auth."
 _AI_MONITOR_LIVE_SCOPE = "ai_monitor"
 _AI_MONITOR_LIVE_ACCOUNT_NAME = "AI发现机会独立跟单"
 _AI_MONITOR_LIVE_ADAPTER_NAME = "__AI Monitor Live Execution Adapter__"
@@ -502,24 +505,34 @@ def _get_stream_user_id(
     before the stream starts and prevents a long-lived database transaction.
     """
 
-    unauthorized = HTTPException(
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise _stream_unauthorized()
+    return _authenticate_stream_token(request.app, credentials.credentials)
+
+
+def _stream_unauthorized() -> HTTPException:
+    return HTTPException(
         status_code=401,
         detail="invalid or expired credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise unauthorized
+
+
+def _authenticate_stream_token(app: Any, token: str) -> int:
+    """Validate a short-lived access token without retaining a DB session."""
+
+    unauthorized = _stream_unauthorized()
     try:
         claims = decode_access_token(
-            credentials.credentials,
-            request.app.state.settings.jwt_secret.get_secret_value(),
+            token,
+            app.state.settings.jwt_secret.get_secret_value(),
         )
         user_id = int(claims["sub"])
         session_id = str(claims["sid"])
     except (SecurityError, TypeError, ValueError):
         raise unauthorized from None
 
-    with Session(request.app.state.database_engine) as db:
+    with Session(app.state.database_engine) as db:
         authenticated_session = db.scalar(
             select(UserSession.id).where(
                 UserSession.id == session_id,
@@ -536,6 +549,16 @@ def _get_stream_user_id(
         if not is_active:
             raise unauthorized
     return user_id
+
+
+def _websocket_access_token(websocket: WebSocket) -> str | None:
+    protocols = websocket.scope.get("subprotocols") or []
+    for protocol in protocols:
+        value = str(protocol)
+        if value.startswith(_WS_AUTH_PROTOCOL_PREFIX):
+            token = value.removeprefix(_WS_AUTH_PROTOCOL_PREFIX).strip()
+            return token or None
+    return None
 
 
 def _revision_value(value: Any) -> str | int | None:
@@ -2187,6 +2210,86 @@ def overview(
         "latest_run": _run_out(latest_run) if latest_run is not None else None,
         "updated_at": _utc_out(now),
     }
+
+
+@router.websocket("/ws")
+async def ai_monitor_websocket(websocket: WebSocket) -> None:
+    """Prefer a tenant-scoped WebSocket channel for incremental UI refreshes."""
+
+    token = _websocket_access_token(websocket)
+    if token is None:
+        await websocket.close(code=4401, reason="missing credentials")
+        return
+    try:
+        user_id = await run_in_threadpool(
+            _authenticate_stream_token,
+            websocket.app,
+            token,
+        )
+    except HTTPException:
+        await websocket.close(code=4401, reason="invalid or expired credentials")
+        return
+
+    await websocket.accept(subprotocol=_WS_PROTOCOL)
+    previous: dict[str, dict[str, Any]] | None = None
+    current_event_id = "unavailable"
+    heartbeat_at = asyncio.get_running_loop().time()
+    try:
+        while True:
+            try:
+                revisions = await run_in_threadpool(
+                    _read_ai_monitor_revisions,
+                    websocket.app.state.database_engine,
+                    user_id,
+                )
+                next_event_id = _revision_event_id(revisions)
+                if previous is None:
+                    await websocket.send_json(
+                        {
+                            "event": "ready",
+                            "id": next_event_id,
+                            "data": {"scopes": list(revisions), "revisions": revisions},
+                        }
+                    )
+                else:
+                    scopes = _changed_revision_scopes(previous, revisions)
+                    if scopes:
+                        await websocket.send_json(
+                            {
+                                "event": "update",
+                                "id": next_event_id,
+                                "data": {
+                                    "scopes": scopes,
+                                    "revisions": {
+                                        scope: revisions[scope] for scope in scopes
+                                    },
+                                },
+                            }
+                        )
+                previous = revisions
+                current_event_id = next_event_id
+            except SQLAlchemyError:
+                await websocket.send_json(
+                    {
+                        "event": "degraded",
+                        "id": current_event_id,
+                        "data": {"code": "REVISION_CHECK_FAILED", "scopes": []},
+                    }
+                )
+
+            now = asyncio.get_running_loop().time()
+            if now - heartbeat_at >= _STREAM_HEARTBEAT_SECONDS:
+                await websocket.send_json(
+                    {
+                        "event": "heartbeat",
+                        "id": current_event_id,
+                        "data": {"generated_at": datetime.now(UTC).isoformat()},
+                    }
+                )
+                heartbeat_at = now
+            await asyncio.sleep(_STREAM_POLL_SECONDS)
+    except (WebSocketDisconnect, RuntimeError):
+        return
 
 
 @router.get("/events")

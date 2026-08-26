@@ -126,6 +126,22 @@ export interface ApiRequestOptions extends RequestInit {
 
 export type ApiStreamOptions = ApiRequestOptions;
 
+export async function openAiMonitorWebSocket(): Promise<WebSocket> {
+  if (!accessToken) {
+    const restored = await refreshAccessToken();
+    if (!restored) {
+      loseAuthentication();
+      throw new ApiError("登录状态已失效，请重新登录", 401);
+    }
+  }
+  const endpoint = new URL(`${apiRoot}/ai-monitor/ws`, window.location.origin);
+  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
+  return new WebSocket(endpoint, [
+    "quantdesk.ai-monitor.v1",
+    `quantdesk.auth.${accessToken}`,
+  ]);
+}
+
 export async function apiRequest<T>(
   path: `/${string}`,
   options: ApiRequestOptions = {},

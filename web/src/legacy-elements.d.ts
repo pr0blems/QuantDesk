@@ -4,6 +4,7 @@ declare global {
   interface Window {
     quantdeskApi: (path: string, options?: ApiRequestOptions) => Promise<unknown>;
     quantdeskApiStream: (path: string, options?: ApiStreamOptions) => Promise<Response>;
+    quantdeskOpenAiMonitorSocket: () => Promise<WebSocket>;
   }
 
   namespace JSX {

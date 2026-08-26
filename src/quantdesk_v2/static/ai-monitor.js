@@ -82,6 +82,7 @@ class AiMonitorDashboard extends HTMLElement {
       lastRefreshError: "",
       incrementalUpdateCount: 0,
       updateStreamStatus: "idle",
+      updateStreamTransport: "",
       newsRenderSignature: "",
       running: false,
       busyRun: "",
@@ -123,6 +124,7 @@ class AiMonitorDashboard extends HTMLElement {
     this.newsScrollAnimationFrame = null;
     this.newsScrollLastTick = 0;
     this.updateStreamAbort = null;
+    this.updateSocket = null;
     this.updateStreamConnectTimer = null;
     this.updateStreamRetryTimer = null;
     this.updateStreamRefreshTimer = null;
@@ -718,6 +720,8 @@ class AiMonitorDashboard extends HTMLElement {
     this.updateStreamRefreshTimer = null;
     this.updateStreamAbort?.abort();
     this.updateStreamAbort = null;
+    this.updateSocket?.close(1000, "page paused");
+    this.updateSocket = null;
     this.predictionAnalyticsAbortController?.abort();
     this.predictionAnalyticsAbortController = null;
     this.opportunitiesAbortController?.abort();
@@ -752,7 +756,7 @@ class AiMonitorDashboard extends HTMLElement {
       this.renderSignalHealth();
       controller.abort();
     }, 8000);
-    this.consumeUpdateStream(controller).catch(() => {}).finally(() => {
+    this.consumePreferredUpdateStream(controller).catch(() => {}).finally(() => {
       window.clearTimeout(this.updateStreamConnectTimer);
       this.updateStreamConnectTimer = null;
       if (this.updateStreamAbort === controller) this.updateStreamAbort = null;
@@ -763,6 +767,62 @@ class AiMonitorDashboard extends HTMLElement {
     });
   }
 
+  async consumePreferredUpdateStream(controller) {
+    if (typeof window.quantdeskOpenAiMonitorSocket === "function") {
+      try {
+        await this.consumeUpdateWebSocket(controller);
+        return;
+      } catch (_) {
+        if (controller.signal.aborted) throw _;
+      }
+    }
+    await this.consumeUpdateStream(controller);
+  }
+
+  async consumeUpdateWebSocket(controller) {
+    const socket = await window.quantdeskOpenAiMonitorSocket();
+    if (controller.signal.aborted) {
+      socket.close(1000, "connection cancelled");
+      throw new Error("WebSocket connection was cancelled");
+    }
+    this.updateSocket = socket;
+    try {
+      await new Promise((resolve, reject) => {
+        let opened = false;
+        const abort = () => {
+          socket.close(1000, "connection cancelled");
+          reject(new Error("WebSocket connection was cancelled"));
+        };
+        controller.signal.addEventListener("abort", abort, { once: true });
+        socket.addEventListener("open", () => {
+          opened = true;
+          window.clearTimeout(this.updateStreamConnectTimer);
+          this.updateStreamConnectTimer = null;
+          this.state.updateStreamStatus = "connected";
+          this.state.updateStreamTransport = "websocket";
+          this.renderSignalHealth();
+        });
+        socket.addEventListener("message", (event) => {
+          try {
+            const message = JSON.parse(String(event.data || "{}"));
+            this.handleUpdateStreamPayload(message.event, message.id, message.data);
+          } catch (_) {
+            // Ignore one malformed message and keep the authenticated socket alive.
+          }
+        });
+        socket.addEventListener("error", () => reject(new Error("WebSocket transport failed")), { once: true });
+        socket.addEventListener("close", () => {
+          controller.signal.removeEventListener("abort", abort);
+          if (controller.signal.aborted) resolve();
+          else reject(new Error(opened ? "WebSocket transport closed" : "WebSocket handshake failed"));
+        }, { once: true });
+      });
+    } finally {
+      if (socket.readyState < 2) socket.close(1011, "switching transport");
+      if (this.updateSocket === socket) this.updateSocket = null;
+    }
+  }
+
   async consumeUpdateStream(controller) {
     const headers = new Headers();
     if (this.lastUpdateStreamEventId) headers.set("Last-Event-ID", this.lastUpdateStreamEventId);
@@ -771,6 +831,7 @@ class AiMonitorDashboard extends HTMLElement {
     window.clearTimeout(this.updateStreamConnectTimer);
     this.updateStreamConnectTimer = null;
     this.state.updateStreamStatus = "connected";
+    this.state.updateStreamTransport = "sse";
     this.renderSignalHealth();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -800,15 +861,20 @@ class AiMonitorDashboard extends HTMLElement {
       if (field === "id") parsed.id = value;
       if (field === "data") parsed.data.push(value);
     });
-    if (parsed.id) this.lastUpdateStreamEventId = parsed.id;
-    if (!parsed.data.length || !["ready", "update"].includes(parsed.event)) return;
+    if (!parsed.data.length) return;
     try {
       const payload = JSON.parse(parsed.data.join("\n"));
-      const scopes = Array.isArray(payload.scopes) ? payload.scopes : [];
-      this.queueStreamRefresh(scopes);
+      this.handleUpdateStreamPayload(parsed.event, parsed.id, payload);
     } catch (_) {
       // Ignore one malformed event and keep the authenticated stream alive.
     }
+  }
+
+  handleUpdateStreamPayload(event, id, payload) {
+    if (id) this.lastUpdateStreamEventId = String(id);
+    if (!["ready", "update"].includes(String(event || ""))) return;
+    const scopes = Array.isArray(payload?.scopes) ? payload.scopes : [];
+    this.queueStreamRefresh(scopes);
   }
 
   queueStreamRefresh(scopes) {
@@ -1794,6 +1860,7 @@ class AiMonitorDashboard extends HTMLElement {
     const overview = this.state.overview || {};
     const health = overview.data_health || overview.market_data_health || overview.realtime_health || overview.streaming || {};
     const incrementalStreamConnected = this.state.updateStreamStatus === "connected";
+    const incrementalWsConnected = incrementalStreamConnected && this.state.updateStreamTransport === "websocket";
     const transportUpdatedAt = this.state.lastSuccessfulRefreshAt;
     const quoteHealth = health.quote || health.quotes || {};
     const quoteAgeMs = Number(this.firstValue(quoteHealth.age_ms, quoteHealth.quote_age_ms, health.quote_age_ms));
@@ -1830,8 +1897,10 @@ class AiMonitorDashboard extends HTMLElement {
       : "danger";
     const pipelineLabel = this.state.lastRefreshError
       ? "更新异常"
+      : incrementalWsConnected
+      ? "WS 实时"
       : incrementalStreamConnected
-      ? "页面增量推送在线"
+      ? "SSE 实时"
       : pipelineInitializing
       ? "正在连接数据"
       : pipelineReconnecting
