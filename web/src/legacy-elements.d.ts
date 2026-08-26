@@ -5,6 +5,7 @@ declare global {
     quantdeskApi: (path: string, options?: ApiRequestOptions) => Promise<unknown>;
     quantdeskApiStream: (path: string, options?: ApiStreamOptions) => Promise<Response>;
     quantdeskOpenAiMonitorSocket: () => Promise<WebSocket>;
+    quantdeskOpenMonitorMarketSocket: (symbol: string) => Promise<WebSocket>;
   }
 
   namespace JSX {

@@ -12,7 +12,19 @@ class ContractMonitor extends HTMLElement {
       watchlist: new Set(),
       lastAlertId: 0,
       spreadAlertStates: new Map(),
-      modal: { symbol: null, tf: "1h", opportunity: null, indicators: [], selectedIndicator: null, predictionContext: null, overviewError: null },
+      modal: {
+        symbol: null,
+        tf: "1h",
+        opportunity: null,
+        indicators: [],
+        selectedIndicator: null,
+        predictionContext: null,
+        overviewError: null,
+        marketTransport: "idle",
+        marketUpdatedAt: 0,
+        tickerTransport: null,
+        depthTransport: null,
+      },
       chart: {
         klines: [],
         realCount: 0,
@@ -53,6 +65,13 @@ class ContractMonitor extends HTMLElement {
     this.audioContext = null;
     this.chartResizeObserver = null;
     this.chartGeometry = null;
+    this.modalMarketSocket = null;
+    this.modalMarketGeneration = 0;
+    this.modalMarketLastEventAt = 0;
+    this.modalMarketFallbackTimer = null;
+    this.modalMarketRestTimer = null;
+    this.modalMarketReconnectTimer = null;
+    this.modalMarketWatchdogTimer = null;
     this.renderShell();
   }
 
@@ -492,6 +511,7 @@ class ContractMonitor extends HTMLElement {
     this.timers.forEach((timer) => clearInterval(timer));
     this.timers = [];
     this.stopNewsAutoScroll();
+    this.stopModalMarketStream();
   }
 
   async refreshAll() {
@@ -1445,8 +1465,10 @@ class ContractMonitor extends HTMLElement {
 
   async openModal(symbol) {
     this.state.modal.predictionContext = null;
+    this.state.modal.opportunity = null;
     this.state.modal.overviewError = null;
     this.revealModal(symbol);
+    this.startModalMarketStream(symbol);
     await this.refreshModal();
   }
 
@@ -1455,7 +1477,12 @@ class ContractMonitor extends HTMLElement {
     if (!normalizedSymbol) return;
     this.state.modal.tf = ["15m", "1h", "4h"].includes(timeframe) ? timeframe : "1h";
     this.state.modal.predictionContext = this.normalizePredictionContext(predictionContext);
+    this.state.modal.opportunity = null;
     this.state.modal.overviewError = null;
+    this.state.modal.marketTransport = "snapshot";
+    this.state.modal.marketUpdatedAt = Date.now();
+    this.state.modal.tickerTransport = null;
+    this.state.modal.depthTransport = null;
     const fallbackOverview = {
       ...this.state.modal.predictionContext?.marketOverview,
       symbol: normalizedSymbol,
@@ -1472,22 +1499,12 @@ class ContractMonitor extends HTMLElement {
     this.q("#modal-pct").textContent = this.formatPercent(fallbackOverview.pct_24h);
     this.renderModalSummary(fallbackOverview);
     this.q("#modal-ohlc").innerHTML = "<span>正在读取合约行情与 K 线…</span>";
-    try {
-      const encoded = encodeURIComponent(normalizedSymbol);
-      const [overview, watchlist] = await Promise.all([
-        this.api(`/overview?symbol=${encoded}`),
-        this.api("/watchlist").catch(() => []),
-      ]);
-      const overviewItems = Array.isArray(overview.items) ? overview.items : [];
-      this.state.overview = overviewItems.length ? overviewItems : [fallbackOverview];
+    this.startModalMarketStream(normalizedSymbol);
+    const watchlistPromise = this.api("/watchlist").then((watchlist) => {
       this.state.watchlist = new Set(Array.isArray(watchlist) ? watchlist : []);
       this.state.overview.forEach((item) => { item.watch = this.state.watchlist.has(item.symbol); });
-    } catch (error) {
-      fallbackOverview.watch = false;
-      this.state.overview = [fallbackOverview];
-      this.state.modal.overviewError = error?.message || "实时快照读取失败";
-    }
-    await this.refreshModal();
+    }).catch(() => {});
+    await Promise.allSettled([this.refreshModal(), watchlistPromise]);
   }
 
   normalizePredictionContext(context) {
@@ -1531,11 +1548,219 @@ class ContractMonitor extends HTMLElement {
     }
   }
 
+  stopModalMarketStream() {
+    this.modalMarketGeneration += 1;
+    [
+      "modalMarketFallbackTimer",
+      "modalMarketRestTimer",
+      "modalMarketReconnectTimer",
+      "modalMarketWatchdogTimer",
+    ].forEach((key) => {
+      if (this[key] != null) window.clearTimeout(this[key]);
+      this[key] = null;
+    });
+    const socket = this.modalMarketSocket;
+    this.modalMarketSocket = null;
+    if (socket && socket.readyState < 2) {
+      try { socket.close(1000, "research modal closed"); } catch (_) {}
+    }
+    this.modalMarketLastEventAt = 0;
+  }
+
+  startModalMarketStream(symbol) {
+    const normalized = String(symbol || "").trim().toUpperCase();
+    if (!normalized) return;
+    this.stopModalMarketStream();
+    const generation = this.modalMarketGeneration;
+    this.state.modal.marketTransport = "connecting";
+    this.state.modal.marketUpdatedAt = Date.now();
+    this.modalMarketLastEventAt = Date.now();
+    this.renderCurrentModalMarketSummary();
+
+    this.modalMarketFallbackTimer = window.setTimeout(() => {
+      this.activateModalRestFallback(normalized, generation);
+    }, 2500);
+    this.modalMarketWatchdogTimer = window.setInterval(() => {
+      if (generation !== this.modalMarketGeneration) return;
+      if (Date.now() - this.modalMarketLastEventAt <= 8000) return;
+      const socket = this.modalMarketSocket;
+      if (socket && socket.readyState < 2) {
+        try { socket.close(4000, "market stream stale"); } catch (_) {}
+      } else {
+        this.activateModalRestFallback(normalized, generation);
+      }
+    }, 1000);
+    this.connectModalMarketStream(normalized, generation);
+  }
+
+  async connectModalMarketStream(symbol, generation) {
+    if (generation !== this.modalMarketGeneration) return;
+    if (typeof window.quantdeskOpenMonitorMarketSocket !== "function") {
+      this.activateModalRestFallback(symbol, generation);
+      return;
+    }
+    try {
+      const socket = await window.quantdeskOpenMonitorMarketSocket(symbol);
+      if (generation !== this.modalMarketGeneration) {
+        socket.close(1000, "stale research request");
+        return;
+      }
+      this.modalMarketSocket = socket;
+      socket.addEventListener("open", () => {
+        if (generation !== this.modalMarketGeneration) return;
+        this.modalMarketLastEventAt = Date.now();
+        this.state.modal.marketTransport = "connecting";
+        this.renderCurrentModalMarketSummary();
+      });
+      socket.addEventListener("message", (event) => {
+        if (generation !== this.modalMarketGeneration) return;
+        let message;
+        try { message = JSON.parse(event.data); } catch (_) { return; }
+        this.modalMarketLastEventAt = Date.now();
+        if (message?.event === "heartbeat") return;
+        if (message?.event === "degraded") {
+          this.activateModalRestFallback(symbol, generation);
+          return;
+        }
+        if (message?.event !== "market" || !message.data) return;
+        const transport = String(message.data.transport || "server_cache");
+        this.state.modal.marketTransport = transport === "websocket"
+          ? "websocket"
+          : transport === "rest_fallback"
+          ? "ws_rest_fallback"
+          : "ws_cache";
+        this.state.modal.tickerTransport = message.data.ticker_transport || null;
+        this.state.modal.depthTransport = message.data.depth_transport || null;
+        this.state.modal.marketUpdatedAt = Number(message.data.server_sent_at_ms) || Date.now();
+        this.state.modal.overviewError = null;
+        if (this.modalMarketFallbackTimer != null) {
+          window.clearTimeout(this.modalMarketFallbackTimer);
+          this.modalMarketFallbackTimer = null;
+        }
+        if (this.modalMarketRestTimer != null) {
+          window.clearInterval(this.modalMarketRestTimer);
+          this.modalMarketRestTimer = null;
+        }
+        this.applyModalMarketSnapshot(message.data);
+      });
+      socket.addEventListener("close", () => {
+        if (generation !== this.modalMarketGeneration) return;
+        if (this.modalMarketSocket === socket) this.modalMarketSocket = null;
+        this.activateModalRestFallback(symbol, generation);
+        if (this.modalMarketReconnectTimer == null) {
+          this.modalMarketReconnectTimer = window.setTimeout(() => {
+            this.modalMarketReconnectTimer = null;
+            if (generation === this.modalMarketGeneration) {
+              this.state.modal.marketTransport = "reconnecting";
+              this.renderCurrentModalMarketSummary();
+              this.connectModalMarketStream(symbol, generation);
+            }
+          }, 2500);
+        }
+      });
+      socket.addEventListener("error", () => {
+        if (generation === this.modalMarketGeneration) {
+          this.activateModalRestFallback(symbol, generation);
+        }
+      });
+    } catch (error) {
+      if (generation !== this.modalMarketGeneration) return;
+      this.state.modal.overviewError = error?.message || "WS 实时行情连接失败";
+      this.activateModalRestFallback(symbol, generation);
+      if (this.modalMarketReconnectTimer == null) {
+        this.modalMarketReconnectTimer = window.setTimeout(() => {
+          this.modalMarketReconnectTimer = null;
+          this.connectModalMarketStream(symbol, generation);
+        }, 2500);
+      }
+    }
+  }
+
+  activateModalRestFallback(symbol, generation) {
+    if (generation !== this.modalMarketGeneration) return;
+    if (this.modalMarketFallbackTimer != null) {
+      window.clearTimeout(this.modalMarketFallbackTimer);
+      this.modalMarketFallbackTimer = null;
+    }
+    const wsFresh = ["websocket", "ws_rest_fallback", "ws_cache"].includes(this.state.modal.marketTransport)
+      && Date.now() - this.modalMarketLastEventAt <= 8000;
+    if (wsFresh) return;
+    this.state.modal.marketTransport = "rest";
+    this.renderCurrentModalMarketSummary();
+    this.refreshModalOverviewFallback(symbol, generation);
+    if (this.modalMarketRestTimer == null) {
+      this.modalMarketRestTimer = window.setInterval(() => {
+        this.refreshModalOverviewFallback(symbol, generation);
+      }, 5000);
+    }
+  }
+
+  async refreshModalOverviewFallback(symbol, generation) {
+    if (generation !== this.modalMarketGeneration) return;
+    try {
+      const encoded = encodeURIComponent(symbol);
+      const overview = await this.api(`/overview?symbol=${encoded}`);
+      if (generation !== this.modalMarketGeneration) return;
+      const item = Array.isArray(overview.items) ? overview.items[0] : null;
+      if (!item) return;
+      item.watch = this.state.watchlist.has(item.symbol);
+      this.state.modal.overviewError = null;
+      this.state.modal.marketUpdatedAt = Date.now();
+      this.applyModalMarketSnapshot(item);
+    } catch (error) {
+      if (generation !== this.modalMarketGeneration) return;
+      this.state.modal.overviewError = `实时总览暂不可用，当前显示机会快照${error?.message ? `：${error.message}` : ""}`;
+      this.renderCurrentModalMarketSummary();
+    }
+  }
+
+  applyModalMarketSnapshot(snapshot) {
+    const symbol = String(snapshot?.symbol || "").trim().toUpperCase();
+    if (!symbol || symbol !== this.state.modal.symbol) return;
+    const current = this.state.overview.find((item) => item.symbol === symbol) || { symbol };
+    const merged = { ...current };
+    [
+      "price",
+      "pct_24h",
+      "quote_volume",
+      "bid_depth_notional",
+      "ask_depth_notional",
+      "book_imbalance",
+      "best_bid",
+      "best_ask",
+      "spread_bps",
+      "depth_levels",
+    ].forEach((key) => {
+      if (snapshot[key] !== null && snapshot[key] !== undefined) merged[key] = snapshot[key];
+    });
+    if (snapshot.battle && typeof snapshot.battle === "object") merged.battle = snapshot.battle;
+    if (snapshot.opportunity && typeof snapshot.opportunity === "object") merged.opportunity = snapshot.opportunity;
+    merged.watch = this.state.watchlist.has(symbol) || Boolean(current.watch);
+    const index = this.state.overview.findIndex((item) => item.symbol === symbol);
+    if (index >= 0) this.state.overview.splice(index, 1, merged);
+    else this.state.overview = [merged, ...this.state.overview];
+
+    if (this.q("#modal").classList.contains("hidden")) return;
+    this.q("#modal-price").textContent = this.formatPrice(merged.price);
+    this.q("#modal-pct").textContent = this.formatPercent(merged.pct_24h);
+    this.q("#modal-pct").className = `research-change ${merged.pct_24h > 0 ? "up" : merged.pct_24h < 0 ? "down" : "flat"}`;
+    this.renderModalSummary(merged, [], null, this.state.modal.opportunity);
+  }
+
+  renderCurrentModalMarketSummary() {
+    const symbol = this.state.modal.symbol;
+    if (!symbol || this.q("#modal").classList.contains("hidden")) return;
+    const overview = this.state.overview.find((item) => item.symbol === symbol) || { symbol };
+    this.renderModalSummary(overview, [], null, this.state.modal.opportunity);
+  }
+
   closeModal() {
     const modal = this.q("#modal");
     this.q("#modal-close").blur();
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
+    this.stopModalMarketStream();
+    this.state.modal.marketTransport = "idle";
   }
 
   async openPredictionHistory() {
@@ -2264,15 +2489,15 @@ class ContractMonitor extends HTMLElement {
     const symbol = this.state.modal.symbol;
     const timeframe = this.state.modal.tf;
     if (!symbol) return;
-    const overview = this.state.overview.find((item) => item.symbol === symbol) || {};
+    const initialOverview = this.state.overview.find((item) => item.symbol === symbol) || {};
     this.q("#modal-symbol").textContent = symbol;
-    this.q("#modal-price").textContent = this.formatPrice(overview.price);
-    this.q("#modal-pct").textContent = this.formatPercent(overview.pct_24h);
-    this.q("#modal-pct").className = `research-change ${overview.pct_24h > 0 ? "up" : overview.pct_24h < 0 ? "down" : "flat"}`;
-    this.q("#modal-watch").textContent = overview.watch ? "★" : "☆";
-    this.q("#modal-watch").classList.toggle("on", Boolean(overview.watch));
+    this.q("#modal-price").textContent = this.formatPrice(initialOverview.price);
+    this.q("#modal-pct").textContent = this.formatPercent(initialOverview.pct_24h);
+    this.q("#modal-pct").className = `research-change ${initialOverview.pct_24h > 0 ? "up" : initialOverview.pct_24h < 0 ? "down" : "flat"}`;
+    this.q("#modal-watch").textContent = initialOverview.watch ? "★" : "☆";
+    this.q("#modal-watch").classList.toggle("on", Boolean(initialOverview.watch));
     this.qa(".tf-switch button").forEach((button) => button.classList.toggle("on", button.dataset.tf === timeframe));
-    this.renderModalSummary(overview);
+    this.renderModalSummary(initialOverview);
     this.q("#modal-ohlc").innerHTML = "<span>正在加载当前周期行情…</span>";
     this.q("#indicator-total-caption").textContent = "共 20 项 · 正在读取真实数据";
     this.q("#strategy-indicator-caption").textContent = `最新一根 K 线：${timeframe} · 正在计算 12 项`;
@@ -2298,6 +2523,7 @@ class ContractMonitor extends HTMLElement {
       ]);
       const opportunityItems = Array.isArray(opportunities.items) ? opportunities.items : [];
       this.state.modal.opportunity = opportunityItems[0] || null;
+      const overview = this.state.overview.find((item) => item.symbol === symbol) || initialOverview;
       this.renderStrategyIndicators(indicatorScan);
       this.renderModalSummary(overview, klines, report, this.state.modal.opportunity);
       this.setChartData(klines);
@@ -2390,7 +2616,26 @@ class ContractMonitor extends HTMLElement {
     const underlying = String(overview.underlying || overview.annotation || "");
     const equityMapped = /stock|equity|tradfi/i.test(underlying);
     this.q("#modal-market").textContent = equityMapped ? "美股映射合约" : "永续合约";
-    this.q("#modal-source").textContent = `数据源：Binance Futures · ${equityMapped ? "美股映射 USDT 合约" : "USDT 永续合约"} · 量化结果仅供研究${this.state.modal.overviewError ? " · 实时总览暂不可用，当前显示机会快照" : ""}`;
+    const transport = this.state.modal.marketTransport || "idle";
+    const transportLabels = {
+      websocket: "WS 实时（自动更新）",
+      ws_rest_fallback: "WS 推送 · 上游 REST 备选",
+      ws_cache: "WS 推送 · 服务器缓存备选",
+      rest: "REST 备选轮询",
+      snapshot: "机会快照",
+      connecting: "正在连接 WS 实时行情",
+      reconnecting: "WS 重连中 · REST 继续补位",
+      idle: "等待实时行情",
+    };
+    const tickerSource = this.state.modal.tickerTransport === "websocket" ? "价格 WS" : "";
+    const depthTransport = String(this.state.modal.depthTransport || "");
+    const depthSource = depthTransport.startsWith("websocket") ? "盘口 WS" : depthTransport.startsWith("rest") ? "盘口 REST" : "";
+    const sourceParts = [tickerSource, depthSource].filter(Boolean).join(" / ");
+    const updatedAt = Number(this.state.modal.marketUpdatedAt) || 0;
+    const updatedLabel = updatedAt ? new Date(updatedAt).toLocaleTimeString("zh-CN", { hour12: false }) : "--";
+    const sourceElement = this.q("#modal-source");
+    sourceElement.dataset.transport = transport;
+    sourceElement.textContent = `数据源：Binance Futures · ${equityMapped ? "美股映射 USDT 合约" : "USDT 永续合约"} · ${transportLabels[transport] || "行情备选"}${sourceParts ? ` · ${sourceParts}` : ""} · 更新 ${updatedLabel} · 量化结果仅供研究${this.state.modal.overviewError ? ` · ${this.state.modal.overviewError}` : ""}`;
 
     const pct = numeric(overview.pct_24h);
     const pctTone = pct != null ? (pct > 0 ? "up" : pct < 0 ? "down" : "neutral") : "neutral";

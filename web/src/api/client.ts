@@ -142,6 +142,27 @@ export async function openAiMonitorWebSocket(): Promise<WebSocket> {
   ]);
 }
 
+export async function openMonitorMarketWebSocket(symbol: string): Promise<WebSocket> {
+  const normalized = symbol.trim().toUpperCase();
+  if (!/^[A-Z0-9]{2,24}$/.test(normalized)) {
+    throw new ApiError("行情品种代码无效", 422);
+  }
+  if (!accessToken) {
+    const restored = await refreshAccessToken();
+    if (!restored) {
+      loseAuthentication();
+      throw new ApiError("登录状态已失效，请重新登录", 401);
+    }
+  }
+  const endpoint = new URL(`${apiRoot}/ai-monitor/market/ws`, window.location.origin);
+  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
+  endpoint.searchParams.set("symbol", normalized);
+  return new WebSocket(endpoint, [
+    "quantdesk.ai-monitor.v1",
+    `quantdesk.auth.${accessToken}`,
+  ]);
+}
+
 export async function apiRequest<T>(
   path: `/${string}`,
   options: ApiRequestOptions = {},

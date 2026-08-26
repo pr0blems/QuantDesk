@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from sqlalchemy import CheckConstraint, MetaData, Table
 
-from quantdesk_v2 import monitor
+from quantdesk_v2 import monitor, ws_depth
 from quantdesk_v2.monitor import MonitorRepository, MonitorUnavailable
 
 
@@ -178,6 +178,56 @@ def test_monitor_overview_tolerates_missing_microstructure_table_during_rollout(
 
     assert item["book_imbalance"] is None
     assert item["depth_levels"] is None
+
+
+def test_market_snapshot_prefers_websocket_ticker_and_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_800_000_000
+    repository = _repository()
+
+    def query(sql: str, _params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        if "FROM ticker WHERE symbol" in sql:
+            return [{
+                "symbol": "TESTUSDT",
+                "price": Decimal("101.75"),
+                "pct_24h": Decimal("2.5"),
+                "quote_volume": Decimal("7500"),
+                "ts": now - 1,
+            }]
+        if "FROM collector_status" in sql:
+            return [{"details_json": '{"source":"websocket"}'}]
+        return []
+
+    monkeypatch.setattr(repository, "_query", query)
+    monkeypatch.setattr(monitor.time, "time", lambda: float(now))
+    monkeypatch.setattr(
+        ws_depth,
+        "order_book_snapshot",
+        lambda symbol, limit: {
+            "symbol": symbol,
+            "transport": "websocket_shared",
+            "captured_at": now - 1,
+            "limit": limit,
+            "best_bid": 101.7,
+            "best_ask": 101.8,
+            "spread_bps": 9.83,
+            "bid_depth_notional": 1_200_000,
+            "ask_depth_notional": 900_000,
+            "book_imbalance": 0.142857,
+        },
+    )
+
+    snapshot = repository.market_snapshot("testusdt")
+
+    assert snapshot["transport"] == "websocket"
+    assert snapshot["ticker_transport"] == "websocket"
+    assert snapshot["depth_transport"] == "websocket_shared"
+    assert snapshot["price"] == pytest.approx(101.75)
+    assert snapshot["bid_depth_notional"] == pytest.approx(1_200_000)
+    assert snapshot["ask_depth_notional"] == pytest.approx(900_000)
+    assert snapshot["ticker_age_seconds"] == 1
+    assert snapshot["depth_age_seconds"] == 1
 
 
 def test_monitor_intelligence_coverage_uses_fresh_depth_not_ticker(

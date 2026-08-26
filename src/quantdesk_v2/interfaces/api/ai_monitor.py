@@ -81,6 +81,8 @@ router = APIRouter(prefix="/ai-monitor")
 
 _STREAM_POLL_SECONDS = 2.0
 _STREAM_HEARTBEAT_SECONDS = 15.0
+_MARKET_STREAM_POLL_SECONDS = 0.5
+_MARKET_STREAM_HEARTBEAT_SECONDS = 5.0
 _STREAM_RETRY_MILLISECONDS = 3000
 _WS_PROTOCOL = "quantdesk.ai-monitor.v1"
 _WS_AUTH_PROTOCOL_PREFIX = "quantdesk.auth."
@@ -2210,6 +2212,86 @@ def overview(
         "latest_run": _run_out(latest_run) if latest_run is not None else None,
         "updated_at": _utc_out(now),
     }
+
+
+@router.websocket("/market/ws")
+async def ai_monitor_market_websocket(websocket: WebSocket) -> None:
+    """Push one contract's live Binance snapshot to the research modal.
+
+    The upstream market worker remains the single owner of the Binance streams.
+    Browsers receive the resulting quote/depth changes through this authenticated
+    socket, while the repository preserves the upstream WS -> REST-cache order.
+    """
+
+    token = _websocket_access_token(websocket)
+    if token is None:
+        await websocket.close(code=4401, reason="missing credentials")
+        return
+    try:
+        await run_in_threadpool(_authenticate_stream_token, websocket.app, token)
+    except HTTPException:
+        await websocket.close(code=4401, reason="invalid or expired credentials")
+        return
+
+    symbol = str(websocket.query_params.get("symbol") or "").strip().upper()
+    try:
+        repository = MonitorRepository(
+            websocket.app.state.database_engine,
+            websocket.app.state.settings.monitor_symbols_config,
+        )
+        if symbol not in repository.symbol_set:
+            raise MonitorUnavailable("unknown contract monitor symbol")
+    except MonitorUnavailable:
+        await websocket.close(code=4404, reason="unknown monitor symbol")
+        return
+
+    await websocket.accept(subprotocol=_WS_PROTOCOL)
+    previous_signature: str | None = None
+    heartbeat_at = asyncio.get_running_loop().time()
+    try:
+        while True:
+            try:
+                snapshot = await run_in_threadpool(repository.market_snapshot, symbol)
+                signature = json.dumps(
+                    snapshot,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if signature != previous_signature:
+                    await websocket.send_json(
+                        {
+                            "event": "market",
+                            "data": {
+                                **snapshot,
+                                "server_sent_at_ms": int(time.time() * 1_000),
+                            },
+                        }
+                    )
+                    previous_signature = signature
+            except MonitorUnavailable as exc:
+                await websocket.send_json(
+                    {
+                        "event": "degraded",
+                        "data": {"code": "MARKET_SNAPSHOT_UNAVAILABLE", "message": str(exc)},
+                    }
+                )
+
+            now = asyncio.get_running_loop().time()
+            if now - heartbeat_at >= _MARKET_STREAM_HEARTBEAT_SECONDS:
+                await websocket.send_json(
+                    {
+                        "event": "heartbeat",
+                        "data": {
+                            "symbol": symbol,
+                            "server_sent_at_ms": int(time.time() * 1_000),
+                        },
+                    }
+                )
+                heartbeat_at = now
+            await asyncio.sleep(_MARKET_STREAM_POLL_SECONDS)
+    except (WebSocketDisconnect, RuntimeError):
+        return
 
 
 @router.websocket("/ws")

@@ -60,3 +60,30 @@ def test_ai_monitor_incremental_stream_never_places_token_in_query_string() -> N
     assert "/events?token=" not in component
     assert "/ai-monitor/ws?" not in client
     assert "/ai-monitor/ws?" not in legacy_client
+
+
+def test_research_modal_prefers_live_market_websocket_before_rest_fallback() -> None:
+    component = (ROOT / "src/quantdesk_v2/static/monitor.js").read_text(
+        encoding="utf-8"
+    )
+    client = (ROOT / "web/src/api/client.ts").read_text(encoding="utf-8")
+    legacy_client = (ROOT / "src/quantdesk_v2/static/app.js").read_text(
+        encoding="utf-8"
+    )
+    endpoint = (
+        ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+
+    assert "window.quantdeskOpenMonitorMarketSocket" in component
+    assert "this.startModalMarketStream(normalizedSymbol)" in component
+    assert "this.applyModalMarketSnapshot(message.data)" in component
+    assert "this.activateModalRestFallback(normalized, generation)" in component
+    assert "}, 2500);" in component
+    assert "}, 5000);" in component
+    assert 'websocket: "WS 实时（自动更新）"' in component
+    assert 'rest: "REST 备选轮询"' in component
+    assert "openMonitorMarketWebSocket" in client
+    assert 'endpoint.searchParams.set("symbol", normalized)' in client
+    assert 'new URL("/api/v2/ai-monitor/market/ws", window.location.origin)' in legacy_client
+    assert '@router.websocket("/market/ws")' in endpoint
+    assert "repository.market_snapshot" in endpoint

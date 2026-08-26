@@ -1,6 +1,11 @@
 import { createRoot } from "react-dom/client";
 
-import { apiRequest, apiStream, openAiMonitorWebSocket } from "./api/client";
+import {
+  apiRequest,
+  apiStream,
+  openAiMonitorWebSocket,
+  openMonitorMarketWebSocket,
+} from "./api/client";
 import { App } from "./App";
 import "./styles.css";
 
@@ -21,9 +26,10 @@ window.quantdeskApiStream = (path, options = {}) => {
 };
 
 window.quantdeskOpenAiMonitorSocket = openAiMonitorWebSocket;
+window.quantdeskOpenMonitorMarketSocket = openMonitorMarketWebSocket;
 
 for (const source of [
-  "/assets/monitor.js?v=20260826-overview-fast1",
+  "/assets/monitor.js?v=20260826-research-ws1",
   "/assets/ai-monitor.js?v=20260826-detail-fallback1",
   "/assets/paper.js?v=20260809-paper-combo-1",
   "/assets/live.js?v=20260809-font1_6x-1",

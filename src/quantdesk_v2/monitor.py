@@ -1145,6 +1145,99 @@ class MonitorRepository:
             if str(row.get("symbol") or "").upper() in requested
         }
 
+    def market_snapshot(self, symbol: str) -> dict[str, Any]:
+        """Return one lightweight market snapshot for the browser WebSocket.
+
+        The market worker writes Binance mini-ticker updates from its upstream
+        WebSocket into ``ticker`` and publishes the synchronized depth book via
+        shared storage.  This read path therefore stays bounded to one symbol,
+        prefers the shared WebSocket book, and only lets ``ws_depth`` use its
+        rate-limited REST cache when the live book is unavailable.
+        """
+
+        from . import ws_depth
+
+        normalized = self._validate_symbol(symbol)
+        ticker_rows = self._query(
+            "SELECT symbol,price,pct_24h,quote_volume,ts FROM ticker WHERE symbol=?",
+            (normalized,),
+        )
+        ticker = ticker_rows[0] if ticker_rows else {}
+        try:
+            collector_rows = self._query(
+                "SELECT details_json,last_success_at,heartbeat_at "
+                "FROM collector_status WHERE name='ticker' LIMIT 1"
+            )
+        except MonitorUnavailable:
+            collector_rows = []
+        collector = collector_rows[0] if collector_rows else {}
+        try:
+            collector_details = json.loads(collector.get("details_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            collector_details = {}
+        ticker_transport = str(collector_details.get("source") or "server_cache")
+
+        depth: dict[str, Any] = {}
+        try:
+            depth = ws_depth.order_book_snapshot(normalized, 100)
+        except ws_depth.OrderBookUnavailableError:
+            # Final local fallback: retain a still-fresh persisted metric row.
+            try:
+                rows = self._query(
+                    """SELECT symbol,bid_depth_notional,ask_depth_notional,
+                              bid_depth_notional_5,ask_depth_notional_5,
+                              book_imbalance,book_imbalance_5,depth_levels,
+                              bid_level_count,ask_level_count,spread_bps,
+                              bid_depth_change_5s_pct,ask_depth_change_5s_pct,
+                              bid_depth_change_30s_pct,ask_depth_change_30s_pct,
+                              imbalance_change_5s,ts
+                       FROM market_microstructure WHERE symbol=?""",
+                    (normalized,),
+                )
+                depth = _fresh_microstructure_metrics(
+                    rows[0] if rows else None,
+                    now_seconds=int(time.time()),
+                )
+                if depth:
+                    depth["transport"] = "database_cache"
+                    depth["captured_at"] = int(rows[0].get("ts") or 0)
+            except MonitorUnavailable:
+                depth = {}
+
+        now_seconds = int(time.time())
+        ticker_at = int(ticker.get("ts") or 0)
+        depth_at = int(depth.get("captured_at") or 0)
+        depth_transport = str(depth.get("transport") or "unavailable")
+        return {
+            "symbol": normalized,
+            "price": _finite_number(ticker.get("price")),
+            "pct_24h": _finite_number(ticker.get("pct_24h")),
+            "quote_volume": _finite_number(ticker.get("quote_volume")),
+            "ticker_updated_at": ticker_at or None,
+            "ticker_age_seconds": max(0, now_seconds - ticker_at) if ticker_at else None,
+            "ticker_transport": ticker_transport,
+            "bid_depth_notional": _finite_number(depth.get("bid_depth_notional")),
+            "ask_depth_notional": _finite_number(depth.get("ask_depth_notional")),
+            "book_imbalance": _finite_number(depth.get("book_imbalance")),
+            "best_bid": _finite_number(depth.get("best_bid")),
+            "best_ask": _finite_number(depth.get("best_ask")),
+            "spread_bps": _finite_number(depth.get("spread_bps")),
+            "depth_levels": min(
+                100,
+                int(depth.get("depth_levels") or depth.get("limit") or 0),
+            ),
+            "depth_updated_at": depth_at or None,
+            "depth_age_seconds": max(0, now_seconds - depth_at) if depth_at else None,
+            "depth_transport": depth_transport,
+            "transport": (
+                "websocket"
+                if ticker_transport == "websocket"
+                else "rest_fallback"
+                if ticker_transport == "rest_fallback"
+                else "server_cache"
+            ),
+        }
+
     def klines(self, symbol: str, timeframe: str, limit: int) -> list[dict[str, Any]]:
         normalized = self._validate_symbol(symbol)
         rows = self._query(

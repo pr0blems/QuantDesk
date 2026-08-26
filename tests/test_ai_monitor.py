@@ -3458,7 +3458,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
     assert '"/assets/ai-monitor.js?v=20260826-detail-fallback1"' in entrypoint
-    assert '"/assets/monitor.js?v=20260826-overview-fast1"' in entrypoint
+    assert '"/assets/monitor.js?v=20260826-research-ws1"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
     assert legacy_index.index('data-panel-target="monitor"') < legacy_index.index(
@@ -3481,7 +3481,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
         "/assets/paper.js?v=20260809-paper-combo-1",
         "/assets/live.js?v=20260809-font1_6x-1",
         "/assets/backtest.js?v=20260809-font1_6x-1",
-        "/assets/app.js?v=20260826-strategy-suite2",
+        "/assets/app.js?v=20260826-market-ws1",
     ):
         assert asset in legacy_index
     assert 'view: "opportunities"' in component
