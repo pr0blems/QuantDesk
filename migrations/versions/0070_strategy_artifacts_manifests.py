@@ -56,12 +56,14 @@ def upgrade() -> None:
         sa.UniqueConstraint("public_id", name="uq_strategy_artifacts_public_id"),
         sa.UniqueConstraint("strategy_revision_id", name="uq_strategy_artifacts_revision"),
         comment="Immutable strategy revision build and dependency identity",
+        if_not_exists=True,
         **TABLE_OPTIONS,
     )
     op.create_index(
         "ix_strategy_artifacts_user_created",
         "strategy_artifacts",
         ["user_id", "created_at"],
+        if_not_exists=True,
     )
 
     op.create_table(
@@ -99,12 +101,14 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name="pk_strategy_validation_runs"),
         sa.UniqueConstraint("public_id", name="uq_strategy_validation_runs_public_id"),
         comment="Append-only validation reports for immutable revisions",
+        if_not_exists=True,
         **TABLE_OPTIONS,
     )
     op.create_index(
         "ix_strategy_validation_runs_revision_type",
         "strategy_validation_runs",
         ["strategy_revision_id", "validation_type", "created_at"],
+        if_not_exists=True,
     )
 
     op.create_table(
@@ -149,12 +153,14 @@ def upgrade() -> None:
         sa.UniqueConstraint("deployment_id", name="uq_strategy_run_manifests_deployment"),
         sa.UniqueConstraint("manifest_hash", name="uq_strategy_run_manifests_hash"),
         comment="Frozen reproducibility manifest for every strategy deployment",
+        if_not_exists=True,
         **TABLE_OPTIONS,
     )
     op.create_index(
         "ix_strategy_run_manifests_user_created",
         "strategy_run_manifests",
         ["user_id", "created_at"],
+        if_not_exists=True,
     )
 
     op.execute(
@@ -177,6 +183,11 @@ def upgrade() -> None:
                ),
                revision_row.created_at
         FROM strategy_revisions AS revision_row
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM strategy_artifacts AS existing_artifact
+            WHERE existing_artifact.strategy_revision_id = revision_row.id
+        )
         """
     )
     op.execute(
@@ -194,6 +205,12 @@ def upgrade() -> None:
                COALESCE(revision_row.validation_json, JSON_OBJECT('backfilled', TRUE)),
                revision_row.created_at, revision_row.created_at, revision_row.created_at
         FROM strategy_revisions AS revision_row
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM strategy_validation_runs AS existing_validation
+            WHERE existing_validation.strategy_revision_id = revision_row.id
+              AND existing_validation.validation_type = 'static'
+        )
         """
     )
     op.execute(
@@ -205,7 +222,7 @@ def upgrade() -> None:
         )
         SELECT UUID(), deployment_row.id, deployment_row.strategy_revision_id,
                deployment_row.user_id, deployment_row.mode,
-               CONCAT(deployment_row.mode, ':legacy:',
+               CONCAT(deployment_row.mode, ':', 'legacy', ':',
                       COALESCE(CAST(deployment_row.target_account_id AS CHAR), 'none')),
                'legacy:unknown', 'legacy:unknown', 'legacy:unknown', 'legacy:unknown',
                JSON_OBJECT(
@@ -214,9 +231,14 @@ def upgrade() -> None:
                    'strategy_revision_id', deployment_row.strategy_revision_id,
                    'runtime_state', deployment_row.runtime_state_json
                ),
-               SHA2(CONCAT(deployment_row.public_id, ':legacy'), 256),
+               SHA2(CONCAT(deployment_row.public_id, ':', 'legacy'), 256),
                deployment_row.created_at
         FROM strategy_deployments AS deployment_row
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM strategy_run_manifests AS existing_manifest
+            WHERE existing_manifest.deployment_id = deployment_row.id
+        )
         """
     )
 
