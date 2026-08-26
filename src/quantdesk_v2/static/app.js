@@ -256,6 +256,21 @@ async function api(path, options = {}, retry = true) {
 
 window.quantdeskApi = api;
 
+async function openAiMonitorWebSocket() {
+  if (!accessToken) {
+    const restored = await refreshAccess();
+    if (!restored) throw new Error("登录状态已失效，请重新登录");
+  }
+  const endpoint = new URL("/api/v2/ai-monitor/ws", window.location.origin);
+  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
+  return new WebSocket(endpoint, [
+    "quantdesk.ai-monitor.v1",
+    `quantdesk.auth.${accessToken}`,
+  ]);
+}
+
+window.quantdeskOpenAiMonitorSocket = openAiMonitorWebSocket;
+
 async function performRefreshAccess() {
   let response;
   try {
