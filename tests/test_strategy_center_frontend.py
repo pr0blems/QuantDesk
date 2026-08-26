@@ -136,6 +136,12 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     )[1].split('}', 1)[0]
 
 
+def test_legacy_shell_busts_the_current_strategy_asset_cache() -> None:
+    index = (ROOT / "src/quantdesk_v2/static/index.html").read_text(encoding="utf-8")
+
+    assert "/assets/strategies.js?v=20260826-backtest-eligibility1" in index
+
+
 def test_strategy_custom_element_initializes_after_construction() -> None:
     script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
     constructor = script.split("constructor() {", 1)[1].split("connectedCallback() {", 1)[0]
