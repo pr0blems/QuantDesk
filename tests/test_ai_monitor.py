@@ -3830,6 +3830,11 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "exit_reason: filters.exitReason" in component
     assert "item?.lifecycle_status" in component
     assert "item?.gate_summary" in component
+    assert "opportunityMarketStatus(item)" in component
+    assert "合约 WS 实时" in component
+    assert "现货参考过期" in component
+    assert "不代表 Binance WS 断线" in component
+    assert 'const stableGateStatus = String(item?.gate_summary?.status || "").toLowerCase();' not in component
     assert "item?.score_components" in component
     assert 'item?.flow && typeof item.flow === "object"' in component
     assert "stableFlow.option_flow" in component

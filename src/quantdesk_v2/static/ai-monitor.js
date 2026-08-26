@@ -1856,6 +1856,51 @@ class AiMonitorDashboard extends HTMLElement {
     };
   }
 
+  opportunityMarketStatus(item) {
+    const evidence = item?.evidence || {};
+    const marketQuality = evidence.market_quality && typeof evidence.market_quality === "object" ? evidence.market_quality : {};
+    const qualityChecks = marketQuality.checks && typeof marketQuality.checks === "object" ? marketQuality.checks : {};
+    const decisionChecks = item?.gate_summary?.decision_checks && typeof item.gate_summary.decision_checks === "object"
+      ? item.gate_summary.decision_checks
+      : {};
+    const executionKeys = ["price_available", "ticker_fresh", "kline_fresh", "feature_quality", "order_book_usable"];
+    const executionValues = executionKeys
+      .filter((key) => Object.prototype.hasOwnProperty.call(decisionChecks, key) || Object.prototype.hasOwnProperty.call(qualityChecks, key))
+      .map((key) => Object.prototype.hasOwnProperty.call(decisionChecks, key) ? decisionChecks[key] : qualityChecks[key]);
+    const executionState = executionValues.length
+      ? executionValues.every((value) => value === true) ? "passed" : "blocked"
+      : marketQuality.passed === true
+      ? "passed"
+      : marketQuality.passed === false
+      ? "blocked"
+      : "missing";
+    const referenceFailures = [
+      ["reference_quote_available", "现货参考缺失"],
+      ["quote_fresh", "现货参考过期"],
+      ["spread_acceptable", "现货点差过大"],
+      ["quote_sane", "现货参考异常"],
+      ["source_price_consistent", "跨市场价差异常"],
+      ["data_coverage", "增强数据不足"],
+    ];
+    const referenceFailure = referenceFailures.find(([key]) => qualityChecks[key] === false);
+    const referenceState = referenceFailure
+      ? "limited"
+      : referenceFailures.some(([key]) => qualityChecks[key] === true)
+      ? "passed"
+      : "missing";
+    const referenceLabel = referenceFailure?.[1] || (referenceState === "passed" ? "现货参考正常" : "现货参考未评估");
+    return {
+      executionState,
+      referenceState,
+      referenceLabel,
+      summary: executionState === "passed"
+        ? `合约行情正常${referenceState === "limited" ? ` · ${referenceLabel}` : ""}`
+        : executionState === "blocked"
+        ? "合约行情未通过"
+        : "无行情质量评估数据",
+    };
+  }
+
   renderSignalHealth() {
     const target = this.q("#signal-health-strip");
     if (!target) return;
@@ -3803,26 +3848,17 @@ class AiMonitorDashboard extends HTMLElement {
       const triggerBadge = newsTrigger.version
         ? `<span class="quality-badge ${newsTrigger.has_new_news ? "passed" : "blocked"}" title="触发窗口 ${Number(newsTrigger.trigger_window_hours || 4)} 小时 · AI 记忆 ${Number(newsTrigger.memory_window_hours || 168)} 小时">${newsTrigger.has_new_news ? `新事件 ${Number.isFinite(triggerAge) ? `${Math.max(0, Math.round(triggerAge))}m` : "已确认"}` : "无新事件"}</span>`
         : `<span class="quality-badge legacy" title="旧版信号未保存新闻触发快照">旧规则</span>`;
-      const marketQuality = evidence.market_quality || {};
-      const stableGateStatus = String(item?.gate_summary?.status || "").toLowerCase();
-      const marketQualityBadge = stableGateStatus === "degraded"
-        ? '<span class="quality-badge legacy">行情降级</span>'
-        : stableGateStatus === "passed" || !stableGateStatus && marketQuality.passed === true
-        ? '<span class="quality-badge passed">行情新鲜</span>'
-        : stableGateStatus === "blocked" || !stableGateStatus && marketQuality.passed === false
-        ? '<span class="quality-badge blocked" title="实时价格、已收盘 K 线或预测因子不符合准入要求">行情受限</span>'
-        : '<span class="quality-badge legacy">行情无评估数据</span>';
-      const marketQualityText = stableGateStatus === "passed"
-        ? "行情质量通过"
-        : stableGateStatus === "degraded"
-        ? "行情降级可用"
-        : stableGateStatus === "blocked"
-        ? "行情质量未通过"
-        : marketQuality.passed === true
-        ? "行情质量通过"
-        : marketQuality.passed === false
-        ? "行情质量未通过"
-        : "无行情质量评估数据";
+      const marketStatus = this.opportunityMarketStatus(item);
+      const executionMarketBadge = marketStatus.executionState === "passed"
+        ? '<span class="quality-badge passed" title="Binance 合约实时价格、已收盘 K 线与执行盘口均满足要求">合约 WS 实时</span>'
+        : marketStatus.executionState === "blocked"
+        ? '<span class="quality-badge blocked" title="Binance 合约价格、K 线或执行盘口未满足要求">合约行情受限</span>'
+        : '<span class="quality-badge legacy">合约行情未评估</span>';
+      const referenceMarketBadge = marketStatus.executionState === "passed" && marketStatus.referenceState === "limited"
+        ? `<span class="quality-badge legacy" title="${this.escape(marketStatus.referenceLabel)}；这是美股现货/增强参考数据，不代表 Binance WS 断线">${this.escape(marketStatus.referenceLabel)}</span>`
+        : "";
+      const marketQualityBadge = `${executionMarketBadge}${referenceMarketBadge}`;
+      const marketQualityText = marketStatus.summary;
       const historyState = item.prediction_status === "pending"
         ? "等待结算"
         : item.prediction_status === "unavailable"
