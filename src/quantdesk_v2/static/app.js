@@ -5,6 +5,7 @@ const TAB_USERNAME_KEY = "quantdesk.tab-username";
 const THEME_STORAGE_KEY = "quantdesk.theme";
 const AUTH_IDENTITY_CHANGED_MESSAGE = "检测到登录身份已变化。为防止数据写入其他用户，本次请求已中止，请重新登录。";
 let accessToken = "";
+let marketSocketAuthenticationRefreshedAt = 0;
 let isAuthenticated = false;
 let authBootResolved = false;
 let authSessionVersion = 0;
@@ -283,9 +284,10 @@ async function apiStream(path, options = {}, retry = true) {
 window.quantdeskApiStream = apiStream;
 
 async function openAiMonitorWebSocket() {
-  if (!accessToken) {
+  if (!accessToken || Date.now() - marketSocketAuthenticationRefreshedAt > 60000) {
     const restored = await refreshAccess();
-    if (!restored) throw new Error("登录状态已失效，请重新登录");
+    if (restored) marketSocketAuthenticationRefreshedAt = Date.now();
+    if (!restored && !accessToken) throw new Error("登录状态已失效，请重新登录");
   }
   const endpoint = new URL("/api/v2/ai-monitor/ws", window.location.origin);
   endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";

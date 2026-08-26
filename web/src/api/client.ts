@@ -8,6 +8,7 @@ const authenticationLostEvent = "quantdesk:authentication-lost";
 let accessToken = "";
 let authenticatedUserId = readStoredUserId();
 let refreshPromise: Promise<boolean> | null = null;
+let marketSocketAuthenticationRefreshedAt = 0;
 
 type ErrorPayload = {
   detail?: unknown;
@@ -147,9 +148,10 @@ export async function openMonitorMarketWebSocket(symbol: string): Promise<WebSoc
   if (!/^[A-Z0-9]{2,24}$/.test(normalized)) {
     throw new ApiError("行情品种代码无效", 422);
   }
-  if (!accessToken) {
+  if (!accessToken || Date.now() - marketSocketAuthenticationRefreshedAt > 60_000) {
     const restored = await refreshAccessToken();
-    if (!restored) {
+    if (restored) marketSocketAuthenticationRefreshedAt = Date.now();
+    if (!restored && !accessToken) {
       loseAuthentication();
       throw new ApiError("登录状态已失效，请重新登录", 401);
     }
@@ -260,6 +262,7 @@ export function rememberUser(user: CurrentUser): void {
 
 export function clearSession(): void {
   accessToken = "";
+  marketSocketAuthenticationRefreshedAt = 0;
   writeStoredUserId("");
 }
 
