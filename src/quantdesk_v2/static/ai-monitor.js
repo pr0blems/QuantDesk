@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260827-entry-state2">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260827-entry-state3">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -3629,20 +3629,15 @@ class AiMonitorDashboard extends HTMLElement {
     const dataQualityState = String(this.firstValue(snapshot.dataQuality.status, snapshot.dataQuality.state, "")).toLowerCase();
     const dataErrors = snapshot.dataQuality.errors || snapshot.dataQuality.error_codes || [];
     if (["error", "failed", "invalid"].includes(dataQualityState) || (Array.isArray(dataErrors) && dataErrors.length)) return "data_error";
-    const hardRiskBlock = evidence.risk_gate?.blocked === true
-      || evidence.event_gate?.blocked === true
-      || evidence.halt?.active === true
-      || snapshot.riskEvents.some((event) => event?.blocked === true || ["critical", "blocked"].includes(String(event?.risk_level || event?.severity || "").toLowerCase()));
-    // Reserve the data-blocked bucket for unusable execution inputs or an
-    // explicit halt/event risk. Score, macro alignment, event selection and
-    // order-book direction are ordinary entry conditions, so a miss remains a
-    // candidate instead of being presented as broken data.
-    const hardFailedKeys = new Set(["market_quality", "execution_market_quality", "order_book_quality", "order_book_usable", "quote_freshness", "quote_spread", "halt", "risk_event", "event_gate", "price_available", "ticker_fresh", "kline_fresh", "feature_quality", "quote_fresh", "spread_acceptable", "quote_sane", "not_halted", "data_coverage", "event_window_clear"]);
+    // “数据阻断”只表示关键行情输入缺失、过期或无效。盘口方向、点差、
+    // 宏观分歧、事件窗口和其他交易准入条件未通过，都仍是可继续观察的
+    // 候选机会，不能让用户误以为行情链路已经离线。
+    const hardFailedKeys = new Set(["quote_freshness", "price_available", "ticker_fresh", "kline_fresh", "feature_quality", "quote_fresh", "quote_sane", "data_coverage"]);
     const hardGateFailure = (gate?.checks || []).some((check) => !check.passed && hardFailedKeys.has(check.key));
-    const dataBlockingCodes = new Set(["QUOTE_PRICE_MISSING", "EXECUTION_PRICE_STALE", "TECHNICAL_BAR_STALE", "TECHNICAL_FEATURE_QUALITY_LOW", "BINANCE_ORDER_BOOK_NOT_USABLE", "EXECUTION_MARKET_QUALITY_BLOCKED", "SYMBOL_HALTED_OR_COOLDOWN", "HIGH_IMPACT_EVENT_WINDOW"]);
+    const dataBlockingCodes = new Set(["QUOTE_PRICE_MISSING", "EXECUTION_PRICE_STALE", "TECHNICAL_BAR_STALE", "TECHNICAL_FEATURE_QUALITY_LOW", "REFERENCE_QUOTE_UNAVAILABLE", "REFERENCE_QUOTE_STALE", "MARKET_DATA_COVERAGE_LOW"]);
     const blockingReasons = Array.isArray(item?.gate_summary?.blocking_reasons) ? item.gate_summary.blocking_reasons : [];
     const stableGateBlocked = blockingReasons.some((code) => dataBlockingCodes.has(String(code)));
-    if (hardRiskBlock || hardGateFailure || stableGateBlocked) return "blocked";
+    if (hardGateFailure || stableGateBlocked) return "blocked";
     if (gate?.entry_ready) return "data_error";
     return "candidate";
   }
