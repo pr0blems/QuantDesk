@@ -5,42 +5,32 @@ import { authApi } from "./api/quantdesk";
 import type { CurrentUser } from "./api/types";
 import { LegacyPanel } from "./pages/LegacyPanel";
 import { LoginPage } from "./pages/LoginPage";
-import { OrdersPage } from "./pages/OrdersPage";
 import { OverviewPage } from "./pages/OverviewPage";
-import { PlaceholderPage } from "./pages/PlaceholderPage";
-import { RiskPage } from "./pages/RiskPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
-type PageKey = "ai-monitor" | "audit" | "backtest" | "live" | "monitor" | "orders" | "overview" | "paper" | "risk" | "settings" | "strategies";
+type PageKey = "ai-monitor" | "backtest" | "live" | "monitor" | "overview" | "paper" | "settings" | "strategies";
 type AuthState = { status: "booting" } | { status: "anonymous" } | { status: "authenticated"; user: CurrentUser };
 
 const pageTitles: Record<PageKey, string> = {
   "ai-monitor": "发现机会",
-  overview: "工作台", monitor: "合约监控", paper: "模拟盘", live: "实盘交易", strategies: "策略中心", backtest: "数据回测", orders: "订单与持仓", settings: "系统设置", risk: "风险控制", audit: "审计日志",
+  overview: "工作台", monitor: "合约监控", paper: "模拟盘", live: "实盘交易", strategies: "策略中心", backtest: "数据回测", settings: "系统设置",
 };
 
 const navigation: Array<{ badge?: string; icon: string; key: PageKey; label: string }> = [
   { key: "overview", icon: "概", label: "工作台" },
   { key: "monitor", icon: "监", label: "合约监控" },
+  { key: "ai-monitor", icon: "机", label: "发现机会" },
   { key: "paper", icon: "模", label: "模拟盘" },
   { key: "live", icon: "实", label: "实盘交易", badge: "风控" },
   { key: "strategies", icon: "策", label: "策略中心" },
   { key: "backtest", icon: "测", label: "数据回测" },
-  { key: "orders", icon: "单", label: "订单与持仓", badge: "只读" },
   { key: "settings", icon: "设", label: "系统设置" },
-  { key: "risk", icon: "险", label: "风险控制", badge: "联锁" },
-  { key: "audit", icon: "审", label: "审计日志" },
 ];
-
-navigation.splice(
-  navigation.findIndex((item) => item.key === "monitor") + 1,
-  0,
-  { key: "ai-monitor", icon: "机", label: "发现机会" },
-);
 
 function pageFromHash(): PageKey {
   const candidate = window.location.hash.replace(/^#\/?/, "").split("/")[0] || "overview";
   if (candidate === "backtests") return "backtest";
+  if (candidate === "orders") return "live";
   return candidate in pageTitles ? candidate as PageKey : "overview";
 }
 
@@ -80,9 +70,9 @@ function Workspace({ user, onLogout }: { user: CurrentUser; onLogout: () => Prom
       <div className="sidebar-brand"><span>Q</span><div><strong>QUANTDESK</strong><small>NG · BINANCE</small></div></div>
       <nav className="side-nav">
         <p>交易工作区</p>
-        {navigation.slice(0, 8).map((item) => <a className={`nav-item${page === item.key ? " active" : ""}`} href={`#/${item.key}`} aria-current={page === item.key ? "page" : undefined} key={item.key}><span>{item.icon}</span>{item.label}{item.badge ? <i>{item.badge}</i> : null}</a>)}
+        {navigation.slice(0, 7).map((item) => <a className={`nav-item${page === item.key ? " active" : ""}`} href={`#/${item.key}`} aria-current={page === item.key ? "page" : undefined} key={item.key}><span>{item.icon}</span>{item.label}{item.badge ? <i>{item.badge}</i> : null}</a>)}
         <p>安全与管理</p>
-        {navigation.slice(8).map((item) => <a className={`nav-item${page === item.key ? " active" : ""}`} href={`#/${item.key}`} aria-current={page === item.key ? "page" : undefined} key={item.key}><span>{item.icon}</span>{item.label}{item.badge ? <i>{item.badge}</i> : null}</a>)}
+        {navigation.slice(7).map((item) => <a className={`nav-item${page === item.key ? " active" : ""}`} href={`#/${item.key}`} aria-current={page === item.key ? "page" : undefined} key={item.key}><span>{item.icon}</span>{item.label}{item.badge ? <i>{item.badge}</i> : null}</a>)}
         {user.is_admin ? <a className="nav-item" href="/next/admin/#overview"><span>管</span>管理后台</a> : null}
       </nav>
       <div className="sidebar-account"><div className="avatar">{user.username.slice(0, 2)}</div><div><strong>{user.username}</strong><small>当前账户</small></div><button className="theme-toggle" type="button" title={light ? "切换深色主题" : "切换浅色主题"} aria-label={light ? "切换深色主题" : "切换浅色主题"} aria-pressed={light} onClick={toggleTheme}><span aria-hidden="true">{light ? "◐" : "☼"}</span><b>{light ? "深色" : "浅色"}</b></button><button type="button" title="退出登录" aria-label="退出登录" disabled={loggingOut} onClick={() => void logout()}>{loggingOut ? "退出中" : "退出"}</button></div>
@@ -97,10 +87,7 @@ function Workspace({ user, onLogout }: { user: CurrentUser; onLogout: () => Prom
         <section className={`workspace-panel${page === "strategies" ? "" : " hidden"}`}><LegacyPanel active={page === "strategies"} tag="strategy-center" /></section>
         <section className={`workspace-panel${page === "backtest" ? "" : " hidden"}`}><LegacyPanel active={page === "backtest"} tag="backtest-workbench" /></section>
         {page === "overview" ? <section className="workspace-panel"><OverviewPage user={user} /></section> : null}
-        {page === "orders" ? <section className="workspace-panel"><OrdersPage /></section> : null}
         {page === "settings" ? <section className="workspace-panel"><SettingsPage user={user} /></section> : null}
-        {page === "risk" ? <section className="workspace-panel"><RiskPage user={user} /></section> : null}
-        {page === "audit" ? <section className="workspace-panel"><PlaceholderPage kind="audit" /></section> : null}
       </main>
     </div>
   </section>;

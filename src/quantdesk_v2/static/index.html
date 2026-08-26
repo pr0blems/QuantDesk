@@ -80,11 +80,8 @@
         <a class="nav-item" href="/live" data-panel-target="live"><span>实</span>实盘交易<i>风控</i></a>
         <a class="nav-item" href="/strategies" data-panel-target="strategies"><span>策</span>策略中心</a>
         <a class="nav-item" href="/backtest" data-panel-target="backtest"><span>测</span>数据回测</a>
-        <a class="nav-item" href="/orders" data-panel-target="orders"><span>单</span>订单与持仓<i>只读</i></a>
         <p>安全与管理</p>
         <a class="nav-item" href="/settings" data-panel-target="settings"><span>设</span>系统设置</a>
-        <a class="nav-item" href="/risk" data-panel-target="risk"><span>风</span>风险控制<i>规划中</i></a>
-        <a class="nav-item" href="/audit" data-panel-target="audit"><span>审</span>审计日志<i>规划中</i></a>
       </nav>
       <div class="sidebar-account">
         <div class="avatar" id="user-avatar">--</div>
@@ -307,42 +304,6 @@
           <backtest-workbench id="backtest-workbench"></backtest-workbench>
         </section>
 
-        <section class="workspace-panel hidden" data-panel="orders">
-          <div class="page-heading orders-heading">
-            <div><span class="eyebrow">BINANCE LIVE STATE</span><h1>订单与持仓</h1><p>读取当前 Binance U 本位合约持仓与未成交订单</p></div>
-            <div class="orders-heading-actions">
-              <span class="live-lock"><i></i>只读 · 不执行下单</span>
-              <button id="orders-refresh" class="secondary" type="button">刷新数据</button>
-            </div>
-          </div>
-          <div id="orders-summary" class="orders-summary" aria-live="polite">
-            <article class="metric-card"><span>当前持仓</span><strong id="orders-position-count">--</strong><small>非零合约仓位</small></article>
-            <article class="metric-card"><span>当前挂单</span><strong id="orders-open-count">--</strong><small>尚未完全成交</small></article>
-            <article class="metric-card"><span>账户模式</span><strong id="orders-account-type">--</strong><small id="orders-updated-at">等待同步</small></article>
-          </div>
-          <p id="orders-message" class="orders-message loading" role="status">正在读取 Binance 账户数据…</p>
-          <div class="orders-data-grid">
-            <article class="card orders-table-card">
-              <header><div><span class="eyebrow">POSITIONS</span><h2>当前持仓</h2></div><span id="orders-position-badge" class="orders-count-badge">0 个</span></header>
-              <div id="orders-positions" class="orders-table-wrap"></div>
-            </article>
-            <article class="card orders-table-card">
-              <header><div><span class="eyebrow">OPEN ORDERS</span><h2>当前挂单</h2></div><span id="orders-open-badge" class="orders-count-badge">0 个</span></header>
-              <div id="orders-open-orders" class="orders-table-wrap"></div>
-            </article>
-          </div>
-        </section>
-
-        <section class="workspace-panel hidden" data-panel="risk">
-          <div class="page-heading"><div><span class="eyebrow">RISK CONTROL</span><h1>风险控制</h1><p>用户、策略和标的三级风险边界</p></div></div>
-          <article class="card empty-state"><span>风</span><h2>风控规则正在规划</h2><p>将覆盖仓位上限、每日亏损、最大回撤、行情过期和全局 Kill Switch。</p></article>
-        </section>
-
-        <section class="workspace-panel hidden" data-panel="audit">
-          <div class="page-heading"><div><span class="eyebrow">AUDIT TRAIL</span><h1>审计日志</h1><p>敏感操作和安全事件追踪</p></div></div>
-          <article class="card empty-state"><span>审</span><h2>审计查询界面正在建设</h2><p>注册、登录及凭据变更已经在服务端记录，后续将提供分级查询和导出功能。</p></article>
-        </section>
-
       </main>
     </div>
   </section>
@@ -353,6 +314,6 @@
   <script src="/assets/live.js?v=20260809-font1_6x-1" defer></script>
   <script src="/assets/strategies.js?v=20260825-strategyi18n1" defer></script>
   <script src="/assets/backtest.js?v=20260809-font1_6x-1" defer></script>
-  <script src="/assets/app.js?v=20260810-ai-monitor-1" defer></script>
+  <script src="/assets/app.js?v=20260826-nav-1" defer></script>
 </body>
 </html>

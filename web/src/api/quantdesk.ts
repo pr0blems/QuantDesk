@@ -270,7 +270,6 @@ export const backtestApi = {
 
 export const settingsApi = {
   binanceAccount: () => apiRequest<ApiObject>("/me/binance-account"),
-  binanceOrders: () => apiRequest<ApiObject>("/me/binance-orders"),
   saveBinanceCredentials: (input: BinanceCredentialUpdate) =>
     apiRequest<ApiObject>("/me/binance-credentials", { method: "PUT", body: jsonBody(input) }),
   deleteBinanceCredentials: () => apiRequest<ApiObject>("/me/binance-credentials", { method: "DELETE" }),

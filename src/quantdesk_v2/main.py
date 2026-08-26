@@ -48,10 +48,13 @@ FRONTEND_ROUTES = (
     "/settings",
     "/strategies",
     "/backtest",
-    "/orders",
-    "/risk",
-    "/audit",
 )
+
+LEGACY_FRONTEND_REDIRECTS = {
+    "/orders": "/live",
+    "/risk": "/overview",
+    "/audit": "/overview",
+}
 
 _SENSITIVE_VALIDATION_MARKERS = (
     "api_key",
@@ -410,6 +413,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             include_in_schema=False,
             name="frontend_credentials_redirect",
         )
+
+        def retired_frontend_redirect(request: Request) -> RedirectResponse:
+            return RedirectResponse(
+                url=LEGACY_FRONTEND_REDIRECTS[request.url.path],
+                status_code=308,
+            )
+
+        for retired_route in LEGACY_FRONTEND_REDIRECTS:
+            app.add_api_route(
+                retired_route,
+                retired_frontend_redirect,
+                methods=["GET"],
+                include_in_schema=False,
+                name=f"frontend_{retired_route.removeprefix('/')}_redirect",
+            )
 
     if runtime_settings.react_static_dir.is_dir():
         # The React application uses hash routing and is intentionally exposed

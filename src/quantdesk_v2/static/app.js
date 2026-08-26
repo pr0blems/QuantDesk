@@ -70,8 +70,6 @@ const AI_PROVIDER_FALLBACKS = Object.freeze([
   { code: "minimax", name: "MiniMax", base_url: "", default_model: "MiniMax-M2.7", models: ["MiniMax-M2.7"] },
   { code: "openai", name: "OpenAI", base_url: "", default_model: "", models: [] },
 ]);
-let binanceOrdersRequestVersion = 0;
-
 const panelNames = {
   overview: "工作台",
   monitor: "合约监控",
@@ -81,9 +79,6 @@ const panelNames = {
   settings: "系统设置",
   strategies: "策略中心",
   backtest: "数据回测",
-  orders: "订单与持仓",
-  risk: "风险控制",
-  audit: "审计日志",
 };
 
 const LOGIN_PATH = "/login";
@@ -97,12 +92,12 @@ const panelPaths = Object.freeze({
   settings: "/settings",
   strategies: "/strategies",
   backtest: "/backtest",
-  orders: "/orders",
-  risk: "/risk",
-  audit: "/audit",
 });
 const panelByPath = new Map(Object.entries(panelPaths).map(([panel, path]) => [path, panel]));
 panelByPath.set("/credentials", "settings");
+panelByPath.set("/orders", "live");
+panelByPath.set("/risk", "overview");
+panelByPath.set("/audit", "overview");
 
 function panelFromPath(pathname = window.location.pathname) {
   return panelByPath.get(pathname) || "";
@@ -355,9 +350,6 @@ function openPanel(name, { historyMode = "push" } = {}) {
   if (selected === "settings" && isAuthenticated) {
     void loadAiModelSettings();
   }
-  if (selected === "orders" && isAuthenticated) {
-    refreshBinanceOrders();
-  }
   closeSidebar();
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   window.scrollTo({ top: 0, behavior: reducedMotion ? "auto" : "smooth" });
@@ -372,7 +364,6 @@ function setAuthenticated(authenticated) {
     resetAiModelSettings();
     $("#credential-form").reset();
     resetBinanceAccount();
-    resetBinanceOrders();
     resetPerformancePanel();
     const monitor = $("#contract-monitor");
     const paper = $("#paper-dashboard");
@@ -1603,175 +1594,6 @@ async function refreshBinanceAccount(configuredFallback = false) {
   }
 }
 
-function escapeOrdersHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  })[character]);
-}
-
-function ordersNumber(value, maximumFractionDigits = 8) {
-  if (value === null || value === undefined || value === "") return "--";
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
-  return number.toLocaleString("zh-CN", { maximumFractionDigits });
-}
-
-function ordersTime(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function resetBinanceOrders() {
-  binanceOrdersRequestVersion += 1;
-  $("#orders-position-count").textContent = "--";
-  $("#orders-open-count").textContent = "--";
-  $("#orders-account-type").textContent = "--";
-  $("#orders-updated-at").textContent = "等待同步";
-  $("#orders-position-badge").textContent = "0 个";
-  $("#orders-open-badge").textContent = "0 个";
-  $("#orders-positions").innerHTML = '<div class="orders-table-empty">等待读取当前持仓</div>';
-  $("#orders-open-orders").innerHTML = '<div class="orders-table-empty">等待读取当前挂单</div>';
-  const message = $("#orders-message");
-  message.className = "orders-message";
-  message.textContent = "尚未同步 Binance 数据";
-  $("#orders-refresh").disabled = false;
-}
-
-function renderBinancePositions(positions) {
-  const target = $("#orders-positions");
-  if (!positions.length) {
-    target.innerHTML = '<div class="orders-table-empty">当前没有非零合约持仓</div>';
-    return;
-  }
-  const rows = positions.map((position) => {
-    const side = String(position.side || "").toLowerCase() === "short" ? "short" : "long";
-    const upnl = position.upnl === null || position.upnl === undefined ? null : Number(position.upnl);
-    const pnlClass = upnl > 0 ? "profit" : (upnl < 0 ? "loss" : "");
-    const apiNotional = position.notional === null || position.notional === undefined
-      ? null
-      : Number(position.notional);
-    const calculatedNotional = position.amt === null || position.amt === undefined
-      || position.mark_price === null || position.mark_price === undefined
-      ? null
-      : Number(position.amt) * Number(position.mark_price);
-    const notional = Number.isFinite(apiNotional) ? apiNotional : calculatedNotional;
-    const leverage = Number(position.leverage);
-    return `<tr>
-      <td class="symbol">${escapeOrdersHtml(position.symbol)}</td>
-      <td class="${side}">${side === "short" ? "空" : "多"}</td>
-      <td>${ordersNumber(position.amt)}</td>
-      <td>${ordersNumber(position.entry_price)}</td>
-      <td>${ordersNumber(position.mark_price)}</td>
-      <td>${ordersNumber(notional, 2)}</td>
-      <td class="${pnlClass}">${ordersNumber(upnl, 4)}</td>
-      <td>${Number.isFinite(leverage) && leverage > 0 ? `${ordersNumber(leverage, 0)}×` : "--"}</td>
-      <td>${ordersTime(Number(position.ts))}</td>
-    </tr>`;
-  }).join("");
-  target.innerHTML = `<table class="orders-table"><thead><tr>
-    <th>合约</th><th>方向</th><th>数量</th><th>开仓均价</th><th>标记价格</th><th>名义价值</th><th>未实现盈亏</th><th>杠杆</th><th>更新时间</th>
-  </tr></thead><tbody>${rows}</tbody></table>`;
-}
-
-function renderBinanceOpenOrders(openOrders) {
-  const target = $("#orders-open-orders");
-  if (!openOrders.length) {
-    target.innerHTML = '<div class="orders-table-empty">当前没有未成交订单</div>';
-    return;
-  }
-  const typeLabels = {
-    LIMIT: "限价", MARKET: "市价", STOP: "止损限价", STOP_MARKET: "止损市价",
-    TAKE_PROFIT: "止盈限价", TAKE_PROFIT_MARKET: "止盈市价", TRAILING_STOP_MARKET: "跟踪止损",
-  };
-  const statusLabels = { NEW: "待成交", PARTIALLY_FILLED: "部分成交" };
-  const rows = openOrders.map((order) => {
-    const side = String(order.side || "").toUpperCase() === "SELL" ? "sell" : "buy";
-    const quantity = Number(order.quantity);
-    const executed = Number(order.executed_quantity);
-    const remaining = Number.isFinite(quantity) && Number.isFinite(executed) ? Math.max(0, quantity - executed) : NaN;
-    const price = Number(order.price) || Number(order.stop_price) || 0;
-    const flags = [
-      order.conditional ? "条件单" : "",
-      order.reduce_only ? "只减仓" : "",
-      order.close_position ? "全平" : "",
-    ].filter(Boolean).join(" · ") || "--";
-    return `<tr>
-      <td class="symbol">${escapeOrdersHtml(order.symbol)}</td>
-      <td class="${side}">${side === "sell" ? "卖出" : "买入"}</td>
-      <td>${escapeOrdersHtml(typeLabels[order.type] || order.type || "--")}</td>
-      <td>${ordersNumber(price)}</td>
-      <td>${ordersNumber(quantity)}</td>
-      <td>${ordersNumber(executed)}</td>
-      <td>${ordersNumber(remaining)}</td>
-      <td>${escapeOrdersHtml(statusLabels[order.status] || order.status || "--")}</td>
-      <td>${escapeOrdersHtml(flags)}</td>
-      <td title="${escapeOrdersHtml(order.order_id)}">${escapeOrdersHtml(order.order_id)}</td>
-      <td>${ordersTime(Number(order.updated_at))}</td>
-    </tr>`;
-  }).join("");
-  target.innerHTML = `<table class="orders-table"><thead><tr>
-    <th>合约</th><th>方向</th><th>类型</th><th>委托/触发价</th><th>委托数量</th><th>已成交</th><th>剩余</th><th>状态</th><th>标记</th><th>订单 ID</th><th>更新时间</th>
-  </tr></thead><tbody>${rows}</tbody></table>`;
-}
-
-function renderBinanceOrders(state) {
-  const positions = Array.isArray(state?.positions) ? state.positions : [];
-  const openOrders = Array.isArray(state?.open_orders) ? state.open_orders : [];
-  const message = $("#orders-message");
-  $("#orders-refresh").disabled = false;
-
-  if (!state?.configured) {
-    resetBinanceOrders();
-    message.className = "orders-message error";
-    message.textContent = "尚未配置 Binance API 凭据，请先在系统设置中完成配置。";
-    return;
-  }
-  if (!state.connected) {
-    const errorHint = {
-      credential_error: "本地凭据无法解密，请重新配置。",
-      authentication: "Binance 身份验证失败，请检查 API Key、IP 白名单及合约读取权限。",
-      timestamp: "服务器时间与 Binance 不同步，请校准后重试。",
-      rate_limit: "Binance 请求频率受限，请稍后再试。",
-      timeout: "Binance 响应超时，请稍后再试。",
-      network: "服务器暂时无法连接 Binance。",
-      upstream: "Binance 服务暂时不可用。",
-      invalid_response: "Binance 返回了无法识别的订单数据。",
-    }[state.error_category];
-    message.className = "orders-message error";
-    message.textContent = errorHint || "暂时无法读取 Binance 持仓与挂单。";
-    return;
-  }
-
-  $("#orders-position-count").textContent = String(positions.length);
-  $("#orders-open-count").textContent = String(openOrders.length);
-  $("#orders-account-type").textContent = accountTypeLabel(state.account_type);
-  $("#orders-updated-at").textContent = `同步于 ${ordersTime(state.updated_at)}`;
-  $("#orders-position-badge").textContent = `${positions.length} 个`;
-  $("#orders-open-badge").textContent = `${openOrders.length} 个`;
-  message.className = "orders-message success";
-  message.textContent = "已从 Binance 实时同步；页面仅展示数据，不会提交或撤销订单。";
-  renderBinancePositions(positions);
-  renderBinanceOpenOrders(openOrders);
-}
-
-async function refreshBinanceOrders() {
-  const requestVersion = ++binanceOrdersRequestVersion;
-  const message = $("#orders-message");
-  $("#orders-refresh").disabled = true;
-  message.className = "orders-message loading";
-  message.textContent = "正在读取 Binance 账户数据…";
-  try {
-    const state = await api("/api/v2/me/binance-orders");
-    if (requestVersion !== binanceOrdersRequestVersion) return;
-    renderBinanceOrders(state);
-  } catch (error) {
-    if (requestVersion !== binanceOrdersRequestVersion) return;
-    $("#orders-refresh").disabled = false;
-    message.className = "orders-message error";
-    message.textContent = error.message || "读取 Binance 订单失败，请稍后重试。";
-  }
-}
-
 async function loadDashboard() {
   let user;
   try {
@@ -1933,7 +1755,6 @@ $("#credential-form").addEventListener("submit", async (event) => {
     updateCredentialStatus(true, data.fingerprint);
     showMessage($("#dashboard-message"), "凭据已加密保存。", "success");
     await refreshBinanceAccount(true);
-    if (panelFromPath() === "orders") await refreshBinanceOrders();
     await refreshDashboardPerformance();
   } catch (error) {
     showMessage($("#dashboard-message"), error.message, "error");
@@ -1947,7 +1768,6 @@ $("#delete-credentials").addEventListener("click", async () => {
     currentUserHasBinanceCredentials = false;
     updateCredentialStatus(false);
     renderBinanceAccount({ configured: false, connected: false });
-    resetBinanceOrders();
     renderBinancePerformanceFailure(false);
     showMessage($("#dashboard-message"), "凭据已删除。", "success");
   } catch (error) {
@@ -2007,7 +1827,6 @@ $("#menu-toggle").addEventListener("click", () => {
 
 $("#sidebar-backdrop").addEventListener("click", closeSidebar);
 $("#performance-refresh").addEventListener("click", refreshDashboardPerformance);
-$("#orders-refresh").addEventListener("click", refreshBinanceOrders);
 $("#binance-performance-asset").addEventListener("change", (event) => {
   if (!binanceDashboardPerformance) return;
   renderBinanceDashboardPerformance(withBinancePerformanceAsset(binanceDashboardPerformance, event.currentTarget.value));

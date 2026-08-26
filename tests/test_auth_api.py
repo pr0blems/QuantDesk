@@ -216,9 +216,9 @@ def test_login_page_and_navigation_shell_are_served(mysql_test_engine: Engine) -
         assert '<html lang="zh-CN" class="auth-booting">' in page.text
         assert 'id="auth-boot"' in page.text
         assert "正在恢复登录状态" in page.text
-        assert '/assets/style.css?v=20260804-7' in page.text
-        assert '/assets/app.js?v=20260804-6' in page.text
-        assert page.text.index('/assets/backtest.js') < page.text.index('/assets/app.js?v=20260804-6')
+        assert '/assets/style.css?v=20260810-font1_6x-1' in page.text
+        assert '/assets/app.js?v=20260826-nav-1' in page.text
+        assert page.text.index('/assets/backtest.js') < page.text.index('/assets/app.js?v=20260826-nav-1')
         assert 'id="login-page"' in page.text
         assert 'id="sidebar"' in page.text
         assert 'href="/monitor" data-panel-target="monitor" aria-current="page"' in page.text
@@ -236,9 +236,11 @@ def test_login_page_and_navigation_shell_are_served(mysql_test_engine: Engine) -
         assert '<strategy-center id="strategy-center">' in page.text
         assert "策略中心</a>" in page.text
         assert 'id="binance-account-card"' in page.text
-        assert 'id="orders-refresh"' in page.text
-        assert 'id="orders-positions"' in page.text
-        assert 'id="orders-open-orders"' in page.text
+        assert 'data-panel-target="orders"' not in page.text
+        assert 'data-panel-target="risk"' not in page.text
+        assert 'data-panel-target="audit"' not in page.text
+        assert 'data-panel="orders"' not in page.text
+        assert '<live-dashboard id="live-dashboard">' in page.text
         assert 'id="binance-wallet-balance"' in page.text
         assert 'id="db-status"' not in page.text
         assert "数据库连接" not in page.text
@@ -258,6 +260,15 @@ def test_login_page_and_navigation_shell_are_served(mysql_test_engine: Engine) -
         assert "累计总收益（自重置）" in page.text
         assert "当月已结算净收益" in page.text
         assert "已实现记录胜率" in page.text
+
+        for retired_path, destination in {
+            "/orders": "/live",
+            "/risk": "/overview",
+            "/audit": "/overview",
+        }.items():
+            response = client.get(retired_path, follow_redirects=False)
+            assert response.status_code == 308
+            assert response.headers["location"] == destination
         assert "当月平仓净收益" in page.text
         assert "平仓净收益日历" in page.text
         assert "完成账户连接" not in page.text
@@ -310,28 +321,34 @@ def test_login_page_and_navigation_shell_are_served(mysql_test_engine: Engine) -
         for frontend_path in (
             "/login",
             "/monitor",
+            "/ai-monitor",
             "/paper",
+            "/live",
             "/overview",
             "/settings",
             "/strategies",
             "/backtest",
-            "/orders",
-            "/risk",
-            "/audit",
         ):
             assert client.get(frontend_path).status_code == 200
         assert client.get("/unknown-frontend-route").status_code == 404
 
         script = client.get("/assets/app.js")
+        live_script = client.get("/assets/live.js")
         monitor_script = client.get("/assets/monitor.js")
         monitor_stylesheet = client.get("/assets/monitor.css")
         stylesheet = client.get("/assets/style.css")
         assert script.status_code == 200
         assert "apiErrorMessage" in script.text
         assert 'api("/api/v2/me/binance-account")' in script.text
-        assert 'api("/api/v2/me/binance-orders")' in script.text
-        assert "renderBinanceOrders" in script.text
+        assert 'api("/api/v2/me/binance-orders")' not in script.text
+        assert "renderBinanceOrders" not in script.text
         assert "renderBinanceAccount" in script.text
+        assert live_script.status_code == 200
+        assert 'id="live-refresh"' in live_script.text
+        assert 'id="live-positions"' in live_script.text
+        assert 'id="live-orders"' in live_script.text
+        assert "renderPositions(positions, orders, account)" in live_script.text
+        assert "renderOrders(orders)" in live_script.text
         assert "formatAccountAmount" in script.text
         assert "/api/v2/dashboard/performance?month=" in script.text
         assert "/api/v2/dashboard/binance-performance?month=" in script.text
