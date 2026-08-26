@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260826-opportunity-card2">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260826-opportunity-card3">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -710,9 +710,7 @@ class AiMonitorDashboard extends HTMLElement {
     button.setAttribute("aria-label", `${nextExpanded ? "收起" : "展开"} ${card.querySelector(".opportunity-symbol")?.textContent?.trim() || "机会"}详情`);
     const label = document.createElement("span");
     label.textContent = nextExpanded ? "收起详情" : "展开详情";
-    const hint = document.createElement("small");
-    hint.textContent = nextExpanded ? "返回精简视图" : "查看完整研判";
-    button.replaceChildren(label, hint);
+    button.replaceChildren(label);
     card.querySelectorAll(".opportunity-details-shell").forEach((details) => {
       details.setAttribute("aria-hidden", String(!nextExpanded));
     });
@@ -4039,7 +4037,7 @@ class AiMonitorDashboard extends HTMLElement {
         : position.valuation_state === "settled"
         ? "预测已结算"
         : "持仓观察中";
-      const positionPanel = triggeredPosition ? `<section class="virtual-position ${positionTone}" data-patch-key="position" aria-label="持仓实时盈亏">
+      const positionPanel = triggeredPosition ? `<section class="virtual-position ${positionTone} direction-${directionClass}" data-patch-key="position" aria-label="持仓实时盈亏">
         <div class="virtual-position-head"><div class="virtual-position-title"><span>POSITION · ${this.state.displayLeverage}X DISPLAY</span><strong>${directionLabel} · ${targetStateLabel}</strong><small>触发 ${this.formatDate(entryTime)} · 有效至 ${signalEnd} · 不会发送真实订单</small></div>${manualFollowControl ? `<div class="virtual-position-action">${manualFollowControl}</div>` : ""}</div>
         <div class="virtual-position-metrics">
           <span><em>冻结入场价</em><b>${position.entry_price > 0 ? this.escape(this.compactNumber(position.entry_price)) : "--"}</b><small>触发时价格，不随行情变化</small></span>
@@ -4053,6 +4051,18 @@ class AiMonitorDashboard extends HTMLElement {
       const waitingDetail = entryState.tone === "ready"
         ? "条件已满足，等待预测写入"
         : `${signalGateChecks.length - passedGateCount} 项条件未满足 · 尚未入场`;
+      const candidateSummaryVisible = !historicalTab && !triggeredPosition;
+      const candidatePositionPanel = candidateSummaryVisible ? `<section class="virtual-position candidate-position direction-${directionClass}" data-patch-key="candidate-position" aria-label="候选信号摘要">
+        <div class="virtual-position-head"><div class="virtual-position-title"><span>SIGNAL · ${this.escape(item.timeframe)} CANDIDATE</span><strong>${directionLabel} · ${this.escape(entryState.label)}</strong><small>发现 ${signalStart} · 有效至 ${signalEnd} · 尚未入场</small></div>${manualFollowControl ? `<div class="virtual-position-action">${manualFollowControl}</div>` : ""}</div>
+        <div class="virtual-position-metrics">
+          <span><em>当前参考价</em><b>${displayedEntryPrice > 0 ? this.escape(this.compactNumber(displayedEntryPrice)) : "--"}</b><small>实时观察价，尚未冻结入场</small></span>
+          <span><em>新闻评分</em><b>${Number.isFinite(displayedNewsScore) ? displayedNewsScore.toFixed(1) : "--"}</b><small>${newsTrigger.version ? `${Number(newsTrigger.new_news_ids?.length || 0)} 条新事件` : "等待新闻快照"}</small></span>
+          <span><em>技术评分</em><b>${Number.isFinite(displayedIndicatorScore) ? displayedIndicatorScore.toFixed(1) : "--"}</b><small>${matchedCount} 项指标同向</small></span>
+          <span><em>组合评分</em><b>${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "--"}</b><small>入场阈值 ${Number(item.entry_score_threshold || 80).toFixed(1)}</small></span>
+          <span><em>触发进度</em><b>${passedGateCount} / ${signalGateChecks.length}</b><small>${this.escape(waitingDetail || entryState.detail)}</small></span>
+          <span><em>信号有效期</em><b>${signalDuration}</b><small>截至 ${signalEnd}</small></span>
+        </div>
+      </section>` : "";
       const signalSummaryPanel = `<div class="opportunity-signal ${historicalTab ? "historical-signal" : "candidate-signal"}" data-patch-key="signal-summary" aria-label="${historicalTab ? "历史信号" : "待触发候选"}信息">
         <span><em>信号时间</em><b>${signalStart}</b></span>
         <span class="validity"><em>信号有效期间</em><b>${signalDuration}</b><small>${signalStart} — ${signalEnd}</small></span>
@@ -4095,7 +4105,7 @@ class AiMonitorDashboard extends HTMLElement {
         ? `<button class="opportunity-symbol" type="button" data-opportunity-id="${this.escape(item.id)}" data-open-contract="${this.escape(item.contract_symbol)}" data-timeframe="${this.escape(item.timeframe)}" title="打开 ${this.escape(item.symbol)} 的合约 K 线研究与预测模拟">${this.escape(item.symbol)}</button>`
         : `<button class="opportunity-symbol unavailable" type="button" disabled title="该股票暂无对应的合约技术行情">${this.escape(item.symbol)}</button>`;
       const conclusionControl = `<button class="ai-conclusion-trigger" type="button" data-ai-conclusion="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 的 AI 分析结论">AI分析结论</button>`;
-      const detailControl = `<button class="opportunity-detail-toggle" type="button" data-toggle-opportunity-details="${this.escape(item.id)}" data-state="${expanded ? "expanded" : "collapsed"}" aria-expanded="${expanded}" aria-label="${expanded ? "收起" : "展开"} ${this.escape(item.symbol)} 详情"><span>${expanded ? "收起详情" : "展开详情"}</span><small>${expanded ? "返回精简视图" : "查看完整研判"}</small></button>`;
+      const detailControl = `<button class="opportunity-detail-toggle" type="button" data-toggle-opportunity-details="${this.escape(item.id)}" data-state="${expanded ? "expanded" : "collapsed"}" aria-expanded="${expanded}" aria-label="${expanded ? "收起" : "展开"} ${this.escape(item.symbol)} 详情"><span>${expanded ? "收起详情" : "展开详情"}</span></button>`;
       const providerQuoteBadge = (source, tone, liveLabel) => source?.available && Number(source.price) > 0
         ? `<span class="provider-quote-badge ${tone} ${source.fresh ? "live" : "stale"}" title="${this.escape(liveLabel)} · ${source.fresh ? "新鲜" : "延迟/休市"} · ${this.formatDate(source.observed_at)}"><i>${this.escape(source.label || "--")}</i><b>${this.escape(this.compactNumber(Number(source.price)))}</b><small>${source.fresh ? "实时" : "延迟"}</small></span>`
         : "";
@@ -4160,25 +4170,27 @@ class AiMonitorDashboard extends HTMLElement {
         <span class="basis-direction"><em>${liveBasisMode ? "配对观察" : "开盘预判"}</em><b>${this.escape(comparisonConclusion)}</b></span>
         <small>${this.escape(basisExplanation)}</small>
       </section>`;
-      return `<article class="opportunity-item ${this.escape(item.status)} state-${this.escape(entryState.tone)} ${expanded ? "is-expanded" : ""} ${triggeredPosition ? "has-position" : "has-signal"} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}" data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:${historicalTab ? "history" : "current"}" data-details-expanded="${expanded}">
+      const compactSummaryPanel = positionPanel || candidatePositionPanel || signalSummaryPanel;
+      const expandedSignalSummaryPanel = historicalTab ? "" : signalSummaryPanel;
+      return `<article class="opportunity-item ${this.escape(item.status)} state-${this.escape(entryState.tone)} ${expanded ? "is-expanded" : ""} ${triggeredPosition ? "has-position" : candidateSummaryVisible ? "has-candidate-summary" : "has-signal"} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}" data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:${historicalTab ? "history" : "current"}" data-details-expanded="${expanded}">
         <header data-patch-key="header">
           <div class="opportunity-identity">
             <div class="opportunity-symbol-line">${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small></div>
-            <div class="opportunity-badges"><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="lifecycle-badge ${this.escape(entryState.tone)}">${this.escape(entryState.label)}</span>${triggerBadge}${marketQualityBadge}</div>
+            <div class="opportunity-badges"><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="direction-badge ${directionClass}">${directionLabel}</span>${triggerBadge}</div>
             <div class="opportunity-quotes">${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}</div>
           </div>
           <div class="opportunity-top-metrics">${marketDepthControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></div>
         </header>
-        ${positionPanel}
+        ${compactSummaryPanel}
         <div class="opportunity-details-shell opportunity-details-primary" data-patch-key="details-primary" aria-hidden="${!expanded}"><div class="opportunity-details-content">
           ${basisPanel}
           ${virtualEntryPanel}
           ${macroReference}
           ${this.opportunityFeatureMarkup(item)}
         </div></div>
-        ${signalSummaryPanel}
+        ${expandedSignalSummaryPanel}
         <div class="opportunity-details-shell opportunity-details-secondary" data-patch-key="details-secondary" aria-hidden="${!expanded}"><div class="opportunity-details-content">
-          <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}" data-patch-key="core-metrics"><span><em>新闻评分</em><b>${Number.isFinite(displayedNewsScore) ? displayedNewsScore.toFixed(1) : "无数据"}</b><small>${newsTrigger.version ? `${Number(newsTrigger.new_news_ids?.length || 0)} 条新事件 · 记忆 ${Number(newsTrigger.memory_window_hours || 168)}h` : "旧版记录"}</small></span><span><em>指标强度</em><b>${Number.isFinite(displayedIndicatorScore) ? displayedIndicatorScore.toFixed(1) : "无数据"}</b><small>${matchedCount} 项同向 · ${availableCount}/${requiredCount} 可用</small></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b><small>${this.escape(marketQualityText)}</small></span><span class="opportunity-signal-status"><em>信号状态</em><b>${this.escape(entryState.label)}</b><small>${this.escape(entryState.detail)}</small>${triggeredPosition ? "" : manualFollowControl}</span>${outcomeMetric}</div>
+          <div class="opportunity-metrics ${historicalTab ? "with-result" : ""}" data-patch-key="core-metrics"><span><em>新闻评分</em><b>${Number.isFinite(displayedNewsScore) ? displayedNewsScore.toFixed(1) : "无数据"}</b><small>${newsTrigger.version ? `${Number(newsTrigger.new_news_ids?.length || 0)} 条新事件 · 记忆 ${Number(newsTrigger.memory_window_hours || 168)}h` : "旧版记录"}</small></span><span><em>指标强度</em><b>${Number.isFinite(displayedIndicatorScore) ? displayedIndicatorScore.toFixed(1) : "无数据"}</b><small>${matchedCount} 项同向 · ${availableCount}/${requiredCount} 可用</small></span><span><em>确认周期</em><b>${this.escape(item.timeframe)}</b><small>${this.escape(marketQualityText)}</small></span><span class="opportunity-signal-status"><em>信号状态</em><b>${this.escape(entryState.label)}</b><small>${this.escape(entryState.detail)}</small>${triggeredPosition || candidateSummaryVisible ? "" : manualFollowControl}</span>${outcomeMetric}</div>
           ${settlementPanel}
           <div class="evidence-chips" data-patch-key="indicator-evidence">${indicators}${indicatorRemainder}</div>
           <ul class="opportunity-news" data-patch-key="news-evidence">${news}</ul>
