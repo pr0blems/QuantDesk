@@ -28,3 +28,37 @@ def test_macro_asset_tooltip_supports_hover_focus_and_visible_overflow() -> None
     assert ".macro-asset-tooltip > * { grid-column: 1; }" in styles
     assert ".macro-market-footer > div:last-child { position: relative; overflow: visible; }" in styles
     assert "pointer-events: none" in styles
+
+
+def test_macro_index_and_risk_cards_explain_market_impact_and_data_basis() -> None:
+    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+        encoding="utf-8"
+    )
+
+    for key in ("NDX", "SPX", "DJI", "RUT"):
+        assert f"{key}: {{" in script
+    for tooltip_id in (
+        "macro-risk-impact-vix",
+        "macro-risk-impact-breadth",
+        "macro-risk-impact-tide",
+        "macro-risk-impact-event",
+    ):
+        assert tooltip_id in script
+    assert 'class="macro-index-card ${item.available ? "" : "unavailable"}" tabindex="0"' in script
+    assert 'class="macro-asset-tooltip macro-card-tooltip" role="tooltip"' in script
+    assert "数据口径" in script
+    assert "点位不可直接互相比对" in script
+    assert 'aria-describedby="macro-risk-impact-vix"' in script
+
+
+def test_macro_index_and_risk_tooltips_support_hover_and_keyboard_focus() -> None:
+    styles = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".macro-index-card:hover > .macro-card-tooltip" in styles
+    assert ".macro-index-card:focus-visible > .macro-card-tooltip" in styles
+    assert ".macro-risk-stack > div:hover > .macro-card-tooltip" in styles
+    assert ".macro-risk-stack > div:focus-visible > .macro-card-tooltip" in styles
+    assert ".macro-card-tooltip { top: calc(100% + 9px)" in styles
+    assert ".macro-index-card:hover, .macro-index-card:focus-visible" in styles

@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260826-opportunity-card7">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260826-macro-index-tooltips1">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -2006,16 +2006,77 @@ class AiMonitorDashboard extends HTMLElement {
     const eventState = data.events || {};
     const entryPolicy = data.entry_policy || {};
     const nextEvent = eventState.next_event || null;
+    const macroIndexProfiles = {
+      NDX: {
+        title: "纳斯达克 100 · 科技与成长风险偏好",
+        up: "上涨通常表示大型科技、半导体和长久期成长股风险偏好改善；若利率也在上行，需要确认是否只是少数权重股拉动。",
+        down: "下跌通常意味着科技与成长股承压，常见原因包括利率上行、估值收缩、盈利预期下修或整体风险偏好下降。",
+        flat: "指数变化有限，暂不足以单独确认科技与成长风格的方向。",
+        history: "纳指 100 对实际利率、AI/半导体周期和大型科技盈利预期较敏感；权重集中时可能与全市场涨跌家数背离。",
+        watch: "结合 10Y 美债、半导体板块、VIX 和上涨家数判断上涨是否健康。",
+      },
+      SPX: {
+        title: "标普 500 · 美国大盘股核心基准",
+        up: "上涨通常代表美国大盘股整体风险偏好改善；若等权指数和上涨家数同步走强，行情的广度与持续性通常更好。",
+        down: "下跌通常反映盈利预期、金融条件或风险偏好转弱；若只有少数权重股下跌而市场宽度稳定，压力可能更集中。",
+        flat: "大盘基准变化有限，需要结合行业、等权指数和市场宽度判断真实方向。",
+        history: "标普 500 覆盖美国主要大型公司，长期受企业盈利、实际利率和经济周期共同驱动，但市值加权会放大巨头影响。",
+        watch: "重点比较 SPY、RSP、上涨家数和信用市场，识别普涨、巨头独涨或防御性轮动。",
+      },
+      DJI: {
+        title: "道琼斯工业平均 · 成熟蓝筹与周期风格",
+        up: "上涨通常表示成熟蓝筹、工业、金融或防御型公司表现较强；相对纳指走强时，常见于价值与周期风格占优。",
+        down: "下跌通常表示传统蓝筹和周期板块承压，可能对应增长担忧、工业需求转弱或防御资产也被抛售。",
+        flat: "蓝筹指数变化有限，暂未形成清晰的价值或周期风格信号。",
+        history: "道指采用价格加权且仅包含 30 家公司，能反映美国蓝筹情绪，但不宜单独代表整个美股市场。",
+        watch: "结合标普 500、工业与金融板块以及美债收益率，判断是风格轮动还是系统性变化。",
+      },
+      RUT: {
+        title: "罗素 2000 · 小盘股与本土经济敏感度",
+        up: "上涨通常代表小盘股风险偏好、美国本土增长预期或融资环境改善；若信用利差同步收窄，信号更可靠。",
+        down: "下跌通常说明小盘企业融资压力、经济增长担忧或信用风险上升；高利率环境下小盘股往往更敏感。",
+        flat: "小盘股变化有限，暂不足以确认市场风险偏好是否正在扩散。",
+        history: "罗素 2000 盈利质量和负债结构更分散，对利率、银行信贷和美国国内经济周期通常比大盘股更敏感。",
+        watch: "结合 IWM、HYG、区域银行和上涨家数，确认小盘行情是否获得信用与广度支持。",
+      },
+    };
+    const buildMacroCardTooltip = ({ id, title, stateTone, stateLabel, summary, history, watch, source }) => `<div id="${this.escape(id)}" class="macro-asset-tooltip macro-card-tooltip" role="tooltip">
+      <span class="macro-asset-tooltip-kicker">HISTORICAL MACRO IMPACT</span>
+      <strong>${this.escape(title)}</strong>
+      <span class="macro-asset-tooltip-state ${this.escape(stateTone)}">${this.escape(stateLabel)}</span>
+      <p>${this.escape(summary)}</p>
+      <dl><div><dt>历史常见</dt><dd>${this.escape(history)}</dd></div><div><dt>观察重点</dt><dd>${this.escape(watch)}</dd></div><div><dt>数据口径</dt><dd>${this.escape(source)}</dd></div></dl>
+      <small>历史联动总结，不代表必然因果，也不构成交易建议。</small>
+    </div>`;
     const indexCards = indices.map((item) => {
       const liveProxy = item.realtime_proxy || null;
+      const profile = macroIndexProfiles[item.key] || null;
+      const change = Number(item.change_percent);
+      const direction = Number.isFinite(change) && change > 0.05 ? "up" : Number.isFinite(change) && change < -0.05 ? "down" : "flat";
+      const tooltipId = `macro-index-impact-${String(item.key || item.provider_symbol || "index").toLowerCase()}`;
+      const currentLabel = direction === "up" ? "当前上涨" : direction === "down" ? "当前下跌" : "当前变化有限";
       const proxyLine = liveProxy?.available
         ? `<span class="macro-live-proxy"><i></i>${this.escape(liveProxy.provider_symbol || "ETF")} ${numberOrDash(liveProxy.price)} · ${this.escape(({ premarket: "盘前", regular: "盘中", postmarket: "盘后", closed: "休市" })[liveProxy.market_time] || session.label || "行情")}</span>`
         : "";
-      return `<article class="macro-index-card ${item.available ? "" : "unavailable"}">
-      <header><strong>${this.escape(item.label || item.key)}</strong><small>${this.escape(item.provider_symbol || "--")} ${item.proxy ? "代理" : "指数"}</small></header>
+      const source = item.proxy
+        ? `主数值来自 ${item.provider_symbol || "ETF"} 代理，不是指数绝对点位。`
+        : `主数值为 ${item.provider_symbol || "指数"} 真实指数${liveProxy?.available ? `；${liveProxy.provider_symbol || "ETF"} 仅作盘前/盘后实时代理，点位不可直接互相比对。` : "；休市时可能停留在最近有效指数行情。"}`;
+      const tooltip = profile ? buildMacroCardTooltip({
+        id: tooltipId,
+        title: profile.title,
+        stateTone: direction,
+        stateLabel: `${currentLabel} · ${percent(item.change_percent)}`,
+        summary: profile[direction],
+        history: profile.history,
+        watch: profile.watch,
+        source,
+      }) : "";
+      return `<article class="macro-index-card ${item.available ? "" : "unavailable"}" tabindex="0"${profile ? ` aria-describedby="${this.escape(tooltipId)}"` : ""}>
+      <header><strong>${this.escape(item.label || item.key)}</strong><small>${this.escape(item.provider_symbol || "--")} ${item.proxy ? "代理" : "指数"}</small>${profile ? '<i class="macro-card-help" aria-hidden="true">?</i>' : ""}</header>
       <b>${numberOrDash(item.price)}</b>
       <span class="${tone(item.change_percent)}">${percent(item.change_percent)}</span>
       <footer><span>日内 ${percent(item.intraday_change_percent)}</span><span>振幅 ${percent(item.amplitude_percent)}</span>${item.rsi_14_1h == null ? "" : `<span>RSI ${numberOrDash(item.rsi_14_1h, 1)}</span>`}${proxyLine}</footer>
+      ${tooltip}
     </article>`;
     }).join("");
     const sectorPills = sectors.map((item) => `<span class="macro-sector ${tone(item.change_percent)}"><em>${this.escape(item.label || item.key)}</em><b>${percent(item.change_percent)}</b><small>${this.escape(item.provider_symbol || "--")} 代理</small></span>`).join("");
@@ -2103,6 +2164,54 @@ class AiMonitorDashboard extends HTMLElement {
         ? `${Math.max(0, Number(nextEvent.hours_until)).toFixed(1)} 小时后`
         : `${Math.ceil(Number(nextEvent.hours_until) / 24)} 天后`
       : "暂无临近事件";
+    const vixValue = Number(vix.value);
+    const vixDirection = !Number.isFinite(vixValue) ? "flat" : vixValue >= 25 ? "down" : vixValue <= 15 ? "up" : "flat";
+    const breadthValue = Number(breadth.advance_decline_ratio);
+    const breadthDirection = !Number.isFinite(breadthValue) ? "flat" : breadthValue >= 1.2 ? "up" : breadthValue <= 0.8 ? "down" : "flat";
+    const tideDirection = tide.bias === "bull" ? "up" : tide.bias === "bear" ? "down" : "flat";
+    const eventDirection = eventTone === "danger" ? "down" : eventTone === "normal" ? "up" : "flat";
+    const riskTooltips = {
+      vix: buildMacroCardTooltip({
+        id: "macro-risk-impact-vix",
+        title: "VIX · 标普 500 隐含波动率",
+        stateTone: vixDirection,
+        stateLabel: !Number.isFinite(vixValue) ? "当前数据不可用" : vixValue >= 30 ? `高波动 · ${numberOrDash(vixValue, 2)}` : vixValue >= 25 ? `波动偏高 · ${numberOrDash(vixValue, 2)}` : vixValue <= 15 ? `波动偏低 · ${numberOrDash(vixValue, 2)}` : `波动中性 · ${numberOrDash(vixValue, 2)}`,
+        summary: !Number.isFinite(vixValue) ? "当前缺少有效的 VIX 数据。" : vixValue >= 25 ? "VIX 偏高通常表示期权保护需求和市场不确定性上升，风险资产更容易出现放大波动。" : vixValue <= 15 ? "VIX 偏低通常表示市场平静、风险偏好较好，但极低水平也可能意味着保护不足和情绪过度乐观。" : "VIX 位于常见中性区间，尚未单独给出极端恐慌或过度平静信号。",
+        history: "VIX 急升常与美股回撤同步，随后回落通常代表恐慌缓解；它衡量未来约 30 天隐含波动，不直接预测涨跌方向。",
+        watch: "结合标普走势、期限结构和实际波动判断；单日百分比变化应与绝对点位一起看。",
+        source: vix.available ? "CBOE VIX 真实指数，不是可直接交易的现货价格。" : "当前为最近有效值或不可用状态，不参与单独决策。",
+      }),
+      breadth: buildMacroCardTooltip({
+        id: "macro-risk-impact-breadth",
+        title: "市场涨跌家数 · 上涨参与广度",
+        stateTone: breadthDirection,
+        stateLabel: !breadth.available ? "当前样本不足" : breadthDirection === "up" ? `广度偏强 · A/D ${breadthRatio}` : breadthDirection === "down" ? `广度偏弱 · A/D ${breadthRatio}` : `广度中性 · A/D ${breadthRatio}`,
+        summary: !breadth.available ? "当前覆盖样本不足，不能据此判断整个市场的上涨参与度。" : breadthDirection === "up" ? "上涨家数明显多于下跌家数，通常表示行情参与面较广，大盘上涨的内部质量更好。" : breadthDirection === "down" ? "下跌家数明显多于上涨家数，通常表示市场内部承压；即使市值指数上涨，也可能只是少数权重股支撑。" : "上涨与下跌家数接近，市场内部方向分化，指数本身的涨跌代表性有限。",
+        history: "市场宽度经常用于确认指数趋势；指数创新高但上涨家数持续减少，历史上属于需要警惕的背离。",
+        watch: "连续观察 A/D 比率、创新高/新低家数，并与标普等权和罗素 2000 交叉验证。",
+        source: breadth.available ? `当前统计覆盖 ${this.number(breadth.advancers)} 只上涨、${this.number(breadth.decliners)} 只下跌。` : "仅展示已取得报价的样本，不代表全部美股。",
+      }),
+      tide: buildMacroCardTooltip({
+        id: "macro-risk-impact-tide",
+        title: "Market Tide · 实时资金方向代理",
+        stateTone: tideDirection,
+        stateLabel: !tide.available ? "当前数据不可用" : `${tideLabel} · 净量 ${this.number(tide.net_volume)}`,
+        summary: !tide.available ? "当前未取得有效资金潮汐数据，系统不会用它单独放行或否决机会。" : tideDirection === "up" ? "资金潮汐偏多通常表示上涨成交量占优，为风险偏好和大盘多头提供短线确认。" : tideDirection === "down" ? "资金潮汐偏空通常表示下跌成交量占优，短线卖压和风险规避增强。" : "资金潮汐接近平衡，暂未形成清晰的多空资金优势。",
+        history: "资金潮汐适合确认盘中方向，但在开盘、收盘和事件窗口容易出现短时放大，不能代替价格趋势。",
+        watch: "观察 5 分钟方向是否持续，并与指数、市场宽度和期权流同步确认。",
+        source: tide.available ? `${sessionActive ? "当前交易时段 5 分钟实时潮汐。" : "最近交易日有效潮汐。"}` : "依赖 Unusual Whales 上游数据；缺失时明确降级。",
+      }),
+      event: buildMacroCardTooltip({
+        id: "macro-risk-impact-event",
+        title: "宏观事件风险 · 波动窗口提醒",
+        stateTone: eventDirection,
+        stateLabel: nextEvent ? `${nextEvent.event_type || "事件"} · ${eventCountdown}` : "未来 24 小时无重大事件",
+        summary: nextEvent ? "临近重大宏观数据或央行事件时，价格可能出现跳空、点差扩大和方向快速反转，技术信号可靠性会下降。" : "当前未登记临近重大事件，事件维度没有额外提高入场门槛，但仍需关注突发新闻。",
+        history: "CPI、非农、FOMC 等事件常令利率、美元和股票同时重新定价；首次波动方向不一定是最终方向。",
+        watch: "事件前后关注发布时间、实际值与预期差，以及 5–15 分钟内利率和美元是否确认。",
+        source: nextEvent ? `事件日历：${nextEvent.title || nextEvent.event_type || "已登记宏观事件"}。` : "根据系统已登记的未来事件窗口判断。",
+      }),
+    };
     this.patchStablePanel(target, `<header class="macro-market-heading" data-patch-key="macro-heading">
       <div><span>US MARKET REGIME</span><strong>宏观大盘环境</strong><small>${this.escape(data.source_note || "指数、波动率、市场宽度和事件风险")}</small></div>
       <div class="macro-session ${this.escape(sessionKey)} ${sessionActive ? "live" : ""}"><span><i></i>${this.escape(session.label || "休市")}</span><b>${sessionActive ? "实时波动" : session.realtime_expected ? "等待实时确认" : "行情静止"}</b><small>美东 ${this.escape(String(session.local_time || "").slice(11, 19) || "--")} · 更新 ${capturedLabel}</small></div>
@@ -2112,10 +2221,10 @@ class AiMonitorDashboard extends HTMLElement {
     <div class="macro-market-body" data-patch-key="macro-body">
       <div class="macro-index-grid">${indexCards || '<div class="macro-empty">大盘实时行情暂不可用，个股评分不会应用宏观调整。</div>'}</div>
       <aside class="macro-risk-stack">
-        <div class="macro-vix ${vixTone}"><span>VIX 恐慌指数</span><b>${numberOrDash(vix.value, 2)}</b><small>${vix.available ? `${percent(vix.change_percent)} · 真实指数` : "暂不可用"}</small></div>
-        <div class="macro-breadth ${breadth.available ? "available" : "unavailable"}"><span>市场涨跌家数</span><b>${this.number(breadth.advancers)} <i>/</i> ${this.number(breadth.decliners)}</b><small>上涨 / 下跌 · A/D ${breadthRatio}${breadth.available ? "" : " · 样本不足"}</small></div>
-        <div class="macro-tide ${tideTone}"><span>Market Tide</span><b>${tide.available ? tideLabel : "暂不可用"}</b><small>${tide.available ? `净量 ${this.number(tide.net_volume)} · ${sessionActive ? "5m 实时潮汐" : "最近交易日潮汐"}` : providers.unusual_whales_enabled === false ? "Unusual Whales 已关闭" : providers.unusual_whales_configured ? "已配置，等待上游数据" : "未配置 Unusual Whales"}</small></div>
-        <div class="macro-event ${eventTone}"><span>宏观事件风险</span><b>${nextEvent ? this.escape(nextEvent.event_type) : "正常"}</b><small>${nextEvent ? `${eventCountdown} · ${this.escape(nextEvent.title)}` : "未来 24 小时无已登记重大事件"}</small></div>
+        <div class="macro-vix ${vixTone}" tabindex="0" aria-describedby="macro-risk-impact-vix"><span>VIX 恐慌指数</span><b>${numberOrDash(vix.value, 2)}</b><small>${vix.available ? `${percent(vix.change_percent)} · 真实指数` : "暂不可用"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.vix}</div>
+        <div class="macro-breadth ${breadth.available ? "available" : "unavailable"}" tabindex="0" aria-describedby="macro-risk-impact-breadth"><span>市场涨跌家数</span><b>${this.number(breadth.advancers)} <i>/</i> ${this.number(breadth.decliners)}</b><small>上涨 / 下跌 · A/D ${breadthRatio}${breadth.available ? "" : " · 样本不足"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.breadth}</div>
+        <div class="macro-tide ${tideTone}" tabindex="0" aria-describedby="macro-risk-impact-tide"><span>Market Tide</span><b>${tide.available ? tideLabel : "暂不可用"}</b><small>${tide.available ? `净量 ${this.number(tide.net_volume)} · ${sessionActive ? "5m 实时潮汐" : "最近交易日潮汐"}` : providers.unusual_whales_enabled === false ? "Unusual Whales 已关闭" : providers.unusual_whales_configured ? "已配置，等待上游数据" : "未配置 Unusual Whales"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.tide}</div>
+        <div class="macro-event ${eventTone}" tabindex="0" aria-describedby="macro-risk-impact-event"><span>宏观事件风险</span><b>${nextEvent ? this.escape(nextEvent.event_type) : "正常"}</b><small>${nextEvent ? `${eventCountdown} · ${this.escape(nextEvent.title)}` : "未来 24 小时无已登记重大事件"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.event}</div>
       </aside>
     </div>
     <footer class="macro-market-footer" data-patch-key="macro-footer"><div><span>板块热度</span>${sectorPills || "<small>暂无板块行情</small>"}</div><div><span>利率 / 美元代理</span>${assetPills || "<small>暂无宏观资产行情</small>"}</div></footer>`);
