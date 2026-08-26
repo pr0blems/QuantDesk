@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
@@ -99,6 +100,7 @@ class FinnhubUsQuoteService:
         self._persisted = 0
         self._write_errors = 0
         self._last_persisted_at: datetime | None = None
+        self._last_storage_refresh_monotonic = 0.0
         self._started = False
         self._stream_connected = False
         self._stream_error: str | None = None
@@ -320,15 +322,11 @@ class FinnhubUsQuoteService:
             symbol=row.symbol,
             price=float(row.price),
             change=float(row.change) if row.change is not None else None,
-            change_percent=(
-                float(row.change_percent) if row.change_percent is not None else None
-            ),
+            change_percent=(float(row.change_percent) if row.change_percent is not None else None),
             day_high=float(row.day_high) if row.day_high is not None else None,
             day_low=float(row.day_low) if row.day_low is not None else None,
             day_open=float(row.day_open) if row.day_open is not None else None,
-            previous_close=(
-                float(row.previous_close) if row.previous_close is not None else None
-            ),
+            previous_close=(float(row.previous_close) if row.previous_close is not None else None),
             source_timestamp=int(row.source_timestamp),
             fetched_at=fetched_at,
             volume=float(row.volume) if row.volume is not None else None,
@@ -346,9 +344,7 @@ class FinnhubUsQuoteService:
             )
             with Session(self.engine) as db:
                 rows = db.scalars(
-                    select(FinnhubQuoteSnapshot).where(
-                        FinnhubQuoteSnapshot.id.in_(latest_ids)
-                    )
+                    select(FinnhubQuoteSnapshot).where(FinnhubQuoteSnapshot.id.in_(latest_ids))
                 ).all()
         except SQLAlchemyError:
             with self._lock:
@@ -358,6 +354,27 @@ class FinnhubUsQuoteService:
             for row in rows:
                 self._quotes[row.symbol] = self._snapshot_quote(row)
                 self._persisted_symbols.add(row.symbol)
+
+    def _refresh_reader_cache(self) -> None:
+        """Refresh API-only instances from the database-backed worker cache.
+
+        Quote collection belongs to the dedicated market worker.  API processes
+        still construct this service so routes can share its read model, but they
+        never call ``start`` and therefore do not own the worker's in-memory
+        quotes.  Refresh those reader instances from persisted snapshots instead
+        of incorrectly returning an empty provider.
+        """
+
+        if self.engine is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if self._started or now - self._last_storage_refresh_monotonic < 1.0:
+                return
+            # Claim the short refresh window before I/O so concurrent API
+            # requests do not stampede the database.
+            self._last_storage_refresh_monotonic = now
+        self._hydrate_latest()
 
     def _persist_quotes(self, quotes: Iterable[FinnhubQuote]) -> None:
         if self.engine is None:
@@ -439,6 +456,7 @@ class FinnhubUsQuoteService:
         return SYMBOL_ALIASES.get(normalized, normalized)
 
     def latest_many(self, symbols: Iterable[str]) -> dict[str, dict[str, Any]]:
+        self._refresh_reader_cache()
         requested = {self.normalize_symbol(symbol) for symbol in symbols}
         now = datetime.now(UTC)
         with self._lock:
@@ -458,6 +476,7 @@ class FinnhubUsQuoteService:
         return result
 
     def snapshot(self) -> dict[str, Any]:
+        self._refresh_reader_cache()
         now = datetime.now(UTC)
         with self._lock:
             quotes = dict(self._quotes)

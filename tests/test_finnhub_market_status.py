@@ -8,6 +8,8 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from quantdesk_v2 import finnhub, finnhub_quotes
 from quantdesk_v2.config import Settings
@@ -21,6 +23,7 @@ from quantdesk_v2.finnhub import (
 )
 from quantdesk_v2.finnhub_quotes import FinnhubUsQuoteService
 from quantdesk_v2.main import create_app
+from quantdesk_v2.models import FinnhubQuoteSnapshot
 
 Transport = Callable[[str, dict[str, str], float], tuple[int, bytes]]
 
@@ -271,6 +274,56 @@ def test_us_quote_latest_many_normalizes_contract_symbol(monkeypatch) -> None:
 
     assert latest["AAPL"]["price"] == 262.1
     assert latest["AAPL"]["storage"] == "memory_pending"
+
+
+def test_api_reader_restores_latest_worker_quote_from_database_while_market_closed(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(finnhub_quotes, "_load_us_symbols", lambda _path: ("AAPL",))
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    FinnhubQuoteSnapshot.__table__.create(engine)
+    observed_at = datetime(2026, 8, 25, 20, 0)
+    with Session(engine) as db:
+        db.add(
+            FinnhubQuoteSnapshot(
+                id=1,
+                symbol="AAPL",
+                bucket_at=observed_at,
+                price=227.16,
+                change=1.25,
+                change_percent=0.553,
+                day_high=228.0,
+                day_low=224.5,
+                day_open=225.0,
+                previous_close=225.91,
+                source_timestamp=int(observed_at.replace(tzinfo=UTC).timestamp()),
+                fetched_at=observed_at,
+                live=True,
+            )
+        )
+        db.commit()
+
+    # This service deliberately never starts: it represents the API process,
+    # while a separate market worker owns collection and persistence.
+    service = FinnhubUsQuoteService(
+        FinnhubClient("https://finnhub.io", "secret", transport=lambda *_: response(429, {})),
+        Path("unused.json"),
+        websocket_enabled=False,
+        engine=engine,
+        market_open_checker=lambda: False,
+    )
+
+    latest = service.latest_many(["AAPLUSDT"])
+    snapshot = service.snapshot()
+
+    assert latest["AAPL"]["available"] is True
+    assert latest["AAPL"]["price"] == 227.16
+    assert latest["AAPL"]["storage"] == "database"
+    assert latest["AAPL"]["stale"] is True
+    assert snapshot["market_open"] is False
+    assert snapshot["collection_active"] is False
+    assert snapshot["available"] == 1
+    assert snapshot["quotes"][0]["price"] == 227.16
 
 
 def test_public_us_market_status_route() -> None:
