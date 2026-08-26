@@ -29,6 +29,27 @@ def _require_mysql() -> None:
 
 def upgrade() -> None:
     _require_mysql()
+    # Alembic creates ``version_num`` as VARCHAR(32) by default.  This project
+    # deliberately uses descriptive revision identifiers, so widen the column
+    # before Alembic writes this revision id.  The table-existence guards make
+    # this migration safe to resume after MySQL's non-transactional DDL has
+    # completed a table creation but the version-row update has failed.
+    op.alter_column(
+        "alembic_version",
+        "version_num",
+        existing_type=sa.String(length=32),
+        type_=sa.String(length=128),
+        existing_nullable=False,
+    )
+    existing_tables = set(sa.inspect(op.get_bind()).get_table_names())
+
+    if "trading_control_latches" not in existing_tables:
+        _create_trading_control_latches()
+    if "trading_control_events" not in existing_tables:
+        _create_trading_control_events()
+
+
+def _create_trading_control_latches() -> None:
     op.create_table(
         "trading_control_latches",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
@@ -99,6 +120,8 @@ def upgrade() -> None:
         unique=False,
     )
 
+
+def _create_trading_control_events() -> None:
     op.create_table(
         "trading_control_events",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
