@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+from quantdesk_v2 import macro_market
 from quantdesk_v2.macro_market import (
     MacroMarketService,
     _bis_policy_metric,
@@ -121,6 +122,40 @@ def test_closed_market_reuses_cache_without_calling_unusual_whales() -> None:
     assert tide["available"] is False
     assert client.state_calls == 0
     assert client.tide_calls == 0
+
+
+def test_public_macro_proxy_fallback_is_cached_and_keeps_all_cards(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_quote(symbol: str, *, retries: int = 3):
+        calls.append(symbol)
+        assert retries == 1
+        return {
+            "price": 100.5,
+            "previous_close": 100.0,
+            "change_pct": 0.5,
+            "day_open": 100.1,
+            "day_high": 101.0,
+            "day_low": 99.5,
+            "market_time_ms": 1_787_745_600_000,
+            "market_state": "pre_market",
+            "status": "ok",
+        }
+
+    monkeypatch.setattr(macro_market.underlying_quotes, "fetch_quote", fake_quote)
+    service = MacroMarketService(object())  # type: ignore[arg-type]
+
+    first = service._public_proxy_snapshot(realtime_expected=True)
+    second = service._public_proxy_snapshot(realtime_expected=True)
+
+    assert set(first) == set(macro_market.MACRO_ASSET_KEYS)
+    assert second == first
+    assert len(calls) == len(macro_market.MACRO_ASSET_KEYS)
+    assert first["US10Y"]["provider_symbol"] == "TLT"
+    assert first["US10Y"]["price"] == 100.5
+    assert first["US10Y"]["change_percent"] == 0.5
+    assert first["US10Y"]["market_time"] == "premarket"
+    assert first["US10Y"]["source"] == "yahoo_extended_hours_fallback"
 
 
 def _market_snapshot() -> dict:

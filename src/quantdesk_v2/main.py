@@ -31,7 +31,12 @@ from .deployment_routes import router as deployment_router
 from .finnhub import FinnhubClient, FinnhubMarketStatusService, FinnhubWebhookReceiver
 from .finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
 from .interfaces.api.public_news import router as public_news_router
-from .macro_market import MacroMarketService, configure_default_service, us_market_session
+from .macro_market import (
+    MACRO_PROXY_SYMBOLS,
+    MacroMarketService,
+    configure_default_service,
+    us_market_session,
+)
 from .models import AdminSetting
 from .news import _unusual_whales_api_key
 from .strategy_routes import router as strategy_router
@@ -252,6 +257,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.finnhub_us_quote_service = FinnhubUsQuoteService(
         finnhub_client,
         runtime_settings.monitor_symbols_config,
+        supplemental_symbols=MACRO_PROXY_SYMBOLS,
         poll_seconds=runtime_settings.finnhub_quote_poll_seconds,
         stale_seconds=runtime_settings.finnhub_quote_stale_seconds,
         websocket_enabled=runtime_settings.finnhub_websocket_enabled,

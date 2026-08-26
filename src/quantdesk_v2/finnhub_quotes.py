@@ -72,6 +72,7 @@ class FinnhubUsQuoteService:
         client: FinnhubClient,
         symbols_config: Path,
         *,
+        supplemental_symbols: Iterable[str] = (),
         poll_seconds: float = 2.0,
         stale_seconds: int = 600,
         websocket_enabled: bool = True,
@@ -81,7 +82,18 @@ class FinnhubUsQuoteService:
         persist_interval_seconds: float = 5.0,
     ) -> None:
         self.client = client
-        self.symbols = _load_us_symbols(symbols_config)
+        configured_symbols = _load_us_symbols(symbols_config)
+        supplements = tuple(
+            dict.fromkeys(
+                normalized
+                for value in supplemental_symbols
+                if (normalized := self.normalize_symbol(value))
+                and SYMBOL_PATTERN.fullmatch(normalized)
+            )
+        )
+        self.symbols = tuple(
+            dict.fromkeys((*configured_symbols, *supplements))
+        )
         self.symbol_set = set(self.symbols)
         self.poll_seconds = poll_seconds
         self.stale_seconds = stale_seconds

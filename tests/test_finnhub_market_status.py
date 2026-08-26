@@ -195,6 +195,19 @@ def test_us_quote_service_has_separate_equity_universe_and_stream_cache(monkeypa
     assert snapshot["quotes"][0]["live"] is True
 
 
+def test_us_quote_service_merges_supplemental_market_context_symbols(monkeypatch) -> None:
+    monkeypatch.setattr(finnhub_quotes, "_load_us_symbols", lambda _path: ("AAPL",))
+    service = FinnhubUsQuoteService(
+        FinnhubClient("https://finnhub.io", "secret", transport=lambda *_: response(429, {})),
+        Path("unused.json"),
+        supplemental_symbols=("TLT", "SHY", "tlt", "invalid symbol"),
+        websocket_enabled=False,
+    )
+
+    assert service.symbols == ("AAPL", "TLT", "SHY")
+    assert service.symbol_set == {"AAPL", "TLT", "SHY"}
+
+
 def test_rest_quote_does_not_replace_equal_or_newer_stream_trade(monkeypatch) -> None:
     monkeypatch.setattr(finnhub_quotes, "_load_us_symbols", lambda _path: ("AAPL",))
     service = FinnhubUsQuoteService(

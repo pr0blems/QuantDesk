@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import math
 import statistics
 import time
@@ -28,11 +29,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
-from . import indicators
+from . import indicators, underlying_quotes
 from .finnhub import FinnhubClient, FinnhubClientError, FinnhubQuote
 from .models import AdminSetting
 from .monitor import MonitorRepository, MonitorUnavailable
 from .unusual_whales import UnusualWhalesMarketClient
+
+logger = logging.getLogger(__name__)
 
 TARGET_QUOTES: dict[str, tuple[str, str, str]] = {
     "NDX": ("QQQ", "QQQUSDT", "纳指 100"),
@@ -51,6 +54,15 @@ TARGET_QUOTES: dict[str, tuple[str, str, str]] = {
     "US2Y": ("SHY", "", "2Y 美债代理"),
     "DXY": ("UUP", "", "美元指数代理"),
 }
+MACRO_ASSET_KEYS = (
+    "US10Y",
+    "US2Y",
+    "DXY",
+    "EQUAL_WEIGHT",
+    "HIGH_YIELD",
+    "OIL",
+)
+MACRO_PROXY_SYMBOLS = tuple(TARGET_QUOTES[key][0] for key in MACRO_ASSET_KEYS)
 VIX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=5d&interval=5m"
 MOVE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EMOVE?range=1mo&interval=1d"
 TREASURY_NOMINAL_URL = (
@@ -880,7 +892,11 @@ def _unusual_whales_payload(
     day_open = _number(item.get("open"))
     day_high = _number(item.get("high"))
     day_low = _number(item.get("low"))
-    change = price - previous_close if price is not None and previous_close not in (None, 0) else None
+    change = (
+        price - previous_close
+        if price is not None and previous_close not in (None, 0)
+        else None
+    )
     change_percent = change / previous_close * 100 if change is not None else None
     intraday = (price - day_open) / day_open * 100 if price is not None and day_open not in (None, 0) else None
     amplitude = (
@@ -931,6 +947,61 @@ def _ticker_payload(
         "available": price is not None and price > 0,
         "proxy": True,
         "source": "binance_tradfi_proxy",
+    }
+
+
+def _public_proxy_payload(
+    item: Mapping[str, Any], *, key: str, provider_symbol: str, label: str
+) -> dict[str, Any]:
+    """Normalize the public extended-hours fallback used after live sources."""
+
+    price = _number(item.get("price"))
+    previous_close = _number(item.get("previous_close"))
+    day_open = _number(item.get("day_open"))
+    day_high = _number(item.get("day_high"))
+    day_low = _number(item.get("day_low"))
+    change = price - previous_close if price is not None and previous_close not in (None, 0) else None
+    change_percent = (
+        change / previous_close * 100
+        if change is not None and previous_close not in (None, 0)
+        else _number(item.get("change_pct"))
+    )
+    intraday = (
+        (price - day_open) / day_open * 100
+        if price is not None and day_open not in (None, 0)
+        else None
+    )
+    amplitude = (
+        (day_high - day_low) / previous_close * 100
+        if day_high is not None and day_low is not None and previous_close not in (None, 0)
+        else None
+    )
+    market_state = {
+        "pre_market": "premarket",
+        "regular": "regular",
+        "after_hours": "postmarket",
+        "closed": "closed",
+    }.get(str(item.get("market_state") or ""), "closed")
+    market_time_ms = _number(item.get("market_time_ms"))
+    return {
+        "key": key,
+        "label": label,
+        "provider_symbol": provider_symbol,
+        "price": price,
+        "change": change,
+        "change_percent": round(change_percent, 4) if change_percent is not None else None,
+        "intraday_change_percent": round(intraday, 4) if intraday is not None else None,
+        "amplitude_percent": round(amplitude, 4) if amplitude is not None else None,
+        "day_high": day_high,
+        "day_low": day_low,
+        "day_open": day_open,
+        "previous_close": previous_close,
+        "source_timestamp": int(market_time_ms // 1_000) if market_time_ms else None,
+        "market_time": market_state,
+        "available": price is not None and price > 0,
+        "stale": item.get("status") == "stale",
+        "proxy": True,
+        "source": "yahoo_extended_hours_fallback",
     }
 
 
@@ -1580,6 +1651,8 @@ class MacroMarketService:
         self._central_bank_last_success_at = ""
         self._market_structure_cached_at = 0.0
         self._market_structure_cached: dict[str, Any] | None = None
+        self._public_proxy_cached_at = 0.0
+        self._public_proxy_cached: dict[str, dict[str, Any]] = {}
 
     def _load_persisted_snapshot(self, key: str) -> dict[str, Any] | None:
         if self.engine is None:
@@ -1902,6 +1975,58 @@ class MacroMarketService:
         self._market_structure_cached_at = time.monotonic()
         return result
 
+    def _public_proxy_snapshot(
+        self, *, realtime_expected: bool
+    ) -> dict[str, dict[str, Any]]:
+        """Keep macro proxy cards populated when live US collection is paused.
+
+        The fallback is intentionally slower than Finnhub WS/REST. Successful
+        rows replace the cached copy while transient provider failures retain the
+        last good value instead of clearing the UI.
+        """
+
+        age = time.monotonic() - self._public_proxy_cached_at
+        refresh_seconds = 120 if realtime_expected else 15 * 60
+        if self._public_proxy_cached_at and age < refresh_seconds:
+            return {
+                key: dict(value) for key, value in self._public_proxy_cached.items()
+            }
+        refreshed = dict(self._public_proxy_cached)
+        with ThreadPoolExecutor(max_workers=len(MACRO_ASSET_KEYS)) as executor:
+            pending = {
+                executor.submit(
+                    underlying_quotes.fetch_quote,
+                    TARGET_QUOTES[key][0],
+                    retries=1,
+                ): key
+                for key in MACRO_ASSET_KEYS
+            }
+            for future in as_completed(pending):
+                key = pending[future]
+                try:
+                    raw = future.result()
+                except Exception as exc:  # noqa: BLE001 - fallback must never break macro context
+                    logger.warning(
+                        "public macro proxy fallback failed for %s: %s",
+                        TARGET_QUOTES[key][0],
+                        type(exc).__name__,
+                    )
+                    continue
+                if not isinstance(raw, Mapping):
+                    continue
+                provider_symbol, _, label = TARGET_QUOTES[key]
+                payload = _public_proxy_payload(
+                    raw,
+                    key=key,
+                    provider_symbol=provider_symbol,
+                    label=label,
+                )
+                if payload.get("available"):
+                    refreshed[key] = payload
+        self._public_proxy_cached = refreshed
+        self._public_proxy_cached_at = time.monotonic()
+        return {key: dict(value) for key, value in refreshed.items()}
+
     def snapshot(self, repository: MonitorRepository, *, now: datetime | None = None) -> dict[str, Any]:
         current = now or datetime.now(UTC).replace(tzinfo=None)
         with self._lock:
@@ -1970,11 +2095,24 @@ class MacroMarketService:
                         cached_quotes[provider_symbol] = future.result()
                     except FinnhubClientError:
                         continue
+        public_proxy_quotes = self._public_proxy_snapshot(
+            realtime_expected=bool(session.get("realtime_expected"))
+        )
         entries: dict[str, dict[str, Any]] = {}
         for key, (provider_symbol, contract_symbol, label) in TARGET_QUOTES.items():
             unusual_state = unusual_states.get(provider_symbol)
             quote = cached_quotes.get(provider_symbol)
-            if unusual_state is not None:
+            public_proxy = public_proxy_quotes.get(key)
+            public_is_newer = bool(
+                public_proxy
+                and (_number(public_proxy.get("source_timestamp")) or 0)
+                > (_number(getattr(quote, "source_timestamp", None)) or 0)
+            )
+            if quote is not None and quote.live:
+                entry = _quote_payload(quote, key=key, label=label)
+            elif public_is_newer:
+                entry = dict(public_proxy or {})
+            elif unusual_state is not None:
                 entry = _unusual_whales_payload(
                     unusual_state,
                     key=key,
@@ -1990,6 +2128,8 @@ class MacroMarketService:
                     provider_symbol=provider_symbol,
                     label=label,
                 )
+            elif public_proxy is not None:
+                entry = dict(public_proxy)
             else:
                 entry = {
                     "key": key,
@@ -2106,14 +2246,7 @@ class MacroMarketService:
             "sectors": [entries[key] for key in ("TECH", "SEMIS", "CRYPTO", "BANKS", "ENERGY")],
             "macro_assets": [
                 entries[key]
-                for key in (
-                    "US10Y",
-                    "US2Y",
-                    "DXY",
-                    "EQUAL_WEIGHT",
-                    "HIGH_YIELD",
-                    "OIL",
-                )
+                for key in MACRO_ASSET_KEYS
             ],
             "treasury_curve": treasury_curve,
             "market_structure": market_structure,
@@ -2139,7 +2272,7 @@ class MacroMarketService:
                 "collection_market_open": regular_market_open,
                 "treasury_direct_yields": bool(treasury_curve.get("available")),
             },
-            "source_note": "收益率取美国财政部官方日曲线；Finnhub 与 Unusual Whales 仅在美股常规交易时段采集。Binance 映射合约始终是交易与结算主价格。",
+            "source_note": "收益率取美国财政部官方日曲线；ETF 代理优先使用 Finnhub 实时行情，盘前盘后缺失时保留公共行情最近有效快照。Binance 映射合约始终是交易与结算主价格。",
         }
         result["capital_retreat"] = capital_retreat_snapshot(result)
         result["entry_policy"] = macro_entry_policy(result)
