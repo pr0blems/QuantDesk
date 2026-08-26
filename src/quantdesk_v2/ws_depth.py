@@ -29,6 +29,8 @@ DEFAULT_SNAPSHOT_LIMIT = 500
 DEFAULT_GROUP_SIZE = 50
 TOP_LEVELS = 100
 HEARTBEAT_SECONDS = 2.0
+REST_SNAPSHOT_CACHE_SECONDS = 2.0
+REST_SNAPSHOT_STALE_SECONDS = 15.0
 
 _MAX_GROUP_SIZE = 50
 _MAX_TOTAL_SYMBOLS = 1_000
@@ -572,6 +574,118 @@ def live_order_book_snapshot(symbol: str, limit: int = TOP_LEVELS) -> dict[str, 
     with _LIVE_BOOKS_LOCK:
         book = _LIVE_BOOKS.get(normalized)
     return book.level_snapshot(limit) if book is not None else None
+
+
+class OrderBookUnavailableError(RuntimeError):
+    """Raised when neither the local stream nor a bounded REST fallback is usable."""
+
+
+_REST_BOOK_CACHE_LOCK = threading.RLock()
+_REST_BOOK_CACHE: dict[str, tuple[float, DepthOrderBook]] = {}
+_REST_BOOK_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+_MAX_REST_BOOK_CACHE_ENTRIES = 256
+
+
+def _decorate_rest_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    cached_at: float,
+    now: float,
+    stale_fallback: bool = False,
+) -> dict[str, Any]:
+    snapshot["source"] = "binance_futures_rest_depth"
+    snapshot["transport"] = "rest_cache"
+    snapshot["server_cache_age_seconds"] = round(max(0.0, now - cached_at), 3)
+    snapshot["stale_fallback"] = bool(stale_fallback)
+    return snapshot
+
+
+def _cached_rest_order_book_snapshot(
+    symbol: str, limit: int = TOP_LEVELS
+) -> dict[str, Any]:
+    """Return a rate-limited REST book for API processes without the market stream.
+
+    The depth collector intentionally lives in the dedicated market worker, while
+    FastAPI runs in another process.  A process-local live-book registry therefore
+    cannot be the API's only source.  One full top-100 REST snapshot is cached per
+    symbol and re-shaped for 20/50/100-level views, preventing the UI's one-second
+    polling loop from issuing one Binance request per frame.
+    """
+
+    normalized = _normalize_symbol(symbol)
+    if isinstance(limit, bool) or limit not in {20, 50, 100}:
+        raise ValueError("depth level snapshot limit must be 20, 50, or 100")
+
+    now = time.monotonic()
+    with _REST_BOOK_CACHE_LOCK:
+        cached = _REST_BOOK_CACHE.get(normalized)
+        refresh_lock = _REST_BOOK_REFRESH_LOCKS.setdefault(
+            normalized, threading.Lock()
+        )
+    if cached is not None and now - cached[0] <= REST_SNAPSHOT_CACHE_SECONDS:
+        snapshot = cached[1].level_snapshot(limit)
+        if snapshot is not None:
+            return _decorate_rest_snapshot(
+                snapshot, cached_at=cached[0], now=now
+            )
+
+    with refresh_lock:
+        now = time.monotonic()
+        with _REST_BOOK_CACHE_LOCK:
+            cached = _REST_BOOK_CACHE.get(normalized)
+        if cached is not None and now - cached[0] <= REST_SNAPSHOT_CACHE_SECONDS:
+            snapshot = cached[1].level_snapshot(limit)
+            if snapshot is not None:
+                return _decorate_rest_snapshot(
+                    snapshot, cached_at=cached[0], now=now
+                )
+
+        try:
+            payload = fetch_depth_snapshot(normalized, TOP_LEVELS)
+            book = DepthOrderBook(normalized)
+            book.load_snapshot(payload)
+            snapshot = book.level_snapshot(limit)
+            if snapshot is None:
+                raise ValueError("Binance depth snapshot did not produce a usable book")
+        except (BinancePublicRequestError, OSError, TimeoutError, ValueError) as exc:
+            if cached is not None and now - cached[0] <= REST_SNAPSHOT_STALE_SECONDS:
+                stale_snapshot = cached[1].level_snapshot(limit)
+                if stale_snapshot is not None:
+                    return _decorate_rest_snapshot(
+                        stale_snapshot,
+                        cached_at=cached[0],
+                        now=now,
+                        stale_fallback=True,
+                    )
+            raise OrderBookUnavailableError(
+                "Binance 盘口快照暂不可用，请稍后重试"
+            ) from exc
+
+        cached_at = time.monotonic()
+        with _REST_BOOK_CACHE_LOCK:
+            _REST_BOOK_CACHE[normalized] = (cached_at, book)
+            if len(_REST_BOOK_CACHE) > _MAX_REST_BOOK_CACHE_ENTRIES:
+                oldest_symbols = sorted(
+                    _REST_BOOK_CACHE,
+                    key=lambda cached_symbol: _REST_BOOK_CACHE[cached_symbol][0],
+                )[: len(_REST_BOOK_CACHE) - _MAX_REST_BOOK_CACHE_ENTRIES]
+                for cached_symbol in oldest_symbols:
+                    _REST_BOOK_CACHE.pop(cached_symbol, None)
+        return _decorate_rest_snapshot(
+            snapshot, cached_at=cached_at, now=cached_at
+        )
+
+
+def order_book_snapshot(symbol: str, limit: int = TOP_LEVELS) -> dict[str, Any]:
+    """Prefer the in-process WebSocket book, then use the bounded REST cache."""
+
+    live_snapshot = live_order_book_snapshot(symbol, limit)
+    if live_snapshot is not None:
+        live_snapshot["transport"] = "websocket"
+        live_snapshot["server_cache_age_seconds"] = 0.0
+        live_snapshot["stale_fallback"] = False
+        return live_snapshot
+    return _cached_rest_order_book_snapshot(symbol, limit)
 
 
 def _register_live_books(collectors: Sequence[DepthStreamCollector]) -> None:

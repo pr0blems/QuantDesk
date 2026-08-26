@@ -3735,7 +3735,7 @@ def opportunity_order_book(
     user: Annotated[User, Depends(get_current_user)],
     limit: int = Query(default=100),
 ) -> dict[str, Any]:
-    """Expose the synchronized Binance Futures book already held in memory."""
+    """Expose Binance Futures depth across the API/market process boundary."""
 
     if limit not in {20, 50, 100}:
         raise HTTPException(status_code=422, detail="limit must be 20, 50, or 100")
@@ -3750,12 +3750,13 @@ def opportunity_order_book(
     contract_symbol = str(opportunity.contract_symbol or "").strip().upper()
     if not contract_symbol:
         raise HTTPException(status_code=409, detail="opportunity has no Binance contract mapping")
-    snapshot = ws_depth.live_order_book_snapshot(contract_symbol, limit)
-    if snapshot is None:
+    try:
+        snapshot = ws_depth.order_book_snapshot(contract_symbol, limit)
+    except ws_depth.OrderBookUnavailableError as exc:
         raise HTTPException(
             status_code=503,
-            detail="Binance live order book is synchronizing; retry shortly",
-        )
+            detail=str(exc),
+        ) from exc
     return {
         **snapshot,
         "opportunity_id": str(opportunity.public_id),

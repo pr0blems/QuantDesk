@@ -413,7 +413,7 @@ class AiMonitorDashboard extends HTMLElement {
             </div>
           </header>
           <div class="order-book-content"><div id="order-book-body" class="order-book-body" role="tabpanel"><div class="order-book-loading">正在同步 Binance 实时盘口…</div></div><div id="order-book-flow-body" class="order-book-flow-body hidden" role="tabpanel"></div></div>
-          <footer class="order-book-foot"><span id="order-book-foot-copy">页面每秒读取一次本地 WebSocket 订单簿，底层深度流约 500ms 更新</span><strong>可见挂单与资金盘口评分用于研究，不代表真实主力资金</strong></footer>
+          <footer class="order-book-foot"><span id="order-book-foot-copy">页面每秒读取服务端盘口；优先使用 WebSocket，跨进程时由短缓存 REST 快照补齐</span><strong>可见挂单与资金盘口评分用于研究，不代表真实主力资金</strong></footer>
         </section>
       </div>
       <div id="ai-conclusion-modal" class="ai-conclusion-modal hidden" aria-hidden="true">
@@ -2971,7 +2971,7 @@ class AiMonitorDashboard extends HTMLElement {
     const footCopy = this.q("#order-book-foot-copy");
     if (footCopy) footCopy.textContent = flowView
       ? "资金盘口评分与买卖盘名义金额按机会扫描点保存"
-      : "页面每秒读取一次本地 WebSocket 订单簿，底层深度流约 500ms 更新";
+      : "页面每秒读取服务端盘口；优先使用 WebSocket，跨进程时由短缓存 REST 快照补齐";
   }
 
   renderOrderBookFlow() {
@@ -3059,7 +3059,7 @@ class AiMonitorDashboard extends HTMLElement {
       const liveState = this.q("#order-book-live-state");
       liveState.className = "order-book-live-state error";
       liveState.textContent = "同步中断";
-      if (!this.orderBookSnapshot) this.q("#order-book-body").innerHTML = `<div class="order-book-empty"><strong>实时盘口暂未同步</strong><span>${this.escape(error.message || "Binance 深度采集器正在重连，请稍后重试。")}</span><button type="button" data-order-book-retry>重新读取</button></div>`;
+      if (!this.orderBookSnapshot) this.q("#order-book-body").innerHTML = `<div class="order-book-empty"><strong>实时盘口暂未同步</strong><span>${this.escape(error.message || "Binance 盘口快照暂不可用，请稍后重试。")}</span><button type="button" data-order-book-retry>重新读取</button></div>`;
       this.q("[data-order-book-retry]")?.addEventListener("click", () => this.loadOrderBook());
     }
   }
@@ -3103,9 +3103,14 @@ class AiMonitorDashboard extends HTMLElement {
     const asks = Array.isArray(snapshot.asks) ? snapshot.asks : [];
     const age = Number(snapshot.age_seconds);
     const live = Number.isFinite(age) && age <= 4;
+    const transportLabel = snapshot.transport === "websocket"
+      ? "WS 实时"
+      : snapshot.stale_fallback
+        ? "REST 降级"
+        : "REST 快照";
     const liveState = this.q("#order-book-live-state");
     liveState.className = `order-book-live-state ${this.orderBookPaused ? "paused" : live ? "live" : "stale"}`;
-    liveState.textContent = this.orderBookPaused ? "已暂停" : live ? `实时 · ${age.toFixed(0)}s` : `延迟 · ${Number.isFinite(age) ? `${age.toFixed(0)}s` : "--"}`;
+    liveState.textContent = this.orderBookPaused ? "已暂停" : live ? `${transportLabel} · ${age.toFixed(0)}s` : `${transportLabel}延迟 · ${Number.isFinite(age) ? `${age.toFixed(0)}s` : "--"}`;
     const rows = Math.max(bids.length, asks.length);
     const maxNotional = Math.max(...bids.map((row) => Number(row.notional) || 0), ...asks.map((row) => Number(row.notional) || 0), 1);
     const largestBidRank = Number(snapshot.largest_bid_wall?.rank);

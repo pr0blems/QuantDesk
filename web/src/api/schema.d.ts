@@ -925,7 +925,7 @@ export interface paths {
         };
         /**
          * Opportunity Order Book
-         * @description Expose the synchronized Binance Futures book already held in memory.
+         * @description Expose Binance Futures depth across the API/market process boundary.
          */
         get: operations["opportunity_order_book_api_v2_ai_monitor_opportunities__opportunity_id__order_book_get"];
         put?: never;

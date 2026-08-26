@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from quantdesk_v2 import market_data_client
+from quantdesk_v2 import market_data_client, ws_depth
 from quantdesk_v2.binance_rate_limit import rest_request_weight
 from quantdesk_v2.ws_depth import (
     DepthOrderBook,
@@ -156,6 +156,106 @@ def test_depth_book_level_snapshot_requires_a_synchronized_book() -> None:
     assert book.level_snapshot(100) is None
     with pytest.raises(ValueError, match="20, 50, or 100"):
         book.level_snapshot(10)
+
+
+@pytest.fixture
+def empty_rest_depth_cache():
+    with ws_depth._REST_BOOK_CACHE_LOCK:
+        ws_depth._REST_BOOK_CACHE.clear()
+        ws_depth._REST_BOOK_REFRESH_LOCKS.clear()
+    yield
+    with ws_depth._REST_BOOK_CACHE_LOCK:
+        ws_depth._REST_BOOK_CACHE.clear()
+        ws_depth._REST_BOOK_REFRESH_LOCKS.clear()
+
+
+def test_order_book_snapshot_prefers_process_local_websocket(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ws_depth,
+        "live_order_book_snapshot",
+        lambda symbol, limit: {
+            "symbol": symbol,
+            "limit": limit,
+            "source": "binance_futures_diff_depth",
+        },
+    )
+    monkeypatch.setattr(
+        ws_depth,
+        "fetch_depth_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("REST fallback must not run")
+        ),
+    )
+
+    snapshot = ws_depth.order_book_snapshot("BTCUSDT", 50)
+
+    assert snapshot["source"] == "binance_futures_diff_depth"
+    assert snapshot["transport"] == "websocket"
+    assert snapshot["stale_fallback"] is False
+
+
+def test_order_book_snapshot_rest_fallback_is_cached_and_relimited(
+    monkeypatch, empty_rest_depth_cache
+) -> None:
+    calls: list[tuple[str, int]] = []
+    bids = [[str(1_000 - index), "1"] for index in range(120)]
+    asks = [[str(1_001 + index), "1"] for index in range(120)]
+    monkeypatch.setattr(ws_depth, "live_order_book_snapshot", lambda *_args: None)
+
+    def fetch(symbol: str, limit: int) -> dict:
+        calls.append((symbol, limit))
+        return _snapshot(bids=bids, asks=asks)
+
+    monkeypatch.setattr(ws_depth, "fetch_depth_snapshot", fetch)
+
+    top_20 = ws_depth.order_book_snapshot("btcusdt", 20)
+    top_100 = ws_depth.order_book_snapshot("BTCUSDT", 100)
+
+    assert calls == [("BTCUSDT", 100)]
+    assert len(top_20["bids"]) == len(top_20["asks"]) == 20
+    assert len(top_100["bids"]) == len(top_100["asks"]) == 100
+    assert top_100["source"] == "binance_futures_rest_depth"
+    assert top_100["transport"] == "rest_cache"
+    assert top_100["stale_fallback"] is False
+
+
+def test_order_book_snapshot_uses_brief_stale_cache_during_rest_failure(
+    monkeypatch, empty_rest_depth_cache
+) -> None:
+    clock = [100.0]
+    attempts = 0
+    monkeypatch.setattr(ws_depth.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ws_depth, "live_order_book_snapshot", lambda *_args: None)
+
+    def fetch(_symbol: str, _limit: int) -> dict:
+        nonlocal attempts
+        attempts += 1
+        if attempts > 1:
+            raise OSError("temporary upstream failure")
+        return _snapshot()
+
+    monkeypatch.setattr(ws_depth, "fetch_depth_snapshot", fetch)
+    assert ws_depth.order_book_snapshot("BTCUSDT", 20)["stale_fallback"] is False
+
+    clock[0] += ws_depth.REST_SNAPSHOT_CACHE_SECONDS + 1
+    stale = ws_depth.order_book_snapshot("BTCUSDT", 20)
+
+    assert stale["stale_fallback"] is True
+    assert stale["server_cache_age_seconds"] == pytest.approx(3.0)
+
+
+def test_order_book_snapshot_reports_chinese_error_without_any_source(
+    monkeypatch, empty_rest_depth_cache
+) -> None:
+    monkeypatch.setattr(ws_depth, "live_order_book_snapshot", lambda *_args: None)
+    monkeypatch.setattr(
+        ws_depth,
+        "fetch_depth_snapshot",
+        lambda *_args: (_ for _ in ()).throw(OSError("upstream unavailable")),
+    )
+
+    with pytest.raises(ws_depth.OrderBookUnavailableError, match="盘口快照暂不可用"):
+        ws_depth.order_book_snapshot("BTCUSDT", 100)
 
 
 def test_depth_gap_invalidates_until_fresh_snapshot_bridges_it() -> None:

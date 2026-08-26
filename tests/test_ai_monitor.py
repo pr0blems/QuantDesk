@@ -3369,7 +3369,8 @@ def test_opportunity_live_order_book_endpoint_is_tenant_scoped() -> None:
 
     assert "AiMonitorOpportunity.public_id == opportunity_id" in endpoint
     assert "AiMonitorOpportunity.user_id == user.id" in endpoint
-    assert "ws_depth.live_order_book_snapshot(contract_symbol, limit)" in endpoint
+    assert "ws_depth.order_book_snapshot(contract_symbol, limit)" in endpoint
+    assert "except ws_depth.OrderBookUnavailableError as exc" in endpoint
     assert 'status_code=503' in endpoint
     assert 'raise HTTPException(status_code=404, detail="opportunity not found")' in endpoint
 
@@ -3451,7 +3452,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260826-v8-1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260826-depth1"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3461,7 +3462,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260825-94"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260826-depth1"' in legacy_index
     assert 'href="/assets/ai-monitor.css?v=20260825-52"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
@@ -3708,6 +3709,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'id="order-book-modal"' in component
     assert 'data-order-book="${this.escape(item.id)}"' in component
     assert '/order-book?limit=${this.orderBookLimit}' in component
+    assert 'snapshot.transport === "websocket"' in component
+    assert '"REST 快照"' in component
+    assert "跨进程时由短缓存 REST 快照补齐" in component
     assert "买卖盘口梯形表" in component
     assert ".order-book-ladder" in stylesheet
     assert ".order-book-chart" in stylesheet
