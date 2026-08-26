@@ -743,7 +743,9 @@ class AiMonitorDashboard extends HTMLElement {
   stream(path = "", options = {}) { return window.quantdeskApiStream(`/api/v2/ai-monitor${path}`, options); }
 
   startUpdateStream() {
-    if (!this.state.running || this.updateStreamAbort || typeof window.quantdeskApiStream !== "function") return;
+    const hasWebSocket = typeof window.quantdeskOpenAiMonitorSocket === "function";
+    const hasEventStream = typeof window.quantdeskApiStream === "function";
+    if (!this.state.running || this.updateStreamAbort || (!hasWebSocket && !hasEventStream)) return;
     const controller = new AbortController();
     let connectionTimedOut = false;
     this.updateStreamAbort = controller;

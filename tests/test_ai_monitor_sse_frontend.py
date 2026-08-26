@@ -23,9 +23,12 @@ def test_ai_monitor_prefers_authenticated_websocket_with_stream_fallback() -> No
     assert '"quantdesk.ai-monitor.v1"' in client
     assert '`quantdesk.auth.${accessToken}`' in client
     assert "window.quantdeskOpenAiMonitorSocket" in legacy_client
+    assert "window.quantdeskApiStream = apiStream" in legacy_client
+    assert 'headers.set("Accept", "text/event-stream")' in legacy_client
     assert 'new URL("/api/v2/ai-monitor/ws", window.location.origin)' in legacy_client
     assert '`quantdesk.auth.${accessToken}`' in legacy_client
     assert "this.consumePreferredUpdateStream(controller)" in component
+    assert "(!hasWebSocket && !hasEventStream)" in component
     assert "await this.consumeUpdateWebSocket(controller)" in component
     assert 'this.state.updateStreamTransport = "websocket"' in component
     assert 'this.state.updateStreamTransport = "sse"' in component

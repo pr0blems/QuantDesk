@@ -256,6 +256,27 @@ async function api(path, options = {}, retry = true) {
 
 window.quantdeskApi = api;
 
+async function apiStream(path, options = {}, retry = true) {
+  const headers = new Headers(options.headers || {});
+  headers.set("Accept", "text/event-stream");
+  if (accessToken) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
+    if (authenticatedUserId) headers.set("X-QuantDesk-User-ID", authenticatedUserId);
+  }
+  const response = await fetch(path, { ...options, headers, credentials: "include" });
+  if (response.status === 401 && retry && !path.includes("/auth/")) {
+    const refreshed = await refreshAccess();
+    if (refreshed) return apiStream(path, options, false);
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(apiErrorMessage(payload.detail));
+  }
+  return response;
+}
+
+window.quantdeskApiStream = apiStream;
+
 async function openAiMonitorWebSocket() {
   if (!accessToken) {
     const restored = await refreshAccess();
