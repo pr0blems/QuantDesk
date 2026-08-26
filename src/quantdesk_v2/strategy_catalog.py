@@ -659,6 +659,19 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
         ["user_strategy_id", "version"],
     )
     db.flush()
+    if revision_rows:
+        from .strategy_artifacts import record_revision_artifact
+
+        by_id = {strategy.id: strategy for strategy in strategies}
+        created_revisions = db.scalars(
+            select(StrategyRevision).where(
+                StrategyRevision.user_id == user_id,
+                StrategyRevision.user_strategy_id.in_(by_id),
+                StrategyRevision.version == 1,
+            )
+        ).all()
+        for revision in created_revisions:
+            record_revision_artifact(db, by_id[revision.user_strategy_id], revision)
     return list_user_strategies(db, user_id)
 
 

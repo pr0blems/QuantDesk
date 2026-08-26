@@ -466,7 +466,11 @@ def test_full_strategy_signal_persistence_is_tenant_scoped_and_idempotent(
     assert insert_params[1:4] == (account["user_id"], 51, 61)
     assert insert_params[4] == 71
     assert insert_params[10] == 1_700_001_800
-    assert insert_params[-1].startswith("paper:51:61:TESTUSDT:15m:")
+    # The persisted key is a bounded hash of mode/deployment plus the stable
+    # cross-runtime decision id.  This avoids index-length drift while keeping
+    # replay/paper/shadow decisions comparable.
+    assert len(insert_params[-1]) == 64
+    assert set(insert_params[-1]) <= set("0123456789abcdef")
     assert writes[1][1] == (decision.signal_time, 51, account["user_id"])
 
 

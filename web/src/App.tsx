@@ -8,6 +8,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { OrdersPage } from "./pages/OrdersPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
+import { RiskPage } from "./pages/RiskPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 type PageKey = "ai-monitor" | "audit" | "backtest" | "live" | "monitor" | "orders" | "overview" | "paper" | "risk" | "settings" | "strategies";
@@ -27,6 +28,8 @@ const navigation: Array<{ badge?: string; icon: string; key: PageKey; label: str
   { key: "backtest", icon: "测", label: "数据回测" },
   { key: "orders", icon: "单", label: "订单与持仓", badge: "只读" },
   { key: "settings", icon: "设", label: "系统设置" },
+  { key: "risk", icon: "险", label: "风险控制", badge: "联锁" },
+  { key: "audit", icon: "审", label: "审计日志" },
 ];
 
 navigation.splice(
@@ -96,7 +99,7 @@ function Workspace({ user, onLogout }: { user: CurrentUser; onLogout: () => Prom
         {page === "overview" ? <section className="workspace-panel"><OverviewPage user={user} /></section> : null}
         {page === "orders" ? <section className="workspace-panel"><OrdersPage /></section> : null}
         {page === "settings" ? <section className="workspace-panel"><SettingsPage user={user} /></section> : null}
-        {page === "risk" ? <section className="workspace-panel"><PlaceholderPage kind="risk" /></section> : null}
+        {page === "risk" ? <section className="workspace-panel"><RiskPage user={user} /></section> : null}
         {page === "audit" ? <section className="workspace-panel"><PlaceholderPage kind="audit" /></section> : null}
       </main>
     </div>

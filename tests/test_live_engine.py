@@ -56,20 +56,60 @@ def _account(position_mode: str = "hedge") -> dict:
 def test_new_live_exposure_is_fenced_by_revision_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: list[tuple[str, tuple[object, ...]]] = []
 
-    def query(sql: str, params: tuple[int, int, int]) -> list[dict]:
-        captured["sql"] = sql
-        captured["params"] = params
+    def query(sql: str, params: tuple[object, ...]) -> list[dict]:
+        captured.append((sql, params))
+        if "FROM live_trading_accounts" in sql:
+            return [
+                {
+                    "live_account_public_id": "11111111-1111-4111-8111-111111111111",
+                    "strategy_public_id": "22222222-2222-4222-8222-222222222222",
+                    "strategy_revision_version": 4,
+                }
+            ]
         return []
 
     monkeypatch.setattr(live_engine.store, "query", query)
 
-    assert live_engine._execution_enabled(_account()) is False
-    assert "JOIN strategy_revisions" in str(captured["sql"])
-    assert "r.lifecycle_status IN ('micro_live','live')" in str(captured["sql"])
-    assert "execution_scope" in str(captured["sql"])
-    assert captured["params"] == (3, 1, 2)
+    assert live_engine._execution_enabled(_account(), "AAPLUSDT") is True
+    lifecycle_sql, lifecycle_params = captured[0]
+    assert "JOIN strategy_revisions" in lifecycle_sql
+    assert "r.lifecycle_status IN ('micro_live','live')" in lifecycle_sql
+    assert "execution_scope" in lifecycle_sql
+    assert lifecycle_params == (3, 1, 2)
+    assert "FROM trading_control_latches" in captured[1][0]
+
+
+def test_new_live_exposure_is_blocked_by_hierarchical_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def query(sql: str, _params: tuple[object, ...]) -> list[dict]:
+        if "FROM live_trading_accounts" in sql:
+            return [
+                {
+                    "live_account_public_id": "11111111-1111-4111-8111-111111111111",
+                    "strategy_public_id": "22222222-2222-4222-8222-222222222222",
+                    "strategy_revision_version": 4,
+                }
+            ]
+        return [
+            {
+                "public_id": "33333333-3333-4333-8333-333333333333",
+                "owner_scope": "global",
+                "scope_type": "global",
+                "scope_key": "*",
+                "reason_code": "operator_freeze",
+                "reason_text": "operator requested a global freeze",
+                "version": 1,
+            }
+        ]
+
+    monkeypatch.setattr(live_engine.store, "query", query)
+
+    account = _account()
+    assert live_engine._execution_enabled(account, "AAPLUSDT") is False
+    assert account["_trading_control_blockers"][0]["scope_type"] == "global"
 
 
 def test_hedge_open_and_protection_are_bound_to_long_side(

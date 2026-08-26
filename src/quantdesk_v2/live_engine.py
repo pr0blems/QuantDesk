@@ -55,6 +55,7 @@ from .strategy_evaluator import (
     resolve_legacy_strategy_timeframe,
     strategy_timeframe_seconds,
 )
+from .trading_controls import effective_control_blockers
 
 _settings: Settings | None = None
 _account_service: BinanceAccountService | None = None
@@ -787,16 +788,20 @@ def _fail_account(account: dict[str, Any], code: str) -> None:
     )
 
 
-def _execution_enabled(account: dict[str, Any]) -> bool:
+def _execution_enabled(account: dict[str, Any], symbol: str) -> bool:
     """Fence every exchange write against a concurrent pause/error transition."""
     rows = store.query(
-        """SELECT 1
+        """SELECT l.public_id AS live_account_public_id,
+                  s.public_id AS strategy_public_id,
+                  r.version AS strategy_revision_version
            FROM live_trading_accounts l
            JOIN strategy_deployments d
              ON d.id=? AND d.user_id=l.user_id AND d.mode='live'
                 AND d.target_account_id=l.id
            JOIN strategy_revisions r
              ON r.id=d.strategy_revision_id AND r.user_id=d.user_id
+           JOIN user_strategies s
+             ON s.id=r.user_strategy_id AND s.user_id=r.user_id
            WHERE l.id=? AND l.user_id=?
              AND l.status='active' AND d.status='running'
              AND (
@@ -806,7 +811,27 @@ def _execution_enabled(account: dict[str, Any]) -> bool:
            LIMIT 1""",
         (account["deployment_id"], account["id"], account["user_id"]),
     )
-    return bool(rows)
+    if not rows:
+        return False
+    binding = dict(rows[0])
+    try:
+        blockers = effective_control_blockers(
+            store.query,
+            owner_user_id=int(account["user_id"]),
+            account_public_id=str(binding["live_account_public_id"]),
+            strategy_public_id=str(binding["strategy_public_id"]),
+            strategy_revision_version=int(binding["strategy_revision_version"]),
+            symbol=symbol,
+        )
+    except Exception as exc:
+        # A missing/corrupt control table must never silently re-enable entries.
+        print(f"[live] trading control lookup failed: {type(exc).__name__}")
+        return False
+    if blockers:
+        account["_trading_control_blockers"] = blockers
+        return False
+    account.pop("_trading_control_blockers", None)
+    return True
 
 
 def _safety_write_enabled(account: dict[str, Any]) -> bool:
@@ -1089,14 +1114,18 @@ def _place_market(
     write_enabled = (
         _safety_write_enabled(account)
         if action == "close" or reduce_only
-        else _execution_enabled(account)
+        else _execution_enabled(account, symbol)
     )
     if not write_enabled:
         _update_intent(
             intent["id"],
             account["user_id"],
             status="canceled",
-            error_code="execution_stopped",
+            error_code=(
+                "kill_switch_engaged"
+                if account.get("_trading_control_blockers")
+                else "execution_stopped"
+            ),
         )
         return None
     if action == "open" and leverage is not None:

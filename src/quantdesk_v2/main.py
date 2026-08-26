@@ -18,14 +18,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
-from .admin import UNUSUAL_WHALES_MARKET_DATA_KEY, initialize_admin_runtime
+from .admin import UNUSUAL_WHALES_MARKET_DATA_KEY
 from .admin import router as admin_router
 from .api import router
 from .binance_client import BinanceAccountClient
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings, get_settings
+from .control_routes import router as control_router
 from .database import build_engine, engine
+from .deployment_routes import router as deployment_router
 from .finnhub import FinnhubClient, FinnhubMarketStatusService, FinnhubWebhookReceiver
 from .finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
 from .interfaces.api.public_news import router as public_news_router
@@ -202,57 +204,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         runtime_settings.validate_runtime()
-        if settings is None:
-            # The production ASGI app owns the market collectors and the
-            # multi-account paper executor. Explicitly constructed apps are
-            # used by tests/tools and must not start perpetual worker threads.
-            from . import (
-                ai_monitor,
-                battle,
-                live_engine,
-                market_engine,
-                market_store,
-                underlying_quotes,
-            )
-
-            market_store.configure_engine(database_engine)
-            initialize_admin_runtime(database_engine)
-            uw_runtime_config = _unusual_whales_runtime_config(database_engine)
-            uw_enabled = bool(uw_runtime_config.get("enabled", True))
-            app.state.unusual_whales_runtime.apply_config(
-                uw_runtime_config["channels"],
-                websocket_enabled=uw_enabled and uw_runtime_config["websocket_enabled"],
-                rest_enabled=uw_enabled and uw_runtime_config["rest_enabled"],
-                thresholds=uw_runtime_config["thresholds"],
-                retention=uw_runtime_config["retention"],
-            )
-            app.state.unusual_whales_runtime.start()
-            app.state.finnhub_us_quote_service.set_enabled(
-                bool(_finnhub_runtime_config(database_engine).get("enabled", True))
-            )
-            market_engine.start()
-            if runtime_settings.ai_monitor_background_workers_enabled:
-                ai_monitor.start(
-                    database_engine,
-                    runtime_settings.credential_master_key.get_secret_value(),
-                    runtime_settings.monitor_symbols_config,
-                )
-            battle.start()
-            underlying_quotes.start()
-            live_engine.configure(
-                runtime_settings,
-                app.state.binance_service,
-                app.state.binance_trading_client,
-            )
-            live_engine.start()
-            app.state.finnhub_us_quote_service.start()
-        try:
-            yield
-        finally:
-            if settings is None:
-                app.state.unusual_whales_runtime.stop()
-                app.state.finnhub_us_quote_service.stop()
-                underlying_quotes.stop()
+        # Long-running collectors and trading loops run in dedicated worker
+        # processes. API releases and restarts must never own or interrupt them.
+        yield
 
     app = FastAPI(
         title="QuantDesk V2",
@@ -401,6 +355,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(admin_router)
     app.include_router(strategy_router)
+    app.include_router(control_router)
+    app.include_router(deployment_router)
     app.include_router(public_news_router)
 
     if runtime_settings.static_dir.is_dir():

@@ -50,5 +50,29 @@ services:
       - "127.0.0.1:8200:8200"
     command: ["quantdesk-v2", "serve"]
 
+  market-worker:
+    <<: *app
+    command: ["quantdesk-v2", "worker", "market"]
+
+  shadow-worker:
+    <<: *app
+    command: ["quantdesk-v2", "worker", "shadow"]
+
+  paper-worker:
+    <<: *app
+    command: ["quantdesk-v2", "worker", "paper"]
+
+  live-worker:
+    <<: *app
+    command: ["quantdesk-v2", "worker", "live"]
+
+  ai-worker:
+    <<: *app
+    command: ["quantdesk-v2", "worker", "ai"]
+
+  ops-worker:
+    <<: *app
+    command: ["quantdesk-v2", "worker", "ops"]
+
 volumes:
   mysql-data:

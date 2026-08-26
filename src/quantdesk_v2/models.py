@@ -2084,6 +2084,195 @@ class AuditLog(Base):
     )
 
 
+class TradingControlLatch(Base):
+    """Current fail-closed trading control state for one hierarchical scope."""
+
+    __tablename__ = "trading_control_latches"
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type IN ('global', 'account', 'strategy_revision', 'symbol', "
+            "'data_source', 'broker_connection')",
+            name="valid_scope_type",
+        ),
+        CheckConstraint("version >= 0", name="non_negative_version"),
+        UniqueConstraint("public_id", name="uq_trading_control_latches_public_id"),
+        UniqueConstraint(
+            "owner_scope",
+            "scope_type",
+            "scope_key",
+            name="uq_trading_control_latches_scope",
+        ),
+        Index("ix_trading_control_latches_active", "engaged", "scope_type"),
+        Index("ix_trading_control_latches_owner", "owner_scope", "changed_at"),
+        {
+            "comment": "Persisted global/account/strategy/symbol/data/broker trading latches",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    owner_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    owner_scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    engaged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(64))
+    reason_text: Mapped[str | None] = mapped_column(String(500))
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    changed_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class TradingControlEvent(Base):
+    """Append-only idempotent command history for trading control transitions."""
+
+    __tablename__ = "trading_control_events"
+    __table_args__ = (
+        CheckConstraint("action IN ('engage', 'release')", name="valid_action"),
+        CheckConstraint(
+            "expected_version >= 0 AND resulting_version > expected_version",
+            name="valid_version_transition",
+        ),
+        UniqueConstraint("public_id", name="uq_trading_control_events_public_id"),
+        UniqueConstraint("command_id", name="uq_trading_control_events_command_id"),
+        Index("ix_trading_control_events_latch_created", "latch_id", "created_at"),
+        Index("ix_trading_control_events_actor_created", "actor_user_id", "created_at"),
+        {
+            "comment": "Append-only audit evidence for hierarchical trading controls",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    command_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    latch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("trading_control_latches.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    actor_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    expected_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    resulting_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason_text: Mapped[str] = mapped_column(String(500), nullable=False)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class WorkerHeartbeat(Base):
+    """Process-level worker lease evidence used by readiness and operations."""
+
+    __tablename__ = "worker_heartbeats"
+    __table_args__ = (
+        CheckConstraint(
+              "worker_type IN ('market', 'shadow', 'paper', 'live', 'ai', 'ops', 'settlement')",
+            name="valid_worker_type",
+        ),
+        CheckConstraint(
+            "status IN ('starting', 'running', 'degraded', 'stopped', 'error')",
+            name="valid_status",
+        ),
+        UniqueConstraint("worker_type", "instance_key", name="uq_worker_heartbeats_identity"),
+        Index("ix_worker_heartbeats_type_seen", "worker_type", "last_seen_at"),
+        {
+            "comment": "Independent worker liveness and release identity",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    worker_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    instance_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    pid: Mapped[int] = mapped_column(Integer, nullable=False)
+    host: Mapped[str] = mapped_column(String(128), nullable=False)
+    release_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    details_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        )
+
+
+class RuntimeIncident(Base):
+    """Durable P0/P1/P2 operational incident with deduplicated occurrences."""
+
+    __tablename__ = "runtime_incidents"
+    __table_args__ = (
+        CheckConstraint("severity IN ('P0', 'P1', 'P2')", name="valid_severity"),
+        CheckConstraint(
+            "status IN ('open', 'acknowledged', 'resolved')",
+            name="valid_status",
+        ),
+        CheckConstraint("occurrence_count > 0", name="positive_occurrence_count"),
+        UniqueConstraint("public_id", name="uq_runtime_incidents_public_id"),
+        UniqueConstraint("dedup_key", name="uq_runtime_incidents_dedup_key"),
+        Index("ix_runtime_incidents_status_severity", "status", "severity", "last_seen_at"),
+        Index("ix_runtime_incidents_source", "source_type", "source_key"),
+        {
+            "comment": "Deduplicated operational and trading safety incidents",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    dedup_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    severity: Mapped[str] = mapped_column(String(4), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    title: Mapped[str] = mapped_column(String(191), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="open", nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    acknowledged_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL")
+    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime)
+    resolved_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL")
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+    resolution_note: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
 class AdminSetting(Base):
     __tablename__ = "admin_settings"
     __table_args__ = ({"comment": "管理员发布的系统运行配置"},)
@@ -2483,6 +2672,163 @@ class StrategyRevision(Base):
     strategy: Mapped[UserStrategy] = relationship(back_populates="revisions")
 
 
+class StrategyPromotionReview(Base):
+    """Durable, revision-bound evidence for a controlled lifecycle promotion."""
+
+    __tablename__ = "strategy_promotion_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'cancelled', 'applied')",
+            name="valid_status",
+        ),
+        CheckConstraint("version > 0", name="positive_version"),
+        ForeignKeyConstraint(
+            ["user_strategy_id", "user_id"],
+            ["user_strategies.id", "user_strategies.user_id"],
+            name="fk_strategy_promotion_reviews_strategy_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_strategy_promotion_reviews_revision_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_promotion_reviews_public_id"),
+        Index(
+            "ix_strategy_promotion_reviews_strategy_status",
+            "user_strategy_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_strategy_promotion_reviews_revision_stage",
+            "strategy_revision_id",
+            "to_stage",
+        ),
+        {
+            "comment": "Revision-bound promotion request, approval and gate evidence",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    user_strategy_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    strategy_revision_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    strategy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    from_stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    to_stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    gate_result_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    requested_by_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    approved_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+    )
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    request_note: Mapped[str] = mapped_column(String(500), nullable=False)
+    decision_note: Mapped[str | None] = mapped_column(String(500))
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
+class StrategyArtifact(Base):
+    """Immutable build identity for one strategy revision."""
+
+    __tablename__ = "strategy_artifacts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_strategy_artifacts_revision_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_artifacts_public_id"),
+        UniqueConstraint("strategy_revision_id", name="uq_strategy_artifacts_revision"),
+        Index("ix_strategy_artifacts_user_created", "user_id", "created_at"),
+        {
+            "comment": "Immutable strategy revision build and dependency identity",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    strategy_revision_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_hash: Mapped[str | None] = mapped_column(String(64))
+    runtime_image_digest: Mapped[str] = mapped_column(String(191), nullable=False)
+    parameter_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    dependency_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class StrategyValidationRun(Base):
+    """Append-only validation evidence bound to an immutable revision."""
+
+    __tablename__ = "strategy_validation_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "validation_type IN ('static', 'unit', 'backtest', 'oos', 'stress', "
+            "'shadow', 'paper', 'micro_live', 'fault_drill')",
+            name="valid_validation_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'passed', 'failed', 'cancelled')",
+            name="valid_status",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_strategy_validation_runs_revision_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_validation_runs_public_id"),
+        Index(
+            "ix_strategy_validation_runs_revision_type",
+            "strategy_revision_id",
+            "validation_type",
+            "created_at",
+        ),
+        {
+            "comment": "Append-only validation reports for immutable revisions",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    strategy_revision_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    validation_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    report_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
 class MarketFeatureSnapshot(Base):
     __tablename__ = "market_feature_snapshots"
     __table_args__ = (
@@ -2734,6 +3080,55 @@ class StrategyDeployment(Base):
         nullable=False,
         comment="策略部署最后更新时间（UTC）",
     )
+
+
+class StrategyRunManifest(Base):
+    """Frozen inputs needed to reproduce one deployment or run."""
+
+    __tablename__ = "strategy_run_manifests"
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('backtest', 'paper', 'shadow', 'live')", name="valid_mode"
+        ),
+        ForeignKeyConstraint(
+            ["deployment_id", "user_id"],
+            ["strategy_deployments.id", "strategy_deployments.user_id"],
+            name="fk_strategy_run_manifests_deployment_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_strategy_run_manifests_revision_tenant",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_run_manifests_public_id"),
+        UniqueConstraint("deployment_id", name="uq_strategy_run_manifests_deployment"),
+        UniqueConstraint("manifest_hash", name="uq_strategy_run_manifests_hash"),
+        Index("ix_strategy_run_manifests_user_created", "user_id", "created_at"),
+        {
+            "comment": "Frozen reproducibility manifest for every strategy deployment",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    deployment_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    strategy_revision_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    data_set_id: Mapped[str | None] = mapped_column(String(191))
+    engine_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    cost_model_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    fill_model_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class StrategySignal(Base):

@@ -39,6 +39,7 @@ from quantdesk_v2.strategy_source_runtime import (
 
 from . import indicators as ind
 from . import market_store as store
+from .domain.runtime import decision_record_key, strategy_decision_id
 from .live_risk import (
     OpenPositionRisk,
     account_loss_limits,
@@ -1183,8 +1184,13 @@ def _record_full_strategy_decision(
     snapshot: dict[str, Any] | None = None,
 ) -> bool:
     deployment_mode = str(account.get("deployment_mode") or "paper")
-    if deployment_mode not in {"paper", "live"}:
+    if deployment_mode not in {"paper", "shadow", "live"}:
         return False
+    # The shadow worker owns the append-only signal write.  The evaluator is
+    # shared with paper/live, but writing here as well would race a second
+    # transaction on the same deterministic idempotency key.
+    if deployment_mode == "shadow":
+        return decision.signal_time is not None
     strategy_public_id = (snapshot or {}).get("public_id")
     if strategy_public_id:
         deployments = store.query(
@@ -1206,9 +1212,22 @@ def _record_full_strategy_decision(
         return False
     deployment = deployments[0]
     timeframe = str(spec["timeframes"]["trigger"])
-    idempotency_key = (
-        f"{deployment_mode}:{deployment['id']}:{deployment['strategy_revision_id']}:"
-        f"{symbol}:{timeframe}:{decision.signal_time}:{decision.decision}"
+    revision_fingerprint = str(
+        (snapshot or {}).get("source_hash")
+        or (snapshot or {}).get("spec_hash")
+        or f"strategy-revision:{deployment['strategy_revision_id']}"
+    )
+    stable_decision_id = strategy_decision_id(
+        revision_fingerprint,
+        symbol,
+        timeframe,
+        int(decision.signal_time),
+        str(decision.decision),
+    )
+    idempotency_key = decision_record_key(
+        deployment_mode,
+        deployment["id"],
+        stable_decision_id,
     )
     opportunity_direction = {
         "LONG_ENTRY": "long",
@@ -1254,7 +1273,10 @@ def _record_full_strategy_decision(
                 decision.confidence,
                 valid_until,
                 json.dumps(list(decision.reason_codes), ensure_ascii=False),
-                json.dumps(decision.evidence, ensure_ascii=False),
+                json.dumps(
+                    {**decision.evidence, "decision_id": stable_decision_id},
+                    ensure_ascii=False,
+                ),
                 json.dumps(decision.risk_proposal, ensure_ascii=False),
                 idempotency_key,
             ),

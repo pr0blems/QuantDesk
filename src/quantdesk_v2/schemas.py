@@ -1351,6 +1351,57 @@ class StrategyPromotionRequest(BaseModel):
         return self
 
 
+class StrategyPromotionReviewRequest(BaseModel):
+    """Create an immutable, revision-bound promotion approval request."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    request_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
+    expected_version: int = Field(ge=1)
+    target_status: Literal[
+        "validated", "backtested", "shadow", "paper", "micro_live", "live"
+    ]
+    request_note: str = Field(min_length=10, max_length=500)
+    confirmed: Literal[True]
+
+
+class StrategyPromotionDecisionRequest(BaseModel):
+    """Approve or reject one pending promotion request with optimistic locking."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    action: Literal["approve", "reject"]
+    expected_review_version: int = Field(ge=1)
+    decision_note: str = Field(min_length=10, max_length=500)
+    confirmed: Literal[True]
+
+
+class StrategyRollbackRequest(BaseModel):
+    """Copy an old immutable revision into a new draft revision."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    target_version: int = Field(ge=1)
+    reason: str = Field(min_length=10, max_length=500)
+    confirmed: Literal[True]
+
+
+class StrategyValidationEvidenceRequest(BaseModel):
+    """Record structured, revision-bound promotion evidence."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    run_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
+    expected_version: int = Field(ge=1)
+    validation_type: Literal[
+        "oos", "stress", "shadow", "paper", "micro_live", "fault_drill"
+    ]
+    status: Literal["passed", "failed"]
+    report: dict[str, JsonValue] = Field(max_length=64)
+    confirmed: Literal[True]
+
+
 class StrategyAiPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

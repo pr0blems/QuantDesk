@@ -1,0 +1,23 @@
+[Unit]
+Description=QuantDesk %i worker
+After=network-online.target mysql.service quantdesk-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www
+Group=www
+WorkingDirectory=/www/wwwroot/binance.taoz.chat
+EnvironmentFile=/www/wwwroot/binance.taoz.chat/.env
+Environment=QUANTDESK_WORKER_INSTANCE=production-primary
+ExecStart=/www/wwwroot/binance.taoz.chat/.venv/bin/quantdesk-v2 worker %i
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/www/wwwroot/binance.taoz.chat
+
+[Install]
+WantedBy=multi-user.target

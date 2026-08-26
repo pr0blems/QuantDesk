@@ -74,6 +74,7 @@ from ...schemas import (
     AiMonitorUnusualWhalesUsageUpdate,
 )
 from ...security import CredentialCipher, SecurityError, decode_access_token
+from ...strategy_artifacts import add_run_manifest, record_revision_artifact
 
 router = APIRouter(prefix="/ai-monitor")
 
@@ -944,6 +945,7 @@ def _ai_monitor_live_adapter(
         )
         db.add(revision)
         db.flush()
+        record_revision_artifact(db, strategy, revision)
     return strategy, revision
 
 
@@ -972,6 +974,7 @@ def _ensure_ai_monitor_live_account(
             StrategyDeployment.user_id == user.id,
             StrategyDeployment.mode == "live",
             StrategyDeployment.target_account_id == account.id,
+            StrategyDeployment.status != "stopped",
         )
         .order_by(StrategyDeployment.id.desc())
         .with_for_update()
@@ -994,7 +997,13 @@ def _ensure_ai_monitor_live_account(
             runtime_state_json={"execution_scope": _AI_MONITOR_LIVE_SCOPE},
         )
         db.add(deployment)
-        db.flush()
+        add_run_manifest(
+            db,
+            deployment,
+            revision,
+            data_set_id=f"live-account:{account.public_id}",
+            extra={"execution_scope": _AI_MONITOR_LIVE_SCOPE},
+        )
     return account, deployment
 
 

@@ -972,7 +972,7 @@ def maybe_alert(
         log_err("toast", e)
 
 # ---------- start ----------
-def start():
+def start(*, include_paper: bool = True):
     with _lock:
         if _state["started"]:
             return
@@ -996,7 +996,7 @@ def start():
     from . import news, social
     threading.Thread(target=news.news_loop, daemon=True, name="news").start()
     threading.Thread(target=social.social_loop, daemon=True, name="social").start()
-    if settings.get("paper_trading", True):
+    if include_paper and settings.get("paper_trading", True):
         from . import paper_engine as paper
         threading.Thread(target=paper.paper_loop, daemon=True, name="paper").start()
         print(

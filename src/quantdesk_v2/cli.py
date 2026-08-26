@@ -72,6 +72,11 @@ def main() -> int:
     sub.add_parser("generate-secrets")
     sub.add_parser("check-db")
     sub.add_parser("serve")
+    worker = sub.add_parser("worker")
+    worker.add_argument(
+        "kind",
+        choices=("market", "shadow", "paper", "live", "ai", "ops"),
+    )
     admin = sub.add_parser("create-admin")
     admin.add_argument("--username", required=True)
     admin.add_argument("--email")
@@ -83,6 +88,10 @@ def main() -> int:
         return check_db()
     if args.command == "serve":
         return serve()
+    if args.command == "worker":
+        from .worker_runtime import run_worker
+
+        return run_worker(args.kind)
     if args.command == "create-admin":
         return create_admin(args.username, args.email)
     return 1

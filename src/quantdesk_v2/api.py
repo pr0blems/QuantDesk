@@ -106,6 +106,7 @@ from .security import (
     verify_password,
 )
 from .strategy_ai import StrategyAiError, _chat_http_transport
+from .strategy_artifacts import add_run_manifest
 from .strategy_catalog import (
     ensure_user_default_strategies,
     get_user_strategy,
@@ -2507,19 +2508,25 @@ def create_paper_account(
         db.rollback()
         raise HTTPException(status_code=409, detail="paper account name already exists") from exc
     for strategy, revision in zip(strategies, revisions, strict=True):
-        db.add(
-            StrategyDeployment(
-                public_id=str(uuid.uuid4()),
-                user_id=user.id,
-                strategy_id=strategy.id,
-                strategy_revision_id=revision.id,
-                mode="paper",
-                target_account_id=account.id,
-                name=_paper_deployment_name(account.name, strategy.name, len(strategies)),
-                status="running",
-                runtime_state_json={"combination_mode": "all"},
-                started_at=utcnow(),
-            )
+        deployment = StrategyDeployment(
+            public_id=str(uuid.uuid4()),
+            user_id=user.id,
+            strategy_id=strategy.id,
+            strategy_revision_id=revision.id,
+            mode="paper",
+            target_account_id=account.id,
+            name=_paper_deployment_name(account.name, strategy.name, len(strategies)),
+            status="running",
+            runtime_state_json={"combination_mode": "all"},
+            started_at=utcnow(),
+        )
+        db.add(deployment)
+        add_run_manifest(
+            db,
+            deployment,
+            revision,
+            data_set_id=f"paper-account:{account.public_id}",
+            extra={"account_name": account.name, "combination_mode": "all"},
         )
     _audit(db, request, "paper.account.create", user.id, "paper_account", account.public_id)
     db.commit()
@@ -2583,6 +2590,8 @@ def update_paper_account_status(
         ).all()
     }
     for deployment in deployments:
+        if deployment.status == "stopped":
+            continue
         if payload.status is not None:
             if payload.status == "archived" or deployment.strategy_id not in selected_strategy_ids:
                 deployment.status = "stopped"
@@ -2674,8 +2683,18 @@ def update_paper_account_strategy(
     deployment_status = "paused" if account.status == "paused" else "running"
     for strategy, revision in zip(strategies, revisions, strict=True):
         matching = deployments_by_strategy.get(strategy.id) or []
-        deployment = matching.pop(0) if matching else None
+        deployment = next(
+            (
+                item
+                for item in matching
+                if item.strategy_revision_id == revision.id and item.status != "stopped"
+            ),
+            None,
+        )
         if deployment is None:
+            for old_deployment in matching:
+                old_deployment.status = "stopped"
+                old_deployment.updated_at = utcnow()
             deployment = StrategyDeployment(
                 public_id=str(uuid.uuid4()),
                 user_id=user.id,
@@ -2689,8 +2708,14 @@ def update_paper_account_strategy(
                 started_at=utcnow(),
             )
             db.add(deployment)
+            add_run_manifest(
+                db,
+                deployment,
+                revision,
+                data_set_id=f"paper-account:{account.public_id}",
+                extra={"account_name": account.name, "combination_mode": "all"},
+            )
         else:
-            deployment.strategy_revision_id = revision.id
             deployment.name = _paper_deployment_name(
                 account.name, strategy.name, len(strategies)
             )
@@ -2887,23 +2912,29 @@ def create_live_account(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="live account name already exists") from exc
-    db.add(
-        StrategyDeployment(
-            public_id=str(uuid.uuid4()),
-            user_id=user.id,
-            strategy_id=strategy.id,
-            strategy_revision_id=revision.id,
-            mode="live",
-            target_account_id=account.id,
-            name=account.name,
-            status="paused",
-            universe_override_json={
-                "universe_key": TRADFI_UNIVERSE_KEY,
-                "symbols": universe,
-            },
-            risk_override_json=risk_config,
-            runtime_state_json={},
-        )
+    deployment = StrategyDeployment(
+        public_id=str(uuid.uuid4()),
+        user_id=user.id,
+        strategy_id=strategy.id,
+        strategy_revision_id=revision.id,
+        mode="live",
+        target_account_id=account.id,
+        name=account.name,
+        status="paused",
+        universe_override_json={
+            "universe_key": TRADFI_UNIVERSE_KEY,
+            "symbols": universe,
+        },
+        risk_override_json=risk_config,
+        runtime_state_json={},
+    )
+    db.add(deployment)
+    add_run_manifest(
+        db,
+        deployment,
+        revision,
+        data_set_id=f"live-account:{account.public_id}",
+        extra={"credential_version": account.credential_version},
     )
     _audit(db, request, "live.account.create", user.id, "live_account", account.public_id)
     db.commit()
@@ -3035,7 +3066,9 @@ def arm_live_account(
             StrategyDeployment.user_id == user.id,
             StrategyDeployment.mode == "live",
             StrategyDeployment.target_account_id == account.id,
+            StrategyDeployment.status != "stopped",
         )
+        .order_by(StrategyDeployment.id.desc())
         .with_for_update()
     )
     if deployment is None:
@@ -3109,11 +3142,14 @@ def update_live_account_status(
     if payload.status == "paused":
         account.last_error_code = None
     deployment = db.scalar(
-        select(StrategyDeployment).where(
+        select(StrategyDeployment)
+        .where(
             StrategyDeployment.user_id == user.id,
             StrategyDeployment.mode == "live",
             StrategyDeployment.target_account_id == account.id,
+            StrategyDeployment.status != "stopped",
         )
+        .order_by(StrategyDeployment.id.desc())
     )
     if deployment is not None:
         if payload.status is not None:
@@ -3218,28 +3254,56 @@ def update_live_account_strategy(
     account.last_error_code = None
 
     deployment = db.scalar(
-        select(StrategyDeployment).where(
+        select(StrategyDeployment)
+        .where(
             StrategyDeployment.user_id == user.id,
             StrategyDeployment.mode == "live",
             StrategyDeployment.target_account_id == account.id,
+            StrategyDeployment.status != "stopped",
         )
+        .order_by(StrategyDeployment.id.desc())
     )
     if deployment is None:
         raise HTTPException(status_code=409, detail="live deployment is unavailable")
-    deployment.strategy_id = strategy.id
-    deployment.strategy_revision_id = revision.id
-    deployment.status = "paused"
-    deployment.universe_override_json = {
-        "universe_key": TRADFI_UNIVERSE_KEY,
-        "symbols": universe,
-    }
-    deployment.risk_override_json = risk_config
-    # Strategy edits must not reset the account's daily-loss/high-watermark
-    # circuit-breaker baseline. A reset is a separate, explicit account action.
-    deployment.last_evaluated_bar_time = None
-    deployment.last_error_code = None
-    deployment.started_at = None
+    deployment.status = "stopped"
     deployment.updated_at = utcnow()
+    replacement = StrategyDeployment(
+        public_id=str(uuid.uuid4()),
+        user_id=user.id,
+        strategy_id=strategy.id,
+        strategy_revision_id=revision.id,
+        mode="live",
+        target_account_id=account.id,
+        name=account.name,
+        status="paused",
+        universe_override_json={
+            "universe_key": TRADFI_UNIVERSE_KEY,
+            "symbols": universe,
+        },
+        risk_override_json=risk_config,
+        runtime_state_json={
+            "replaces_deployment_id": deployment.public_id,
+            # The account-level drawdown baseline intentionally survives this
+            # deployment replacement and remains authoritative.
+            "preserve_account_loss_baseline": True,
+        },
+        last_evaluated_bar_time=None,
+        last_error_code=None,
+        started_at=None,
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    db.add(replacement)
+    add_run_manifest(
+        db,
+        replacement,
+        revision,
+        data_set_id=f"live-account:{account.public_id}",
+        extra={
+            "credential_version": account.credential_version,
+            "replaces_deployment_id": deployment.public_id,
+        },
+    )
     _audit(
         db,
         request,
@@ -3616,24 +3680,40 @@ def create_backtest(
         db.add(run)
         db.flush()
         if selected_strategy_id is not None and selected_revision_id is not None:
-            db.add(
-                StrategyDeployment(
-                    public_id=str(uuid.uuid4()),
-                    user_id=user_id,
-                    strategy_id=selected_strategy_id,
-                    strategy_revision_id=selected_revision_id,
-                    mode="backtest",
-                    target_account_id=run.id,
-                    name=f"回测 · {strategy['name'].strip()} · {payload.symbol}",
-                    status="stopped",
-                    runtime_state_json={
-                        "result": "completed",
-                        "backtest_run_id": run.id,
-                    },
-                    started_at=now,
-                    created_at=now,
-                    updated_at=now,
-                )
+            selected_revision = db.get(StrategyRevision, selected_revision_id)
+            if selected_revision is None:
+                raise ValueError("selected strategy revision disappeared during backtest")
+            deployment = StrategyDeployment(
+                public_id=str(uuid.uuid4()),
+                user_id=user_id,
+                strategy_id=selected_strategy_id,
+                strategy_revision_id=selected_revision_id,
+                mode="backtest",
+                target_account_id=run.id,
+                name=f"回测 · {strategy['name'].strip()} · {payload.symbol}",
+                status="stopped",
+                runtime_state_json={
+                    "result": "completed",
+                    "backtest_run_id": run.id,
+                },
+                started_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(deployment)
+            add_run_manifest(
+                db,
+                deployment,
+                selected_revision,
+                data_set_id=(
+                    f"backtest:{payload.symbol}:{config['timeframe']}:"
+                    f"{config['start_ts']}:{config['end_ts']}"
+                ),
+                extra={
+                    "backtest_run_id": run.id,
+                    "data_quality": _json_safe(data_quality),
+                    "config": stored_config,
+                },
             )
 
         known_trade_fields = {

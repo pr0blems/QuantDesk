@@ -16,13 +16,15 @@ from sqlalchemy.orm import Session
 
 from .ai_model_config import get_global_ai_model_config
 from .database import get_db
-from .dependencies import get_current_user
+from .dependencies import get_current_user, require_admin_write
 from .models import (
     AuditLog,
     StrategyDeployment,
+    StrategyPromotionReview,
     StrategyRevision,
     StrategySignal,
     StrategyTemplate,
+    StrategyValidationRun,
     User,
     UserStrategy,
     utcnow,
@@ -34,13 +36,17 @@ from .schemas import (
     StrategyCodeUpdateRequest,
     StrategyCodeValidateRequest,
     StrategyCreateRequest,
+    StrategyPromotionDecisionRequest,
     StrategyPromotionRequest,
+    StrategyPromotionReviewRequest,
+    StrategyRollbackRequest,
     StrategySourceAiPreviewRequest,
     StrategySourceComposition,
     StrategySourceCreateRequest,
     StrategySourceUpdateRequest,
     StrategySourceValidateRequest,
     StrategyUpdateRequest,
+    StrategyValidationEvidenceRequest,
 )
 from .security import CredentialCipher, SecurityError
 from .strategy_ai import (
@@ -52,6 +58,7 @@ from .strategy_ai import (
     generate_user_model_strategy_preview,
     generate_user_model_strategy_source_preview,
 )
+from .strategy_artifacts import record_revision_artifact
 from .strategy_catalog import (
     DEFAULT_RISK,
     StrategyParameterError,
@@ -62,7 +69,11 @@ from .strategy_catalog import (
     strategy_snapshot,
     validate_strategy_parameters,
 )
-from .strategy_lifecycle import promote_current_revision, strategy_readiness
+from .strategy_lifecycle import (
+    current_strategy_revision,
+    promote_current_revision,
+    strategy_readiness,
+)
 from .strategy_runtime import (
     INDICATOR_BY_KEY,
     INDICATOR_CATALOG,
@@ -448,39 +459,37 @@ def _record_revision(
     source: str,
     summary: str,
 ) -> None:
-    db.add(
-        StrategyRevision(
-            user_strategy_id=strategy.id,
-            user_id=strategy.user_id,
-            version=strategy.version,
-            change_source=source,
-            change_summary=summary[:500],
-            snapshot_json=strategy_snapshot(strategy),
-            spec_schema_version=strategy.spec_schema_version,
-            spec_json=copy.deepcopy(strategy.spec_json),
-            spec_hash=strategy.spec_hash,
-            source_language=strategy.source_language,
-            source_code=strategy.source_code,
-            source_hash=strategy.source_hash,
-            source_runtime_version=strategy.source_runtime_version,
-            validation_json=(
-                copy.deepcopy(strategy.source_validation_json)
-                if strategy.strategy_kind == "source_strategy"
-                else (
-                    {"valid": True, "engine": "strategy_runtime_v1"}
-                    if strategy.strategy_kind == "full_strategy"
-                    else {"valid": True, "legacy": True}
-                )
-            ),
-            lifecycle_status=strategy.lifecycle_status,
-            published_at=(
-                utcnow()
-                if strategy.lifecycle_status not in {"draft", "retired"}
-                else None
-            ),
-            created_at=utcnow(),
-        )
+    revision = StrategyRevision(
+        user_strategy_id=strategy.id,
+        user_id=strategy.user_id,
+        version=strategy.version,
+        change_source=source,
+        change_summary=summary[:500],
+        snapshot_json=strategy_snapshot(strategy),
+        spec_schema_version=strategy.spec_schema_version,
+        spec_json=copy.deepcopy(strategy.spec_json),
+        spec_hash=strategy.spec_hash,
+        source_language=strategy.source_language,
+        source_code=strategy.source_code,
+        source_hash=strategy.source_hash,
+        source_runtime_version=strategy.source_runtime_version,
+        validation_json=(
+            copy.deepcopy(strategy.source_validation_json)
+            if strategy.strategy_kind == "source_strategy"
+            else (
+                {"valid": True, "engine": "strategy_runtime_v1"}
+                if strategy.strategy_kind == "full_strategy"
+                else {"valid": True, "legacy": True}
+            )
+        ),
+        lifecycle_status=strategy.lifecycle_status,
+        published_at=(
+            utcnow() if strategy.lifecycle_status not in {"draft", "retired"} else None
+        ),
+        created_at=utcnow(),
     )
+    db.add(revision)
+    record_revision_artifact(db, strategy, revision)
 
 
 def _apply_edit(
@@ -882,6 +891,178 @@ def _commit_or_conflict(db: Session) -> None:
         raise HTTPException(status_code=503, detail="策略暂时无法保存") from None
 
 
+def _promotion_review_out(review: StrategyPromotionReview) -> dict[str, Any]:
+    return {
+        "id": review.public_id,
+        "strategy_version": review.strategy_version,
+        "revision_id": review.strategy_revision_id,
+        "from_stage": review.from_stage,
+        "to_stage": review.to_stage,
+        "status": review.status,
+        "gate_result": copy.deepcopy(review.gate_result_json),
+        "requested_by_user_id": review.requested_by_user_id,
+        "approved_by_user_id": review.approved_by_user_id,
+        "request_note": review.request_note,
+        "decision_note": review.decision_note,
+        "version": review.version,
+        "decided_at": review.decided_at,
+        "applied_at": review.applied_at,
+        "created_at": review.created_at,
+        "updated_at": review.updated_at,
+    }
+
+
+def _validation_run_out(run: StrategyValidationRun) -> dict[str, Any]:
+    return {
+        "id": run.public_id,
+        "revision_id": run.strategy_revision_id,
+        "validation_type": run.validation_type,
+        "status": run.status,
+        "report": copy.deepcopy(run.report_json),
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "created_at": run.created_at,
+    }
+
+
+def _number(report: Mapping[str, Any], key: str) -> float:
+    value = report.get(key)
+    if isinstance(value, bool):
+        raise ValueError(f"{key} 必须是数值")
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} 必须是数值") from None
+    if not math.isfinite(result):
+        raise ValueError(f"{key} 必须是有限数值")
+    return result
+
+
+def _validate_passed_evidence(validation_type: str, report: Mapping[str, Any]) -> None:
+    errors: list[str] = []
+    if validation_type == "oos":
+        if _number(report, "net_after_cost") <= 0:
+            errors.append("样本外扣除成本后净收益必须为正")
+        if _number(report, "positive_months") < 5:
+            errors.append("独立正收益月份必须不少于 5 个")
+        if _number(report, "largest_symbol_profit_share") > 0.2:
+            errors.append("单一品种正收益贡献不得超过 20%")
+        if report.get("max_drawdown_within_limit") is not True:
+            errors.append("最大回撤必须在审批阈值内")
+    elif validation_type == "stress":
+        if _number(report, "double_cost_net_after_cost") <= 0:
+            errors.append("双倍手续费与滑点压力下净收益必须为正")
+        if report.get("parameter_stable") is not True:
+            errors.append("相邻参数扰动结果必须稳定")
+    elif validation_type == "shadow":
+        if _number(report, "duration_days") < 28:
+            errors.append("影子运行必须不少于 28 天")
+        if _number(report, "decision_consistency") < 0.999:
+            errors.append("实时与回放决策一致率必须达到 99.9%")
+        if _number(report, "incident_count") != 0:
+            errors.append("影子运行事故数必须为 0")
+        if report.get("latency_slo_met") is not True:
+            errors.append("数据与求值延迟必须满足 SLO")
+    elif validation_type == "paper":
+        if _number(report, "trade_count") < 100:
+            errors.append("同执行链模拟成交必须不少于 100 笔")
+        if _number(report, "net_after_cost") <= 0:
+            errors.append("模拟盘扣除成本后净收益必须为正")
+        if report.get("slippage_within_stress") is not True:
+            errors.append("模拟滑点不得高于压力模型")
+        if _number(report, "incident_count") != 0:
+            errors.append("订单、保护和恢复事故数必须为 0")
+    elif validation_type == "micro_live":
+        duration_days = _number(report, "duration_days")
+        trade_count = _number(report, "trade_count")
+        approved_sample = _number(report, "approved_trade_sample")
+        if duration_days < 28 and trade_count < approved_sample:
+            errors.append("微型实盘未达到 28 天或审批成交样本")
+        if report.get("execution_drift_within_limit") is not True:
+            errors.append("实际成交与影子模型偏差必须在阈值内")
+        if report.get("oos_confidence_within_limit") is not True:
+            errors.append("收益与回撤不得突破样本外置信范围")
+        if _number(report, "incident_count") != 0:
+            errors.append("微型实盘重复下单、裸仓和未纳管事故必须为 0")
+    elif validation_type == "fault_drill":
+        scenarios = report.get("scenarios")
+        passed = {
+            str(item.get("code"))
+            for item in scenarios
+            if isinstance(item, dict) and item.get("passed") is True
+        } if isinstance(scenarios, list) else set()
+        required = {
+            "order_timeout_after_submit",
+            "crash_before_ack",
+            "partial_fill_disconnect",
+            "protection_partial_failure",
+            "user_stream_gap",
+            "rest_reconciliation_failure",
+            "database_commit_failure",
+            "worker_lease_handover",
+            "service_restart",
+        }
+        missing = sorted(required - passed)
+        if missing:
+            errors.append(f"故障演练场景未全部通过：{', '.join(missing)}")
+    if errors:
+        raise ValueError("；".join(errors))
+
+
+def _restore_revision_as_new_draft(
+    db: Session,
+    strategy: UserStrategy,
+    target: StrategyRevision,
+    *,
+    reason: str,
+) -> None:
+    snapshot = target.snapshot_json if isinstance(target.snapshot_json, dict) else {}
+    required = {
+        "name",
+        "category",
+        "description",
+        "engine_key",
+        "strategy_kind",
+        "risk_level",
+        "parameter_schema",
+        "parameters",
+        "risk_defaults",
+    }
+    missing = sorted(required.difference(snapshot))
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "目标历史版本缺少完整快照，无法安全回滚", "missing": missing},
+        )
+    strategy.name = str(snapshot["name"])
+    strategy.category = str(snapshot["category"])
+    strategy.description = str(snapshot["description"])
+    strategy.engine_key = str(snapshot["engine_key"])
+    strategy.strategy_kind = str(snapshot["strategy_kind"])
+    strategy.spec_schema_version = target.spec_schema_version
+    strategy.spec_json = copy.deepcopy(target.spec_json)
+    strategy.spec_hash = target.spec_hash
+    strategy.source_language = target.source_language
+    strategy.source_code = target.source_code
+    strategy.source_hash = target.source_hash
+    strategy.source_runtime_version = target.source_runtime_version
+    validation = target.validation_json if isinstance(target.validation_json, dict) else {}
+    strategy.source_validation_json = copy.deepcopy(validation)
+    strategy.risk_level = str(snapshot["risk_level"])
+    strategy.parameter_schema_json = copy.deepcopy(snapshot["parameter_schema"])
+    strategy.parameters_json = copy.deepcopy(snapshot["parameters"])
+    strategy.risk_defaults_json = copy.deepcopy(snapshot["risk_defaults"])
+    strategy.lifecycle_status = "draft"
+    strategy.version += 1
+    strategy.updated_at = utcnow()
+    _record_revision(
+        db,
+        strategy,
+        source="manual",
+        summary=f"回滚自 v{target.version}：{reason}"[:500],
+    )
+
+
 @router.get("")
 def list_strategies(
     db: Session = Depends(get_db),
@@ -1114,6 +1295,348 @@ def get_strategy_readiness(
     return strategy_readiness(db, strategy)
 
 
+@router.get("/{public_id}/validation-runs")
+def list_strategy_validation_runs(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = get_user_strategy(db, user.id, public_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="未找到该策略")
+    revision = current_strategy_revision(db, strategy)
+    if revision is None:
+        raise HTTPException(status_code=409, detail="当前策略缺少不可变修订记录")
+    runs = db.scalars(
+        select(StrategyValidationRun)
+        .where(
+            StrategyValidationRun.strategy_revision_id == revision.id,
+            StrategyValidationRun.user_id == user.id,
+        )
+        .order_by(StrategyValidationRun.created_at.desc())
+    ).all()
+    return {
+        "revision_id": revision.id,
+        "strategy_version": revision.version,
+        "items": [_validation_run_out(run) for run in runs],
+    }
+
+
+@router.post(
+    "/{public_id}/validation-runs",
+    status_code=status.HTTP_201_CREATED,
+)
+def record_strategy_validation_run(
+    public_id: str,
+    payload: StrategyValidationEvidenceRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_write),
+) -> dict[str, Any]:
+    run_id = str(uuid.UUID(payload.run_id))
+    existing = db.scalar(
+        select(StrategyValidationRun).where(StrategyValidationRun.public_id == run_id)
+    )
+    if existing is not None:
+        return {"run": _validation_run_out(existing), "idempotent": True}
+    strategy = db.scalar(
+        select(UserStrategy)
+        .where(UserStrategy.public_id == public_id, UserStrategy.status == "active")
+        .with_for_update()
+    )
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="未找到该策略")
+    if strategy.version != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "策略版本已变化，请刷新后重试",
+                "current_version": strategy.version,
+            },
+        )
+    revision = current_strategy_revision(db, strategy, for_update=True)
+    if revision is None:
+        raise HTTPException(status_code=409, detail="当前策略缺少不可变修订记录")
+    if payload.status == "passed":
+        try:
+            _validate_passed_evidence(payload.validation_type, payload.report)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"message": "验证报告未达到通过门槛", "reason": str(exc)},
+            ) from None
+    now = utcnow()
+    run = StrategyValidationRun(
+        public_id=run_id,
+        strategy_revision_id=revision.id,
+        user_id=strategy.user_id,
+        validation_type=payload.validation_type,
+        status=payload.status,
+        report_json=copy.deepcopy(payload.report),
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    db.add(run)
+    _audit(
+        db,
+        request,
+        "strategy.validation.record",
+        admin.id,
+        strategy.public_id,
+        metadata={
+            "run_id": run_id,
+            "revision_id": revision.id,
+            "strategy_version": revision.version,
+            "validation_type": payload.validation_type,
+            "status": payload.status,
+        },
+    )
+    _commit_or_conflict(db)
+    return {
+        "run": _validation_run_out(run),
+        "readiness": strategy_readiness(db, strategy),
+        "idempotent": False,
+    }
+
+
+@router.get("/{public_id}/promotion-requests")
+def list_strategy_promotion_requests(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = get_user_strategy(db, user.id, public_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="未找到该策略")
+    reviews = db.scalars(
+        select(StrategyPromotionReview)
+        .where(
+            StrategyPromotionReview.user_strategy_id == strategy.id,
+            StrategyPromotionReview.user_id == user.id,
+        )
+        .order_by(StrategyPromotionReview.created_at.desc())
+    ).all()
+    return {"items": [_promotion_review_out(review) for review in reviews]}
+
+
+@router.post("/{public_id}/promotion-requests", status_code=status.HTTP_201_CREATED)
+def request_strategy_promotion(
+    public_id: str,
+    payload: StrategyPromotionReviewRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    request_id = str(uuid.UUID(payload.request_id))
+    existing = db.scalar(
+        select(StrategyPromotionReview).where(
+            StrategyPromotionReview.public_id == request_id
+        )
+    )
+    if existing is not None:
+        if existing.user_id != user.id or existing.requested_by_user_id != user.id:
+            raise HTTPException(status_code=409, detail="晋级申请标识已被占用")
+        return {"review": _promotion_review_out(existing), "idempotent": True}
+
+    strategy = _locked_user_strategy(db, user.id, public_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="未找到该策略")
+    if strategy.version != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "策略版本已变化，请刷新后重试",
+                "current_version": strategy.version,
+            },
+        )
+    revision = current_strategy_revision(db, strategy, for_update=True)
+    readiness = strategy_readiness(db, strategy)
+    if revision is None:
+        raise HTTPException(status_code=409, detail="当前策略缺少不可变 revision")
+    if readiness["next_status"] != payload.target_status or not readiness["can_promote"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "当前 revision 尚未满足目标阶段的晋级条件",
+                "target_status": payload.target_status,
+                "next_status": readiness["next_status"],
+                "blockers": readiness["blockers"],
+                "checks": readiness["promotion_checks"],
+            },
+        )
+    duplicate = db.scalar(
+        select(StrategyPromotionReview).where(
+            StrategyPromotionReview.strategy_revision_id == revision.id,
+            StrategyPromotionReview.to_stage == payload.target_status,
+            StrategyPromotionReview.status == "pending",
+        )
+    )
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "当前 revision 已有待审批的同阶段申请",
+                "review_id": duplicate.public_id,
+            },
+        )
+    review = StrategyPromotionReview(
+        public_id=request_id,
+        user_strategy_id=strategy.id,
+        strategy_revision_id=revision.id,
+        user_id=user.id,
+        strategy_version=strategy.version,
+        from_stage=revision.lifecycle_status,
+        to_stage=payload.target_status,
+        gate_result_json=copy.deepcopy(readiness),
+        requested_by_user_id=user.id,
+        status="pending",
+        request_note=payload.request_note,
+        version=1,
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    db.add(review)
+    _audit(
+        db,
+        request,
+        "strategy.promotion.request",
+        user.id,
+        strategy.public_id,
+        metadata={
+            "review_id": request_id,
+            "revision_id": revision.id,
+            "version": strategy.version,
+            "from_status": review.from_stage,
+            "to_status": review.to_stage,
+            "gate_result": readiness,
+        },
+    )
+    _commit_or_conflict(db)
+    return {"review": _promotion_review_out(review), "idempotent": False}
+
+
+@router.post("/{public_id}/promotion-requests/{review_id}/decision")
+def decide_strategy_promotion(
+    public_id: str,
+    review_id: str,
+    payload: StrategyPromotionDecisionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_write),
+) -> dict[str, Any]:
+    strategy = db.scalar(
+        select(UserStrategy)
+        .where(UserStrategy.public_id == public_id)
+        .with_for_update()
+    )
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="未找到该策略")
+    review = db.scalar(
+        select(StrategyPromotionReview)
+        .where(
+            StrategyPromotionReview.public_id == review_id,
+            StrategyPromotionReview.user_strategy_id == strategy.id,
+            StrategyPromotionReview.user_id == strategy.user_id,
+        )
+        .with_for_update()
+    )
+    if review is None:
+        raise HTTPException(status_code=404, detail="未找到该晋级申请")
+    if review.status != "pending":
+        same_terminal_action = (
+            payload.action == "approve" and review.status == "applied"
+        ) or (payload.action == "reject" and review.status == "rejected")
+        if same_terminal_action:
+            return {
+                "review": _promotion_review_out(review),
+                "strategy": serialize_user_strategy(strategy),
+                "readiness": strategy_readiness(db, strategy),
+                "idempotent": True,
+            }
+        raise HTTPException(status_code=409, detail="晋级申请已完成或已取消")
+    if review.version != payload.expected_review_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "晋级申请版本已变化，请刷新后重试",
+                "current_version": review.version,
+            },
+        )
+    if strategy.version != review.strategy_version:
+        review.status = "cancelled"
+        review.decision_note = "策略 revision 已变化，申请自动失效"
+        review.decided_at = utcnow()
+        review.updated_at = utcnow()
+        review.version += 1
+        _commit_or_conflict(db)
+        raise HTTPException(status_code=409, detail="策略 revision 已变化，晋级申请已取消")
+
+    now = utcnow()
+    if payload.action == "reject":
+        review.status = "rejected"
+        review.approved_by_user_id = admin.id
+        review.decision_note = payload.decision_note
+        review.decided_at = now
+        review.updated_at = now
+        review.version += 1
+        action = "strategy.promotion.reject"
+    else:
+        try:
+            revision, approval_readiness, previous_status = promote_current_revision(
+                db,
+                strategy,
+                expected_version=review.strategy_version,
+                target_status=review.to_stage,
+            )
+        except (PermissionError, ValueError, RuntimeError) as exc:
+            readiness = strategy_readiness(db, strategy)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "审批时重新校验未通过，未执行晋级",
+                    "reason": str(exc),
+                    "blockers": readiness["blockers"],
+                    "checks": readiness["promotion_checks"],
+                },
+            ) from None
+        review.status = "applied"
+        review.approved_by_user_id = admin.id
+        review.decision_note = payload.decision_note
+        review.gate_result_json = {
+            "requested": copy.deepcopy(review.gate_result_json),
+            "approved": copy.deepcopy(approval_readiness),
+        }
+        review.decided_at = now
+        review.applied_at = now
+        review.updated_at = now
+        review.version += 1
+        action = "strategy.promotion.approve"
+        del revision, previous_status
+    _audit(
+        db,
+        request,
+        action,
+        admin.id,
+        strategy.public_id,
+        metadata={
+            "review_id": review.public_id,
+            "revision_id": review.strategy_revision_id,
+            "version": review.strategy_version,
+            "from_status": review.from_stage,
+            "to_status": review.to_stage,
+            "decision": payload.action,
+        },
+    )
+    _commit_or_conflict(db)
+    return {
+        "review": _promotion_review_out(review),
+        "strategy": serialize_user_strategy(strategy),
+        "readiness": strategy_readiness(db, strategy),
+        "idempotent": False,
+    }
+
+
 @router.post("/{public_id}/promote")
 def promote_strategy(
     public_id: str,
@@ -1122,6 +1645,11 @@ def promote_strategy(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    if payload.target_status in {"micro_live", "live"}:
+        raise HTTPException(
+            status_code=409,
+            detail="微型实盘和正式实盘必须通过晋级申请与管理员审批接口",
+        )
     strategy = _locked_user_strategy(db, user.id, public_id)
     if strategy is None:
         raise HTTPException(status_code=404, detail="未找到该策略")
@@ -1174,6 +1702,82 @@ def promote_strategy(
     return {
         "strategy": serialize_user_strategy(strategy),
         "readiness": strategy_readiness(db, strategy),
+    }
+
+
+@router.post("/{public_id}/rollback")
+def rollback_strategy_revision(
+    public_id: str,
+    payload: StrategyRollbackRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    strategy = _locked_user_strategy(db, user.id, public_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="未找到该策略")
+    if strategy.version != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "策略版本已变化，请刷新后重试",
+                "current_version": strategy.version,
+            },
+        )
+    if payload.target_version == strategy.version:
+        raise HTTPException(status_code=409, detail="目标版本已经是当前版本")
+    target = db.scalar(
+        select(StrategyRevision).where(
+            StrategyRevision.user_strategy_id == strategy.id,
+            StrategyRevision.user_id == user.id,
+            StrategyRevision.version == payload.target_version,
+        )
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="未找到目标历史 revision")
+    previous_version = strategy.version
+    previous_status = strategy.lifecycle_status
+    _restore_revision_as_new_draft(db, strategy, target, reason=payload.reason)
+    pending_reviews = db.scalars(
+        select(StrategyPromotionReview)
+        .where(
+            StrategyPromotionReview.user_strategy_id == strategy.id,
+            StrategyPromotionReview.status == "pending",
+        )
+        .with_for_update()
+    ).all()
+    now = utcnow()
+    for review in pending_reviews:
+        review.status = "cancelled"
+        review.decision_note = "策略回滚后当前 revision 已变化"
+        review.decided_at = now
+        review.updated_at = now
+        review.version += 1
+    _audit(
+        db,
+        request,
+        "strategy.revision.rollback",
+        user.id,
+        strategy.public_id,
+        metadata={
+            "from_version": previous_version,
+            "from_status": previous_status,
+            "source_version": target.version,
+            "new_version": strategy.version,
+            "new_status": "draft",
+            "reason": payload.reason,
+            "cancelled_review_ids": [review.public_id for review in pending_reviews],
+        },
+    )
+    _commit_or_conflict(db)
+    return {
+        "strategy": serialize_user_strategy(strategy),
+        "readiness": strategy_readiness(db, strategy),
+        "rollback": {
+            "source_version": target.version,
+            "new_version": strategy.version,
+            "lifecycle_status": strategy.lifecycle_status,
+        },
     }
 
 

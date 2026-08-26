@@ -1,0 +1,22 @@
+[Unit]
+Description=QuantDesk API
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www
+Group=www
+WorkingDirectory=/www/wwwroot/binance.taoz.chat
+EnvironmentFile=/www/wwwroot/binance.taoz.chat/.env
+ExecStart=/www/wwwroot/binance.taoz.chat/.venv/bin/quantdesk-v2 serve
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/www/wwwroot/binance.taoz.chat
+
+[Install]
+WantedBy=multi-user.target

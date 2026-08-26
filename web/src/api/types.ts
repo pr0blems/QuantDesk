@@ -116,7 +116,7 @@ export interface StrategyReadinessCheck {
   label: string;
   passed: boolean;
   detail: string;
-  evidence_id?: number | null;
+  evidence_id?: number | string | null;
 }
 
 export interface StrategyReadiness {
@@ -129,7 +129,132 @@ export interface StrategyReadiness {
   blockers: string[];
   checks: StrategyReadinessCheck[];
   promotion_checks: StrategyReadinessCheck[];
-  eligibility: { backtest: boolean; paper: boolean; live: boolean };
+  eligibility: { backtest: boolean; shadow: boolean; paper: boolean; live: boolean };
+}
+
+export interface StrategyValidationRun {
+  id: string;
+  revision_id: number;
+  validation_type: string;
+  status: string;
+  report: Record<string, JsonValue>;
+  started_at: string;
+  completed_at: string | null;
+  created_at: string;
+}
+
+export interface StrategyValidationRunList {
+  revision_id: number;
+  strategy_version: number;
+  items: StrategyValidationRun[];
+}
+
+export interface StrategyPromotionReview {
+  id: string;
+  strategy_version: number;
+  revision_id: number;
+  from_stage: string;
+  to_stage: string;
+  status: "pending" | "approved" | "rejected" | "cancelled" | "applied";
+  gate_result: Record<string, JsonValue>;
+  request_note: string;
+  decision_note: string | null;
+  version: number;
+  decided_at: string | null;
+  applied_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StrategyPromotionReviewList {
+  items: StrategyPromotionReview[];
+}
+
+export type RiskControlScopeType =
+  | "global"
+  | "account"
+  | "strategy_revision"
+  | "symbol"
+  | "data_source"
+  | "broker_connection";
+
+export interface TradingControlLatch {
+  id: string;
+  owner_scope: string;
+  scope_type: RiskControlScopeType;
+  scope_key: string;
+  engaged: boolean;
+  reason_code: string | null;
+  reason: string | null;
+  version: number;
+  changed_at: string;
+  idempotent: boolean;
+}
+
+export interface TradingControlListResponse {
+  items: TradingControlLatch[];
+}
+
+export interface TradingWorkerStatus {
+  worker_type: string;
+  required: boolean;
+  status: string;
+  fresh: boolean;
+  age_seconds: number | null;
+  release_version: string | null;
+  instance_key: string | null;
+  last_seen_at: string | null;
+}
+
+export interface TradingReadiness {
+  ready_for_new_risk: boolean;
+  status: "ready" | "blocked";
+  blockers: string[];
+  workers: TradingWorkerStatus[];
+  engaged_controls: Array<{
+    scope_type: RiskControlScopeType;
+    scope_key: string;
+    reason_code: string | null;
+    reason: string | null;
+    changed_at: string;
+  }>;
+  invalid_live_deployment_count: number;
+  open_p0_incident_count: number;
+  checked_at: string;
+}
+
+export interface RuntimeIncident {
+  id: string;
+  dedup_key: string;
+  severity: "P0" | "P1" | "P2";
+  category: string;
+  source_type: string;
+  source_key: string;
+  title: string;
+  status: "open" | "acknowledged" | "resolved";
+  details: Record<string, JsonValue>;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  acknowledged_at: string | null;
+  resolved_at: string | null;
+  resolution_note: string | null;
+  updated_at: string;
+}
+
+export interface RuntimeIncidentListResponse {
+  items: RuntimeIncident[];
+}
+
+export interface KillSwitchCommandRequest {
+  command_id: string;
+  action: "engage" | "release";
+  scope_type: RiskControlScopeType;
+  scope_key: string;
+  expected_version: number;
+  reason_code: string;
+  reason: string;
+  confirmed: true;
 }
 
 export interface LiveAccount {

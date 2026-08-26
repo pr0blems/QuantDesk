@@ -4,6 +4,7 @@ from quantdesk_v2.strategy_lifecycle import (
     BACKTEST_ELIGIBLE_STATUSES,
     LIVE_ELIGIBLE_STATUSES,
     PAPER_ELIGIBLE_STATUSES,
+    SHADOW_ELIGIBLE_STATUSES,
     _static_validation_check,
 )
 
@@ -18,7 +19,10 @@ def test_lifecycle_capability_sets_are_fail_closed() -> None:
     assert "validated" in BACKTEST_ELIGIBLE_STATUSES
     assert "validated" not in PAPER_ELIGIBLE_STATUSES
     assert "backtested" not in PAPER_ELIGIBLE_STATUSES
-    assert "shadow" in PAPER_ELIGIBLE_STATUSES
+    assert "backtested" not in SHADOW_ELIGIBLE_STATUSES
+    assert "shadow" in SHADOW_ELIGIBLE_STATUSES
+    assert "shadow" not in PAPER_ELIGIBLE_STATUSES
+    assert "paper" in PAPER_ELIGIBLE_STATUSES
     assert LIVE_ELIGIBLE_STATUSES == {"micro_live", "live"}
 
 

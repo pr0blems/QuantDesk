@@ -7,7 +7,14 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import BacktestRun, StrategyDeployment, StrategyRevision, UserStrategy, utcnow
+from .models import (
+    BacktestRun,
+    StrategyDeployment,
+    StrategyRevision,
+    StrategyValidationRun,
+    UserStrategy,
+    utcnow,
+)
 
 LIFECYCLE_SEQUENCE = (
     "draft",
@@ -22,13 +29,13 @@ LIFECYCLE_STATUSES = frozenset((*LIFECYCLE_SEQUENCE, "published", "retired"))
 BACKTEST_ELIGIBLE_STATUSES = frozenset(
     {"validated", "backtested", "shadow", "paper", "micro_live", "live"}
 )
-PAPER_ELIGIBLE_STATUSES = frozenset({"shadow", "paper", "micro_live", "live"})
+SHADOW_ELIGIBLE_STATUSES = frozenset({"shadow", "paper", "micro_live", "live"})
+PAPER_ELIGIBLE_STATUSES = frozenset({"paper", "micro_live", "live"})
 LIVE_ELIGIBLE_STATUSES = frozenset({"micro_live", "live"})
 
 _NEXT_STATUS = {
     "draft": "validated",
-    # Existing installations used published as an all-purpose status. It must
-    # pass through the new validation stage before gaining any deployment rights.
+    # 旧安装中的 published 只代表“曾发布”，不能视为实盘授权。
     "published": "validated",
     "validated": "backtested",
     "backtested": "shadow",
@@ -92,83 +99,82 @@ def _backtest_evidence(db: Session, revision_id: int | None) -> tuple[int, int |
     return int(rows[0] or 0), int(rows[1]) if rows[1] is not None else None
 
 
-def _deployment_evidence(
-    db: Session, revision_id: int | None, mode: str
-) -> tuple[int, int | None]:
+def _latest_passed_validation(
+    db: Session,
+    revision_id: int | None,
+    validation_type: str,
+) -> StrategyValidationRun | None:
     if revision_id is None:
-        return 0, None
-    rows = db.execute(
-        select(func.count(StrategyDeployment.id), func.max(StrategyDeployment.id)).where(
-            StrategyDeployment.strategy_revision_id == revision_id,
-            StrategyDeployment.mode == mode,
-            StrategyDeployment.status.in_(("created", "running", "paused", "stopped")),
+        return None
+    return db.scalar(
+        select(StrategyValidationRun)
+        .where(
+            StrategyValidationRun.strategy_revision_id == revision_id,
+            StrategyValidationRun.validation_type == validation_type,
+            StrategyValidationRun.status == "passed",
         )
-    ).one()
-    return int(rows[0] or 0), int(rows[1]) if rows[1] is not None else None
+        .order_by(StrategyValidationRun.completed_at.desc(), StrategyValidationRun.id.desc())
+        .limit(1)
+    )
+
+
+def _validation_check(
+    db: Session,
+    revision_id: int | None,
+    validation_type: str,
+    label: str,
+) -> dict[str, Any]:
+    run = _latest_passed_validation(db, revision_id, validation_type)
+    return {
+        "code": f"{validation_type}_validation_passed",
+        "label": label,
+        "passed": run is not None,
+        "detail": (
+            "已找到绑定当前修订的通过报告" if run is not None else "没有绑定当前修订的通过报告"
+        ),
+        "evidence_id": run.public_id if run is not None else None,
+        "report": run.report_json if run is not None else None,
+    }
 
 
 def strategy_readiness(db: Session, strategy: UserStrategy) -> dict[str, Any]:
-    """Return a revision-bound, explainable promotion and deployment report."""
+    """Return revision-bound, explainable, evidence-based promotion readiness."""
 
     revision = current_strategy_revision(db, strategy)
     revision_id = revision.id if revision is not None else None
     static_valid, static_detail = _static_validation_check(strategy, revision)
     backtest_count, latest_backtest_run_id = _backtest_evidence(db, revision_id)
-    shadow_count, latest_shadow_deployment_id = _deployment_evidence(db, revision_id, "shadow")
-    paper_count, latest_paper_deployment_id = _deployment_evidence(db, revision_id, "paper")
-    live_count, latest_live_deployment_id = _deployment_evidence(db, revision_id, "live")
-    checks_by_code = {
+    checks_by_code: dict[str, dict[str, Any]] = {
         "current_revision_valid": {
             "code": "current_revision_valid",
             "label": "当前修订通过服务端校验",
             "passed": static_valid,
             "detail": static_detail,
+            "evidence_id": revision_id,
         },
         "current_revision_backtested": {
             "code": "current_revision_backtested",
-            "label": "当前修订已完成回测",
+            "label": "当前修订已完成可复现回测",
             "passed": backtest_count > 0,
             "detail": (
-                f"已找到 {backtest_count} 次完成的当前版本回测"
+                f"已找到 {backtest_count} 次绑定当前修订的完成回测"
                 if backtest_count
                 else "没有找到绑定当前修订的完成回测"
             ),
             "evidence_id": latest_backtest_run_id,
         },
-        "shadow_deployment_exists": {
-            "code": "shadow_deployment_exists",
-            "label": "当前修订已有影子部署记录",
-            "passed": shadow_count > 0,
-            "detail": (
-                f"已找到 {shadow_count} 个影子部署"
-                if shadow_count
-                else "没有找到当前修订的影子部署"
-            ),
-            "evidence_id": latest_shadow_deployment_id,
-        },
-        "paper_deployment_exists": {
-            "code": "paper_deployment_exists",
-            "label": "当前修订已有模拟盘部署记录",
-            "passed": paper_count > 0,
-            "detail": (
-                f"已找到 {paper_count} 个模拟盘部署"
-                if paper_count
-                else "没有找到当前修订的模拟盘部署"
-            ),
-            "evidence_id": latest_paper_deployment_id,
-        },
-        "live_deployment_exists": {
-            "code": "live_deployment_exists",
-            "label": "当前修订已有微型实盘部署记录",
-            "passed": live_count > 0,
-            "detail": (
-                f"已找到 {live_count} 个实盘部署"
-                if live_count
-                else "没有找到当前修订的微型实盘部署"
-            ),
-            "evidence_id": latest_live_deployment_id,
-        },
     }
+    for validation_type, label in (
+        ("oos", "样本外报告通过"),
+        ("stress", "成本与参数压力测试通过"),
+        ("shadow", "影子运行报告通过"),
+        ("paper", "同执行链模拟盘报告通过"),
+        ("fault_drill", "关键故障演练全部通过"),
+        ("micro_live", "微型实盘观察报告通过"),
+    ):
+        item = _validation_check(db, revision_id, validation_type, label)
+        checks_by_code[item["code"]] = item
+
     status = revision.lifecycle_status if revision is not None else strategy.lifecycle_status
     next_status = _NEXT_STATUS.get(status)
     required_codes = {
@@ -177,11 +183,22 @@ def strategy_readiness(db: Session, strategy: UserStrategy) -> dict[str, Any]:
         "shadow": (
             "current_revision_valid",
             "current_revision_backtested",
-            "shadow_deployment_exists",
+            "oos_validation_passed",
+            "stress_validation_passed",
         ),
-        "paper": ("current_revision_valid", "shadow_deployment_exists"),
-        "micro_live": ("current_revision_valid", "paper_deployment_exists"),
-        "live": ("current_revision_valid", "live_deployment_exists"),
+        "paper": (
+            "current_revision_valid",
+            "shadow_validation_passed",
+        ),
+        "micro_live": (
+            "current_revision_valid",
+            "paper_validation_passed",
+            "fault_drill_validation_passed",
+        ),
+        "live": (
+            "current_revision_valid",
+            "micro_live_validation_passed",
+        ),
     }.get(next_status, ())
     promotion_checks = [checks_by_code[code] for code in required_codes]
     blockers = [item["code"] for item in promotion_checks if not item["passed"]]
@@ -197,6 +214,7 @@ def strategy_readiness(db: Session, strategy: UserStrategy) -> dict[str, Any]:
         "promotion_checks": promotion_checks,
         "eligibility": {
             "backtest": status in BACKTEST_ELIGIBLE_STATUSES,
+            "shadow": status in SHADOW_ELIGIBLE_STATUSES,
             "paper": status in PAPER_ELIGIBLE_STATUSES,
             "live": status in LIVE_ELIGIBLE_STATUSES,
         },
@@ -224,9 +242,7 @@ def promote_current_revision(
         raise ValueError("策略与当前修订的生命周期状态不一致")
     expected_target = _NEXT_STATUS.get(current_status)
     if expected_target != target_status:
-        raise ValueError(
-            f"不允许从 {current_status} 直接晋级到 {target_status}"
-        )
+        raise ValueError(f"不允许从 {current_status} 直接晋级到 {target_status}")
     readiness = strategy_readiness(db, strategy)
     if not readiness["can_promote"]:
         raise PermissionError(",".join(readiness["blockers"]) or "promotion_not_ready")

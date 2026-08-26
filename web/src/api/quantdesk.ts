@@ -26,6 +26,7 @@ import type {
   LiveAccountStatusUpdate,
   LiveAccountStrategyUpdate,
   LiveAccountsResponse,
+  KillSwitchCommandRequest,
   LiveDashboardResponse,
   LoginInput,
   MonitorWatchlistUpdate,
@@ -36,15 +37,21 @@ import type {
   PredictionAlgorithmOptimizationRequest,
   PredictionAlgorithmUpdate,
   RegisterInput,
+  RuntimeIncidentListResponse,
   StrategyAiApplyRequest,
   StrategyAiPreviewRequest,
   StrategyCreateRequest,
   StrategyDeploymentsResponse,
   StrategyListResponse,
   StrategyPromotionRequest,
+  StrategyPromotionReviewList,
   StrategyReadiness,
+  StrategyValidationRunList,
   StrategyUpdateRequest,
   TokenPair,
+  TradingControlLatch,
+  TradingControlListResponse,
+  TradingReadiness,
 } from "./types";
 
 type QueryValue = boolean | number | string | null | undefined;
@@ -122,6 +129,25 @@ export const strategyApi = {
   revisions: (publicId: string) => apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}/revisions`),
   readiness: (publicId: string) =>
     apiRequest<StrategyReadiness>(`/strategies/${encodeURIComponent(publicId)}/readiness`),
+  validationRuns: (publicId: string) =>
+    apiRequest<StrategyValidationRunList>(`/strategies/${encodeURIComponent(publicId)}/validation-runs`),
+  promotionRequests: (publicId: string) =>
+    apiRequest<StrategyPromotionReviewList>(`/strategies/${encodeURIComponent(publicId)}/promotion-requests`),
+  requestPromotion: (publicId: string, input: {
+    request_id: string;
+    expected_version: number;
+    target_status: "validated" | "backtested" | "shadow" | "paper" | "micro_live" | "live";
+    request_note: string;
+    confirmed: true;
+  }) => apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}/promotion-requests`, { method: "POST", body: jsonBody(input) }),
+  decidePromotion: (publicId: string, reviewId: string, input: {
+    action: "approve" | "reject";
+    expected_review_version: number;
+    decision_note: string;
+    confirmed: true;
+  }) => apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}/promotion-requests/${encodeURIComponent(reviewId)}/decision`, { method: "POST", body: jsonBody(input) }),
+  rollback: (publicId: string, input: { expected_version: number; target_version: number; reason: string; confirmed: true }) =>
+    apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}/rollback`, { method: "POST", body: jsonBody(input) }),
   promote: (publicId: string, input: StrategyPromotionRequest) =>
     apiRequest<ApiObject>(`/strategies/${encodeURIComponent(publicId)}/promote`, { method: "POST", body: jsonBody(input) }),
   create: (input: StrategyCreateRequest) => apiRequest<ApiObject>("/strategies", { method: "POST", body: jsonBody(input) }),
@@ -153,6 +179,33 @@ export const liveApi = {
     apiRequest<ApiObject>(`/live/accounts/${encodeURIComponent(accountId)}/strategy`, { method: "PUT", body: jsonBody(input) }),
   arm: (accountId: string, input: LiveAccountArmRequest) =>
     apiRequest<ApiObject>(`/live/accounts/${encodeURIComponent(accountId)}/arm`, { method: "POST", body: jsonBody(input) }),
+};
+
+export const riskApi = {
+  readiness: () => apiRequest<TradingReadiness>("/system/trading-readiness"),
+  incidents: (status?: "open" | "acknowledged" | "resolved") =>
+    apiRequest<RuntimeIncidentListResponse>(
+      withQuery("/system/incidents", { incident_status: status }),
+    ),
+  acknowledgeIncident: (incidentId: string, note: string) =>
+    apiRequest<ApiObject>(
+      `/system/incidents/${encodeURIComponent(incidentId)}/acknowledge`,
+      { method: "POST", body: jsonBody({ note, confirmed: true }) },
+    ),
+  resolveIncident: (incidentId: string, note: string) =>
+    apiRequest<ApiObject>(
+      `/system/incidents/${encodeURIComponent(incidentId)}/resolve`,
+      { method: "POST", body: jsonBody({ note, confirmed: true }) },
+    ),
+  controls: (engagedOnly = false) =>
+    apiRequest<TradingControlListResponse>(
+      withQuery("/risk/kill-switches", { engaged_only: engagedOnly }),
+    ),
+  transition: (input: KillSwitchCommandRequest) =>
+    apiRequest<TradingControlLatch>("/risk/kill-switch", {
+      method: "POST",
+      body: jsonBody(input),
+    }),
 };
 
 export const dashboardApi = {
