@@ -602,6 +602,12 @@ class AiMonitorDashboard extends HTMLElement {
       }
       const opportunity = this.state.opportunities.find((item) => item.id === button.dataset.opportunityId);
       const evidence = opportunity?.evidence || {};
+      const market = evidence.market || {};
+      const marketFlow = {
+        ...(evidence.market_flow && typeof evidence.market_flow === "object" ? evidence.market_flow : {}),
+        ...(opportunity?.flow && typeof opportunity.flow === "object" ? opportunity.flow : {}),
+      };
+      const binanceQuote = opportunity?.binance_contract_quote || {};
       research.openResearch(button.dataset.openContract, button.dataset.timeframe || "1h", opportunity ? {
         id: opportunity.id,
         direction: opportunity.direction,
@@ -611,6 +617,17 @@ class AiMonitorDashboard extends HTMLElement {
         signal_time: opportunity.discovered_at,
         expires_at: opportunity.expires_at,
         entry_price: evidence.market?.price,
+        market_overview: {
+          underlying: "stock",
+          price: this.firstValue(binanceQuote.price, opportunity?.quote?.price, market.price),
+          pct_24h: this.firstValue(market.pct_24h, market.price_change_pct_24h, marketFlow.price_change_pct_24h),
+          quote_volume: this.firstValue(market.quote_volume, marketFlow.quote_volume),
+          bid_depth_notional: marketFlow.bid_depth_notional,
+          ask_depth_notional: marketFlow.ask_depth_notional,
+          book_imbalance: marketFlow.book_imbalance,
+          book_imbalance_5: marketFlow.book_imbalance_5,
+          depth_levels: this.firstValue(marketFlow.depth_levels, 100),
+        },
         technical_confirmed: evidence.confirmed === true,
         historical: this.state.opportunityTab === "history",
         outcome_result: opportunity.outcome?.result,

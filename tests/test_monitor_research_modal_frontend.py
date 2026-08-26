@@ -75,7 +75,9 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
     assert "终点价格偏差" in script
     assert "targetReturnPct" in script
     assert "非真实行情" in script
-    assert 'this.api("/overview")' in script
+    assert 'this.api(`/overview?symbol=${encoded}`)' in script
+    assert "fallbackOverview" in script
+    assert "实时总览暂不可用，当前显示机会快照" in script
 
 
 def test_monitor_research_modal_is_responsive_and_supports_light_theme() -> None:

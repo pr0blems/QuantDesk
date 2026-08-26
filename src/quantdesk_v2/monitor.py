@@ -406,6 +406,38 @@ class MonitorRepository:
             raise MonitorUnavailable("unknown contract monitor symbol")
         return normalized
 
+    def _latest_score_rows(
+        self,
+        symbols: Sequence[str],
+        timeframes: Sequence[str] = ("15m", "1h", "4h"),
+    ) -> list[dict[str, Any]]:
+        """Read the latest score for each requested symbol/timeframe by PK lookup.
+
+        The former GROUP BY + self-join scanned the complete scores history on
+        every monitor refresh.  That query can exceed the production MySQL read
+        timeout while the market workers are writing.  The scores primary key
+        is (symbol, tf, open_time), so scalar ORDER BY/LIMIT lookups are bounded
+        and deterministic even as history grows.
+        """
+        statements: list[str] = []
+        params: list[Any] = []
+        for symbol in symbols:
+            for timeframe in timeframes:
+                statements.append(
+                    """SELECT ? AS symbol, ? AS tf,
+                              (SELECT score FROM scores
+                               WHERE symbol=? AND tf=?
+                               ORDER BY open_time DESC LIMIT 1) AS score"""
+                )
+                params.extend((symbol, timeframe, symbol, timeframe))
+        if not statements:
+            return []
+        return [
+            row
+            for row in self._query(" UNION ALL ".join(statements), tuple(params))
+            if row.get("score") is not None
+        ]
+
     def _configure_market_store(self) -> None:
         """Point the in-process market modules at the shared MySQL engine."""
         from . import market_store
@@ -416,15 +448,21 @@ class MonitorRepository:
         self,
         watchlist: list[str],
         *,
+        symbols: Sequence[str] | None = None,
         underlying_quotes: dict[str, Any] | None = None,
         underlying_market_status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         from . import market_engine
 
+        selected_symbols = (
+            [self._validate_symbol(symbol) for symbol in symbols]
+            if symbols is not None
+            else list(self.symbols)
+        )
         now_seconds = int(time.time())
         tickers = {row["symbol"]: row for row in self._query("SELECT * FROM ticker")}
         rolling_changes = market_engine.rolling_price_changes(
-            self.symbols,
+            selected_symbols,
             now=now_seconds,
             require_fresh_stream=True,
         )
@@ -453,13 +491,7 @@ class MonitorRepository:
         except MonitorUnavailable:
             # Fall back to the in-memory Finnhub source during rolling migration.
             underlying_by_contract = {}
-        score_rows = self._query(
-            """
-            SELECT s.symbol, s.tf, s.score FROM scores s
-            JOIN (SELECT symbol, tf, MAX(open_time) mo FROM scores GROUP BY symbol, tf) m
-            ON s.symbol=m.symbol AND s.tf=m.tf AND s.open_time=m.mo
-            """
-        )
+        score_rows = self._latest_score_rows(selected_symbols)
         scores: dict[str, dict[str, float]] = {}
         for row in score_rows:
             scores.setdefault(row["symbol"], {})[row["tf"]] = row["score"]
@@ -539,7 +571,7 @@ class MonitorRepository:
         weights = {"15m": 0.3, "1h": 0.4, "4h": 0.3}
         items = []
         latest = 0
-        for symbol in self.symbols:
+        for symbol in selected_symbols:
             ticker = tickers.get(symbol, {})
             short_term = rolling_changes.get(symbol, {})
             depth = _fresh_microstructure_metrics(
@@ -659,13 +691,7 @@ class MonitorRepository:
         return [_opportunity_out(row) for row in rows]
 
     def breadth(self) -> dict[str, Any]:
-        rows = self._query(
-            """
-            SELECT s.symbol, s.score FROM scores s
-            JOIN (SELECT symbol, MAX(open_time) mo FROM scores WHERE tf='1h' GROUP BY symbol) m
-            ON s.symbol=m.symbol AND s.open_time=m.mo WHERE s.tf='1h'
-            """
-        )
+        rows = self._latest_score_rows(self.symbols, ("1h",))
         bull = sum(1 for row in rows if row["score"] >= 40)
         bear = sum(1 for row in rows if row["score"] <= -40)
         neutral = len(rows) - bull - bear

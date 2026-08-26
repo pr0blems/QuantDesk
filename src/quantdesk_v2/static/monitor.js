@@ -12,7 +12,7 @@ class ContractMonitor extends HTMLElement {
       watchlist: new Set(),
       lastAlertId: 0,
       spreadAlertStates: new Map(),
-      modal: { symbol: null, tf: "1h", opportunity: null, indicators: [], selectedIndicator: null, predictionContext: null },
+      modal: { symbol: null, tf: "1h", opportunity: null, indicators: [], selectedIndicator: null, predictionContext: null, overviewError: null },
       chart: {
         klines: [],
         realCount: 0,
@@ -1445,6 +1445,7 @@ class ContractMonitor extends HTMLElement {
 
   async openModal(symbol) {
     this.state.modal.predictionContext = null;
+    this.state.modal.overviewError = null;
     this.revealModal(symbol);
     await this.refreshModal();
   }
@@ -1454,21 +1455,37 @@ class ContractMonitor extends HTMLElement {
     if (!normalizedSymbol) return;
     this.state.modal.tf = ["15m", "1h", "4h"].includes(timeframe) ? timeframe : "1h";
     this.state.modal.predictionContext = this.normalizePredictionContext(predictionContext);
+    this.state.modal.overviewError = null;
+    const fallbackOverview = {
+      ...this.state.modal.predictionContext?.marketOverview,
+      symbol: normalizedSymbol,
+      opportunity: this.state.modal.predictionContext ? {
+        direction: this.state.modal.predictionContext.direction,
+        quality_score: this.state.modal.predictionContext.combinedScore,
+        status: this.state.modal.predictionContext.historical ? "completed" : "watching",
+      } : null,
+    };
+    this.state.overview = [fallbackOverview];
     this.revealModal(normalizedSymbol);
     this.q("#modal-symbol").textContent = normalizedSymbol;
-    this.q("#modal-price").textContent = "--";
-    this.q("#modal-pct").textContent = "--";
+    this.q("#modal-price").textContent = this.formatPrice(fallbackOverview.price);
+    this.q("#modal-pct").textContent = this.formatPercent(fallbackOverview.pct_24h);
+    this.renderModalSummary(fallbackOverview);
     this.q("#modal-ohlc").innerHTML = "<span>正在读取合约行情与 K 线…</span>";
     try {
+      const encoded = encodeURIComponent(normalizedSymbol);
       const [overview, watchlist] = await Promise.all([
-        this.api("/overview"),
+        this.api(`/overview?symbol=${encoded}`),
         this.api("/watchlist").catch(() => []),
       ]);
-      this.state.overview = Array.isArray(overview.items) ? overview.items : [];
+      const overviewItems = Array.isArray(overview.items) ? overview.items : [];
+      this.state.overview = overviewItems.length ? overviewItems : [fallbackOverview];
       this.state.watchlist = new Set(Array.isArray(watchlist) ? watchlist : []);
       this.state.overview.forEach((item) => { item.watch = this.state.watchlist.has(item.symbol); });
-    } catch (_) {
-      this.state.overview = [];
+    } catch (error) {
+      fallbackOverview.watch = false;
+      this.state.overview = [fallbackOverview];
+      this.state.modal.overviewError = error?.message || "实时快照读取失败";
     }
     await this.refreshModal();
   }
@@ -1477,6 +1494,9 @@ class ContractMonitor extends HTMLElement {
     if (!context || typeof context !== "object") return null;
     const clampScore = (value) => Math.max(0, Math.min(100, Number(value) || 0));
     const entryPrice = Number(context.entry_price);
+    const marketOverview = context.market_overview && typeof context.market_overview === "object"
+      ? { ...context.market_overview }
+      : {};
     return {
       id: String(context.id || ""),
       direction: context.direction === "short" ? "short" : "long",
@@ -1489,6 +1509,7 @@ class ContractMonitor extends HTMLElement {
       technicalConfirmed: context.technical_confirmed === true,
       historical: context.historical === true,
       outcomeResult: ["win", "loss", "flat"].includes(context.outcome_result) ? context.outcome_result : "unavailable",
+      marketOverview,
       exitPrice: Number(context.exit_price) > 0 ? Number(context.exit_price) : null,
       directionalReturnBps: Number.isFinite(Number(context.directional_return_bps)) ? Number(context.directional_return_bps) : null,
       settledPriceAt: context.settled_price_at || null,
@@ -2369,7 +2390,7 @@ class ContractMonitor extends HTMLElement {
     const underlying = String(overview.underlying || overview.annotation || "");
     const equityMapped = /stock|equity|tradfi/i.test(underlying);
     this.q("#modal-market").textContent = equityMapped ? "美股映射合约" : "永续合约";
-    this.q("#modal-source").textContent = `数据源：Binance Futures · ${equityMapped ? "美股映射 USDT 合约" : "USDT 永续合约"} · 量化结果仅供研究`;
+    this.q("#modal-source").textContent = `数据源：Binance Futures · ${equityMapped ? "美股映射 USDT 合约" : "USDT 永续合约"} · 量化结果仅供研究${this.state.modal.overviewError ? " · 实时总览暂不可用，当前显示机会快照" : ""}`;
 
     const pct = numeric(overview.pct_24h);
     const pctTone = pct != null ? (pct > 0 ? "up" : pct < 0 ? "down" : "neutral") : "neutral";

@@ -29,6 +29,7 @@ def _repository(request: Request) -> MonitorRepository:
 def monitor_overview(
     request: Request,
     user: Annotated[User, Depends(get_current_user)],
+    symbol: str | None = None,
 ) -> dict[str, Any]:
     quote_service = getattr(request.app.state, "finnhub_us_quote_service", None)
     status_service = getattr(request.app.state, "finnhub_market_status_service", None)
@@ -36,6 +37,7 @@ def monitor_overview(
     market_status = asdict(status_service.status()) if status_service is not None else {}
     return _repository(request).overview(
         user.monitor_watchlist or [],
+        symbols=[symbol] if symbol else None,
         underlying_quotes=quote_snapshot,
         underlying_market_status=market_status,
     )

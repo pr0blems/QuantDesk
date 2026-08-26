@@ -53,3 +53,9 @@ def test_monitor_route_contracts_remain_under_api_v2() -> None:
         "/api/v2/monitor/report",
     ):
         assert set(paths[path]) == {"get"}
+
+    overview_parameters = paths["/api/v2/monitor/overview"]["get"]["parameters"]
+    assert any(
+        parameter["name"] == "symbol" and parameter["required"] is False
+        for parameter in overview_parameters
+    )

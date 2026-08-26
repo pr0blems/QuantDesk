@@ -177,6 +177,38 @@ def test_monitor_overview_breadth_and_user_state(mysql_test_engine, tmp_path, mo
     assert repository.latest_alert_id(user_id) == 1
 
 
+def test_latest_score_rows_use_bounded_primary_key_lookups(monkeypatch) -> None:
+    repository = object.__new__(MonitorRepository)
+    captured: dict[str, object] = {}
+
+    def capture_query(sql: str, params: tuple[object, ...]):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [
+            {"symbol": "AAAUSDT", "tf": "1h", "score": 42},
+            {"symbol": "BBBUSDT", "tf": "1h", "score": None},
+        ]
+
+    monkeypatch.setattr(repository, "_query", capture_query)
+
+    rows = repository._latest_score_rows(["AAAUSDT", "BBBUSDT"], ("1h",))
+
+    sql = str(captured["sql"])
+    assert "GROUP BY" not in sql
+    assert sql.count("ORDER BY open_time DESC LIMIT 1") == 2
+    assert captured["params"] == (
+        "AAAUSDT",
+        "1h",
+        "AAAUSDT",
+        "1h",
+        "BBBUSDT",
+        "1h",
+        "BBBUSDT",
+        "1h",
+    )
+    assert rows == [{"symbol": "AAAUSDT", "tf": "1h", "score": 42}]
+
+
 def test_monitor_detail_queries(mysql_test_engine, tmp_path) -> None:
     repository, _, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
     assert repository.klines("testusdt", "1h", 120)[0]["close"] == 101.5
