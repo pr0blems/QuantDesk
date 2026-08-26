@@ -3549,7 +3549,7 @@ class AiMonitorDashboard extends HTMLElement {
       macro_direction_aligned: ["大盘方向", "统一指数口径后的宏观方向不得与候选方向冲突"],
       actionable_news_trigger: ["有效新事件", "新闻必须是尚未消费且可行动的新事件"],
       event_cluster_selected: ["事件去重", "同一事件簇只选择最强候选标的"],
-      order_book_confirms_direction: ["盘口方向", "Binance 实时盘口必须确认候选方向"],
+      order_book_no_strong_conflict: ["盘口冲突", "中性盘口允许研究预测，只有强反向冲突才否决"],
     };
     const stableChecksSource = stableGate?.decision_checks || stableGate?.checks || {};
     const stableChecks = stableGate
@@ -3578,7 +3578,9 @@ class AiMonitorDashboard extends HTMLElement {
       ]),
       { key: "entry_price", label: "入场价格", passed: entryPrice > 0, current: entryPrice > 0 ? entryPrice : null, required: "> 0", detail: "取得真实扫描参考价后才能冻结" },
     ];
-    const signalConfirmed = checks.filter((check) => check.key !== "entry_price").every((check) => check.passed);
+    const signalConfirmed = checks
+      .filter((check) => check.key !== "entry_price")
+      .every((check) => check.passed || check.blocking === false);
     return {
       version: stableGate?.decision_version || "frontend_legacy_fallback",
       execution_mode: "prediction_only",
@@ -3676,7 +3678,7 @@ class AiMonitorDashboard extends HTMLElement {
         MACRO_DIRECTION_DIVERGENT: "候选方向与大盘方向相反",
         NEWS_NOT_ACTIONABLE: "新闻属于收盘复盘或已发生行情，不作为新催化剂",
         CORRELATED_EVENT_ALREADY_SELECTED: "同一新闻事件已选择更强标的",
-        ORDER_BOOK_DIRECTION_NOT_CONFIRMED: "Binance 实时盘口尚未确认候选方向",
+        MARKET_FLOW_DIRECTION_CONFLICT: "Binance 实时盘口与候选方向存在强冲突",
       };
       const reason = reasonCodes.map((code) => retryableLabels[code] || blockedLabels[code]).filter(Boolean)[0];
       return {

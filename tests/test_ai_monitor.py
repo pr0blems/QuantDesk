@@ -34,6 +34,7 @@ from quantdesk_v2.ai_monitor import (
     market_flow_snapshot,
     match_configured_indicators,
     merged_opportunity_expiration,
+    multi_timeframe_technical_snapshot,
     news_actionability_snapshot,
     opportunity_score_weights,
     prediction_actionability_gate_summary,
@@ -51,6 +52,7 @@ from quantdesk_v2.ai_monitor import (
     prediction_soft_exit_policy,
     refresh_pending_prediction_scores,
     reopen_legacy_prediction_settlements,
+    select_directional_candidates_with_technical_context,
     settle_due_predictions,
     settleable_historical_outcomes,
     settlement_exit_subreason,
@@ -823,6 +825,104 @@ def test_ai_monitor_keeps_only_the_strongest_direction_per_symbol() -> None:
     ]
 
 
+def test_multi_timeframe_policy_uses_1h_as_primary_or_15m_with_4h() -> None:
+    def scan(*, bullish: bool, bearish: bool, evaluated_at: int) -> dict:
+        return {
+            "evaluated_at": evaluated_at,
+            "items": [
+                {
+                    "key": key,
+                    "available": True,
+                    "status": "triggered",
+                    "bullish_triggered": bullish,
+                    "bearish_triggered": bearish,
+                    "bullish_strength": 88 if bullish else 30,
+                    "bearish_strength": 90 if bearish else 30,
+                }
+                for key in ("moving_average_bull", "ma_golden_cross")
+            ],
+            "prediction_features": {"items": []},
+        }
+
+    one_hour = multi_timeframe_technical_snapshot(
+        {
+            "15m": scan(bullish=False, bearish=False, evaluated_at=1),
+            "1h": scan(bullish=True, bearish=False, evaluated_at=2),
+            "4h": scan(bullish=False, bearish=False, evaluated_at=3),
+        },
+        ["moving_average_bull", "ma_golden_cross"],
+        direction="long",
+    )
+    timing_and_regime = multi_timeframe_technical_snapshot(
+        {
+            "15m": scan(bullish=False, bearish=True, evaluated_at=1),
+            "1h": scan(bullish=False, bearish=False, evaluated_at=2),
+            "4h": scan(bullish=False, bearish=True, evaluated_at=3),
+        },
+        ["moving_average_bull", "ma_golden_cross"],
+        direction="short",
+    )
+
+    assert one_hour["eligible"] is True
+    assert one_hour["confirmed_timeframes"] == ["1h"]
+    assert one_hour["technical_score"] == 88
+    assert timing_and_regime["eligible"] is True
+    assert timing_and_regime["confirmed_timeframes"] == ["15m", "4h"]
+    assert timing_and_regime["technical_score"] == 90
+
+
+def test_direction_selection_can_choose_bearish_side_when_technical_structure_is_short() -> None:
+    def bearish_scan(evaluated_at: int) -> dict:
+        return {
+            "evaluated_at": evaluated_at,
+            "items": [
+                {
+                    "key": key,
+                    "available": True,
+                    "status": "triggered",
+                    "bullish_triggered": False,
+                    "bearish_triggered": True,
+                    "bullish_strength": 25,
+                    "bearish_strength": 92,
+                }
+                for key in ("moving_average_bull", "ma_golden_cross")
+            ],
+            "prediction_features": {"items": []},
+        }
+
+    selected = select_directional_candidates_with_technical_context(
+        [
+            {
+                "symbol": "TEST",
+                "contract_symbol": "TESTUSDT",
+                "direction": "long",
+                "news_score": 85,
+                "news": [{"ts": 100}],
+            },
+            {
+                "symbol": "TEST",
+                "contract_symbol": "TESTUSDT",
+                "direction": "short",
+                "news_score": 80,
+                "news": [{"ts": 101}],
+            },
+        ],
+        {
+            "TESTUSDT": {
+                "15m": bearish_scan(1),
+                "1h": bearish_scan(2),
+                "4h": bearish_scan(3),
+            }
+        },
+        ["moving_average_bull", "ma_golden_cross"],
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["direction"] == "short"
+    assert selected[0]["multi_timeframe_technical"]["eligible"] is True
+    assert selected[0]["direction_selection"]["alternatives"][0]["direction"] == "short"
+
+
 def test_news_candidates_keep_unmapped_us_stocks_visible() -> None:
     candidates = aggregate_news_candidates(
         [
@@ -1457,8 +1557,8 @@ def test_virtual_entry_gate_requires_every_signal_condition_and_a_real_price() -
     }
 
 
-def test_virtual_entry_gate_requires_order_book_direction_confirmation() -> None:
-    blocked = virtual_entry_gate_snapshot(
+def test_virtual_entry_gate_allows_neutral_order_book_for_research() -> None:
+    neutral = virtual_entry_gate_snapshot(
         direction="long",
         news_score=80,
         news_mention_count=1,
@@ -1475,12 +1575,46 @@ def test_virtual_entry_gate_requires_order_book_direction_confirmation() -> None
         order_book_gate={
             "quality_passed": True,
             "direction_clear": True,
+            "direction_conflict": False,
             "confirms_direction": False,
             "directional_pressure": 0.05,
         },
     )
 
+    assert neutral["signal_confirmed"] is True
+    assert neutral["entry_ready"] is True
+    assert (
+        next(item for item in neutral["checks"] if item["key"] == "order_book_direction")["passed"]
+        is True
+    )
+
+
+def test_virtual_entry_gate_blocks_fresh_strong_order_book_conflict() -> None:
+    blocked = virtual_entry_gate_snapshot(
+        direction="long",
+        news_score=80,
+        news_mention_count=1,
+        minimum_news_score=60,
+        minimum_news_mentions=1,
+        indicator_policy_passed=True,
+        indicator_score=80,
+        minimum_indicator_score=65,
+        combined_score=80,
+        minimum_combined_score=75,
+        market_flow_hard_conflict=False,
+        entry_price=100,
+        checked_at="2026-08-26T15:00:00+00:00",
+        order_book_gate={
+            "quality_passed": True,
+            "direction_clear": False,
+            "direction_conflict": True,
+            "confirms_direction": False,
+            "directional_pressure": -0.4,
+        },
+    )
+
     assert blocked["signal_confirmed"] is False
+    assert blocked["entry_ready"] is False
     assert (
         next(item for item in blocked["checks"] if item["key"] == "order_book_direction")["passed"]
         is False
@@ -1510,6 +1644,7 @@ def test_prediction_actionability_gate_blocks_non_actionable_correlated_entry() 
         },
         order_book_gate={
             "quality_passed": True,
+            "direction_conflict": True,
             "confirms_direction": False,
         },
         require_new_news=True,
@@ -1521,7 +1656,7 @@ def test_prediction_actionability_gate_blocks_non_actionable_correlated_entry() 
         "EXECUTION_MARKET_QUALITY_BLOCKED",
         "NEWS_NOT_ACTIONABLE",
         "CORRELATED_EVENT_ALREADY_SELECTED",
-        "ORDER_BOOK_DIRECTION_NOT_CONFIRMED",
+        "MARKET_FLOW_DIRECTION_CONFLICT",
     }
     assert "OBSERVED_ONLY:NON_REGULAR_US_SESSION" in summary["warnings"]
     assert "OBSERVED_ONLY:MACRO_DIRECTION_DIVERGENT" in summary["warnings"]
@@ -3193,7 +3328,7 @@ def test_market_flow_snapshot_keeps_depth_with_bounded_future_clock_skew() -> No
     assert snapshot["order_book_quality_passed"] is True
 
 
-def test_stable_gate_blocks_an_unusable_execution_order_book() -> None:
+def test_stable_gate_degrades_research_for_an_unusable_order_book() -> None:
     now = datetime(2026, 8, 11, 8, 0, tzinfo=UTC)
     result = stable_gate_summary(
         {
@@ -3217,9 +3352,10 @@ def test_stable_gate_blocks_an_unusable_execution_order_book() -> None:
         policy_mode="record",
     )
 
-    assert result["passed"] is False
-    assert result["decision_checks"]["order_book_usable"] is False
-    assert "BINANCE_ORDER_BOOK_NOT_USABLE" in result["blocking_reasons"]
+    assert result["passed"] is True
+    assert "order_book_usable" not in result["decision_checks"]
+    assert "BINANCE_ORDER_BOOK_NOT_USABLE" not in result["blocking_reasons"]
+    assert "OBSERVED_ONLY:BINANCE_ORDER_BOOK_NOT_USABLE" in result["warnings"]
     assert result["execution_safety_gate_applied"] is True
 
 

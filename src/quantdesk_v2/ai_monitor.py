@@ -107,8 +107,10 @@ PREDICTION_SCORE_EXIT_POLICY_VERSION = "horizon_aligned_closed_bar_v3"
 PREDICTION_SOFT_EXIT_MIN_HORIZON_FRACTION = 0.5
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
-OPPORTUNITY_DECISION_VERSION = "actionable_entry_v8"
+OPPORTUNITY_DECISION_VERSION = "actionable_entry_v9"
 OPPORTUNITY_API_VERSION = "ai_opportunity.v3"
+MULTI_TIMEFRAME_TECHNICAL_VERSION = "directional_mtf_15m_1h_4h_v1"
+MULTI_TIMEFRAME_TECHNICAL_WEIGHTS = {"15m": 0.25, "1h": 0.45, "4h": 0.30}
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
 FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS = 15 * 60
@@ -1450,20 +1452,21 @@ def virtual_entry_gate_snapshot(
                     "key": "order_book_quality",
                     "label": "实时盘口质量",
                     "passed": bool(frozen_order_book.get("quality_passed")),
+                    "blocking": False,
                     "current": str(frozen_order_book.get("status") or "missing"),
-                    "required": "fresh / complete / spread-safe",
-                    "detail": "Binance 当前合约盘口必须新鲜、档位完整且点差可接受",
+                    "required": "研究信号仅作质量提示",
+                    "detail": "盘口缺失或过期会降低研究信号质量，但不会单独阻止模拟记录",
                 },
                 {
                     "key": "order_book_direction",
-                    "label": "实时盘口方向",
-                    "passed": bool(
+                    "label": "盘口强冲突否决",
+                    "passed": not bool(
                         frozen_order_book.get("quality_passed")
-                        and frozen_order_book.get("confirms_direction")
+                        and frozen_order_book.get("direction_conflict")
                     ),
                     "current": frozen_order_book.get("directional_pressure"),
-                    "required": "盘口质量通过且方向确认",
-                    "detail": "盘口不产生独立信号，但必须确认候选方向后才允许生成新预测",
+                    "required": "不得存在新鲜盘口的强反向冲突",
+                    "detail": "中性盘口允许生成研究预测；只有新鲜且明确反向的盘口才否决",
                 },
             ]
             if frozen_order_book
@@ -1478,10 +1481,13 @@ def virtual_entry_gate_snapshot(
             "detail": "必须取得真实扫描参考价后才能冻结入场",
         },
     ]
-    signal_confirmed = all(bool(item["passed"]) for item in checks[:-1])
+    signal_confirmed = all(
+        bool(item["passed"]) or item.get("blocking") is False
+        for item in checks[:-1]
+    )
     entry_ready = signal_confirmed and bool(checks[-1]["passed"])
     return {
-        "version": "research_entry_quality_v5",
+        "version": "research_entry_quality_v6",
         "execution_mode": "virtual_prediction_only",
         "real_order_enabled": False,
         "direction": "short" if direction == "short" else "long",
@@ -4370,8 +4376,12 @@ def stable_gate_summary(
         "ticker_fresh",
         "kline_fresh",
         "feature_quality",
-        "order_book_usable",
     }
+    # A depth snapshot is an execution aid, not a signal source. Missing or
+    # stale depth therefore degrades a research/simulation decision instead of
+    # suppressing it. A fresh, strong directional conflict remains a hard veto
+    # through ``directional_conflict_clear``; automatic live copy applies the
+    # stricter fresh-and-confirming rule immediately before order placement.
     # Binance is the execution and valuation venue for mapped contracts.
     # Finnhub/UW cash-market quotes are cross-venue references: in record and
     # score modes they can adjust confidence and raise warnings, but a closed or
@@ -4490,10 +4500,9 @@ def prediction_actionability_gate_summary(
     frozen_order_book = (
         dict(order_book_gate) if isinstance(order_book_gate, Mapping) else {}
     )
-    if frozen_order_book:
-        actionable_checks["order_book_confirms_direction"] = bool(
-            frozen_order_book.get("quality_passed")
-            and frozen_order_book.get("confirms_direction")
+    if frozen_order_book and frozen_order_book.get("quality_passed"):
+        actionable_checks["order_book_no_strong_conflict"] = not bool(
+            frozen_order_book.get("direction_conflict")
         )
     decision_checks.update(actionable_checks)
     decision_checks["regular_us_session"] = regular_us_session
@@ -4502,7 +4511,7 @@ def prediction_actionability_gate_summary(
         "execution_market_quality": "EXECUTION_MARKET_QUALITY_BLOCKED",
         "actionable_news_trigger": "NEWS_NOT_ACTIONABLE",
         "event_cluster_selected": "CORRELATED_EVENT_ALREADY_SELECTED",
-        "order_book_confirms_direction": "ORDER_BOOK_DIRECTION_NOT_CONFIRMED",
+        "order_book_no_strong_conflict": "MARKET_FLOW_DIRECTION_CONFLICT",
     }
     new_reasons = [
         failure_codes[key]
@@ -8503,6 +8512,175 @@ def strongest_candidate_per_symbol(
     )
 
 
+def multi_timeframe_technical_snapshot(
+    scans: Mapping[str, Mapping[str, Any]],
+    indicator_keys: Sequence[str],
+    *,
+    direction: str,
+) -> dict[str, Any]:
+    """Evaluate one direction across 15m timing, 1h trend and 4h regime.
+
+    The configured indicators remain the strategy definition.  This function
+    changes only how their directional evidence is combined: a 1h setup can
+    qualify by itself, while a 15m timing setup must agree with the 4h regime.
+    Scores are averaged over confirmed frames so an untriggered auxiliary frame
+    does not dilute a valid 1h signal into a false rejection.
+    """
+
+    normalized_direction = "short" if direction == "short" else "long"
+    frames: dict[str, dict[str, Any]] = {}
+    for timeframe, weight in MULTI_TIMEFRAME_TECHNICAL_WEIGHTS.items():
+        scan = dict(scans.get(timeframe) or {})
+        matched, evidence = match_configured_indicators(
+            scan,
+            indicator_keys,
+            normalized_direction,
+        )
+        policy = configured_indicator_policy(evidence)
+        available = any(bool(item.get("available")) for item in evidence)
+        frames[timeframe] = {
+            "timeframe": timeframe,
+            "role": {
+                "15m": "entry_timing",
+                "1h": "primary_trend",
+                "4h": "regime_filter",
+            }[timeframe],
+            "weight": weight,
+            "available": available,
+            "passed": bool(matched),
+            "technical_score": float(policy.get("technical_score") or 0.0),
+            "matched_indicator_keys": [
+                str(item.get("key")) for item in evidence if item.get("matched")
+            ],
+            "passed_groups": list(policy.get("passed_groups") or []),
+            "evaluated_at": int(scan.get("evaluated_at") or 0),
+            "policy": policy,
+            "indicators": evidence,
+        }
+
+    passed_frames = [item for item in frames.values() if item["passed"]]
+    score_source = passed_frames or [
+        item for item in frames.values() if item["available"]
+    ]
+    score_weight = sum(float(item["weight"]) for item in score_source)
+    technical_score = (
+        sum(
+            float(item["technical_score"]) * float(item["weight"])
+            for item in score_source
+        )
+        / score_weight
+        if score_weight
+        else 0.0
+    )
+    structure_confirmed = bool(frames["1h"]["passed"] or frames["4h"]["passed"])
+    timing_confirmed = bool(frames["15m"]["passed"] or frames["1h"]["passed"])
+    eligible = bool(structure_confirmed and timing_confirmed)
+    return {
+        "version": MULTI_TIMEFRAME_TECHNICAL_VERSION,
+        "direction": normalized_direction,
+        "technical_score": round(technical_score, 4),
+        "eligible": eligible,
+        "structure_confirmed": structure_confirmed,
+        "timing_confirmed": timing_confirmed,
+        "confirmed_timeframes": [
+            timeframe for timeframe, item in frames.items() if item["passed"]
+        ],
+        "available_timeframes": [
+            timeframe for timeframe, item in frames.items() if item["available"]
+        ],
+        "frames": frames,
+        "rule": "1h 可独立确认；否则必须由 15m 入场节奏与 4h 大级别方向共同确认",
+    }
+
+
+def select_directional_candidates_with_technical_context(
+    candidates: Sequence[Mapping[str, Any]],
+    scans_by_contract: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    indicator_keys: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Choose one auditable long/short side per symbol using news and MTF evidence."""
+
+    contexts: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def context(contract_symbol: str, direction: str) -> dict[str, Any]:
+        key = (contract_symbol, direction)
+        if key not in contexts:
+            contexts[key] = multi_timeframe_technical_snapshot(
+                scans_by_contract.get(contract_symbol, {}),
+                indicator_keys,
+                direction=direction,
+            )
+        return contexts[key]
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for raw in candidates:
+        candidate = dict(raw)
+        symbol_key = str(
+            candidate.get("contract_symbol") or candidate.get("symbol") or ""
+        ).upper()
+        if symbol_key:
+            grouped.setdefault(symbol_key, []).append(candidate)
+
+    selected: list[dict[str, Any]] = []
+    for symbol_key, alternatives in grouped.items():
+        ranked: list[tuple[tuple[float, float, int], dict[str, Any]]] = []
+        selection_rows: list[dict[str, Any]] = []
+        for candidate in alternatives:
+            direction = "short" if candidate.get("direction") == "short" else "long"
+            technical = context(symbol_key, direction)
+            news_score = float(candidate.get("news_score") or 0.0)
+            ranking_score = (
+                news_score * 0.55
+                + float(technical["technical_score"]) * 0.45
+                + (5.0 if technical["eligible"] else 0.0)
+            )
+            latest_news = max(
+                (int(item.get("ts") or 0) for item in candidate.get("news") or []),
+                default=0,
+            )
+            row = {
+                "direction": direction,
+                "news_score": round(news_score, 4),
+                "technical_score": technical["technical_score"],
+                "technical_eligible": technical["eligible"],
+                "ranking_score": round(ranking_score, 4),
+            }
+            selection_rows.append(row)
+            ranked.append(((ranking_score, news_score, latest_news), candidate))
+        _, winner = max(ranked, key=lambda item: item[0])
+        winner_direction = "short" if winner.get("direction") == "short" else "long"
+        opposite_direction = "long" if winner_direction == "short" else "short"
+        winner["multi_timeframe_technical"] = context(symbol_key, winner_direction)
+        winner["opposite_multi_timeframe_technical"] = context(
+            symbol_key, opposite_direction
+        )
+        winner["direction_selection"] = {
+            "version": MULTI_TIMEFRAME_TECHNICAL_VERSION,
+            "selected_direction": winner_direction,
+            "alternatives": sorted(
+                selection_rows,
+                key=lambda item: float(item["ranking_score"]),
+                reverse=True,
+            ),
+            "weights": {"news": 0.55, "technical": 0.45},
+            "technical_eligibility_bonus": 5.0,
+        }
+        selected.append(winner)
+    return sorted(
+        selected,
+        key=lambda item: max(
+            (
+                float(row.get("ranking_score") or 0.0)
+                for row in dict(item.get("direction_selection") or {}).get(
+                    "alternatives", []
+                )
+            ),
+            default=0.0,
+        ),
+        reverse=True,
+    )
+
+
 def match_configured_indicators(
     scan: Mapping[str, Any], indicator_keys: Sequence[str], direction: str = "long"
 ) -> tuple[bool, list[dict[str, Any]]]:
@@ -8873,7 +9051,10 @@ def _scan_opportunities(
         minimum_confidence=float(config["minimum_news_confidence"]),
         minimum_mentions=int(config["minimum_news_mentions"]),
     )
-    all_candidates = strongest_candidate_per_symbol(directional_candidates)
+    # Preserve both news directions until the 15m/1h/4h technical context has
+    # been evaluated. Choosing by news score alone discarded valid shorts when
+    # a slightly stronger bullish headline existed for the same symbol.
+    all_candidates = [dict(item) for item in directional_candidates]
     unmapped_candidates = [item for item in all_candidates if not item.get("contract_symbol")]
     monitor_symbols = list(config.get("monitor_symbols") or [])
     candidates = filter_monitored_candidates(all_candidates, monitor_symbols)
@@ -8966,6 +9147,35 @@ def _scan_opportunities(
             continue
         eligible_candidates.append(candidate)
     candidates = annotate_event_cluster_selection(eligible_candidates)
+    indicator_keys = list(config["indicator_keys"])
+    timeframe = str(config["timeframe"])
+    technical_scans: dict[str, dict[str, dict[str, Any]]] = {}
+    for contract_symbol in sorted(
+        {
+            str(item.get("contract_symbol") or "").upper()
+            for item in candidates
+            if str(item.get("contract_symbol") or "").strip()
+        }
+    ):
+        contract_scans: dict[str, dict[str, Any]] = {}
+        for technical_timeframe in MULTI_TIMEFRAME_TECHNICAL_WEIGHTS:
+            try:
+                contract_scans[technical_timeframe] = repository.strategy_indicators(
+                    contract_symbol,
+                    technical_timeframe,
+                )
+            except MonitorUnavailable:
+                contract_scans[technical_timeframe] = {
+                    "items": [],
+                    "prediction_features": {"items": []},
+                    "evaluated_at": 0,
+                }
+        technical_scans[contract_symbol] = contract_scans
+    candidates = select_directional_candidates_with_technical_context(
+        candidates,
+        technical_scans,
+        indicator_keys,
+    )
     run.input_count = len(candidates)
     stored = 0
     confirmed = 0
@@ -8976,8 +9186,6 @@ def _scan_opportunities(
     merged = 0
     failed_symbols: list[str] = []
     unmapped_symbols: list[str] = [str(item["symbol"]) for item in unmapped_candidates]
-    indicator_keys = list(config["indicator_keys"])
-    timeframe = str(config["timeframe"])
     prediction_max_holding_bars = max(
         1,
         min(24, int(config.get("prediction_max_holding_bars", 4))),
@@ -9038,21 +9246,76 @@ def _scan_opportunities(
             unmapped_symbols.append(candidate["symbol"])
             scan = {"items": [], "prediction_features": {"items": []}, "evaluated_at": 0}
         else:
-            try:
-                scan = repository.strategy_indicators(contract_symbol, timeframe)
-            except MonitorUnavailable:
-                failed_symbols.append(candidate["symbol"])
-                scan = {"items": [], "prediction_features": {"items": []}, "evaluated_at": 0}
-        policy_matched, indicator_evidence = match_configured_indicators(
+            scan = dict(
+                technical_scans.get(contract_symbol.upper(), {}).get(timeframe)
+                or {}
+            )
+            if not scan:
+                try:
+                    scan = repository.strategy_indicators(contract_symbol, timeframe)
+                except MonitorUnavailable:
+                    failed_symbols.append(candidate["symbol"])
+                    scan = {"items": [], "prediction_features": {"items": []}, "evaluated_at": 0}
+        primary_policy_matched, indicator_evidence = match_configured_indicators(
             scan, indicator_keys, candidate["direction"]
         )
-        indicator_policy = configured_indicator_policy(indicator_evidence)
-        matched_indicator_keys = [
-            str(item["key"]) for item in indicator_evidence if item["matched"]
-        ]
-        indicator_score = float(indicator_policy["technical_score"])
+        primary_indicator_policy = configured_indicator_policy(indicator_evidence)
+        multi_timeframe_technical = dict(
+            candidate.get("multi_timeframe_technical") or {}
+        )
+        opposite_multi_timeframe_technical = dict(
+            candidate.get("opposite_multi_timeframe_technical") or {}
+        )
+        current_mtf_score = float(
+            multi_timeframe_technical.get("technical_score")
+            or primary_indicator_policy["technical_score"]
+            or 0.0
+        )
+        opposite_mtf_score = float(
+            opposite_multi_timeframe_technical.get("technical_score") or 0.0
+        )
+        opposite_direction_conflict = bool(
+            opposite_multi_timeframe_technical.get("eligible")
+            and opposite_mtf_score >= current_mtf_score + 8.0
+        )
+        if multi_timeframe_technical.get("available_timeframes"):
+            policy_matched = bool(
+                multi_timeframe_technical.get("eligible")
+                and not opposite_direction_conflict
+            )
+            indicator_score = current_mtf_score
+        else:
+            policy_matched = bool(primary_policy_matched)
+            indicator_score = float(primary_indicator_policy["technical_score"])
+        indicator_policy = {
+            **primary_indicator_policy,
+            "version": MULTI_TIMEFRAME_TECHNICAL_VERSION,
+            "passed": policy_matched,
+            "technical_score": round(indicator_score, 4),
+            "primary_timeframe": timeframe,
+            "primary_timeframe_passed": bool(primary_policy_matched),
+            "multi_timeframe": multi_timeframe_technical,
+            "opposite_direction": opposite_multi_timeframe_technical,
+            "opposite_direction_conflict": opposite_direction_conflict,
+        }
+        matched_indicator_keys = sorted(
+            {
+                str(key)
+                for frame in dict(multi_timeframe_technical.get("frames") or {}).values()
+                for key in dict(frame or {}).get("matched_indicator_keys") or []
+            }
+            or {
+                str(item["key"]) for item in indicator_evidence if item["matched"]
+            }
+        )
         news_ids = sorted({item["id"] for item in candidate["news"] if item["id"]})
-        evaluated_at = int(scan.get("evaluated_at") or 0)
+        evaluated_at = max(
+            [int(scan.get("evaluated_at") or 0)]
+            + [
+                int(dict(frame or {}).get("evaluated_at") or 0)
+                for frame in dict(multi_timeframe_technical.get("frames") or {}).values()
+            ]
+        )
         fingerprint = "|".join(
             [
                 str(run.user_id),
@@ -9060,6 +9323,7 @@ def _scan_opportunities(
                 candidate["direction"],
                 timeframe,
                 str(evaluated_at),
+                MULTI_TIMEFRAME_TECHNICAL_VERSION,
                 ",".join(indicator_keys),
                 ",".join(news_ids),
             ]
@@ -9478,8 +9742,10 @@ def _scan_opportunities(
         )
         evidence = {
             "match_policy": INDICATOR_MATCH_POLICY,
-            "indicator_scoring": "continuous_directional_v2",
+            "indicator_scoring": "continuous_directional_mtf_v3",
             "direction": candidate["direction"],
+            "direction_selection": dict(candidate.get("direction_selection") or {}),
+            "multi_timeframe_technical": multi_timeframe_technical,
             "confirmed": signal_confirmed,
             "technical_confirmed": technical_confirmed,
             "market_available": bool(contract_symbol),
@@ -9754,7 +10020,12 @@ def _scan_opportunities(
         "monitor_scope": "selected" if monitor_symbols else "all",
         "indicator_keys": indicator_keys,
         "match_policy": INDICATOR_MATCH_POLICY,
-        "indicator_scoring": "continuous_directional_v2",
+        "indicator_scoring": "continuous_directional_mtf_v3",
+        "multi_timeframe_policy": {
+            "version": MULTI_TIMEFRAME_TECHNICAL_VERSION,
+            "weights": dict(MULTI_TIMEFRAME_TECHNICAL_WEIGHTS),
+            "rule": "1h 可独立确认；否则必须由 15m 与 4h 共同确认",
+        },
         "minimum_indicator_score": minimum_indicator_score,
         "minimum_combined_score": minimum_combined_score,
         "timeframe": timeframe,
