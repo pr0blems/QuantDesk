@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260825-52">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260826-macro-tooltip1">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -2016,7 +2016,72 @@ class AiMonitorDashboard extends HTMLElement {
     </article>`;
     }).join("");
     const sectorPills = sectors.map((item) => `<span class="macro-sector ${tone(item.change_percent)}"><em>${this.escape(item.label || item.key)}</em><b>${percent(item.change_percent)}</b><small>${this.escape(item.provider_symbol || "--")} 代理</small></span>`).join("");
-    const assetPills = assets.map((item) => `<span class="macro-asset ${tone(item.change_percent)}"><em>${this.escape(item.label || item.key)}</em><b>${numberOrDash(item.price)}</b><small>${percent(item.change_percent)} · ${this.escape(item.provider_symbol || "--")}</small></span>`).join("");
+    const macroImpactProfiles = {
+      US10Y: {
+        title: "长端利率与久期估值",
+        up: "TLT 上涨通常对应长期美债收益率回落，成长股、黄金及利率敏感资产的估值压力趋缓；若上涨来自避险，股票未必同步受益。",
+        down: "TLT 下跌通常对应长期美债收益率上行，长久期成长股、房地产和长期融资条件容易承压；若源于增长改善，周期股可能相对占优。",
+        flat: "长端利率代理变化有限，当前不足以单独确认估值环境转向。",
+        history: "历史上，通胀或财政供给压力常令长端收益率上行、TLT 承压；降息、衰退或避险预期升温时，TLT 往往获得支撑。",
+        watch: "结合 10Y 实际收益率、通胀预期和 VIX，区分宽松交易与避险交易。",
+      },
+      US2Y: {
+        title: "短端利率与政策预期",
+        up: "SHY 上涨通常对应短端收益率回落，市场可能提高降息或政策转松预期，融资压力趋缓；快速上涨也可能反映衰退避险。",
+        down: "SHY 下跌通常对应短端收益率上行，降息预期后移或政策定价偏鹰，风险资产估值与短期融资条件承压。",
+        flat: "短端债价格变化有限，政策预期暂未出现足够清晰的重新定价。",
+        history: "SHY 久期较短，价格波动天然很小；历史上即使很小的价格变化，也应与 2Y 收益率和联邦基金利率路径一起判断。",
+        watch: "重点观察 2Y 收益率、FOMC 预期和收益率曲线，而不是只看绝对涨跌幅。",
+      },
+      DXY: {
+        title: "美元强弱与全球金融条件",
+        up: "UUP 上涨代表美元偏强，通常收紧全球美元金融条件，对商品、黄金、加密资产、新兴市场及美国跨国公司利润形成压力，同时有助压低美国进口通胀。",
+        down: "UUP 下跌代表美元偏弱，通常缓和全球金融条件，对商品、黄金、加密资产和新兴市场更友好，但美国进口通胀压力可能回升。",
+        flat: "美元代理变化有限，当前没有形成明确的跨资产方向信号。",
+        history: "历史上，美国利差扩大、政策偏鹰或全球避险常推升美元；利差收窄和风险偏好恢复往往令美元回落。",
+        watch: "结合美债利差和风险事件判断；避险型美元上涨与增长型美元上涨，对股票含义并不相同。",
+      },
+      EQUAL_WEIGHT: {
+        title: "市场宽度与集中度",
+        up: "RSP 上涨说明等权成分整体偏强；若同时跑赢 SPY，通常代表上涨参与面扩大，小盘、价值与周期方向更容易受益。",
+        down: "RSP 下跌说明多数成分偏弱；若明显跑输 SPY，通常意味着行情集中在少数巨头，市场宽度和风险承受力下降。",
+        flat: "等权指数变化有限，需要比较 RSP 与 SPY 的相对强弱才能判断市场宽度。",
+        history: "历史上，RSP 相对 SPY 走强常见于领导面扩散和经济修复阶段；持续走弱则常伴随大盘集中度上升。",
+        watch: "绝对涨跌不能单独代表宽度，重点看 RSP/SPY 的 5 日与 20 日相对表现。",
+      },
+      HIGH_YIELD: {
+        title: "信用风险与风险偏好",
+        up: "HYG 上涨通常伴随高收益债利差收窄、信用风险偏好改善，对股票、小盘股和高杠杆企业相对有利。",
+        down: "HYG 下跌通常伴随信用利差走阔、违约或衰退担忧升温，是风险资产尤其小盘及高负债公司的压力信号。",
+        flat: "高收益债价格变化有限，信用市场暂未给出明显的风险偏好方向。",
+        history: "历史上，信用利差和超额债券溢价常被用来衡量投资者风险偏好；信用恶化有时会早于股票压力显现。",
+        watch: "同时观察美债收益率：HYG 可能因无风险利率上升而下跌，不一定全是信用风险恶化。",
+      },
+      OIL: {
+        title: "增长、通胀与供给冲击",
+        up: "USO 上涨可能来自需求改善或供给冲击：能源股通常受益，但通胀、运输成本和消费者支出压力可能上升。",
+        down: "USO 下跌通常缓和通胀和家庭能源成本，对消费者与运输行业较友好；若跌幅过快，也可能反映全球需求转弱。",
+        flat: "原油代理变化有限，对增长和通胀暂未形成新的确认信号。",
+        history: "历史上，需求推动的油价上涨偏增长交易，供给冲击型上涨却可能造成滞胀；相同方向可能对应完全不同的股市影响。",
+        watch: "结合能源股、通胀预期、美元与经济数据，先区分需求变化还是供应扰动。",
+      },
+    };
+    const assetPills = assets.map((item) => {
+      const profile = macroImpactProfiles[item.key] || null;
+      const change = Number(item.change_percent);
+      const direction = Number.isFinite(change) && change > 0.05 ? "up" : Number.isFinite(change) && change < -0.05 ? "down" : "flat";
+      const tooltipId = `macro-impact-${String(item.key || item.provider_symbol || "asset").toLowerCase()}`;
+      const currentLabel = direction === "up" ? "当前偏强" : direction === "down" ? "当前偏弱" : "当前变化有限";
+      const tooltip = profile ? `<span id="${this.escape(tooltipId)}" class="macro-asset-tooltip" role="tooltip">
+        <span class="macro-asset-tooltip-kicker">HISTORICAL MACRO IMPACT</span>
+        <strong>${this.escape(profile.title)}</strong>
+        <span class="macro-asset-tooltip-state ${direction}">${currentLabel} · ${percent(item.change_percent)}${item.stale ? " · 最近有效行情" : ""}</span>
+        <p>${this.escape(profile[direction])}</p>
+        <dl><div><dt>历史常见</dt><dd>${this.escape(profile.history)}</dd></div><div><dt>观察重点</dt><dd>${this.escape(profile.watch)}</dd></div></dl>
+        <small>历史联动总结，不代表必然因果，也不构成交易建议。</small>
+      </span>` : "";
+      return `<span class="macro-asset ${tone(item.change_percent)}" tabindex="0"${profile ? ` aria-describedby="${this.escape(tooltipId)}"` : ""}><em>${this.escape(item.label || item.key)}</em><b>${numberOrDash(item.price)}</b><small>${percent(item.change_percent)} · ${this.escape(item.provider_symbol || "--")}</small>${profile ? '<i class="macro-asset-help" aria-hidden="true">?</i>' : ""}${tooltip}</span>`;
+    }).join("");
     const breadthRatio = Number.isFinite(Number(breadth.advance_decline_ratio)) ? Number(breadth.advance_decline_ratio).toFixed(2) : "--";
     const vixTone = Number(vix.value) >= 30 ? "danger" : Number(vix.value) >= 25 ? "warning" : "normal";
     const eventTone = eventState.risk_level === "critical" || eventState.risk_level === "high" ? "danger" : eventState.risk_level === "medium" ? "warning" : "normal";
