@@ -116,6 +116,7 @@ class SourceMetadata:
     valid_for_bars: int
     parameter_keys: tuple[str, ...]
     parameter_schema: tuple[dict[str, Any], ...]
+    uses_risk_proposal: bool
     source_hash: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -129,6 +130,7 @@ class SourceMetadata:
             "valid_for_bars": self.valid_for_bars,
             "parameter_keys": list(self.parameter_keys),
             "parameter_schema": [dict(item) for item in self.parameter_schema],
+            "uses_risk_proposal": self.uses_risk_proposal,
             "source_hash": self.source_hash,
         }
 
@@ -235,6 +237,10 @@ def validate_source(source_code: str, language: str = "python") -> SourceMetadat
     parameter_schema = _parameter_schema_from_constant(
         constants.get("PARAMETERS"), parameter_keys
     )
+    uses_risk_proposal = any(
+        isinstance(node, ast.Constant) and node.value == "risk_proposal"
+        for node in ast.walk(evaluate)
+    )
 
     raw_timeframes = constants["TIMEFRAMES"]
     if not isinstance(raw_timeframes, (tuple, list)) or not 1 <= len(raw_timeframes) <= 6:
@@ -267,6 +273,7 @@ def validate_source(source_code: str, language: str = "python") -> SourceMetadat
         valid_for_bars=valid_for_bars,
         parameter_keys=parameter_keys,
         parameter_schema=parameter_schema,
+        uses_risk_proposal=uses_risk_proposal,
         source_hash=source_hash(normalized),
     )
 

@@ -127,25 +127,38 @@ from .strategy_lifecycle import (
 router = APIRouter(prefix="/api/v2")
 MIN_PERSISTED_QUANTITY = Decimal("0.000000000000000001")
 MAX_CONCURRENT_BACKTESTS = 2
+MAX_CONCURRENT_BACKTESTS_PER_USER = 2
 MAX_PERSISTED_TRADES = 10_000
 _backtest_guard = Lock()
-_active_backtest_users: set[int] = set()
+_active_backtest_users: dict[int, int] = {}
+_active_backtest_count = 0
 
 
 def _acquire_backtest_slot(user_id: int) -> None:
+    global _active_backtest_count
     with _backtest_guard:
-        if user_id in _active_backtest_users:
+        user_count = _active_backtest_users.get(user_id, 0)
+        if user_count >= MAX_CONCURRENT_BACKTESTS_PER_USER:
             raise HTTPException(
-                status_code=409, detail="current user already has a backtest running"
+                status_code=409,
+                detail="current user reached the concurrent backtest limit",
             )
-        if len(_active_backtest_users) >= MAX_CONCURRENT_BACKTESTS:
+        if _active_backtest_count >= MAX_CONCURRENT_BACKTESTS:
             raise HTTPException(status_code=429, detail="backtest capacity is busy; retry shortly")
-        _active_backtest_users.add(user_id)
+        _active_backtest_users[user_id] = user_count + 1
+        _active_backtest_count += 1
 
 
 def _release_backtest_slot(user_id: int) -> None:
+    global _active_backtest_count
     with _backtest_guard:
-        _active_backtest_users.discard(user_id)
+        user_count = _active_backtest_users.get(user_id, 0)
+        if user_count <= 1:
+            _active_backtest_users.pop(user_id, None)
+        else:
+            _active_backtest_users[user_id] = user_count - 1
+        if user_count > 0:
+            _active_backtest_count = max(0, _active_backtest_count - 1)
 
 
 def _backtest(request: Request) -> BacktestRepository:
@@ -454,6 +467,7 @@ def _catalog_response(catalog: dict[str, Any]) -> dict[str, Any]:
     limits.update(
         {
             "max_concurrent_backtests": MAX_CONCURRENT_BACKTESTS,
+            "max_concurrent_backtests_per_user": MAX_CONCURRENT_BACKTESTS_PER_USER,
             "max_persisted_trades": MAX_PERSISTED_TRADES,
         }
     )

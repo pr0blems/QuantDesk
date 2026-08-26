@@ -250,7 +250,12 @@ async function api(path, options = {}, retry = true) {
     if (refreshed) return api(path, options, false);
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(apiErrorMessage(payload.detail));
+  if (!response.ok) {
+    const error = new Error(apiErrorMessage(payload.detail));
+    error.status = response.status;
+    error.retryAfter = Number(response.headers.get("Retry-After") || 0);
+    throw error;
+  }
   return payload;
 }
 

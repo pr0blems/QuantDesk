@@ -376,6 +376,7 @@
 .strategy-change-before { color: #9d7881; background: rgba(255, 107, 125, .07); text-decoration: line-through; }
 .strategy-change-after { color: #73c8ad; background: rgba(43, 215, 163, .07); }
 .strategy-change-empty { padding: 10px; color: #73889c; font-size: 12.8px; text-align: center; }
+.strategy-change-empty.error { color: #ff8c9d; border: 1px solid rgba(255, 107, 125, .22); border-radius: 7px; background: rgba(255, 107, 125, .045); }
 .strategy-ai-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .strategy-ai-apply-button { min-height: 36px; padding: 7px 10px; font-size: 14.4px; }
 .strategy-ai-pane > .strategy-form-error { margin-top: 10px; }
@@ -425,8 +426,11 @@
 .strategy-runner-scope small { color: #526a80; font-size: 9.6px; }
 .strategy-runner-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
 .strategy-runner-fields label { display: grid; gap: 4px; color: #70879c; font-size: 11.2px; }
+.strategy-runner-fields label.disabled { opacity: .56; }
 .strategy-runner-fields input,
 .strategy-runner-fields select { min-width: 0; min-height: 34px; padding: 6px 7px; border-radius: 7px; font-size: 12.8px; }
+.strategy-runner-risk-mode { margin: 0; padding: 7px 9px; border: 1px solid rgba(43, 215, 163, .18); border-radius: 7px; color: #78c8af; background: rgba(43, 215, 163, .04); font-size: 11.2px; line-height: 1.45; }
+.strategy-runner-risk-mode.source { color: #f1c866; border-color: rgba(241, 200, 102, .22); background: rgba(241, 200, 102, .045); }
 .strategy-runner-symbol-field { grid-row: span 2; align-content: start; }
 .strategy-runner-symbol-field input { border-radius: 7px 7px 0 0; }
 .strategy-runner-symbol-field select { margin-top: -4px; border-radius: 0 0 7px 7px; }

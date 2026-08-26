@@ -3481,7 +3481,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
         "/assets/paper.js?v=20260809-paper-combo-1",
         "/assets/live.js?v=20260809-font1_6x-1",
         "/assets/backtest.js?v=20260809-font1_6x-1",
-        "/assets/app.js?v=20260826-ws2",
+        "/assets/app.js?v=20260826-strategy-suite2",
     ):
         assert asset in legacy_index
     assert 'view: "opportunities"' in component

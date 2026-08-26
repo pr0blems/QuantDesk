@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import select
@@ -346,6 +348,29 @@ def test_backtest_endpoints_require_authentication(mysql_test_engine: Engine) ->
         assert client.post("/api/v2/backtests", json=backtest_payload()).status_code == 401
 
 
+def test_backtest_guard_matches_the_two_worker_browser_contract() -> None:
+    api._active_backtest_users.clear()
+    api._active_backtest_count = 0
+    try:
+        api._acquire_backtest_slot(101)
+        api._acquire_backtest_slot(101)
+        assert api._active_backtest_users == {101: 2}
+        assert api._active_backtest_count == 2
+
+        with pytest.raises(HTTPException) as same_user:
+            api._acquire_backtest_slot(101)
+        assert same_user.value.status_code == 409
+
+        with pytest.raises(HTTPException) as global_capacity:
+            api._acquire_backtest_slot(202)
+        assert global_capacity.value.status_code == 429
+    finally:
+        api._release_backtest_slot(101)
+        api._release_backtest_slot(101)
+        api._active_backtest_users.clear()
+        api._active_backtest_count = 0
+
+
 def test_backtest_run_is_saved_audited_and_isolated_by_user(
     monkeypatch, mysql_test_engine: Engine
 ) -> None:
@@ -361,6 +386,7 @@ def test_backtest_run_is_saved_audited_and_isolated_by_user(
         assert catalog.json()["bounds"]["BTCUSDT"]["4h"]["min_date"] == "2025-01-01"
         assert catalog.json()["timeframes"][0]["value"] == "4h"
         assert catalog.json()["limits"]["max_concurrent_backtests"] == 2
+        assert catalog.json()["limits"]["max_concurrent_backtests_per_user"] == 2
         assert catalog.json()["limits"]["max_persisted_trades"] == 10_000
 
         created = client.post("/api/v2/backtests", headers=first_headers, json=backtest_payload())

@@ -36,6 +36,7 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestSuite = [];
     this.sourceBacktestFailures = [];
     this.sourceBacktestAnalysis = null;
+    this.sourceOptimizationValidation = null;
     this.sourceComposition = null;
     this.sourceCompositionDirty = false;
     this.aiConversation = [];
@@ -269,6 +270,7 @@ class StrategyCenter extends HTMLElement {
                   <label>手续费 (bp)<input id="strategy-runner-fee" type="number" min="0" max="1000" step="0.1" value="4"></label>
                   <label>滑点 (bp)<input id="strategy-runner-slippage" type="number" min="0" max="1000" step="0.1" value="2"></label>
                 </div>
+                <p id="strategy-runner-risk-mode" class="strategy-runner-risk-mode"></p>
                 <button id="strategy-runner-submit" class="strategy-runner-submit" type="button"><span aria-hidden="true">▶</span><strong>保存当前版本并运行回测</strong></button>
                 <div id="strategy-runner-empty" class="strategy-runner-empty"><span aria-hidden="true">⌁</span><strong>尚未运行当前源码</strong><small>回测完成后将在这里显示收益、回撤、胜率、权益曲线与最近成交。</small></div>
                 <section id="strategy-runner-analysis" class="strategy-runner-analysis hidden">
@@ -487,6 +489,7 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestSuite = [];
     this.sourceBacktestFailures = [];
     this.sourceBacktestAnalysis = null;
+    this.sourceOptimizationValidation = null;
     this.sourceComposition = null;
     this.sourceCompositionDirty = false;
     this.aiConversation = [];
@@ -1115,6 +1118,7 @@ class StrategyCenter extends HTMLElement {
     this.sourceBacktestSuite = [];
     this.sourceBacktestFailures = [];
     this.sourceBacktestAnalysis = null;
+    this.sourceOptimizationValidation = null;
     const empty = this.querySelector("#strategy-runner-empty");
     const result = this.querySelector("#strategy-runner-result");
     if (empty) empty.classList.remove("hidden");
@@ -1141,7 +1145,8 @@ class StrategyCenter extends HTMLElement {
       ? "保存当前版本并运行全品种回测"
       : "保存当前版本并运行回测";
     const count = this.sourceBacktestCatalog?.symbols?.length || 0;
-    if (allSymbols && count) this.showSourceRunnerNotice(`将按最多 2 路并发测试 ${count} 个品种，并逐项保留成功结果与失败原因。`);
+    const concurrency = this.sourceBacktestConcurrency();
+    if (allSymbols && count) this.showSourceRunnerNotice(`将按最多 ${concurrency} 路并发测试 ${count} 个品种；容量冲突会自动排队重试。`);
     else if (!this.sourceBacktestRunning) this.showSourceRunnerNotice("");
     if (this.sourceBacktestCatalog) this.syncSourceBacktestBounds();
   }
@@ -1202,6 +1207,27 @@ class StrategyCenter extends HTMLElement {
       "#strategy-runner-slippage": risk.slippage_bps ?? 2,
     };
     Object.entries(values).forEach(([selector, value]) => { this.querySelector(selector).value = String(value); });
+    this.syncSourceRiskMode();
+  }
+
+  sourceUsesRiskProposal(item = this.activeItem) {
+    const validation = this.plainObject(item?.source_validation);
+    if (typeof validation.uses_risk_proposal === "boolean") return validation.uses_risk_proposal;
+    return /["']risk_proposal["']\s*:/.test(String(item?.source_code || ""));
+  }
+
+  syncSourceRiskMode() {
+    const sourceControlled = this.sourceUsesRiskProposal();
+    ["#strategy-runner-stop", "#strategy-runner-take"].forEach((selector) => {
+      const input = this.querySelector(selector);
+      input.disabled = sourceControlled;
+      input.closest("label")?.classList.toggle("disabled", sourceControlled);
+    });
+    const mode = this.querySelector("#strategy-runner-risk-mode");
+    mode.className = `strategy-runner-risk-mode ${sourceControlled ? "source" : "config"}`;
+    mode.textContent = sourceControlled
+      ? "当前源码返回 risk_proposal：ATR 风险参数接管止损/止盈，页面百分比仅作备用，不参与本版本回测优化。"
+      : "当前源码未接管风险距离：回测使用页面配置的百分比止损与止盈。";
   }
 
   sourceTriggerTimeframe(item = this.activeItem) {
@@ -1238,6 +1264,7 @@ class StrategyCenter extends HTMLElement {
           label: String(item?.label ?? item?.timeframe ?? item ?? ""),
         })).filter((item) => item.value),
         bounds: this.plainObject(payload?.bounds),
+        limits: this.plainObject(payload?.limits),
       };
       this.renderSourceBacktestCatalog();
       this.setSourceRunnerStatus("可以回测", "ready");
@@ -1449,6 +1476,39 @@ class StrategyCenter extends HTMLElement {
     return { run, result, symbol: String(run.symbol || payload.symbol) };
   }
 
+  sourceBacktestConcurrency() {
+    const limits = this.plainObject(this.sourceBacktestCatalog?.limits);
+    const configured = Number(limits.max_concurrent_backtests_per_user ?? limits.max_concurrent_backtests ?? 1);
+    return Math.max(1, Math.min(4, Number.isFinite(configured) ? Math.floor(configured) : 1));
+  }
+
+  sourceBacktestFailureCategory(error) {
+    const status = Number(error?.status || 0);
+    const message = String(error?.message || "").toLowerCase();
+    if ([409, 429].includes(status) || message.includes("concurrent backtest") || message.includes("capacity is busy")) return "capacity";
+    if ([502, 503, 504].includes(status) || message.includes("timeout") || message.includes("temporarily")) return "transient";
+    if (status === 422 && (message.includes("historical") || message.includes("kline") || message.includes("行情"))) return "market_data";
+    if (status === 422 && (message.includes("源码") || message.includes("strategy"))) return "strategy";
+    return "unknown";
+  }
+
+  async executeSourceBacktestWithRetry(payload, maxAttempts = 7) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.executeSourceBacktest(payload);
+      } catch (error) {
+        lastError = error;
+        const category = this.sourceBacktestFailureCategory(error);
+        if (!["capacity", "transient"].includes(category) || attempt >= maxAttempts) throw error;
+        const retryAfter = Math.max(0, Number(error?.retryAfter || 0) * 1000);
+        const delay = Math.max(retryAfter, Math.min(5000, 350 * (2 ** (attempt - 1))));
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
+      }
+    }
+    throw lastError;
+  }
+
   async runSourceBacktestSuite(basePayload, symbols) {
     const completed = [];
     const failures = [];
@@ -1464,15 +1524,20 @@ class StrategyCenter extends HTMLElement {
         cursor += 1;
         const symbol = symbols[index];
         try {
-          completed.push(await this.executeSourceBacktest({ ...basePayload, symbol }));
+          completed.push(await this.executeSourceBacktestWithRetry({ ...basePayload, symbol }));
         } catch (error) {
-          failures.push({ symbol, message: this.localizedErrorMessage(error, "行情或策略执行失败") });
+          failures.push({
+            symbol,
+            status: Number(error?.status || 0) || null,
+            category: this.sourceBacktestFailureCategory(error),
+            message: this.localizedErrorMessage(error, "行情或策略执行失败"),
+          });
         }
         updateProgress();
       }
     };
     updateProgress();
-    await Promise.all(Array.from({ length: Math.min(2, symbols.length) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(this.sourceBacktestConcurrency(), symbols.length) }, () => worker()));
     return { completed, failures };
   }
 
@@ -1523,6 +1588,11 @@ class StrategyCenter extends HTMLElement {
     const weightedWinRate = totalTrades
       ? rows.reduce((sum, row) => sum + (Number.isFinite(row.winRate) ? row.winRate * row.trades : 0), 0) / totalTrades
       : NaN;
+    const failureCategories = failures.reduce((result, failure) => {
+      const category = String(failure?.category || "unknown");
+      result[category] = (result[category] || 0) + 1;
+      return result;
+    }, {});
     let verdict = "需要优化";
     if (!rows.length) verdict = "无有效结果";
     else if (rows.length < Math.min(5, expectedCount) || totalTrades < Math.max(10, rows.length * 2)) verdict = "样本不足";
@@ -1530,6 +1600,11 @@ class StrategyCenter extends HTMLElement {
     else if (averageReturn > 0 && positiveRate >= 45) verdict = "收益较集中";
     const insights = [];
     if (rows.length) insights.push(`成功覆盖 ${rows.length} / ${expectedCount} 个品种，${failures.length} 个失败。`);
+    if (failures.length) {
+      const labels = { capacity: "容量冲突", transient: "临时服务异常", market_data: "行情数据", strategy: "策略执行", unknown: "其他" };
+      const summary = Object.entries(failureCategories).map(([category, count]) => `${labels[category] || category} ${count}`).join("、");
+      insights.push(`失败分类：${summary}；系统失败不会计入策略盈亏统计。`);
+    }
     if (Number.isFinite(averageReturn)) insights.push(`平均收益 ${averageReturn.toFixed(2)}%，中位数 ${medianReturn.toFixed(2)}%，正收益品种占比 ${positiveRate.toFixed(1)}%。`);
     if (Number.isFinite(worstDrawdown)) insights.push(`最差回撤 ${worstDrawdown.toFixed(2)}%；共 ${totalTrades} 笔交易，避免只凭少数品种判断。`);
     if (verdict === "收益较集中") insights.push("平均收益为正但分布不均，参数可能依赖少数强势品种。建议优先降低过拟合和回撤。 ");
@@ -1547,6 +1622,7 @@ class StrategyCenter extends HTMLElement {
       averageSharpe,
       weightedWinRate,
       totalTrades,
+      failureCategories,
       rows: rows.sort((left, right) => right.score - left.score),
       failures,
       insights,
@@ -1691,16 +1767,95 @@ class StrategyCenter extends HTMLElement {
     }
   }
 
+  sourceOptimizationPartitions() {
+    const entries = [...this.sourceBacktestSuite].sort((left, right) => String(left?.symbol || "").localeCompare(String(right?.symbol || "")));
+    const validation = entries.filter((_, index) => index % 4 === 0);
+    const training = entries.filter((_, index) => index % 4 !== 0);
+    return { training, validation };
+  }
+
+  sourceOptimizationEligibility(analysis) {
+    if (this.sourceBacktestScope !== "all" || analysis.expectedCount < 8) return "请先运行全品种回测，再进行参数优化。";
+    const coverage = analysis.expectedCount ? analysis.successCount / analysis.expectedCount : 0;
+    if (coverage < 0.9) return `有效覆盖率仅 ${(coverage * 100).toFixed(1)}%，请先解决系统失败后再优化参数。`;
+    if (analysis.totalTrades < 20) return `当前仅 ${analysis.totalTrades} 笔交易，样本不足以生成可靠候选。请先调整源码信号逻辑。`;
+    const partitions = this.sourceOptimizationPartitions();
+    if (partitions.training.length < 6 || partitions.validation.length < 2) return "训练组或验证组样本不足，无法执行隔离验证。";
+    return "";
+  }
+
+  sourceOptimizationScore(analysis) {
+    const value = (candidate, fallback = 0) => Number.isFinite(Number(candidate)) ? Number(candidate) : fallback;
+    return value(analysis.medianReturn) * 0.55
+      + value(analysis.averageReturn) * 0.25
+      + value(analysis.positiveRate) * 0.02
+      + Math.max(-3, Math.min(3, value(analysis.averageSharpe))) * 0.1
+      - value(analysis.worstDrawdown) * 0.25;
+  }
+
+  validateSourceOptimizationAnalysis(baseline, candidate) {
+    const baselineScore = this.sourceOptimizationScore(baseline);
+    const candidateScore = this.sourceOptimizationScore(candidate);
+    const minimumCoverage = Math.max(2, Math.floor(baseline.successCount * 0.95));
+    const minimumTrades = Math.max(10, Math.floor(baseline.totalTrades * 0.75));
+    const drawdownLimit = Math.max(baseline.worstDrawdown + 0.25, baseline.worstDrawdown * 1.1);
+    const reasons = [];
+    if (candidate.successCount < minimumCoverage) reasons.push(`验证覆盖不足（${candidate.successCount}/${baseline.successCount}）`);
+    if (candidate.totalTrades < minimumTrades) reasons.push(`验证交易数下降过多（${candidate.totalTrades}/${baseline.totalTrades}）`);
+    if (candidate.medianReturn < baseline.medianReturn) reasons.push("验证组收益中位数没有改善");
+    if (candidate.worstDrawdown > drawdownLimit) reasons.push("验证组最差回撤恶化");
+    if (candidateScore <= baselineScore + 0.02) reasons.push("综合验证得分没有显著提高");
+    const approved = reasons.length === 0;
+    return {
+      approved,
+      baseline,
+      candidate,
+      baselineScore,
+      candidateScore,
+      reasons,
+      summary: approved
+        ? `隔离验证通过：综合得分 ${baselineScore.toFixed(2)} → ${candidateScore.toFixed(2)}，可以确认应用。`
+        : `隔离验证未通过：${reasons.join("；")}。候选不会允许应用。`,
+    };
+  }
+
+  async validateSourceOptimizationCandidate(proposed, validationEntries) {
+    const sourceRisk = this.sourceUsesRiskProposal();
+    const risk = this.plainObject(proposed.risk_defaults);
+    const basePayload = this.sourceBacktestPayload();
+    const candidatePayload = {
+      ...basePayload,
+      params: { ...this.plainObject(proposed.parameters) },
+      max_holding_bars: Number(risk.max_holding_bars ?? basePayload.max_holding_bars),
+      stop_loss_pct: sourceRisk ? basePayload.stop_loss_pct : Number(risk.stop_loss_pct ?? basePayload.stop_loss_pct),
+      take_profit_pct: sourceRisk ? basePayload.take_profit_pct : Number(risk.take_profit_pct ?? basePayload.take_profit_pct),
+    };
+    const symbols = validationEntries.map((entry) => String(entry?.symbol || "")).filter(Boolean);
+    this.showSourceRunnerNotice(`候选已生成，正在对隔离验证组 ${symbols.length} 个品种复测；结果未改善时不会允许应用。`);
+    const suite = await this.runSourceBacktestSuite(candidatePayload, symbols);
+    const baseline = this.buildSourceBacktestAnalysis(validationEntries, [], symbols.length);
+    const candidate = this.buildSourceBacktestAnalysis(suite.completed, suite.failures, symbols.length);
+    return this.validateSourceOptimizationAnalysis(baseline, candidate);
+  }
+
   async optimizeSourceBacktestParameters() {
     const analysis = this.sourceBacktestAnalysis;
     if (!analysis || !this.activeItem?.public_id) return;
+    const ineligible = this.sourceOptimizationEligibility(analysis);
+    if (ineligible) {
+      this.showSourceRunnerNotice(ineligible, "error");
+      return;
+    }
+    const partitions = this.sourceOptimizationPartitions();
+    const trainingAnalysis = this.buildSourceBacktestAnalysis(partitions.training, [], partitions.training.length);
     const button = this.querySelector("#strategy-runner-ai-optimize");
     this.setButtonBusy(button, true, "AI 分析中…");
-    this.showSourceRunnerNotice("AI 正在读取跨品种分布、回撤和成交样本，并在现有参数范围内生成候选…");
+    this.sourceBacktestRunning = true;
+    this.showSourceRunnerNotice(`AI 仅读取训练组 ${partitions.training.length} 个品种；另有 ${partitions.validation.length} 个品种保留用于隔离验证。`);
     try {
       const compactRows = [
-        ...analysis.rows.slice(0, 3),
-        ...analysis.rows.slice(-3),
+        ...trainingAnalysis.rows.slice(0, 3),
+        ...trainingAnalysis.rows.slice(-3),
       ].map((row) => ({
         symbol: row.symbol,
         return_pct: Number.isFinite(row.returnPct) ? Number(row.returnPct.toFixed(3)) : null,
@@ -1708,7 +1863,7 @@ class StrategyCenter extends HTMLElement {
         sharpe: Number.isFinite(row.sharpe) ? Number(row.sharpe.toFixed(3)) : null,
         trades: row.trades,
       }));
-      const parameterBounds = this.activeItem.parameter_schema.slice(0, 40).map((definition) => ({
+      const parameterBounds = this.activeItem.parameter_schema.filter((definition) => definition.key !== "signal_valid_bars").slice(0, 40).map((definition) => ({
         key: definition.key,
         type: definition.type,
         min: definition.min,
@@ -1716,21 +1871,21 @@ class StrategyCenter extends HTMLElement {
         step: definition.step,
       }));
       const prompt = [
-        "你是参数优化助手。仅修改当前已有 parameters，以及止损、止盈、最大持有K线；不改名称、分类、说明、源码、仓位、杠杆、手续费和滑点，不新增或删除参数。",
+        `你是参数优化助手。仅修改提供的 parameters，以及${this.sourceUsesRiskProposal() ? "最大持有K线" : "止损、止盈、最大持有K线"}；不改名称、分类、说明、源码、仓位、杠杆、手续费和滑点，不新增或删除参数。signal_valid_bars 属于实时信号有效期，不纳入历史收益优化。`,
         "目标是提高跨品种中位数收益、正收益品种占比与稳定性，同时控制最差回撤；不要追逐单一最佳品种，也不要承诺盈利。",
         `当前参数：${JSON.stringify(this.activeItem.parameters)}`,
         `参数约束：${JSON.stringify(parameterBounds)}`,
         `当前风险：${JSON.stringify(this.activeItem.risk_defaults)}`,
         `汇总：${JSON.stringify({
-          tested: analysis.expectedCount,
-          success: analysis.successCount,
-          failed: analysis.failureCount,
-          average_return_pct: analysis.averageReturn,
-          median_return_pct: analysis.medianReturn,
-          positive_symbol_pct: analysis.positiveRate,
-          worst_drawdown_pct: analysis.worstDrawdown,
-          average_sharpe: analysis.averageSharpe,
-          total_trades: analysis.totalTrades,
+          tested: trainingAnalysis.expectedCount,
+          success: trainingAnalysis.successCount,
+          failed: trainingAnalysis.failureCount,
+          average_return_pct: trainingAnalysis.averageReturn,
+          median_return_pct: trainingAnalysis.medianReturn,
+          positive_symbol_pct: trainingAnalysis.positiveRate,
+          worst_drawdown_pct: trainingAnalysis.worstDrawdown,
+          average_sharpe: trainingAnalysis.averageSharpe,
+          total_trades: trainingAnalysis.totalTrades,
         })}`,
         `代表品种：${JSON.stringify(compactRows)}`,
         "给出一组保守、可解释的候选参数。变化幅度应小，成交样本不足时优先减少复杂度而不是激进调参。",
@@ -1740,10 +1895,12 @@ class StrategyCenter extends HTMLElement {
         body: JSON.stringify({ prompt }),
       });
       const normalized = this.normalizeBacktestOptimizationProposal(result?.proposed);
+      if (!normalized.changes.length) throw new Error("AI 没有生成可执行的有效参数变化");
+      const optimizationValidation = await this.validateSourceOptimizationCandidate(normalized.proposed, partitions.validation);
       this.preview = {
         base_version: Number(result?.base_version ?? this.activeItem.version),
         provider: String(result?.provider ?? "AI model"),
-        summary: String(result?.summary ?? "AI 已根据回测分布生成参数候选。"),
+        summary: `${String(result?.summary ?? "AI 已根据训练组生成参数候选。")} ${optimizationValidation.summary}`,
         changes: normalized.changes,
         proposed: normalized.proposed,
         proposed_spec: {},
@@ -1757,21 +1914,26 @@ class StrategyCenter extends HTMLElement {
         parameters: {},
         generated_from_composition: false,
         mode: "parameters",
+        optimization_validation: optimizationValidation,
       };
+      this.sourceOptimizationValidation = optimizationValidation;
       this.aiWorkingProposed = this.preview.proposed;
       const turn = ++this.aiTurnSequence;
       this.aiConversation.push(
-        { id: `optimizer-user-${turn}`, turn, role: "user", content: `基于 ${analysis.successCount} 个成功品种的回测结果优化参数`, status: "complete" },
-        { id: `optimizer-ai-${turn}`, turn, role: "assistant", content: this.preview.summary, status: "complete", meta: `${this.providerLabel(this.preview.provider)} · ${this.preview.changes.length} 项候选变化 · 待确认` },
+        { id: `optimizer-user-${turn}`, turn, role: "user", content: `基于 ${partitions.training.length} 个训练品种优化，并用 ${partitions.validation.length} 个隔离品种验证`, status: "complete" },
+        { id: `optimizer-ai-${turn}`, turn, role: "assistant", content: this.preview.summary, status: optimizationValidation.approved ? "complete" : "error", meta: `${this.providerLabel(this.preview.provider)} · ${this.preview.changes.length} 项候选变化 · ${optimizationValidation.approved ? "验证通过" : "已拒绝"}` },
       );
       this.completeAiProcess(this.preview);
       this.renderAiConversation();
       this.renderPreview();
       this.switchSourceWorkbenchTab("ai");
-      this.showAiError("AI 参数候选已生成。请检查变化并确认应用；应用后必须重新运行全品种回测。", "success");
+      this.showAiError(optimizationValidation.approved
+        ? "候选已通过隔离品种验证，可以确认应用；应用后仍需运行完整全品种回测。"
+        : optimizationValidation.summary, optimizationValidation.approved ? "success" : "error");
     } catch (error) {
       this.showSourceRunnerNotice(`AI 参数优化失败：${this.friendlyMutationError(error)}`, "error");
     } finally {
+      this.sourceBacktestRunning = false;
       this.setButtonBusy(button, false);
     }
   }
@@ -1799,16 +1961,20 @@ class StrategyCenter extends HTMLElement {
     this.activeItem.parameter_schema.forEach((definition) => {
       const key = String(definition.key || "");
       if (!key) return;
-      parameters[key] = quantize(rawParameters[key], definition, currentParameters[key] ?? definition.default);
+      parameters[key] = key === "signal_valid_bars"
+        ? quantize(currentParameters[key], definition, definition.default)
+        : quantize(rawParameters[key], definition, currentParameters[key] ?? definition.default);
     });
     const currentRisk = this.plainObject(this.activeItem?.risk_defaults);
     const rawRisk = this.plainObject(proposed.risk_defaults);
     const riskDefaults = { ...currentRisk };
-    const riskBounds = {
-      stop_loss_pct: [0, 99.9, false],
-      take_profit_pct: [0, 99.9, false],
-      max_holding_bars: [0, 50000, true],
-    };
+    const riskBounds = this.sourceUsesRiskProposal()
+      ? { max_holding_bars: [0, 50000, true] }
+      : {
+        stop_loss_pct: [0, 99.9, false],
+        take_profit_pct: [0, 99.9, false],
+        max_holding_bars: [0, 50000, true],
+      };
     Object.entries(riskBounds).forEach(([key, [minimum, maximum, integer]]) => {
       const candidateValue = Number(rawRisk[key]);
       if (!Number.isFinite(candidateValue)) return;
@@ -3237,11 +3403,17 @@ class StrategyCenter extends HTMLElement {
       row.append(path, before, arrow, after);
       return row;
     }));
-    this.querySelector("#strategy-ai-apply").disabled = false;
+    const validationRejected = this.preview.mode === "parameters"
+      && this.preview.optimization_validation?.approved === false;
+    if (validationRejected) {
+      changes.append(this.node("div", "strategy-change-empty error", "候选未通过隔离验证，已禁止应用。请保留当前版本并重新调整策略逻辑。"));
+    }
+    this.querySelector("#strategy-ai-apply").disabled = validationRejected;
   }
 
   clearPreview() {
     this.preview = null;
+    this.sourceOptimizationValidation = null;
     this.querySelector("#strategy-ai-preview").classList.add("hidden");
     this.querySelector("#strategy-ai-changes").replaceChildren();
     this.querySelector("#strategy-ai-apply").disabled = false;
@@ -3250,6 +3422,10 @@ class StrategyCenter extends HTMLElement {
 
   async applyAiPreview() {
     if (!this.preview) return;
+    if (this.preview.mode === "parameters" && this.preview.optimization_validation?.approved === false) {
+      this.showAiError("候选参数未通过隔离验证，不能应用到策略版本。", "error");
+      return;
+    }
     if (this.editorMode === "create" && this.preview.mode !== "source") {
       this.applyCompositionDraft(this.preview.draft);
       return;

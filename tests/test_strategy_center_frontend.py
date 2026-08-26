@@ -106,7 +106,12 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
         "const payload = this.sourceBacktestPayload()"
     )
     assert "正在校验当前源码并取得回测资格" in script
-    assert "最多 2 路并发" in script
+    assert "sourceBacktestConcurrency" in script
+    assert "executeSourceBacktestWithRetry" in script
+    assert "容量冲突会自动排队重试" in script
+    assert "sourceOptimizationPartitions" in script
+    assert "validateSourceOptimizationCandidate" in script
+    assert "候选未通过隔离验证，已禁止应用" in script
     assert "AI 只生成符合当前 PARAMETERS 范围的候选参数" in script
 
 
@@ -119,8 +124,8 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260826-strategy-suite1" in index
-    assert index.index("/assets/strategies.js?v=20260826-strategy-suite1") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260826-strategy-suite2" in index
+    assert index.index("/assets/strategies.js?v=20260826-strategy-suite2") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.customElements.get(tag)" in legacy_panel
     assert "document.createElement(tag)" in legacy_panel
@@ -152,7 +157,7 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
 def test_legacy_shell_busts_the_current_strategy_asset_cache() -> None:
     index = (ROOT / "src/quantdesk_v2/static/index.html").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260826-strategy-suite1" in index
+    assert "/assets/strategies.js?v=20260826-strategy-suite2" in index
 
 
 def test_strategy_custom_element_initializes_after_construction() -> None:

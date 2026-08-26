@@ -87,6 +87,8 @@ def test_source_composition_builds_a_parameter_contract_for_generated_code() -> 
     ]
     assert parameters["ema_fast_period"] == 12
     assert parameters["volume_ratio_min_ratio"] == 1.4
+    assert parameters["risk_stop_atr_multiplier"] == pytest.approx(1.5)
+    assert parameters["risk_take_profit_atr_multiplier"] == pytest.approx(3.0)
     assert context["required_parameter_keys"] == sorted(parameters)
     assert context["parameter_values"] == parameters
     assert context["parameter_schema"] == schema
@@ -111,6 +113,7 @@ def evaluate(context, params):
     assert validation["parameter_keys"] == ["period"]
     assert validation["parameters"] == {"period": 21}
     assert validation["parameter_schema"][0]["label"] == "计算周期"
+    assert validation["uses_risk_proposal"] is False
 
 
 def test_platform_compiler_builds_safe_source_for_four_indicator_blueprint() -> None:
@@ -145,8 +148,11 @@ def test_platform_compiler_builds_safe_source_for_four_indicator_blueprint() -> 
     assert validation["data_requirements"]["trigger_timeframe"] == "1h"
     assert set(validation["parameter_keys"]) == set(parameters)
     assert validation["directions"] == ["long", "short"]
+    assert validation["uses_risk_proposal"] is True
     schema_by_key = {item["key"]: item for item in validation["parameter_schema"]}
     assert schema_by_key["ema_weight"]["step"] == pytest.approx(0.1)
+    assert schema_by_key["risk_stop_atr_multiplier"]["default"] == pytest.approx(1.5)
+    assert "risk_atr_value * risk_stop_atr_multiplier" in source
     assert "'ema_weight': {'label': 'EMA 趋势组合 · 权重', 'type': 'number', 'default': 1, 'min': 0.1, 'max': 5, 'step': 0.1}" in source
 
 

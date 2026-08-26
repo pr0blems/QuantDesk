@@ -396,6 +396,34 @@ def _source_composition_context(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+    source_risk_schema = [
+        {
+            "key": "risk_stop_atr_multiplier",
+            "label": "ATR 止损倍数",
+            "type": "number",
+            "default": 1.5,
+            "min": 0.1,
+            "max": 10,
+            "step": 0.1,
+            "help": "源码 risk_proposal 使用的 ATR 止损距离。",
+        },
+        {
+            "key": "risk_take_profit_atr_multiplier",
+            "label": "ATR 止盈倍数",
+            "type": "number",
+            "default": 3.0,
+            "min": 0.1,
+            "max": 20,
+            "step": 0.1,
+            "help": "源码 risk_proposal 使用的 ATR 止盈距离。",
+        },
+    ]
+    parameter_schema = [*parameter_schema, *source_risk_schema]
+    parameters = {
+        **parameters,
+        "risk_stop_atr_multiplier": 1.5,
+        "risk_take_profit_atr_multiplier": 3.0,
+    }
     selected_indicators = []
     for selection in selections:
         definition = INDICATOR_BY_KEY[selection["key"]]
@@ -645,6 +673,7 @@ def _source_validation_response(source_code: str, language: str = "python") -> d
         "valid_for_bars": metadata.valid_for_bars,
         "parameter_keys": list(metadata.parameter_keys),
         "parameter_schema": [copy.deepcopy(item) for item in metadata.parameter_schema],
+        "uses_risk_proposal": metadata.uses_risk_proposal,
         "parameters": {
             str(item["key"]): item["default"] for item in metadata.parameter_schema
         },
