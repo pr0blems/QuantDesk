@@ -2545,6 +2545,74 @@
         "title": "DashboardPerformanceOut",
         "type": "object"
       },
+      "DeploymentRollbackRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Reason",
+            "type": "string"
+          },
+          "request_id": {
+            "pattern": "^[0-9a-fA-F-]{36}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "target_version": {
+            "minimum": 1.0,
+            "title": "Target Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "request_id",
+          "target_version",
+          "reason",
+          "confirmed"
+        ],
+        "title": "DeploymentRollbackRequest",
+        "type": "object"
+      },
+      "DeploymentTransitionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "expected_status": {
+            "enum": [
+              "created",
+              "running",
+              "paused",
+              "stopped",
+              "error"
+            ],
+            "title": "Expected Status",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_status",
+          "reason",
+          "confirmed"
+        ],
+        "title": "DeploymentTransitionRequest",
+        "type": "object"
+      },
       "FinnhubUsQuoteOut": {
         "properties": {
           "available": {
@@ -2928,7 +2996,98 @@
         "title": "HealthOut",
         "type": "object"
       },
+      "IncidentActionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "note": {
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "note",
+          "confirmed"
+        ],
+        "title": "IncidentActionRequest",
+        "type": "object"
+      },
       "JsonValue": {},
+      "KillSwitchCommandRequest": {
+        "properties": {
+          "action": {
+            "enum": [
+              "engage",
+              "release"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reason_code": {
+            "maxLength": 64,
+            "minLength": 3,
+            "pattern": "^[a-z][a-z0-9_]{2,63}$",
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "scope_key": {
+            "maxLength": 191,
+            "minLength": 1,
+            "title": "Scope Key",
+            "type": "string"
+          },
+          "scope_type": {
+            "enum": [
+              "global",
+              "account",
+              "strategy_revision",
+              "symbol",
+              "data_source",
+              "broker_connection"
+            ],
+            "title": "Scope Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "action",
+          "scope_type",
+          "scope_key",
+          "expected_version",
+          "reason_code",
+          "reason",
+          "confirmed"
+        ],
+        "title": "KillSwitchCommandRequest",
+        "type": "object"
+      },
       "LiveAccountArmRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4001,6 +4160,56 @@
         "title": "RegisterRequest",
         "type": "object"
       },
+      "ShadowDeploymentRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "mode": {
+            "const": "shadow",
+            "title": "Mode",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "request_id": {
+            "pattern": "^[0-9a-fA-F-]{36}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Symbols",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_version",
+          "mode",
+          "name",
+          "symbols",
+          "confirmed"
+        ],
+        "title": "ShadowDeploymentRequest",
+        "type": "object"
+      },
       "StrategyAiApplyRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4370,6 +4579,44 @@
         "title": "StrategyIndicatorSelection",
         "type": "object"
       },
+      "StrategyPromotionDecisionRequest": {
+        "additionalProperties": false,
+        "description": "Approve or reject one pending promotion request with optimistic locking.",
+        "properties": {
+          "action": {
+            "enum": [
+              "approve",
+              "reject"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "decision_note": {
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Decision Note",
+            "type": "string"
+          },
+          "expected_review_version": {
+            "minimum": 1.0,
+            "title": "Expected Review Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action",
+          "expected_review_version",
+          "decision_note",
+          "confirmed"
+        ],
+        "title": "StrategyPromotionDecisionRequest",
+        "type": "object"
+      },
       "StrategyPromotionRequest": {
         "additionalProperties": false,
         "description": "Promote only the current immutable revision by one lifecycle stage.",
@@ -4415,6 +4662,89 @@
           "confirmed"
         ],
         "title": "StrategyPromotionRequest",
+        "type": "object"
+      },
+      "StrategyPromotionReviewRequest": {
+        "additionalProperties": false,
+        "description": "Create an immutable, revision-bound promotion approval request.",
+        "properties": {
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "request_id": {
+            "pattern": "^[0-9a-fA-F-]{36}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "request_note": {
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Request Note",
+            "type": "string"
+          },
+          "target_status": {
+            "enum": [
+              "validated",
+              "backtested",
+              "shadow",
+              "paper",
+              "micro_live",
+              "live"
+            ],
+            "title": "Target Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_version",
+          "target_status",
+          "request_note",
+          "confirmed"
+        ],
+        "title": "StrategyPromotionReviewRequest",
+        "type": "object"
+      },
+      "StrategyRollbackRequest": {
+        "additionalProperties": false,
+        "description": "Copy an old immutable revision into a new draft revision.",
+        "properties": {
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Reason",
+            "type": "string"
+          },
+          "target_version": {
+            "minimum": 1.0,
+            "title": "Target Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_version",
+          "target_version",
+          "reason",
+          "confirmed"
+        ],
+        "title": "StrategyRollbackRequest",
         "type": "object"
       },
       "StrategySourceAiPreviewRequest": {
@@ -4753,6 +5083,65 @@
           "risk_defaults"
         ],
         "title": "StrategyUpdateRequest",
+        "type": "object"
+      },
+      "StrategyValidationEvidenceRequest": {
+        "additionalProperties": false,
+        "description": "Record structured, revision-bound promotion evidence.",
+        "properties": {
+          "confirmed": {
+            "const": true,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "report": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "maxProperties": 64,
+            "title": "Report",
+            "type": "object"
+          },
+          "run_id": {
+            "pattern": "^[0-9a-fA-F-]{36}$",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "validation_type": {
+            "enum": [
+              "oos",
+              "stress",
+              "shadow",
+              "paper",
+              "micro_live",
+              "fault_drill"
+            ],
+            "title": "Validation Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "expected_version",
+          "validation_type",
+          "status",
+          "report",
+          "confirmed"
+        ],
+        "title": "StrategyValidationEvidenceRequest",
         "type": "object"
       },
       "TokenPair": {
@@ -9230,6 +9619,343 @@
         "summary": "Dashboard Performance"
       }
     },
+    "/api/v2/deployments": {
+      "get": {
+        "operationId": "list_deployments_api_v2_deployments_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "backtest",
+                    "paper",
+                    "shadow",
+                    "live"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Mode"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Deployments Api V2 Deployments Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Deployments",
+        "tags": [
+          "strategy-deployments"
+        ]
+      }
+    },
+    "/api/v2/deployments/{deployment_id}/manifest": {
+      "get": {
+        "operationId": "get_deployment_manifest_api_v2_deployments__deployment_id__manifest_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deployment_id",
+            "required": true,
+            "schema": {
+              "title": "Deployment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Deployment Manifest Api V2 Deployments  Deployment Id  Manifest Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Deployment Manifest",
+        "tags": [
+          "strategy-deployments"
+        ]
+      }
+    },
+    "/api/v2/deployments/{deployment_id}/pause": {
+      "post": {
+        "operationId": "pause_shadow_deployment_api_v2_deployments__deployment_id__pause_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deployment_id",
+            "required": true,
+            "schema": {
+              "title": "Deployment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeploymentTransitionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pause Shadow Deployment Api V2 Deployments  Deployment Id  Pause Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Pause Shadow Deployment",
+        "tags": [
+          "strategy-deployments"
+        ]
+      }
+    },
+    "/api/v2/deployments/{deployment_id}/reconciliation": {
+      "get": {
+        "operationId": "deployment_reconciliation_api_v2_deployments__deployment_id__reconciliation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deployment_id",
+            "required": true,
+            "schema": {
+              "title": "Deployment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Deployment Reconciliation Api V2 Deployments  Deployment Id  Reconciliation Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Deployment Reconciliation",
+        "tags": [
+          "strategy-deployments"
+        ]
+      }
+    },
+    "/api/v2/deployments/{deployment_id}/resume": {
+      "post": {
+        "operationId": "resume_shadow_deployment_api_v2_deployments__deployment_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deployment_id",
+            "required": true,
+            "schema": {
+              "title": "Deployment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeploymentTransitionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resume Shadow Deployment Api V2 Deployments  Deployment Id  Resume Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resume Shadow Deployment",
+        "tags": [
+          "strategy-deployments"
+        ]
+      }
+    },
+    "/api/v2/deployments/{deployment_id}/rollback": {
+      "post": {
+        "operationId": "rollback_shadow_deployment_api_v2_deployments__deployment_id__rollback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deployment_id",
+            "required": true,
+            "schema": {
+              "title": "Deployment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeploymentRollbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rollback Shadow Deployment Api V2 Deployments  Deployment Id  Rollback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rollback Shadow Deployment",
+        "tags": [
+          "strategy-deployments"
+        ]
+      }
+    },
     "/api/v2/health": {
       "get": {
         "operationId": "health_api_v2_health_get",
@@ -11383,6 +12109,125 @@
         "summary": "Reset Paper Account"
       }
     },
+    "/api/v2/ready": {
+      "get": {
+        "description": "API process readiness; worker health is reported separately.",
+        "operationId": "ready_api_v2_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ready Api V2 Ready Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ready"
+      }
+    },
+    "/api/v2/risk/kill-switch": {
+      "post": {
+        "operationId": "transition_kill_switch_api_v2_risk_kill_switch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KillSwitchCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Transition Kill Switch Api V2 Risk Kill Switch Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Transition Kill Switch",
+        "tags": [
+          "risk-controls"
+        ]
+      }
+    },
+    "/api/v2/risk/kill-switches": {
+      "get": {
+        "operationId": "list_kill_switches_api_v2_risk_kill_switches_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "engaged_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Engaged Only",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Kill Switches Api V2 Risk Kill Switches Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Kill Switches",
+        "tags": [
+          "risk-controls"
+        ]
+      }
+    },
     "/api/v2/strategies": {
       "get": {
         "operationId": "list_strategies_api_v2_strategies_get",
@@ -12262,6 +13107,180 @@
         ]
       }
     },
+    "/api/v2/strategies/{public_id}/promotion-requests": {
+      "get": {
+        "operationId": "list_strategy_promotion_requests_api_v2_strategies__public_id__promotion_requests_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Strategy Promotion Requests Api V2 Strategies  Public Id  Promotion Requests Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Strategy Promotion Requests",
+        "tags": [
+          "strategies"
+        ]
+      },
+      "post": {
+        "operationId": "request_strategy_promotion_api_v2_strategies__public_id__promotion_requests_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyPromotionReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Request Strategy Promotion Api V2 Strategies  Public Id  Promotion Requests Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Request Strategy Promotion",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/promotion-requests/{review_id}/decision": {
+      "post": {
+        "operationId": "decide_strategy_promotion_api_v2_strategies__public_id__promotion_requests__review_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyPromotionDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Decide Strategy Promotion Api V2 Strategies  Public Id  Promotion Requests  Review Id  Decision Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Decide Strategy Promotion",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
     "/api/v2/strategies/{public_id}/readiness": {
       "get": {
         "operationId": "get_strategy_readiness_api_v2_strategies__public_id__readiness_get",
@@ -12355,6 +13374,65 @@
           }
         ],
         "summary": "List Strategy Revisions",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/rollback": {
+      "post": {
+        "operationId": "rollback_strategy_revision_api_v2_strategies__public_id__rollback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyRollbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rollback Strategy Revision Api V2 Strategies  Public Id  Rollback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rollback Strategy Revision",
         "tags": [
           "strategies"
         ]
@@ -12584,6 +13662,386 @@
         "tags": [
           "strategies"
         ]
+      }
+    },
+    "/api/v2/strategies/{public_id}/validation-runs": {
+      "get": {
+        "operationId": "list_strategy_validation_runs_api_v2_strategies__public_id__validation_runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Strategy Validation Runs Api V2 Strategies  Public Id  Validation Runs Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Strategy Validation Runs",
+        "tags": [
+          "strategies"
+        ]
+      },
+      "post": {
+        "operationId": "record_strategy_validation_run_api_v2_strategies__public_id__validation_runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "public_id",
+            "required": true,
+            "schema": {
+              "title": "Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyValidationEvidenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Record Strategy Validation Run Api V2 Strategies  Public Id  Validation Runs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Record Strategy Validation Run",
+        "tags": [
+          "strategies"
+        ]
+      }
+    },
+    "/api/v2/strategies/{strategy_public_id}/deployments": {
+      "post": {
+        "operationId": "create_shadow_deployment_api_v2_strategies__strategy_public_id__deployments_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "strategy_public_id",
+            "required": true,
+            "schema": {
+              "title": "Strategy Public Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShadowDeploymentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Shadow Deployment Api V2 Strategies  Strategy Public Id  Deployments Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Shadow Deployment",
+        "tags": [
+          "strategy-deployments"
+        ]
+      }
+    },
+    "/api/v2/system/incidents": {
+      "get": {
+        "operationId": "list_runtime_incidents_api_v2_system_incidents_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "incident_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Incident Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Runtime Incidents Api V2 System Incidents Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Runtime Incidents"
+      }
+    },
+    "/api/v2/system/incidents/{incident_id}/acknowledge": {
+      "post": {
+        "operationId": "acknowledge_runtime_incident_api_v2_system_incidents__incident_id__acknowledge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "title": "Incident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Acknowledge Runtime Incident Api V2 System Incidents  Incident Id  Acknowledge Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Acknowledge Runtime Incident"
+      }
+    },
+    "/api/v2/system/incidents/{incident_id}/resolve": {
+      "post": {
+        "operationId": "resolve_runtime_incident_api_v2_system_incidents__incident_id__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "title": "Incident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resolve Runtime Incident Api V2 System Incidents  Incident Id  Resolve Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resolve Runtime Incident"
+      }
+    },
+    "/api/v2/system/metrics": {
+      "get": {
+        "description": "Prometheus text exposition for the safety control plane.",
+        "operationId": "system_metrics_api_v2_system_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "System Metrics"
+      }
+    },
+    "/api/v2/system/trading-readiness": {
+      "get": {
+        "description": "Explain whether infrastructure can safely accept new trading risk.",
+        "operationId": "trading_readiness_api_v2_system_trading_readiness_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Trading Readiness Api V2 System Trading Readiness Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Trading Readiness"
       }
     }
   }

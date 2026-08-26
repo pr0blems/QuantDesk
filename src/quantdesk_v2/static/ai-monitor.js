@@ -3352,11 +3352,19 @@ class AiMonitorDashboard extends HTMLElement {
         REFERENCE_QUOTE_STALE: "买卖报价过期",
         MARKET_DATA_COVERAGE_LOW: "关键行情未到齐",
       };
-      const reason = reasonCodes.map((code) => retryableLabels[code]).filter(Boolean)[0];
+      const blockedLabels = {
+        RAW_MARKET_QUALITY_BLOCKED: "原始行情质量未通过",
+        NON_REGULAR_US_SESSION: "当前不是美股常规交易时段",
+        MACRO_DIRECTION_DIVERGENT: "候选方向与大盘方向相反",
+        NEWS_NOT_ACTIONABLE: "新闻属于收盘复盘或已发生行情，不作为新催化剂",
+        CORRELATED_EVENT_ALREADY_SELECTED: "同一新闻事件已选择更强标的",
+        ORDER_BOOK_DIRECTION_NOT_CONFIRMED: "Binance 实时盘口尚未确认候选方向",
+      };
+      const reason = reasonCodes.map((code) => retryableLabels[code] || blockedLabels[code]).filter(Boolean)[0];
       return {
         tone: "blocked",
         label: retryable ? "等待行情" : "风险阻断",
-        detail: retryable ? `${reason || "行情暂不可用"}，下一轮扫描自动重试` : failed[0]?.detail || "事件、停牌或资金风险门控未通过",
+        detail: retryable ? `${reason || "行情暂不可用"}，下一轮扫描自动重试` : reason || failed[0]?.detail || "事件、停牌或资金风险门控未通过",
         triggered: false,
         retryable,
       };
@@ -5285,33 +5293,40 @@ class AiMonitorDashboard extends HTMLElement {
       const exitCounts = summary.exit_reason_counts || {};
       const protectedCount = Number(exitCounts.profit_lock || 0) + Number(exitCounts.trailing_profit || 0);
       const policyVersion = String(summary.settlement_policy_version || "--");
+      const isV8 = policyVersion.endsWith("_v8");
       const isV7 = policyVersion.endsWith("_v7");
       const isV6 = policyVersion.endsWith("_v6");
       const policyTag = policyVersion === "all"
         ? "MULTI-VERSION EXIT COMPARISON"
-        : isV7
-          ? "RISK UNIT EXIT GUARD V7"
+        : isV8
+          ? "ACTIONABLE ENTRY + R EXIT GUARD V8"
+          : isV7
+            ? "RISK UNIT EXIT GUARD V7"
           : isV6
             ? "FROZEN EXIT GUARD V6"
             : "FROZEN LEGACY EXIT GUARD";
       const policyTitle = policyVersion === "all"
         ? "跨结算策略版本对比"
-        : isV7
-          ? "R 单位递进锁盈与失败跟随早退"
+        : isV8
+          ? "可执行入场门禁与 R 单位连续确认退出"
+          : isV7
+            ? "R 单位递进锁盈与失败跟随早退"
           : "历史结算规则审计视图";
       const policyDescription = policyVersion === "all"
         ? "当前结果混合多个冻结策略版本，只适合横向审计；各版本不会互相重算。建议逐一选择版本比较命中率和成本后 ROE。"
-        : isV7
-          ? "浮盈覆盖交易成本并达到 0.5R 后，至少锁定成本后的 0.25R 净利润，并按峰值回撤 0.35R 递进抬高保护线；达到 1R 后切换为回撤 0.5R。旧版本规则保持冻结，不重写历史结果。"
+        : isV8
+          ? "新预测必须通过常规时段、原始行情质量、大盘方向、事件聚类和实时盘口确认；跟随失败改为按本笔风险 R 归一，并要求连续两根已收 15 分钟 K 线确认。旧版本规则保持冻结。"
+          : isV7
+            ? "浮盈覆盖交易成本并达到 0.5R 后，至少锁定成本后的 0.25R 净利润，并按峰值回撤 0.35R 递进抬高保护线；达到 1R 后切换为回撤 0.5R。旧版本规则保持冻结，不重写历史结果。"
           : isV6
             ? "V6 在 0.5R 后只锁定成本加 2bps，可能显示约 0.2% 的 10x 模拟 ROE。该规则已经停用，仅保留历史审计。"
-            : "该版本使用生成信号时冻结的历史退出规则，仅供复盘，不会用 V7 重新计算。";
+            : "该版本使用生成信号时冻结的历史退出规则，仅供复盘，不会用当前 V8 重新计算。";
       exitPolicyTarget.innerHTML = `
         <header><div><span>${this.escape(policyTag)}</span><h3>${this.escape(policyTitle)}</h3><p>${this.escape(policyDescription)}</p></div><strong>虚拟回放<small>${this.escape(policyVersion)}</small></strong></header>
         <div>
           <article class="profit"><span>递进锁盈</span><b>0.5R / 净锁 0.25R</b><small>先覆盖交易成本，再锁定至少 0.25R；保护线只升不降 · 已触发 ${this.number(exitCounts.profit_lock)}</small></article>
           <article class="profit"><span>移动保护</span><b>1R / 回吐 0.5R</b><small>按本笔 ATR 风险归一，不再使用所有品种统一 30 bps · 已触发 ${this.number(exitCounts.trailing_profit)}</small></article>
-          <article class="risk"><span>跟随失败</span><b>仍按持有周期确认</b><small>与盈利保护分离，避免短线噪声秒平 · 已触发 ${this.number(exitCounts.failed_follow_through)}</small></article>
+          <article class="risk"><span>跟随失败</span><b>${isV8 ? "0.20R / 连续 2 根确认" : "仍按持有周期确认"}</b><small>与盈利保护分离，避免单根短线噪声误平 · 已触发 ${this.number(exitCounts.failed_follow_through)}</small></article>
           <article><span>保护退出合计</span><b>${this.number(protectedCount)}</b><small>ATR 硬止损、2R 止盈和评分反转仍然保留</small></article>
         </div>`;
     }
@@ -5407,7 +5422,7 @@ class AiMonitorDashboard extends HTMLElement {
   categoryLabel(value) { return ({ macro: "宏观", company: "公司", earnings: "财报", policy: "政策", geopolitics: "地缘", commodity: "商品", crypto: "加密", other: "其他" })[value] || "分类待定"; }
   analyticsResultLabel(value) { return ({ win: "命中", loss: "未命中", flat: "持平", unavailable: "行情不足" })[value] || "行情不足"; }
   exitReasonLabel(value, detail = "") {
-    const detailLabels = { hard_target: "命中最终止盈价", profit_lock: "递进锁盈退出", trailing_profit: "移动止盈退出", failed_follow_through: "跟随失败早退" };
+    const detailLabels = { hard_target: "命中最终止盈价", profit_lock: "递进锁盈退出", trailing_profit: "移动止盈退出", profit_lock_gap_loss: "锁盈线跳空失效（成本后亏损）", trailing_profit_gap_loss: "移动保护跳空失效（成本后亏损）", failed_follow_through: "跟随失败早退" };
     if (detailLabels[detail]) return detailLabels[detail];
     return ({ take_profit: "触发止盈", stop_loss: "触发止损", score_breakdown: "综合评分转弱", score_reversal: "方向反转", max_holding_time: "最大持有期退出", legacy_horizon_close: "旧版到期结算" })[value] || "退出原因待确认";
   }

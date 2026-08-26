@@ -59,9 +59,11 @@ def test_system_settings_navigation_owns_the_binance_credential_form() -> None:
     settings_navigation = html.index(
         'href="/settings" data-panel-target="settings"'
     )
-    risk_navigation = html.index('href="/risk" data-panel-target="risk"')
-    assert security_heading < settings_navigation < risk_navigation
-    assert ">系统设置</a>" in html[settings_navigation:risk_navigation]
+    navigation_end = html.index("</nav>", settings_navigation)
+    assert security_heading < settings_navigation < navigation_end
+    assert ">系统设置</a>" in html[settings_navigation:navigation_end]
+    assert 'data-panel-target="risk"' not in html
+    assert 'data-panel-target="audit"' not in html
     assert 'href="/credentials"' not in html
     assert 'data-panel-target="credentials"' not in html
 

@@ -1031,6 +1031,11 @@ def _historical_exit_decision(
                 if isinstance(risk_plan.get("profit_protection"), Mapping)
                 else None
             ),
+            failed_follow_through=(
+                dict(risk_plan.get("failed_follow_through") or {})
+                if isinstance(risk_plan.get("failed_follow_through"), Mapping)
+                else None
+            ),
         )
         if adaptive_exit_enabled
         else None
@@ -1492,6 +1497,10 @@ def _replay_symbol(
             terminal_price=exit_price,
         )
         result = "win" if net > 0 else "loss" if net < 0 else "flat"
+        exit_subreason = ai_monitor.settlement_exit_subreason(
+            exit_decision,
+            net_result=result,
+        )
         db.add(
             AiMonitorReplayOutcome(
                 signal_id=signal.id,
@@ -1507,14 +1516,14 @@ def _replay_symbol(
                 max_adverse_bps=Decimal(str(round(adverse, 8))),
                 result=result,
                 settlement_json={
-                    "version": "historical_replay_adaptive_guard_v4",
+                    "version": "historical_replay_adaptive_guard_v5",
                     "entry_policy": "next_bar_open",
                     "exit_policy": (
                         "frozen_profit_guard_then_price_barrier_then_confirmed_score_exit_"
                         "then_failed_follow_through_then_hard_time_cap"
                     ),
                     "exit_reason": exit_reason,
-                    "exit_subreason": exit_decision.get("exit_subreason"),
+                    "exit_subreason": exit_subreason,
                     "peak_favorable_bps_at_decision": exit_decision.get(
                         "peak_favorable_bps"
                     ),

@@ -17,6 +17,7 @@ from quantdesk_v2.ai_monitor import (
     _take_ingested_news,
     adaptive_exit_precedes,
     aggregate_news_candidates,
+    annotate_event_cluster_selection,
     append_score_history,
     backfill_prediction_path_metrics,
     configured_indicator_policy,
@@ -33,7 +34,9 @@ from quantdesk_v2.ai_monitor import (
     market_flow_snapshot,
     match_configured_indicators,
     merged_opportunity_expiration,
+    news_actionability_snapshot,
     opportunity_score_weights,
+    prediction_actionability_gate_summary,
     prediction_adaptive_path_exit,
     prediction_cost_breakdown,
     prediction_estimated_cost_bps,
@@ -50,6 +53,7 @@ from quantdesk_v2.ai_monitor import (
     reopen_legacy_prediction_settlements,
     settle_due_predictions,
     settleable_historical_outcomes,
+    settlement_exit_subreason,
     signal_readiness_snapshot,
     stable_gate_summary,
     strongest_candidate_per_symbol,
@@ -502,7 +506,7 @@ def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None
     assert item.settlement_version == "repair_pending_v4"
     assert (
         item.evidence_json["risk_plan"]["settlement_version"]
-        == "cost_consistent_exit_v6"
+        == "cost_consistent_exit_v7"
     )
     assert item.evidence_json["settlement_repair"]["status"] == "pending_recalculation"
     assert database.flushed is True
@@ -513,7 +517,7 @@ def test_legacy_prediction_is_reopened_before_new_lifecycle_statistics() -> None
     assert {"completed", "legacy_horizon_close"}.issubset(
         set(mysql_compiled.params.values())
     )
-    assert "cost_consistent_exit_v7" not in set(mysql_compiled.params.values())
+    assert "cost_consistent_exit_v8" not in set(mysql_compiled.params.values())
     assert database.statement.get_execution_options()["populate_existing"] is True
 
 
@@ -1414,6 +1418,120 @@ def test_virtual_entry_gate_requires_every_signal_condition_and_a_real_price() -
     } == {"new_news_trigger", "market_quality"}
 
 
+def test_virtual_entry_gate_requires_order_book_direction_confirmation() -> None:
+    blocked = virtual_entry_gate_snapshot(
+        direction="long",
+        news_score=80,
+        news_mention_count=1,
+        minimum_news_score=60,
+        minimum_news_mentions=1,
+        indicator_policy_passed=True,
+        indicator_score=80,
+        minimum_indicator_score=65,
+        combined_score=80,
+        minimum_combined_score=75,
+        market_flow_hard_conflict=False,
+        entry_price=100,
+        checked_at="2026-08-26T15:00:00+00:00",
+        order_book_gate={
+            "quality_passed": True,
+            "direction_clear": True,
+            "confirms_direction": False,
+            "directional_pressure": 0.05,
+        },
+    )
+
+    assert blocked["signal_confirmed"] is False
+    assert next(
+        item for item in blocked["checks"] if item["key"] == "order_book_direction"
+    )["passed"] is False
+
+
+def test_prediction_actionability_gate_blocks_non_actionable_correlated_entry() -> None:
+    summary = prediction_actionability_gate_summary(
+        {
+            "status": "passed",
+            "passed": True,
+            "decision_checks": {},
+            "blocking_reasons": [],
+            "warnings": [],
+        },
+        market_quality={"passed": False},
+        market_environment={
+            "resonance": "divergent",
+            "market_session": {
+                "key": "postmarket",
+                "allows_new_entries": False,
+            },
+        },
+        news_trigger={
+            "has_actionable_new_news": False,
+            "event_cluster": {"selected": False},
+        },
+        order_book_gate={
+            "quality_passed": True,
+            "confirms_direction": False,
+        },
+        require_new_news=True,
+    )
+
+    assert summary["status"] == "blocked"
+    assert summary["passed"] is False
+    assert set(summary["blocking_reasons"]) == {
+        "RAW_MARKET_QUALITY_BLOCKED",
+        "NON_REGULAR_US_SESSION",
+        "MACRO_DIRECTION_DIVERGENT",
+        "NEWS_NOT_ACTIONABLE",
+        "CORRELATED_EVENT_ALREADY_SELECTED",
+        "ORDER_BOOK_DIRECTION_NOT_CONFIRMED",
+    }
+
+
+def test_closing_recap_news_is_evidence_but_not_a_new_catalyst() -> None:
+    recap = news_actionability_snapshot(
+        {"title": "美股收盘：AMD 收涨 5%，芯片股走强", "reason": "收盘复盘"}
+    )
+    catalyst = news_actionability_snapshot(
+        {"title": "AMD 发布超预期财报并上调全年指引", "reason": "盈利预期上修"}
+    )
+
+    assert recap["actionable"] is False
+    assert recap["reason_code"] == "CLOSING_RECAP_NOT_A_CATALYST"
+    assert catalyst["actionable"] is True
+
+
+def test_shared_news_event_only_selects_the_strongest_symbol() -> None:
+    candidates = [
+        {
+            "symbol": "MSFT",
+            "direction": "long",
+            "news_score": 78,
+            "news_trigger": {"actionable_new_news_ids": ["cloud-capex"]},
+        },
+        {
+            "symbol": "META",
+            "direction": "long",
+            "news_score": 84,
+            "news_trigger": {"actionable_new_news_ids": ["cloud-capex"]},
+        },
+        {
+            "symbol": "AMZN",
+            "direction": "short",
+            "news_score": 75,
+            "news_trigger": {"actionable_new_news_ids": ["cloud-capex"]},
+        },
+    ]
+
+    annotated = annotate_event_cluster_selection(candidates)
+    selected = {
+        item["symbol"]: item["news_trigger"]["event_cluster"]["selected"]
+        for item in annotated
+    }
+
+    assert selected == {"MSFT": False, "META": True, "AMZN": True}
+    assert candidates[0]["news_trigger"]["event_cluster"]["selected_symbol"] == "META"
+
+
 def test_configured_indicators_match_the_requested_short_direction() -> None:
     scan = {
         "items": [
@@ -1662,9 +1780,9 @@ def test_new_risk_plan_uses_r_normalized_profit_protection() -> None:
         atr_pct=1,
     )
 
-    assert plan["version"] == "atr_risk_reward_guard_v5"
-    assert plan["settlement_version"] == "cost_consistent_exit_v7"
-    assert plan["execution_policy"] == "cost_consistent_risk_guard_v8"
+    assert plan["version"] == "atr_risk_reward_guard_v6"
+    assert plan["settlement_version"] == "cost_consistent_exit_v8"
+    assert plan["execution_policy"] == "cost_consistent_risk_guard_v9"
     assert plan["stop_loss_pct"] == 1.5
     assert plan["take_profit_pct"] == 3.0
     assert plan["profit_protection"] == {
@@ -1681,6 +1799,9 @@ def test_new_risk_plan_uses_r_normalized_profit_protection() -> None:
     }
     assert plan["failed_follow_through"]["maximum_favorable_r"] == 0.5
     assert plan["failed_follow_through"]["maximum_favorable_bps"] == 75
+    assert plan["failed_follow_through"]["maximum_adverse_r"] == 0.2
+    assert plan["failed_follow_through"]["minimum_adverse_bps"] == 15
+    assert plan["failed_follow_through"]["confirmation_closes"] == 2
     assert (
         plan["failed_follow_through"]["minimum_hold_policy"]
         == "horizon_aligned"
@@ -1882,6 +2003,73 @@ def test_adaptive_exit_cuts_failed_follow_through_after_three_closed_bars() -> N
     assert result["exit_subreason"] == "failed_follow_through"
     assert result["observed_bar_count"] == 3
     assert result["price_time_ms"] == start + interval * 3
+
+
+def test_v8_failed_follow_through_uses_r_threshold_and_two_closed_bars() -> None:
+    start = 1_800_000_000_000
+    interval = 900_000
+    candles = [
+        {
+            "open_time": start + index * interval,
+            "open": 100,
+            "high": 100.1,
+            "low": 99.6,
+            "close": close,
+        }
+        for index, close in enumerate((99.95, 99.75, 99.74, 99.70))
+    ]
+    failed_policy = {
+        "closed_bars": 3,
+        "maximum_adverse_r": 0.2,
+        "minimum_adverse_bps": 15,
+        "confirmation_closes": 2,
+        "confirmation_unit": "closed_15m_bar",
+    }
+    first_confirmation_only = prediction_adaptive_path_exit(
+        candles[:3],
+        100,
+        "long",
+        start,
+        start + interval * 3,
+        profit_protection={"mode": "risk_unit", "risk_bps": 100},
+        failed_follow_through=failed_policy,
+    )
+    result = prediction_adaptive_path_exit(
+        candles,
+        100,
+        "long",
+        start,
+        start + interval * 4,
+        profit_protection={"mode": "risk_unit", "risk_bps": 100},
+        failed_follow_through=failed_policy,
+    )
+
+    assert first_confirmation_only is None
+    assert result is not None
+    assert result["exit_subreason"] == "failed_follow_through"
+    assert result["failed_threshold_mode"] == "risk_unit"
+    assert result["failed_loss_threshold_bps"] == -20
+    assert result["confirmation_points"] == 2
+    assert result["price_time_ms"] == start + interval * 4
+
+
+def test_gap_loss_is_not_classified_as_successful_profit_protection() -> None:
+    assert settlement_exit_subreason(
+        {
+            "reason": "take_profit",
+            "exit_subreason": "profit_lock",
+            "gap_execution": True,
+        },
+        net_result="loss",
+    ) == "profit_lock_gap_loss"
+    assert settlement_exit_subreason(
+        {
+            "reason": "take_profit",
+            "exit_subreason": "profit_lock",
+            "gap_execution": False,
+        },
+        net_result="win",
+    ) == "profit_lock"
 
 
 def test_settlement_keeps_stop_loss_when_profit_guard_ties_on_same_bar() -> None:
@@ -2238,11 +2426,11 @@ def test_current_settlement_policy_cannot_disable_execution_costs() -> None:
 
     previous = prediction_settlement_cost_config(
         disabled,
-        settlement_version="cost_consistent_exit_v6",
+        settlement_version="cost_consistent_exit_v7",
     )
     current = prediction_settlement_cost_config(
         disabled,
-        settlement_version="cost_consistent_exit_v7",
+        settlement_version="cost_consistent_exit_v8",
     )
     legacy = prediction_settlement_cost_config(
         disabled,
@@ -2427,7 +2615,7 @@ def test_due_predictions_use_historical_due_price_without_ticker_fallback() -> N
     assert float(settled.net_directional_return_bps) == pytest.approx(183.96875)
     assert settled.max_favorable_bps == Decimal("200.0")
     assert settled.max_adverse_bps == Decimal("0.0")
-    assert settled.settlement_version == "cost_consistent_exit_v6"
+    assert settled.settlement_version == "cost_consistent_exit_v7"
     assert (
         settled.evidence_json["settlement"]["score_exit_policy_version"]
         == "horizon_aligned_closed_bar_v3"
@@ -3261,9 +3449,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     component = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
     stylesheet = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(encoding="utf-8")
 
-    assert app.index('item.key === "monitor"') < app.index('key: "ai-monitor"')
+    assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260825-94"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260826-v8-1"' in entrypoint
     assert '"/assets/monitor.js?v=20260810-forecast-2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3287,7 +3475,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
         "/assets/paper.js?v=20260809-paper-combo-1",
         "/assets/live.js?v=20260809-font1_6x-1",
         "/assets/backtest.js?v=20260809-font1_6x-1",
-        "/assets/app.js?v=20260810-ai-monitor-1",
+        "/assets/app.js?v=20260826-nav-1",
     ):
         assert asset in legacy_index
     assert 'view: "opportunities"' in component

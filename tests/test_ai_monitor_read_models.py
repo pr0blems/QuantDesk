@@ -113,7 +113,7 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
         signal_news_score=Decimal("82"),
         signal_indicator_score=Decimal("88"),
         estimated_cost_bps=Decimal("16"),
-        settlement_version="cost_consistent_exit_v7",
+        settlement_version="cost_consistent_exit_v8",
         readiness_status="research_only",
         calibration_sample_count=0,
         evidence_json=opportunity.evidence_json,
@@ -294,7 +294,7 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
         "peak_favorable_bps": 150.0,
         "protected_bps": 45.0,
     }
-    assert analytics["filters"]["settlement_version"] == "cost_consistent_exit_v7"
+    assert analytics["filters"]["settlement_version"] == "cost_consistent_exit_v8"
     assert analytics["settlement_versions"][0]["current"] is True
 
     prediction.settlement_version = "cost_consistent_exit_v6"

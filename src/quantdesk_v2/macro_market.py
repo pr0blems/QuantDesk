@@ -2311,16 +2311,34 @@ def opportunity_market_context(
     """Return a transparent directional adjustment for one opportunity."""
 
     if not snapshot or not snapshot.get("available"):
+        session = dict((snapshot or {}).get("market_session") or {})
+        session_key = str(session.get("key") or "unknown").lower()
+        session_blocked = bool(
+            session.get("allows_new_entries") is False
+            or session_key in {"premarket", "postmarket", "closed"}
+        )
+        entry_policy = dict((snapshot or {}).get("entry_policy") or {})
+        entry_policy["entry_allowed"] = bool(
+            entry_policy.get("entry_allowed", True) and not session_blocked
+        )
+        entry_policy["blocked_reasons"] = (
+            ["NON_REGULAR_US_SESSION"] if session_blocked else []
+        )
+        if session_blocked:
+            entry_policy["blocked_reason"] = (
+                "Current session is outside regular US market hours; "
+                "the candidate remains research-only."
+            )
         return {
-            "version": "macro_directional_adjustment_v2",
+            "version": "macro_directional_adjustment_v3",
             "available": False,
             "adjustment": 0.0,
             "resonance": "unknown",
             "resonance_label": "大盘数据不足",
             "sector_key": sector_key(symbol, sector, industry),
-            "market_session": dict((snapshot or {}).get("market_session") or {}),
+            "market_session": session,
             "market_tide": dict((snapshot or {}).get("market_tide") or {}),
-            "entry_policy": dict((snapshot or {}).get("entry_policy") or {}),
+            "entry_policy": entry_policy,
             "rate_shock": dict(dict((snapshot or {}).get("treasury_curve") or {}).get("shock") or {}),
             "capital_retreat": dict((snapshot or {}).get("capital_retreat") or {}),
             "factors": [],
@@ -2422,18 +2440,38 @@ def opportunity_market_context(
             "long_position_multiplier" if long_side else "short_position_multiplier"
         )
     )
-    direction_blocked = bool(long_side and global_policy.get("pause_new_trend_longs"))
+    session_blocked = bool(
+        session.get("allows_new_entries") is False
+        or session_key in {"premarket", "postmarket", "closed"}
+    )
+    global_direction_blocked = bool(
+        long_side and global_policy.get("pause_new_trend_longs")
+    )
+    blocked_reasons: list[str] = []
+    if global_direction_blocked:
+        blocked_reasons.append("GLOBAL_RISK_POLICY")
+    if session_blocked:
+        blocked_reasons.append("NON_REGULAR_US_SESSION")
+    if opposed:
+        blocked_reasons.append("MACRO_DIRECTION_DIVERGENT")
+    blocked_reason_labels = {
+        "GLOBAL_RISK_POLICY": "重大事件或信用压力环境暂停新增顺势多单",
+        "NON_REGULAR_US_SESSION": "当前不是美股常规交易时段，仅保留扫描与研究记录",
+        "MACRO_DIRECTION_DIVERGENT": "候选方向与当前大盘方向相反",
+    }
+    direction_blocked = bool(blocked_reasons)
     entry_policy = {
         **global_policy,
         "direction": direction,
         "position_multiplier": position_multiplier if position_multiplier is not None else 1.0,
         "entry_allowed": not direction_blocked,
-        "blocked_reason": (
-            "重大事件或信用压力环境暂停新增顺势多单" if direction_blocked else None
-        ),
+        "blocked_reasons": blocked_reasons,
+        "blocked_reason": "；".join(
+            blocked_reason_labels[item] for item in blocked_reasons
+        ) or None,
     }
     return {
-        "version": "macro_directional_adjustment_v2",
+        "version": "macro_directional_adjustment_v3",
         "available": True,
         "adjustment": round(adjustment, 4),
         "resonance": resonance,

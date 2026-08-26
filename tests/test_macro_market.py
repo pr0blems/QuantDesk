@@ -165,6 +165,8 @@ def test_long_signal_is_penalized_and_marked_divergent_in_fear_regime() -> None:
 
     assert context["resonance"] == "divergent"
     assert context["adjustment"] == -20
+    assert context["entry_policy"]["entry_allowed"] is False
+    assert "MACRO_DIRECTION_DIVERGENT" in context["entry_policy"]["blocked_reasons"]
     assert apply_market_adjustment(82.0, context) == 62.0
     assert {factor["key"] for factor in context["factors"]} >= {
         "ndx_trend",
@@ -185,6 +187,7 @@ def test_short_signal_can_benefit_from_bear_regime_but_adjustment_is_capped() ->
     assert context["sector_key"] == "CRYPTO"
     assert context["resonance"] == "resonant"
     assert context["adjustment"] == 10
+    assert context["entry_policy"]["entry_allowed"] is True
     assert apply_market_adjustment(96.0, context) == 100.0
 
 
@@ -235,6 +238,8 @@ def test_closed_session_applies_a_transparent_liquidity_discount() -> None:
     )
 
     assert any(item["key"] == "market_session" for item in context["factors"])
+    assert context["entry_policy"]["entry_allowed"] is False
+    assert "NON_REGULAR_US_SESSION" in context["entry_policy"]["blocked_reasons"]
 
 
 def test_direct_treasury_curve_classifies_long_end_term_premium_pressure() -> None:

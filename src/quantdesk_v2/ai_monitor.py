@@ -78,9 +78,10 @@ PREDICTION_SETTLEMENT_BATCH_SIZE = 25
 PREDICTION_FEE_BPS_PER_SIDE = 5.0
 PREDICTION_SLIPPAGE_BPS_PER_SIDE = 3.0
 PREDICTION_FUNDING_BPS_PER_8H = 1.0
-PREVIOUS_PREDICTION_SETTLEMENT_VERSION = "cost_consistent_exit_v6"
-PREDICTION_SETTLEMENT_VERSION = "cost_consistent_exit_v7"
+PREVIOUS_PREDICTION_SETTLEMENT_VERSION = "cost_consistent_exit_v7"
+PREDICTION_SETTLEMENT_VERSION = "cost_consistent_exit_v8"
 COST_CONSISTENT_SETTLEMENT_VERSIONS = {
+    "cost_consistent_exit_v6",
     PREVIOUS_PREDICTION_SETTLEMENT_VERSION,
     PREDICTION_SETTLEMENT_VERSION,
 }
@@ -97,6 +98,8 @@ PREDICTION_RISK_UNIT_MINIMUM_PROTECTED_R = 0.0
 PREDICTION_RISK_UNIT_MINIMUM_NET_PROTECTED_R = 0.25
 PREDICTION_FOLLOW_THROUGH_BARS = 3
 PREDICTION_FOLLOW_THROUGH_LOSS_BPS = -15.0
+PREDICTION_FOLLOW_THROUGH_MAXIMUM_ADVERSE_R = 0.20
+PREDICTION_FOLLOW_THROUGH_CONFIRMATION_CLOSES = 2
 PREDICTION_SCORE_EXIT_BAR_MS = 15 * 60 * 1_000
 PREDICTION_SCORE_EXIT_MIN_HOLD_MS = 30 * 60 * 1_000
 PREDICTION_SCORE_EXIT_CONFIRMATION_BARS = 2
@@ -104,7 +107,7 @@ PREDICTION_SCORE_EXIT_POLICY_VERSION = "horizon_aligned_closed_bar_v3"
 PREDICTION_SOFT_EXIT_MIN_HORIZON_FRACTION = 0.5
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
-OPPORTUNITY_DECISION_VERSION = "binance_primary_v4"
+OPPORTUNITY_DECISION_VERSION = "actionable_entry_v5"
 OPPORTUNITY_API_VERSION = "ai_opportunity.v3"
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
@@ -1454,10 +1457,13 @@ def virtual_entry_gate_snapshot(
                 {
                     "key": "order_book_direction",
                     "label": "实时盘口方向",
-                    "passed": bool(frozen_order_book.get("direction_clear")),
+                    "passed": bool(
+                        frozen_order_book.get("quality_passed")
+                        and frozen_order_book.get("confirms_direction")
+                    ),
                     "current": frozen_order_book.get("directional_pressure"),
-                    "required": "> -0.20",
-                    "detail": "盘口只作为强冲突否决，不单独产生买卖信号",
+                    "required": "盘口质量通过且方向确认",
+                    "detail": "盘口不产生独立信号，但必须确认候选方向后才允许生成新预测",
                 },
             ]
             if frozen_order_book
@@ -1475,7 +1481,7 @@ def virtual_entry_gate_snapshot(
     signal_confirmed = all(bool(item["passed"]) for item in checks[:-1])
     entry_ready = signal_confirmed and bool(checks[-1]["passed"])
     return {
-        "version": "research_entry_quality_v4",
+        "version": "research_entry_quality_v5",
         "execution_mode": "virtual_prediction_only",
         "real_order_enabled": False,
         "direction": "short" if direction == "short" else "long",
@@ -1596,7 +1602,7 @@ def virtual_risk_plan_snapshot(
         stop_loss_price = 0.0
         take_profit_price = 0.0
     return {
-        "version": "atr_risk_reward_guard_v5",
+        "version": "atr_risk_reward_guard_v6",
         "settlement_version": PREDICTION_SETTLEMENT_VERSION,
         "method": "atr14_x_1_5" if volatility_risk > 0 else "timeframe_fallback",
         "timeframe": timeframe,
@@ -1637,10 +1643,13 @@ def virtual_risk_plan_snapshot(
                 * PREDICTION_RISK_UNIT_PROTECTION_ACTIVATION_R,
                 8,
             ),
-            "directional_loss_bps": PREDICTION_FOLLOW_THROUGH_LOSS_BPS,
+            "maximum_adverse_r": PREDICTION_FOLLOW_THROUGH_MAXIMUM_ADVERSE_R,
+            "minimum_adverse_bps": abs(PREDICTION_FOLLOW_THROUGH_LOSS_BPS),
+            "confirmation_closes": PREDICTION_FOLLOW_THROUGH_CONFIRMATION_CLOSES,
+            "confirmation_unit": "closed_15m_bar",
             "minimum_hold_policy": "horizon_aligned",
         },
-        "execution_policy": "cost_consistent_risk_guard_v8",
+        "execution_policy": "cost_consistent_risk_guard_v9",
     }
 
 
@@ -2229,6 +2238,7 @@ def prediction_adaptive_path_exit(
     minimum_profit_protection_ms: int | None = None,
     minimum_failed_follow_through_ms: int | None = None,
     profit_protection: Mapping[str, Any] | None = None,
+    failed_follow_through: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Protect proven profit and cut a failed follow-through without look-ahead.
 
@@ -2267,6 +2277,8 @@ def prediction_adaptive_path_exit(
     peak_favorable_bps = 0.0
     protected_bps: float | None = None
     observed_bar_count = 0
+    consecutive_failed_closes = 0
+    failed_confirmation_times_ms: list[int] = []
     profit_delay_ms = (
         minimum_soft_exit_ms
         if minimum_profit_protection_ms is None
@@ -2283,6 +2295,7 @@ def prediction_adaptive_path_exit(
     )
     protection = dict(profit_protection or {})
     protection_mode = str(protection.get("mode") or "fixed_bps")
+    risk_bps = 0.0
     if protection_mode == "risk_unit":
         risk_bps = max(0.0, float(protection.get("risk_bps") or 0.0))
         activation_bps = risk_bps * max(
@@ -2342,6 +2355,29 @@ def prediction_adaptive_path_exit(
         minimum_protected_bps = PREDICTION_PROFIT_PROTECTION_MIN_BPS
         minimum_net_protected_bps = None
         early_giveback_bps = None
+    failed_policy = dict(failed_follow_through or {})
+    required_follow_bars = max(
+        1,
+        int(failed_policy.get("closed_bars") or PREDICTION_FOLLOW_THROUGH_BARS),
+    )
+    required_failed_closes = max(
+        1,
+        int(failed_policy.get("confirmation_closes") or 1),
+    )
+    maximum_adverse_r = failed_policy.get("maximum_adverse_r")
+    if maximum_adverse_r is not None and risk_bps > 0:
+        failed_loss_threshold_bps = -max(
+            float(failed_policy.get("minimum_adverse_bps") or 0.0),
+            risk_bps * max(0.0, float(maximum_adverse_r)),
+        )
+        failed_threshold_mode = "risk_unit"
+    else:
+        failed_loss_threshold_bps = float(
+            failed_policy.get(
+                "directional_loss_bps", PREDICTION_FOLLOW_THROUGH_LOSS_BPS
+            )
+        )
+        failed_threshold_mode = "fixed_bps"
     cost_floor_bps = max(
         minimum_protected_bps,
         max(0.0, float(estimated_cost_bps)) + 2.0,
@@ -2428,13 +2464,19 @@ def prediction_adaptive_path_exit(
             if normalized_direction == "short"
             else (close_price / entry_price - 1.0) * 10_000.0
         )
-        if (
+        failed_close = bool(
             close_time >= failed_follow_not_before_ms
-            and
-            observed_bar_count >= PREDICTION_FOLLOW_THROUGH_BARS
+            and observed_bar_count >= required_follow_bars
             and peak_favorable_bps < activation_bps
-            and close_directional_bps <= PREDICTION_FOLLOW_THROUGH_LOSS_BPS
-        ):
+            and close_directional_bps <= failed_loss_threshold_bps
+        )
+        if failed_close:
+            consecutive_failed_closes += 1
+            failed_confirmation_times_ms.append(close_time)
+        else:
+            consecutive_failed_closes = 0
+            failed_confirmation_times_ms = []
+        if consecutive_failed_closes >= required_failed_closes:
             return {
                 "reason": "score_breakdown",
                 "exit_subreason": "failed_follow_through",
@@ -2445,7 +2487,13 @@ def prediction_adaptive_path_exit(
                 "observed_bar_count": observed_bar_count,
                 "peak_favorable_bps": round(peak_favorable_bps, 8),
                 "protected_bps": None,
-                "confirmation_points": PREDICTION_FOLLOW_THROUGH_BARS,
+                "confirmation_points": consecutive_failed_closes,
+                "confirmation_unit": str(
+                    failed_policy.get("confirmation_unit") or "closed_15m_bar"
+                ),
+                "confirmation_bar_times_ms": failed_confirmation_times_ms[-required_failed_closes:],
+                "failed_loss_threshold_bps": round(failed_loss_threshold_bps, 8),
+                "failed_threshold_mode": failed_threshold_mode,
             }
         if peak_favorable_bps >= effective_activation_bps:
             if peak_favorable_bps >= trailing_activation_bps:
@@ -2480,6 +2528,24 @@ def adaptive_exit_precedes(
         adaptive.get("exit_subreason") in {"profit_lock", "trailing_profit"}
         and current.get("reason") != "stop_loss"
     )
+
+
+def settlement_exit_subreason(
+    exit_decision: Mapping[str, Any],
+    *,
+    net_result: str,
+) -> str | None:
+    """Keep protective-gap losses out of successful lock-profit statistics."""
+
+    exit_subreason = str(exit_decision.get("exit_subreason") or "") or None
+    if (
+        str(exit_decision.get("reason") or "") == "take_profit"
+        and exit_subreason in {"profit_lock", "trailing_profit"}
+        and bool(exit_decision.get("gap_execution"))
+        and net_result == "loss"
+    ):
+        return f"{exit_subreason}_gap_loss"
+    return exit_subreason
 
 
 def prediction_score_exit_signal(
@@ -4378,6 +4444,80 @@ def stable_gate_summary(
         "evaluated_at": evaluated_at.isoformat(),
         "decision_version": f"binance_primary_{normalized_mode}_v3",
     }
+
+
+def prediction_actionability_gate_summary(
+    stable_summary: Mapping[str, Any],
+    *,
+    market_quality: Mapping[str, Any],
+    market_environment: Mapping[str, Any],
+    news_trigger: Mapping[str, Any],
+    order_book_gate: Mapping[str, Any] | None,
+    require_new_news: bool,
+) -> dict[str, Any]:
+    """Add prediction-specific hard gates without stopping all-hours scans."""
+
+    result = dict(stable_summary or {})
+    decision_checks = dict(result.get("decision_checks") or {})
+    session = dict(market_environment.get("market_session") or {})
+    session_key = str(session.get("key") or "unknown").lower()
+    event_cluster = dict(news_trigger.get("event_cluster") or {})
+    actionable_checks = {
+        "raw_market_quality": bool(market_quality.get("passed")),
+        "regular_us_session": bool(
+            session_key == "regular" and session.get("allows_new_entries") is not False
+        ),
+        "macro_direction_aligned": str(
+            market_environment.get("resonance") or "unknown"
+        ).lower()
+        != "divergent",
+        "actionable_news_trigger": bool(
+            not require_new_news or news_trigger.get("has_actionable_new_news")
+        ),
+        "event_cluster_selected": bool(event_cluster.get("selected", True)),
+    }
+    frozen_order_book = (
+        dict(order_book_gate) if isinstance(order_book_gate, Mapping) else {}
+    )
+    if frozen_order_book:
+        actionable_checks["order_book_confirms_direction"] = bool(
+            frozen_order_book.get("quality_passed")
+            and frozen_order_book.get("confirms_direction")
+        )
+    decision_checks.update(actionable_checks)
+    failure_codes = {
+        "raw_market_quality": "RAW_MARKET_QUALITY_BLOCKED",
+        "regular_us_session": "NON_REGULAR_US_SESSION",
+        "macro_direction_aligned": "MACRO_DIRECTION_DIVERGENT",
+        "actionable_news_trigger": "NEWS_NOT_ACTIONABLE",
+        "event_cluster_selected": "CORRELATED_EVENT_ALREADY_SELECTED",
+        "order_book_confirms_direction": "ORDER_BOOK_DIRECTION_NOT_CONFIRMED",
+    }
+    new_reasons = [
+        failure_codes[key]
+        for key, passed in actionable_checks.items()
+        if not passed
+    ]
+    blocking_reasons = list(
+        dict.fromkeys(
+            [*list(result.get("blocking_reasons") or []), *new_reasons]
+        )
+    )
+    passed = not blocking_reasons
+    warnings = list(result.get("warnings") or [])
+    result.update(
+        {
+            "status": "blocked" if not passed else "degraded" if warnings else "passed",
+            "passed": passed,
+            "decision_checks": decision_checks,
+            "blocking_reasons": blocking_reasons,
+            "market_quality_passed": bool(market_quality.get("passed")),
+            "prediction_actionability_checks": actionable_checks,
+            "hard_gate_applied": True,
+            "decision_version": OPPORTUNITY_DECISION_VERSION,
+        }
+    )
+    return result
 
 
 def opportunity_score_components(
@@ -6351,6 +6491,7 @@ def _prediction_fact_outcome(
 
 
 _SETTLEMENT_VERSION_LABELS = {
+    "cost_consistent_exit_v8": "V8 · 入场质量与R确认退出",
     "cost_consistent_exit_v7": "V7 · R单位递进锁盈",
     "cost_consistent_exit_v6": "V6 · 成本保护线",
     "horizon_aligned_exit_v5": "V5 · 原移动保护",
@@ -7786,6 +7927,11 @@ def settle_due_predictions(
                 if isinstance(risk_plan.get("profit_protection"), Mapping)
                 else None
             ),
+            failed_follow_through=(
+                dict(risk_plan.get("failed_follow_through") or {})
+                if isinstance(risk_plan.get("failed_follow_through"), Mapping)
+                else None
+            ),
         )
         score_signal = prediction_score_exit_signal(
             evidence,
@@ -7883,7 +8029,10 @@ def settle_due_predictions(
             int(exit_decision["price_time_ms"]),
         )
         exit_reason = str(exit_decision["reason"])
-        exit_subreason = str(exit_decision.get("exit_subreason") or "") or None
+        exit_subreason = settlement_exit_subreason(
+            exit_decision,
+            net_result=str(net_outcome.get("net_result") or ""),
+        )
         peak_favorable_bps_at_exit = (
             Decimal(str(path_metrics["max_favorable_bps"]))
             if path_metrics["max_favorable_bps"] is not None
@@ -7950,6 +8099,8 @@ def settle_due_predictions(
                         "confirmation_unit",
                         "confirmation_bar_times_ms",
                         "confirmation_scores",
+                        "failed_loss_threshold_bps",
+                        "failed_threshold_mode",
                         "minimum_hold_ms",
                         "ignored_duplicate_points",
                         "calculated_at",
@@ -7981,12 +8132,12 @@ def settle_due_predictions(
             score_exit += 1
         else:
             max_holding += 1
-        if exit_decision.get("exit_subreason") in {
+        if exit_subreason in {
             "profit_lock",
             "trailing_profit",
         }:
             profit_protection += 1
-        elif exit_decision.get("exit_subreason") == "failed_follow_through":
+        elif exit_subreason == "failed_follow_through":
             failed_follow_through += 1
         if previous_status == "unavailable":
             recovered += 1
@@ -8218,6 +8369,89 @@ def aggregate_news_candidates(
         candidate["news"].sort(key=lambda item: (item["score"], item["ts"]), reverse=True)
         result.append(candidate)
     return sorted(result, key=lambda item: item["news_score"], reverse=True)
+
+
+_NON_ACTIONABLE_RECAP_PATTERNS = (
+    re.compile(r"美股.{0,4}收盘|收盘综述|盘后复盘|收盘\s*[：:]"),
+    re.compile(r"(?:收涨|收跌|尾盘)(?:[^。；;]{0,28})(?:%|％|点|美元)"),
+    re.compile(
+        r"\b(?:market close|closing bell|post[- ]market recap|stocks? close[sd]?|"
+        r"closed (?:up|down)|ends? (?:up|down))\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def news_actionability_snapshot(news_item: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify whether a news item can initiate a new prediction.
+
+    Closing recaps describe a move that has already happened.  They remain in
+    the evidence and memory windows, but must not be treated as a fresh
+    catalyst for a new entry.
+    """
+
+    title = str(news_item.get("title") or "").strip()
+    reason = str(news_item.get("reason") or "").strip()
+    text = " ".join(part for part in (title, reason) if part)
+    matched_pattern = next(
+        (pattern.pattern for pattern in _NON_ACTIONABLE_RECAP_PATTERNS if pattern.search(text)),
+        None,
+    )
+    return {
+        "version": "news_actionability_v1",
+        "actionable": matched_pattern is None,
+        "reason_code": "CLOSING_RECAP_NOT_A_CATALYST" if matched_pattern else None,
+        "matched_pattern": matched_pattern,
+    }
+
+
+def annotate_event_cluster_selection(
+    candidates: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Allow one strongest candidate per shared news event and direction.
+
+    A broad story can mention several correlated stocks.  Counting every symbol
+    as an independent signal creates concentrated, misleading samples.  The
+    strongest candidate remains eligible; the others are still persisted as
+    blocked candidates with an auditable cluster owner.
+    """
+
+    claimed: dict[tuple[str, str], str] = {}
+    for candidate in sorted(
+        candidates,
+        key=lambda item: float(item.get("news_score") or 0),
+        reverse=True,
+    ):
+        trigger = dict(candidate.get("news_trigger") or {})
+        direction = str(candidate.get("direction") or "long")
+        symbol = str(candidate.get("symbol") or "")
+        news_ids = sorted(
+            str(item)
+            for item in trigger.get("actionable_new_news_ids") or []
+            if str(item)
+        )
+        owners = sorted(
+            {
+                claimed[(direction, news_id)]
+                for news_id in news_ids
+                if (direction, news_id) in claimed
+            }
+        )
+        selected = not owners
+        if selected:
+            for news_id in news_ids:
+                claimed[(direction, news_id)] = symbol
+        cluster_seed = ",".join(news_ids) or f"{direction}:{symbol}:no-new-event"
+        trigger["event_cluster"] = {
+            "version": "shared_news_event_v1",
+            "cluster_id": hashlib.sha256(cluster_seed.encode("utf-8")).hexdigest()[:16],
+            "selected": selected,
+            "selected_symbol": symbol if selected else owners[0],
+            "shared_news_ids": news_ids,
+            "reason_code": None if selected else "CORRELATED_EVENT_ALREADY_SELECTED",
+        }
+        candidate["news_trigger"] = trigger
+    return list(candidates)
 
 
 def strongest_candidate_per_symbol(
@@ -8653,17 +8887,43 @@ def _scan_opportunities(
         } - {""}
         key = (str(candidate["symbol"]), str(candidate["direction"]))
         new_news_ids = sorted(candidate_news_ids - consumed_news_ids.get(key, set()))
+        actionability_by_id = {
+            str(item.get("id") or ""): news_actionability_snapshot(item)
+            for item in candidate.get("news", [])
+            if str(item.get("id") or "") in new_news_ids
+        }
+        actionable_new_news_ids = sorted(
+            news_id
+            for news_id, actionability in actionability_by_id.items()
+            if bool(actionability.get("actionable"))
+        )
+        non_actionable_news_ids = sorted(
+            news_id
+            for news_id, actionability in actionability_by_id.items()
+            if not bool(actionability.get("actionable"))
+        )
         newest_news_ts = max(
             (int(item.get("ts") or 0) for item in candidate.get("news", [])),
             default=0,
         )
         candidate["news_trigger"] = {
-            "version": "fresh_unconsumed_news_v1",
+            "version": "fresh_actionable_news_v2",
             "required": require_new_news,
             "memory_window_hours": int(config["news_lookback_hours"]),
             "trigger_window_hours": trigger_window_hours,
             "has_new_news": bool(new_news_ids),
             "new_news_ids": new_news_ids,
+            "has_actionable_new_news": bool(actionable_new_news_ids),
+            "actionable_new_news_ids": actionable_new_news_ids,
+            "non_actionable_news_ids": non_actionable_news_ids,
+            "non_actionable_reasons": sorted(
+                {
+                    str(actionability.get("reason_code"))
+                    for actionability in actionability_by_id.values()
+                    if actionability.get("reason_code")
+                }
+            ),
+            "actionability": actionability_by_id,
             "reused_news_count": len(candidate_news_ids) - len(new_news_ids),
             "newest_news_age_minutes": (
                 round((int(now.replace(tzinfo=UTC).timestamp()) - newest_news_ts) / 60, 2)
@@ -8675,7 +8935,7 @@ def _scan_opportunities(
             reused_news_skipped += 1
             continue
         eligible_candidates.append(candidate)
-    candidates = eligible_candidates
+    candidates = annotate_event_cluster_selection(eligible_candidates)
     run.input_count = len(candidates)
     stored = 0
     confirmed = 0
@@ -8919,9 +9179,9 @@ def _scan_opportunities(
             combined_score = legacy_combined_score
         normalized_realtime_feature = realtime_feature_payload(realtime_feature)
         market_session = str(
-            dict(normalized_realtime_feature.get("quote") or {}).get("market_session")
+            dict(market_environment.get("market_session") or {}).get("key")
+            or dict(normalized_realtime_feature.get("quote") or {}).get("market_session")
             or normalized_realtime_feature.get("market_session")
-            or dict(market_environment.get("market_session") or {}).get("key")
             or "unknown"
         ).lower()
         maximum_quote_age_ms = int(
@@ -8964,9 +9224,9 @@ def _scan_opportunities(
             # executable NBBO checks above deliberately stay false.
             market_quality["quote"] = dict(finnhub_quote)
             market_quality["quote_source"] = "finnhub_quote_snapshots"
-            market_quality["market_session"] = finnhub_quote.get(
-                "market_session", market_session
-            )
+        # The exchange clock is authoritative.  A stale cash quote may describe
+        # its last observed session as regular even after the close.
+        market_quality["market_session"] = market_session
         gate_summary = stable_gate_summary(
             market_quality,
             market_flow,
@@ -8989,8 +9249,21 @@ def _scan_opportunities(
         require_market_quality = bool(
             config.get("require_market_quality_for_prediction", True)
         )
+        order_book_gate = (
+            dict(market_flow.get("order_book_gate") or {})
+            if isinstance(market_flow.get("order_book_gate"), Mapping)
+            else None
+        )
+        gate_summary = prediction_actionability_gate_summary(
+            gate_summary,
+            market_quality=market_quality,
+            market_environment=market_environment,
+            news_trigger=news_trigger,
+            order_book_gate=order_book_gate,
+            require_new_news=require_new_news,
+        )
         decision_market_quality_passed = bool(
-            gate_summary.get("market_quality_passed")
+            market_quality.get("passed")
         )
         decision_hard_conflict = not bool(
             dict(gate_summary.get("decision_checks") or {}).get(
@@ -9023,7 +9296,7 @@ def _scan_opportunities(
             and bool(gate_summary["passed"])
             and (
                 not require_new_news
-                or bool(news_trigger.get("has_new_news"))
+                or bool(news_trigger.get("has_actionable_new_news"))
                 or existing_prediction is not None
             )
             and (not require_market_quality or decision_market_quality_passed)
@@ -9042,17 +9315,16 @@ def _scan_opportunities(
             market_flow_hard_conflict=decision_hard_conflict,
             entry_price=entry_price,
             checked_at=now,
-            has_new_trigger_news=bool(news_trigger.get("has_new_news")),
+            has_new_trigger_news=bool(
+                news_trigger.get("has_actionable_new_news")
+                or existing_prediction is not None
+            ),
             require_new_trigger_news=require_new_news,
             market_quality_passed=decision_market_quality_passed,
             require_market_quality=require_market_quality,
             macro_entry_allowed=macro_entry_allowed,
             macro_policy=macro_entry_policy,
-            order_book_gate=(
-                dict(market_flow.get("order_book_gate") or {})
-                if isinstance(market_flow.get("order_book_gate"), Mapping)
-                else None
-            ),
+            order_book_gate=order_book_gate,
         )
         max_holding_seconds = (
             _TIMEFRAME_SECONDS[timeframe] * prediction_max_holding_bars
@@ -9252,7 +9524,10 @@ def _scan_opportunities(
                 "feature": market_quality.get("feature_version")
                 or MARKET_FEATURE_VERSION,
                 "weights": str(uw_signal_policy["weights_version"]),
-                "decision": str(uw_signal_policy["decision_version"]),
+                "decision": str(
+                    gate_summary.get("decision_version")
+                    or uw_signal_policy["decision_version"]
+                ),
                 "policy": str(uw_signal_policy["policy_version"]),
                 "published_config": int(uw_signal_policy["published_version"]),
             },
