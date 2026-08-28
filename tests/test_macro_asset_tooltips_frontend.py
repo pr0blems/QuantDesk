@@ -62,3 +62,14 @@ def test_macro_index_and_risk_tooltips_support_hover_and_keyboard_focus() -> Non
     assert ".macro-risk-stack > div:focus-visible > .macro-card-tooltip" in styles
     assert ".macro-card-tooltip { top: calc(100% + 9px)" in styles
     assert ".macro-index-card:hover, .macro-index-card:focus-visible" in styles
+
+
+def test_macro_policy_labels_directional_values_as_independent_caps() -> None:
+    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "入场门槛调整" in script
+    assert "多头仓位上限" in script
+    assert "空头仓位上限" in script
+    assert "多/空仓位上限" in script
