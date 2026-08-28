@@ -82,6 +82,22 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
             },
             "market": {"price": 191.25},
             "gate_summary": {"passed": True, "blocking_reasons": []},
+            "risk_events": [
+                {
+                    "event_name": "Chicago PMI",
+                    "title": "Chicago PMI",
+                    "risk_level": "medium",
+                    "scheduled_at": "2026-08-28T13:45:00+00:00",
+                    "minutes_until_event": 60,
+                    "blocking_active": False,
+                }
+            ],
+            "event_gate": {
+                "status": "warning",
+                "event_name": "Chicago PMI",
+                "minutes_until_event": 60,
+                "blocking": False,
+            },
             "unusual_whales_policy": {
                 "enabled": True,
                 "channels": {"option_trades": False, "gex": True},
@@ -294,6 +310,9 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
         "peak_favorable_bps": 150.0,
         "protected_bps": 45.0,
     }
+    assert analytics["items"][0]["event_title"] == "Chicago PMI"
+    assert analytics["items"][0]["event_gate"]["status"] == "warning"
+    assert analytics["items"][0]["risk_events"][0]["minutes_until_event"] == 60
     assert analytics["filters"]["settlement_version"] == "cost_consistent_exit_v8"
     assert analytics["settlement_versions"][0]["current"] is True
 

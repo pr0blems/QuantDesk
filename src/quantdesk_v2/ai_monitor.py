@@ -6915,6 +6915,62 @@ def historical_opportunity_fact_analytics(
     total_pages = max(1, (total_items + page_size - 1) // page_size)
     current_page = min(max(1, int(page)), total_pages)
     page_start = (current_page - 1) * page_size
+    page_facts = facts[page_start : page_start + page_size]
+    page_outcomes = outcomes[page_start : page_start + page_size]
+    if page_facts:
+        event_rows = db.execute(
+            select(
+                AiMonitorPrediction.id,
+                func.json_extract(
+                    AiMonitorPrediction.evidence_json,
+                    "$.risk_events",
+                ).label("risk_events"),
+                func.json_extract(
+                    AiMonitorPrediction.evidence_json,
+                    "$.event_gate",
+                ).label("event_gate"),
+            ).where(
+                AiMonitorPrediction.id.in_(
+                    [int(fact.prediction_id) for fact in page_facts]
+                )
+            )
+        ).mappings()
+
+        def decoded_event_json(value: Any, fallback: Any) -> Any:
+            if value is None:
+                return fallback
+            if isinstance(value, (dict, list)):
+                return value
+            try:
+                return json.loads(str(value))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return fallback
+
+        events_by_prediction = {
+            int(row["id"]): {
+                "risk_events": decoded_event_json(row["risk_events"], []),
+                "event_gate": decoded_event_json(row["event_gate"], {}),
+            }
+            for row in event_rows
+        }
+        for fact, outcome in zip(page_facts, page_outcomes, strict=True):
+            event_context = events_by_prediction.get(int(fact.prediction_id), {})
+            risk_events = event_context.get("risk_events") or []
+            event_gate = event_context.get("event_gate") or {}
+            nearest_event = (
+                risk_events[0]
+                if risk_events and isinstance(risk_events[0], Mapping)
+                else event_gate.get("nearest_event")
+                if isinstance(event_gate.get("nearest_event"), Mapping)
+                else {}
+            )
+            outcome["risk_events"] = risk_events
+            outcome["event_gate"] = event_gate
+            outcome["event_title"] = (
+                nearest_event.get("event_name")
+                or nearest_event.get("title")
+                or event_gate.get("event_name")
+            )
     configured_cost_settings = prediction_cost_settings(current_config)
     conservative_cost_config = readiness_cost_config(current_config)
     active_cost_settings = prediction_cost_settings(conservative_cost_config)
@@ -6928,7 +6984,7 @@ def historical_opportunity_fact_analytics(
             "variants": [],
             "gate_rejections": {},
         },
-        "items": outcomes[page_start : page_start + page_size],
+        "items": page_outcomes,
         "pagination": {
             "page": current_page,
             "page_size": page_size,
@@ -7804,6 +7860,9 @@ def historical_opportunity_analytics(
                 "market_session": outcome_market_session,
                 "quote_quality": outcome_quote_quality,
                 "event_risk": outcome_event_risk,
+                "risk_events": risk_events,
+                "event_gate": event_gate,
+                "event_title": event_gate.get("event_name"),
                 "data_coverage_pct": data_coverage_pct,
                 "feature_availability": feature_availability,
             }
