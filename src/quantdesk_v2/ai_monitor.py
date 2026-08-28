@@ -107,10 +107,11 @@ PREDICTION_SCORE_EXIT_POLICY_VERSION = "horizon_aligned_closed_bar_v3"
 PREDICTION_SOFT_EXIT_MIN_HORIZON_FRACTION = 0.5
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
-OPPORTUNITY_DECISION_VERSION = "actionable_entry_v9"
+OPPORTUNITY_DECISION_VERSION = "actionable_entry_v10"
 OPPORTUNITY_API_VERSION = "ai_opportunity.v3"
-MULTI_TIMEFRAME_TECHNICAL_VERSION = "directional_mtf_15m_1h_4h_v1"
+MULTI_TIMEFRAME_TECHNICAL_VERSION = "directional_mtf_15m_1h_4h_v2"
 MULTI_TIMEFRAME_TECHNICAL_WEIGHTS = {"15m": 0.25, "1h": 0.45, "4h": 0.30}
+MARKET_RISK_EVENT_LOOKAHEAD_HOURS = 48
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
 FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS = 15 * 60
@@ -3904,17 +3905,36 @@ def latest_realtime_feature_snapshots(
     return result
 
 
-def active_market_risk_events(
+def _utc_event_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return normalized.astimezone(UTC).isoformat()
+
+
+def market_risk_event_contexts(
     db: Session,
     *,
     now: datetime,
     symbols: Sequence[str],
     blocking_before_minutes: int | None = None,
     blocking_after_minutes: int | None = None,
+    lookahead_hours: int = MARKET_RISK_EVENT_LOOKAHEAD_HOURS,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Return only events whose configured block window contains ``now``."""
+    """Return upcoming event context while marking the much smaller block window.
+
+    Event visibility and entry blocking are intentionally different clocks.  A
+    scheduled release can be useful context hours before it becomes unsafe to
+    open a position.  The previous query discarded that context and therefore
+    rendered almost every frozen signal as ``no nearby event``.
+    """
 
     normalized = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+    normalized_now = now.astimezone(UTC).replace(tzinfo=None) if now.tzinfo else now
+    maximum_after_seconds = max(
+        max(0, int(blocking_after_minutes or 0)) * 60,
+        2 * 60 * 60,
+    )
     rows = db.scalars(
         select(MarketRiskEvent)
         .where(
@@ -3926,8 +3946,10 @@ def active_market_risk_events(
             or_(
                 MarketRiskEvent.status == "active",
                 and_(
-                    MarketRiskEvent.scheduled_at >= now - timedelta(days=7),
-                    MarketRiskEvent.scheduled_at <= now + timedelta(days=7),
+                    MarketRiskEvent.scheduled_at
+                    >= normalized_now - timedelta(seconds=maximum_after_seconds),
+                    MarketRiskEvent.scheduled_at
+                    <= normalized_now + timedelta(hours=max(1, int(lookahead_hours))),
                 ),
             ),
         )
@@ -3948,24 +3970,99 @@ def active_market_risk_events(
         )
         starts_at = anchor - timedelta(seconds=before_seconds)
         ends_at = anchor + timedelta(seconds=after_seconds)
-        active = row.status == "active" or starts_at <= now <= ends_at
-        if not active or row.risk_level not in {"high", "critical"}:
-            continue
+        blocking_active = bool(
+            row.risk_level in {"high", "critical"}
+            and (row.status == "active" or starts_at <= normalized_now <= ends_at)
+        )
+        minutes_until_event = round(
+            (anchor - normalized_now).total_seconds() / 60,
+            2,
+        )
         item = {
             "id": row.public_id,
             "event_type": row.event_type,
             "event_name": row.event_name,
+            "title": row.event_name,
             "symbol": row.symbol,
             "risk_level": row.risk_level,
             "status": row.status,
-            "scheduled_at": row.scheduled_at.isoformat(),
-            "actual_at": row.actual_at.isoformat() if row.actual_at else None,
-            "blocking_starts_at": starts_at.isoformat(),
-            "blocking_ends_at": ends_at.isoformat(),
+            "scheduled_at": _utc_event_iso(row.scheduled_at),
+            "actual_at": _utc_event_iso(row.actual_at),
+            "blocking_starts_at": _utc_event_iso(starts_at),
+            "blocking_ends_at": _utc_event_iso(ends_at),
+            "minutes_until_event": minutes_until_event,
+            "blocking_active": blocking_active,
+            "proximity": (
+                "blocking"
+                if blocking_active
+                else "upcoming"
+                if minutes_until_event >= 0
+                else "recent"
+            ),
             "provider": row.provider,
         }
         result.setdefault((row.symbol or "*").strip().upper(), []).append(item)
     return result
+
+
+def active_market_risk_events(
+    db: Session,
+    *,
+    now: datetime,
+    symbols: Sequence[str],
+    blocking_before_minutes: int | None = None,
+    blocking_after_minutes: int | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Compatibility wrapper returning only high-impact events blocking now."""
+
+    contexts = market_risk_event_contexts(
+        db,
+        now=now,
+        symbols=symbols,
+        blocking_before_minutes=blocking_before_minutes,
+        blocking_after_minutes=blocking_after_minutes,
+    )
+    return {
+        key: [item for item in rows if bool(item.get("blocking_active"))]
+        for key, rows in contexts.items()
+    }
+
+
+def market_risk_event_gate_snapshot(
+    events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Summarize nearby-event visibility without promoting it to a hard gate."""
+
+    normalized = [dict(item) for item in events if isinstance(item, Mapping)]
+    normalized.sort(
+        key=lambda item: (
+            abs(float(item.get("minutes_until_event") or 0.0)),
+            str(item.get("scheduled_at") or ""),
+        )
+    )
+    blocking = [item for item in normalized if bool(item.get("blocking_active"))]
+    nearest = (blocking or normalized or [{}])[0]
+    if blocking:
+        status = "blocked"
+        risk_level = str(nearest.get("risk_level") or "high")
+    elif normalized:
+        status = "warning"
+        risk_level = "warning"
+    else:
+        status = "clear"
+        risk_level = "normal"
+    return {
+        "version": "event_visibility_v2",
+        "status": status,
+        "risk_level": risk_level,
+        "blocking": bool(blocking),
+        "event_count": len(normalized),
+        "blocking_event_count": len(blocking),
+        "nearest_event": nearest or None,
+        "event_name": nearest.get("event_name") if nearest else None,
+        "scheduled_at": nearest.get("scheduled_at") if nearest else None,
+        "minutes_until_event": nearest.get("minutes_until_event") if nearest else None,
+    }
 
 
 def _market_domain(
@@ -6944,6 +7041,7 @@ def historical_opportunity_analytics(
                 "market_environment",
                 "score_snapshot",
                 "risk_events",
+                "event_gate",
                 "max_holding",
                 "unusual_whales_policy",
             )
@@ -7448,16 +7546,26 @@ def historical_opportunity_analytics(
         ).lower()
         risk_events = prediction_evidence.get("risk_events")
         risk_events = list(risk_events) if isinstance(risk_events, list) else []
+        event_gate = dict(prediction_evidence.get("event_gate") or {})
+        event_gate_status = str(event_gate.get("status") or "").lower()
         risk_levels = {
             str(event.get("risk_level") or event.get("severity") or "").lower()
             for event in risk_events
             if isinstance(event, Mapping)
         }
-        if any("EVENT" in reason for reason in blocking_reasons) or risk_levels.intersection(
+        if event_gate_status == "blocked" or any(
+            "EVENT" in reason for reason in blocking_reasons
+        ):
+            outcome_event_risk = "blocked"
+        elif event_gate_status == "warning" or any(
+            "EVENT" in reason for reason in warnings
+        ):
+            outcome_event_risk = "warning"
+        elif not event_gate_status and risk_levels.intersection(
             {"critical", "blocked"}
         ):
             outcome_event_risk = "blocked"
-        elif any("EVENT" in reason for reason in warnings) or risk_levels.intersection(
+        elif not event_gate_status and risk_levels.intersection(
             {"high", "medium", "warning"}
         ):
             outcome_event_risk = "warning"
@@ -8520,11 +8628,9 @@ def multi_timeframe_technical_snapshot(
 ) -> dict[str, Any]:
     """Evaluate one direction across 15m timing, 1h trend and 4h regime.
 
-    The configured indicators remain the strategy definition.  This function
-    changes only how their directional evidence is combined: a 1h setup can
-    qualify by itself, while a 15m timing setup must agree with the 4h regime.
-    Scores are averaged over confirmed frames so an untriggered auxiliary frame
-    does not dilute a valid 1h signal into a false rejection.
+    The 15m frame owns entry timing and the 4h frame owns regime direction.
+    Both must confirm before a new entry is eligible.  The 1h frame improves
+    confidence when aligned, but can no longer create an entry by itself.
     """
 
     normalized_direction = "short" if direction == "short" else "long"
@@ -8572,8 +8678,9 @@ def multi_timeframe_technical_snapshot(
         if score_weight
         else 0.0
     )
-    structure_confirmed = bool(frames["1h"]["passed"] or frames["4h"]["passed"])
-    timing_confirmed = bool(frames["15m"]["passed"] or frames["1h"]["passed"])
+    structure_confirmed = bool(frames["4h"]["passed"])
+    timing_confirmed = bool(frames["15m"]["passed"])
+    trend_confirmed = bool(frames["1h"]["passed"])
     eligible = bool(structure_confirmed and timing_confirmed)
     return {
         "version": MULTI_TIMEFRAME_TECHNICAL_VERSION,
@@ -8582,6 +8689,7 @@ def multi_timeframe_technical_snapshot(
         "eligible": eligible,
         "structure_confirmed": structure_confirmed,
         "timing_confirmed": timing_confirmed,
+        "trend_confirmed": trend_confirmed,
         "confirmed_timeframes": [
             timeframe for timeframe, item in frames.items() if item["passed"]
         ],
@@ -8589,7 +8697,7 @@ def multi_timeframe_technical_snapshot(
             timeframe for timeframe, item in frames.items() if item["available"]
         ],
         "frames": frames,
-        "rule": "1h 可独立确认；否则必须由 15m 入场节奏与 4h 大级别方向共同确认",
+        "rule": "15m 确认入场时机，4h 确认大级别方向；1h 用于趋势加分与冲突校验。",
     }
 
 
@@ -8597,8 +8705,16 @@ def select_directional_candidates_with_technical_context(
     candidates: Sequence[Mapping[str, Any]],
     scans_by_contract: Mapping[str, Mapping[str, Mapping[str, Any]]],
     indicator_keys: Sequence[str],
+    *,
+    market_direction: str = "neutral",
 ) -> list[dict[str, Any]]:
-    """Choose one auditable long/short side per symbol using news and MTF evidence."""
+    """Choose one auditable side after evaluating both technical directions.
+
+    News starts symbol discovery, but it must not permanently lock the trade to
+    the model's headline direction.  A missing opposite-news row is represented
+    as a technical-regime alternative; it may win only when 15m and 4h both
+    confirm that side.  The original news direction remains frozen for audit.
+    """
 
     contexts: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -8622,18 +8738,81 @@ def select_directional_candidates_with_technical_context(
             grouped.setdefault(symbol_key, []).append(candidate)
 
     selected: list[dict[str, Any]] = []
+    normalized_market_direction = str(market_direction or "neutral").lower()
     for symbol_key, alternatives in grouped.items():
-        ranked: list[tuple[tuple[float, float, int], dict[str, Any]]] = []
-        selection_rows: list[dict[str, Any]] = []
+        explicit_by_direction: dict[str, dict[str, Any]] = {}
         for candidate in alternatives:
             direction = "short" if candidate.get("direction") == "short" else "long"
-            technical = context(symbol_key, direction)
-            news_score = float(candidate.get("news_score") or 0.0)
-            ranking_score = (
-                news_score * 0.55
-                + float(technical["technical_score"]) * 0.45
-                + (5.0 if technical["eligible"] else 0.0)
+            current = explicit_by_direction.get(direction)
+            if current is None or float(candidate.get("news_score") or 0.0) > float(
+                current.get("news_score") or 0.0
+            ):
+                explicit_by_direction[direction] = candidate
+        strongest_explicit = max(
+            explicit_by_direction.values(),
+            key=lambda item: float(item.get("news_score") or 0.0),
+        )
+        directional_alternatives: list[dict[str, Any]] = []
+        for direction in ("long", "short"):
+            explicit = explicit_by_direction.get(direction)
+            if explicit is not None:
+                candidate = dict(explicit)
+                candidate["direction_origin"] = "explicit_news"
+                candidate["source_news_direction"] = direction
+                candidate["synthetic_direction"] = False
+            else:
+                candidate = dict(strongest_explicit)
+                candidate["direction"] = direction
+                candidate["direction_origin"] = "technical_regime_override"
+                candidate["source_news_direction"] = str(
+                    strongest_explicit.get("direction") or "long"
+                )
+                candidate["synthetic_direction"] = True
+            directional_alternatives.append(candidate)
+
+        ranked: list[tuple[tuple[float, float, int], dict[str, Any]]] = []
+        selection_rows: list[dict[str, Any]] = []
+        for candidate in directional_alternatives:
+            direction = "short" if candidate.get("direction") == "short" else "long"
+            opposite_direction = "long" if direction == "short" else "short"
+            technical = dict(context(symbol_key, direction))
+            opposite_technical = context(symbol_key, opposite_direction)
+            one_hour_conflict = bool(
+                not dict(technical.get("frames") or {}).get("1h", {}).get("passed")
+                and dict(opposite_technical.get("frames") or {})
+                .get("1h", {})
+                .get("passed")
             )
+            technical["eligible_before_1h_conflict"] = bool(
+                technical.get("eligible")
+            )
+            technical["one_hour_conflict"] = one_hour_conflict
+            technical["eligible"] = bool(
+                technical.get("eligible") and not one_hour_conflict
+            )
+            contexts[(symbol_key, direction)] = technical
+            news_score = float(candidate.get("news_score") or 0.0)
+            explicit_news_direction = not bool(candidate.get("synthetic_direction"))
+            directional_news_score = (
+                news_score if explicit_news_direction else max(0.0, 100.0 - news_score)
+            )
+            macro_bias = (
+                4.0
+                if (direction == "long" and normalized_market_direction == "bull")
+                or (direction == "short" and normalized_market_direction == "bear")
+                else -4.0
+                if (direction == "long" and normalized_market_direction == "bear")
+                or (direction == "short" and normalized_market_direction == "bull")
+                else 0.0
+            )
+            ranking_score = (
+                directional_news_score * 0.40
+                + float(technical["technical_score"]) * 0.55
+                + (5.0 if technical["eligible"] else 0.0)
+                + macro_bias
+            )
+            if not explicit_news_direction and not bool(technical["eligible"]):
+                ranking_score = -1.0
             latest_news = max(
                 (int(item.get("ts") or 0) for item in candidate.get("news") or []),
                 default=0,
@@ -8641,8 +8820,14 @@ def select_directional_candidates_with_technical_context(
             row = {
                 "direction": direction,
                 "news_score": round(news_score, 4),
+                "directional_news_score": round(directional_news_score, 4),
+                "news_direction_explicit": explicit_news_direction,
+                "direction_origin": candidate.get("direction_origin"),
                 "technical_score": technical["technical_score"],
                 "technical_eligible": technical["eligible"],
+                "one_hour_conflict": one_hour_conflict,
+                "confirmed_timeframes": list(technical["confirmed_timeframes"]),
+                "macro_bias": macro_bias,
                 "ranking_score": round(ranking_score, 4),
             }
             selection_rows.append(row)
@@ -8657,13 +8842,21 @@ def select_directional_candidates_with_technical_context(
         winner["direction_selection"] = {
             "version": MULTI_TIMEFRAME_TECHNICAL_VERSION,
             "selected_direction": winner_direction,
+            "direction_origin": winner.get("direction_origin"),
+            "source_news_direction": winner.get("source_news_direction"),
+            "news_direction_aligned": not bool(winner.get("synthetic_direction")),
+            "combined_score_adjustment": (
+                -5.0 if bool(winner.get("synthetic_direction")) else 0.0
+            ),
+            "market_direction": normalized_market_direction,
             "alternatives": sorted(
                 selection_rows,
                 key=lambda item: float(item["ranking_score"]),
                 reverse=True,
             ),
-            "weights": {"news": 0.55, "technical": 0.45},
+            "weights": {"news_direction": 0.40, "technical": 0.55},
             "technical_eligibility_bonus": 5.0,
+            "macro_alignment_bonus": 4.0,
         }
         selected.append(winner)
     return sorted(
@@ -9171,10 +9364,15 @@ def _scan_opportunities(
                     "evaluated_at": 0,
                 }
         technical_scans[contract_symbol] = contract_scans
+    macro_snapshot = macro_market.default_snapshot(repository, now=now)
     candidates = select_directional_candidates_with_technical_context(
         candidates,
         technical_scans,
         indicator_keys,
+        market_direction=str(
+            dict(macro_snapshot.get("sentiment") or {}).get("direction")
+            or "neutral"
+        ),
     )
     run.input_count = len(candidates)
     stored = 0
@@ -9210,7 +9408,6 @@ def _scan_opportunities(
         key.startswith("prediction_") for key in indicator_keys
     )
     market_flow_inputs = _market_flow_input_maps(db, repository)
-    macro_snapshot = macro_market.default_snapshot(repository, now=now)
     realtime_features = latest_realtime_feature_snapshots(
         db,
         [
@@ -9223,7 +9420,7 @@ def _scan_opportunities(
         [str(item.get("symbol") or "") for item in candidates],
         signal_at=now,
     )
-    risk_events_by_symbol = active_market_risk_events(
+    risk_event_contexts_by_symbol = market_risk_event_contexts(
         db,
         now=now,
         symbols=[str(item.get("symbol") or "") for item in candidates],
@@ -9471,6 +9668,15 @@ def _scan_opportunities(
         else:
             base_combined_score = legacy_base_combined_score
             combined_score = legacy_combined_score
+        direction_selection = dict(candidate.get("direction_selection") or {})
+        direction_score_adjustment = float(
+            direction_selection.get("combined_score_adjustment") or 0.0
+        )
+        if direction_score_adjustment:
+            combined_score = round(
+                max(0.0, min(100.0, combined_score + direction_score_adjustment)),
+                4,
+            )
         normalized_realtime_feature = realtime_feature_payload(realtime_feature)
         market_session = str(
             dict(market_environment.get("market_session") or {}).get("key")
@@ -9485,6 +9691,24 @@ def _scan_opportunities(
                 else "quote_age_extended_ms"
             ]
         )
+        nearby_risk_events = [
+            *risk_event_contexts_by_symbol.get("*", []),
+            *risk_event_contexts_by_symbol.get(
+                str(candidate["symbol"]).upper(), []
+            ),
+        ]
+        nearby_risk_events.sort(
+            key=lambda item: (
+                abs(float(item.get("minutes_until_event") or 0.0)),
+                str(item.get("scheduled_at") or ""),
+            )
+        )
+        blocking_risk_events = [
+            item
+            for item in nearby_risk_events
+            if bool(item.get("blocking_active"))
+        ]
+        event_gate = market_risk_event_gate_snapshot(nearby_risk_events)
         market_quality = signal_market_quality(
             scan,
             market,
@@ -9495,14 +9719,7 @@ def _scan_opportunities(
             requires_prediction_features=requires_prediction_features,
             enhanced_feature=realtime_feature,
             risk_events=(
-                [
-                    *risk_events_by_symbol.get("*", []),
-                    *risk_events_by_symbol.get(
-                        str(candidate["symbol"]).upper(), []
-                    ),
-                ]
-                if bool(uw_signal_policy["enabled"])
-                else []
+                blocking_risk_events if bool(uw_signal_policy["enabled"]) else []
             ),
             maximum_quote_age_ms=maximum_quote_age_ms,
             maximum_spread_bps=float(uw_thresholds["spread_hard_max_bps"]),
@@ -9762,6 +9979,9 @@ def _scan_opportunities(
             "market": market,
             "market_flow": market_flow,
             "quote": dict(market_quality.get("quote") or {}),
+            "risk_events": nearby_risk_events,
+            "blocking_risk_events": blocking_risk_events,
+            "event_gate": event_gate,
             "market_session": str(
                 market_quality.get("market_session") or market_session or "unknown"
             ),

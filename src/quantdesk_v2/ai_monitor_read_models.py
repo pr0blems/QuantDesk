@@ -296,6 +296,7 @@ def _projection_inputs(
         "institutional_flow_status": _feature_status(institutional),
         "event_risk": _event_risk(
             _first(
+                event_gate.get("status"),
                 event_gate.get("risk_level"),
                 _mapping(market_environment.get("events")).get("risk_level"),
             )

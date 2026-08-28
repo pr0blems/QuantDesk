@@ -5492,6 +5492,10 @@ class AiMonitorDashboard extends HTMLElement {
       gexRegime: String(this.firstValue(snapshot.gex.regime, snapshot.gex.gamma_regime, "unknown")),
       institutionalScore: score(snapshot.institutional, "score", "confirmation_score"),
       eventRisk,
+      eventName: String(this.firstValue(event.event_name, event.title, item?.event_title, "")),
+      eventMinutesUntil: score(event, "minutes_until_event"),
+      eventBlocking: Boolean(event.blocking_active),
+      eventScheduledAt: this.firstValue(event.scheduled_at, event.actual_at),
       coverage,
       apiVersion: snapshot.apiVersion,
       featureVersion: this.firstValue(snapshot.version.feature, item?.feature_version, item?.feature_set_version, snapshot.dataQuality.version, "--"),
@@ -5532,10 +5536,18 @@ class AiMonitorDashboard extends HTMLElement {
     const gexReason = reasonLabel(feature.availability?.gex?.reason);
     const institutionalReason = reasonLabel(feature.availability?.institutional_flow?.reason);
     const eventTone = ["critical", "blocked", "high"].includes(feature.eventRisk) ? "blocked" : ["medium", "warning"].includes(feature.eventRisk) ? "warning" : ["clear", "normal"].includes(feature.eventRisk) ? "passed" : "missing";
-    const eventLabel = ({ clear: "无临近事件", normal: "无临近事件", medium: "事件预警", warning: "事件预警", high: "高风险事件", critical: "重大事件阻断", blocked: "事件阻断", unknown: "事件数据缺失" })[feature.eventRisk] || feature.eventRisk;
+    const defaultEventLabel = ({ clear: "无临近事件", normal: "无临近事件", medium: "事件预警", warning: "事件预警", high: "高风险事件", critical: "重大事件阻断", blocked: "事件阻断", unknown: "事件数据缺失" })[feature.eventRisk] || feature.eventRisk;
+    const eventLabel = feature.eventName
+      ? `${feature.eventBlocking ? "事件窗口" : "临近事件"}：${feature.eventName}`
+      : defaultEventLabel;
+    const eventTiming = feature.eventMinutesUntil == null
+      ? ""
+      : feature.eventMinutesUntil >= 0
+      ? `距事件 ${feature.eventMinutesUntil < 60 ? `${Math.round(feature.eventMinutesUntil)} 分钟` : `${(feature.eventMinutesUntil / 60).toFixed(1)} 小时`}`
+      : `事件已发生 ${Math.abs(feature.eventMinutesUntil) < 60 ? `${Math.round(Math.abs(feature.eventMinutesUntil))} 分钟` : `${(Math.abs(feature.eventMinutesUntil) / 60).toFixed(1)} 小时`}`;
     return `<td><span class="prediction-context ${feature.quoteQuality}">${this.escape(sessionLabel)} · ${this.escape(quoteLabel)}</span><small>${feature.quoteAgeMs == null ? reasonLabel(feature.availability?.quote?.reason) : `信号时延 ${Math.round(feature.quoteAgeMs)}ms`} · ${feature.spreadBps == null ? "无 NBBO 点差" : `${feature.spreadBps.toFixed(1)} bps`}</small></td>
       <td><span class="prediction-feature-score">期权 ${feature.optionScore == null ? this.escape(optionReason) : feature.optionScore.toFixed(1)}</span><small>GEX ${feature.gexScore == null ? this.escape(gexReason) : feature.gexScore.toFixed(1)} · 机构 ${feature.institutionalScore == null ? this.escape(institutionalReason) : feature.institutionalScore.toFixed(1)}</small></td>
-      <td><span class="prediction-context ${eventTone}">${this.escape(eventLabel)}</span><small>覆盖 ${feature.coverage == null ? "--" : `${feature.coverage.toFixed(0)}%`} · API ${this.escape(feature.apiVersion)}</small><small>F ${this.escape(feature.featureVersion)} / D ${this.escape(feature.decisionVersion)} · 快照 ${this.escape(feature.snapshotId)}</small></td>`;
+      <td><span class="prediction-context ${eventTone}">${this.escape(eventLabel)}</span>${eventTiming ? `<small>${this.escape(eventTiming)}</small>` : ""}<small>覆盖 ${feature.coverage == null ? "--" : `${feature.coverage.toFixed(0)}%`} · API ${this.escape(feature.apiVersion)}</small><small>F ${this.escape(feature.featureVersion)} / D ${this.escape(feature.decisionVersion)} · 快照 ${this.escape(feature.snapshotId)}</small></td>`;
   }
 
   renderMarketAblation(ablation) {

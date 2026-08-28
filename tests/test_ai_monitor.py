@@ -32,6 +32,8 @@ from quantdesk_v2.ai_monitor import (
     indicator_templates,
     market_flow_history_snapshot,
     market_flow_snapshot,
+    market_risk_event_contexts,
+    market_risk_event_gate_snapshot,
     match_configured_indicators,
     merged_opportunity_expiration,
     multi_timeframe_technical_snapshot,
@@ -825,7 +827,7 @@ def test_ai_monitor_keeps_only_the_strongest_direction_per_symbol() -> None:
     ]
 
 
-def test_multi_timeframe_policy_uses_1h_as_primary_or_15m_with_4h() -> None:
+def test_multi_timeframe_policy_requires_15m_timing_and_4h_regime() -> None:
     def scan(*, bullish: bool, bearish: bool, evaluated_at: int) -> dict:
         return {
             "evaluated_at": evaluated_at,
@@ -863,12 +865,135 @@ def test_multi_timeframe_policy_uses_1h_as_primary_or_15m_with_4h() -> None:
         direction="short",
     )
 
-    assert one_hour["eligible"] is True
+    assert one_hour["eligible"] is False
+    assert one_hour["trend_confirmed"] is True
+    assert one_hour["timing_confirmed"] is False
+    assert one_hour["structure_confirmed"] is False
     assert one_hour["confirmed_timeframes"] == ["1h"]
     assert one_hour["technical_score"] == 88
     assert timing_and_regime["eligible"] is True
     assert timing_and_regime["confirmed_timeframes"] == ["15m", "4h"]
     assert timing_and_regime["technical_score"] == 90
+
+
+def test_direction_selection_can_override_single_sided_news_with_confirmed_short_regime() -> None:
+    def scan(*, bearish: bool, evaluated_at: int) -> dict:
+        return {
+            "evaluated_at": evaluated_at,
+            "items": [
+                {
+                    "key": key,
+                    "available": True,
+                    "status": "triggered",
+                    "bullish_triggered": False,
+                    "bearish_triggered": bearish,
+                    "bullish_strength": 20,
+                    "bearish_strength": 94 if bearish else 40,
+                }
+                for key in ("moving_average_bull", "ma_golden_cross")
+            ],
+            "prediction_features": {"items": []},
+        }
+
+    selected = select_directional_candidates_with_technical_context(
+        [
+            {
+                "symbol": "TEST",
+                "contract_symbol": "TESTUSDT",
+                "direction": "long",
+                "news_score": 80,
+                "news": [{"id": "news-1", "ts": 100, "direction": "long"}],
+            }
+        ],
+        {
+            "TESTUSDT": {
+                "15m": scan(bearish=True, evaluated_at=1),
+                "1h": scan(bearish=False, evaluated_at=2),
+                "4h": scan(bearish=True, evaluated_at=3),
+            }
+        },
+        ["moving_average_bull", "ma_golden_cross"],
+        market_direction="bear",
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["direction"] == "short"
+    assert selected[0]["direction_origin"] == "technical_regime_override"
+    assert selected[0]["source_news_direction"] == "long"
+    assert selected[0]["news"][0]["direction"] == "long"
+    assert selected[0]["multi_timeframe_technical"]["confirmed_timeframes"] == [
+        "15m",
+        "4h",
+    ]
+    assert selected[0]["direction_selection"]["combined_score_adjustment"] == -5.0
+
+
+def test_upcoming_event_warns_without_becoming_an_active_block() -> None:
+    warning = market_risk_event_gate_snapshot(
+        [
+            {
+                "event_name": "FOMC 利率决议",
+                "risk_level": "critical",
+                "minutes_until_event": 360,
+                "blocking_active": False,
+            }
+        ]
+    )
+    blocked = market_risk_event_gate_snapshot(
+        [
+            {
+                "event_name": "非农就业报告",
+                "risk_level": "critical",
+                "minutes_until_event": 15,
+                "blocking_active": True,
+            }
+        ]
+    )
+
+    assert warning["status"] == "warning"
+    assert warning["risk_level"] == "warning"
+    assert warning["blocking"] is False
+    assert warning["event_name"] == "FOMC 利率决议"
+    assert blocked["status"] == "blocked"
+    assert blocked["blocking"] is True
+
+
+def test_event_context_keeps_upcoming_release_visible_with_utc_timestamp() -> None:
+    now = datetime(2026, 8, 28, 12, 0, 0)
+    row = SimpleNamespace(
+        public_id="event-1",
+        event_type="report",
+        event_name="消费者信心指数",
+        symbol=None,
+        risk_level="medium",
+        status="scheduled",
+        scheduled_at=now + timedelta(hours=6),
+        actual_at=None,
+        blocking_before_seconds=1800,
+        blocking_after_seconds=900,
+        provider="calendar",
+    )
+
+    class ScalarRows:
+        def all(self):
+            return [row]
+
+    class Database:
+        def scalars(self, _statement):
+            return ScalarRows()
+
+    contexts = market_risk_event_contexts(
+        Database(),
+        now=now,
+        symbols=["AAPL"],
+    )
+
+    assert len(contexts["*"]) == 1
+    event = contexts["*"][0]
+    assert event["scheduled_at"].endswith("+00:00")
+    assert event["minutes_until_event"] == 360
+    assert event["blocking_active"] is False
+    assert event["proximity"] == "upcoming"
 
 
 def test_direction_selection_can_choose_bearish_side_when_technical_structure_is_short() -> None:
@@ -4122,6 +4247,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "market_session: filters.marketSession" in component
     assert "quote_quality: filters.quoteQuality" in component
     assert "event_risk: filters.eventRisk" in component
+    assert "距事件" in component
+    assert "临近事件" in component
+    assert 'score(event, "minutes_until_event")' in component
     assert "exit_reason: filters.exitReason" in component
     assert "item?.lifecycle_status" in component
     assert "item?.gate_summary" in component
