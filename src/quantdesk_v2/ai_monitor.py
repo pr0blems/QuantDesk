@@ -10358,7 +10358,7 @@ def _scan_opportunities(
         "multi_timeframe_policy": {
             "version": MULTI_TIMEFRAME_TECHNICAL_VERSION,
             "weights": dict(MULTI_TIMEFRAME_TECHNICAL_WEIGHTS),
-            "rule": "1h 可独立确认；否则必须由 15m 与 4h 共同确认",
+            "rule": "15m 入场时机与 4h 趋势方向必须共同确认；1h 仅用于增强或冲突校验",
         },
         "minimum_indicator_score": minimum_indicator_score,
         "minimum_combined_score": minimum_combined_score,
