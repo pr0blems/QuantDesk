@@ -1352,6 +1352,7 @@ def virtual_entry_gate_snapshot(
     checked_at: datetime | str,
     has_new_trigger_news: bool = True,
     require_new_trigger_news: bool = False,
+    event_cluster_selected: bool = True,
     market_quality_passed: bool = True,
     require_market_quality: bool = False,
     macro_entry_allowed: bool = True,
@@ -1379,6 +1380,14 @@ def virtual_entry_gate_snapshot(
             if require_new_trigger_news
             else []
         ),
+        {
+            "key": "event_cluster_selected",
+            "label": "独立事件",
+            "passed": bool(event_cluster_selected),
+            "current": bool(event_cluster_selected),
+            "required": True,
+            "detail": "同一新闻事件与方向只允许最强候选生成一条预测",
+        },
         {
             "key": "news_candidate",
             "label": "新闻候选",
@@ -1535,6 +1544,10 @@ def prediction_entry_gate_snapshot(
     )
     macro_policy = market_environment.get("entry_policy")
     macro_policy = dict(macro_policy) if isinstance(macro_policy, Mapping) else {}
+    news_trigger = evidence.get("news_trigger")
+    news_trigger = dict(news_trigger) if isinstance(news_trigger, Mapping) else {}
+    event_cluster = news_trigger.get("event_cluster")
+    event_cluster = dict(event_cluster) if isinstance(event_cluster, Mapping) else {}
     news_score = float(
         prediction.signal_news_score
         if prediction.signal_news_score is not None
@@ -1562,11 +1575,12 @@ def prediction_entry_gate_snapshot(
         entry_price=float(prediction.entry_price or 0),
         checked_at=prediction.predicted_at,
         has_new_trigger_news=bool(
-            (evidence.get("news_trigger") or {}).get("has_new_news", True)
+            news_trigger.get("has_new_news", True)
         ),
         require_new_trigger_news=bool(
-            (evidence.get("news_trigger") or {}).get("required", False)
+            news_trigger.get("required", False)
         ),
+        event_cluster_selected=bool(event_cluster.get("selected", True)),
         market_quality_passed=bool((evidence.get("market_quality") or {}).get("passed", True)),
         require_market_quality=bool(evidence.get("require_market_quality_for_prediction", False)),
         macro_entry_allowed=bool(macro_policy.get("entry_allowed", True)),
@@ -5458,6 +5472,45 @@ def historical_closed_settlement_price(
     }
 
 
+def news_event_cluster_id(
+    news_ids: Sequence[Any] | None,
+    *,
+    fallback: Any,
+    direction: str = "",
+) -> str:
+    """Build a stable research-sample key from frozen trigger-news identities."""
+
+    normalized = sorted({str(item).strip() for item in (news_ids or []) if str(item).strip()})
+    if not normalized:
+        return f"prediction:{str(fallback)}"
+    seed = "\0".join(normalized)
+    if str(direction).strip():
+        seed = f"{str(direction).strip().lower()}\0{seed}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def resolved_news_event_cluster_id(
+    stored_cluster_id: Any,
+    news_ids: Sequence[Any] | None,
+    *,
+    fallback: Any,
+    direction: str = "",
+) -> str:
+    """Prefer the immutable signal-time cluster id, with legacy-news fallback."""
+
+    value = stored_cluster_id
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded = value
+        value = decoded if isinstance(decoded, (str, int)) else value
+    normalized = str(value or "").strip().strip('"')
+    if normalized:
+        return normalized
+    return news_event_cluster_id(news_ids, fallback=fallback, direction=direction)
+
+
 def summarize_historical_opportunities(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Aggregate observed outcomes for the historical-opportunity dashboard."""
 
@@ -5506,6 +5559,23 @@ def summarize_historical_opportunities(items: Sequence[Mapping[str, Any]]) -> di
         for item in settled
         if item.get("max_adverse_bps") is not None
     ]
+    event_clusters: dict[str, list[Mapping[str, Any]]] = {}
+    for index, item in enumerate(settled):
+        cluster_id = str(
+            item.get("event_cluster_id")
+            or f"prediction:{item.get('prediction_id') or item.get('id') or index}"
+        )
+        event_clusters.setdefault(cluster_id, []).append(item)
+    event_returns = [
+        sum(float(item["directional_return_bps"]) for item in cluster)
+        / len(cluster)
+        for cluster in event_clusters.values()
+        if cluster and all(item.get("directional_return_bps") is not None for item in cluster)
+    ]
+    event_wins = sum(value > 0 for value in event_returns)
+    event_losses = sum(value < 0 for value in event_returns)
+    event_flats = sum(abs(value) < 0.000001 for value in event_returns)
+    event_decisive = event_wins + event_losses
     total = len(items)
     return {
         "historical_count": total,
@@ -5517,6 +5587,20 @@ def summarize_historical_opportunities(items: Sequence[Mapping[str, Any]]) -> di
         "decisive_count": decisive_count,
         "hit_rate": round(win_count / decisive_count * 100, 2) if decisive_count else None,
         "coverage_rate": round(len(settled) / total * 100, 2) if total else 0.0,
+        "independent_event_count": len(event_clusters),
+        "correlated_prediction_count": max(0, len(settled) - len(event_clusters)),
+        "event_adjusted_win_count": event_wins,
+        "event_adjusted_loss_count": event_losses,
+        "event_adjusted_flat_count": event_flats,
+        "event_adjusted_hit_rate": (
+            round(event_wins / event_decisive * 100, 2) if event_decisive else None
+        ),
+        "event_adjusted_average_return_bps": (
+            round(sum(event_returns) / len(event_returns), 4)
+            if event_returns
+            else None
+        ),
+        "event_cluster_method": "signal_time_news_direction_cluster_v1",
         "average_directional_return_bps": round(sum(returns) / len(returns), 4)
         if returns
         else None,
@@ -5573,6 +5657,12 @@ def _compact_historical_outcome(
         float(cost_breakdown["total_cost_bps"]),
     )
     return {
+        "event_cluster_id": resolved_news_event_cluster_id(
+            row.get("event_cluster_id"),
+            row.get("news_ids_json"),
+            fallback=row.get("prediction_id"),
+            direction=str(row.get("direction") or ""),
+        ),
         "direction": row["direction"],
         "technical_confirmed": True,
         "result": str(net_outcome["net_result"]),
@@ -6741,6 +6831,17 @@ def normalized_settlement_version(value: str) -> str:
     return str(value).strip()[:32]
 
 
+def normalized_decision_version(value: str) -> str:
+    """Resolve the analytics decision scope without mixing strategy generations."""
+
+    normalized = str(value or "current").strip().lower()
+    if normalized in {"", "current"}:
+        return OPPORTUNITY_DECISION_VERSION
+    if normalized == "all":
+        return "all"
+    return str(value).strip()[:32]
+
+
 def prediction_settlement_version_catalog(
     db: Session,
     user_id: int,
@@ -6808,6 +6909,7 @@ def historical_opportunity_fact_analytics(
     local_date_offset = timedelta(minutes=timezone_offset_minutes)
     normalized_symbol = str(symbol or "").strip().upper()
     selected_settlement_version = normalized_settlement_version(settlement_version)
+    selected_decision_version = normalized_decision_version(decision_version)
     conditions = [
         AiMonitorPredictionFact.user_id == user_id,
         AiMonitorPredictionFact.news_score >= Decimal(str(news_score_min)),
@@ -6848,8 +6950,10 @@ def historical_opportunity_fact_analytics(
         )
     if feature_version:
         conditions.append(AiMonitorPredictionFact.feature_version == feature_version)
-    if decision_version:
-        conditions.append(AiMonitorPredictionFact.decision_version == decision_version)
+    if selected_decision_version != "all":
+        conditions.append(
+            AiMonitorPredictionFact.decision_version == selected_decision_version
+        )
     if market_session != "all":
         conditions.append(AiMonitorPredictionFact.market_session == market_session)
     if quote_quality != "all":
@@ -6885,6 +6989,41 @@ def historical_opportunity_fact_analytics(
         ).all()
     )
     outcomes = [_prediction_fact_outcome(fact, current_config) for fact in facts]
+    direction_by_prediction = {
+        int(fact.prediction_id): str(fact.direction or "") for fact in facts
+    }
+    event_cluster_by_prediction = {
+        int(prediction_id): resolved_news_event_cluster_id(
+            stored_cluster_id,
+            news_ids,
+            fallback=prediction_id,
+            direction=direction_by_prediction.get(int(prediction_id), ""),
+        )
+        for prediction_id, stored_cluster_id, news_ids in db.execute(
+            select(
+                AiMonitorPrediction.id,
+                func.json_extract(
+                    AiMonitorPrediction.evidence_json,
+                    "$.news_trigger.event_cluster.cluster_id",
+                ),
+                AiMonitorOpportunity.news_ids_json,
+            )
+            .join(
+                AiMonitorOpportunity,
+                AiMonitorOpportunity.id == AiMonitorPrediction.opportunity_id,
+            )
+            .where(
+                AiMonitorPrediction.id.in_(
+                    [int(fact.prediction_id) for fact in facts]
+                )
+            )
+        ).all()
+    }
+    for fact, outcome in zip(facts, outcomes, strict=True):
+        outcome["event_cluster_id"] = event_cluster_by_prediction.get(
+            int(fact.prediction_id),
+            f"prediction:{fact.prediction_id}",
+        )
     summary = summarize_historical_opportunities(outcomes)
     exit_reason_counts: dict[str, int] = {}
     for outcome in outcomes:
@@ -7022,7 +7161,7 @@ def historical_opportunity_fact_analytics(
             "gex_score_min": float(gex_score_min),
             "min_data_coverage": float(min_data_coverage),
             "feature_version": feature_version,
-            "decision_version": decision_version,
+            "decision_version": selected_decision_version,
             "settlement_version": selected_settlement_version,
             "direction": direction,
             "market_session": market_session,
@@ -7074,6 +7213,7 @@ def historical_opportunity_analytics(
     conservative_cost_config = readiness_cost_config(current_config)
     active_cost_settings = prediction_cost_settings(conservative_cost_config)
     selected_settlement_version = normalized_settlement_version(settlement_version)
+    selected_decision_version = normalized_decision_version(decision_version)
     news_score_expression = func.coalesce(
         AiMonitorPrediction.signal_news_score,
         AiMonitorOpportunity.news_score,
@@ -7116,7 +7256,7 @@ def historical_opportunity_analytics(
         or gex_score_min > 0
         or min_data_coverage > 0
         or feature_version
-        or decision_version
+        or selected_decision_version != "all"
         or market_session != "all"
         or quote_quality != "all"
         or event_risk != "all"
@@ -7149,6 +7289,11 @@ def historical_opportunity_analytics(
                 AiMonitorPrediction.exit_subreason,
                 AiMonitorPrediction.peak_favorable_bps_at_exit,
                 AiMonitorPrediction.protected_bps_at_exit,
+                func.json_extract(
+                    AiMonitorPrediction.evidence_json,
+                    "$.news_trigger.event_cluster.cluster_id",
+                ).label("event_cluster_id"),
+                AiMonitorOpportunity.news_ids_json,
             )
             .join(
                 AiMonitorOpportunity,
@@ -7245,6 +7390,9 @@ def historical_opportunity_analytics(
                     AiMonitorOpportunity.news_score.label("opportunity_news_score"),
                     AiMonitorOpportunity.indicator_score.label(
                         "opportunity_indicator_score"
+                    ),
+                    AiMonitorOpportunity.news_ids_json.label(
+                        "opportunity_news_ids_json"
                     ),
                     OpportunityMarketSnapshot.id.label("snapshot_id"),
                     OpportunityMarketSnapshot.market_feature_snapshot_id.label(
@@ -7367,6 +7515,7 @@ def historical_opportunity_analytics(
                     public_id=row["opportunity_public_id"],
                     news_score=row["opportunity_news_score"],
                     indicator_score=row["opportunity_indicator_score"],
+                    news_ids_json=row["opportunity_news_ids_json"],
                 )
                 market_snapshot = (
                     SimpleNamespace(
@@ -7512,6 +7661,18 @@ def historical_opportunity_analytics(
             if isinstance(settlement_evidence, Mapping)
             else {}
         )
+        news_trigger_evidence = prediction_evidence.get("news_trigger")
+        news_trigger_evidence = (
+            dict(news_trigger_evidence)
+            if isinstance(news_trigger_evidence, Mapping)
+            else {}
+        )
+        event_cluster_evidence = news_trigger_evidence.get("event_cluster")
+        event_cluster_evidence = (
+            dict(event_cluster_evidence)
+            if isinstance(event_cluster_evidence, Mapping)
+            else {}
+        )
         gross_return = float(prediction.directional_return_bps or 0)
         actual_exit_at = prediction.exit_at or prediction.due_at
         cost_breakdown = prediction_cost_breakdown(
@@ -7526,6 +7687,12 @@ def historical_opportunity_analytics(
         outcome = {
             "id": opportunity.public_id,
             "prediction_id": prediction.public_id,
+            "event_cluster_id": resolved_news_event_cluster_id(
+                event_cluster_evidence.get("cluster_id"),
+                opportunity.news_ids_json,
+                fallback=prediction.public_id,
+                direction=prediction.direction,
+            ),
             "symbol": prediction.symbol,
             "contract_symbol": prediction.contract_symbol,
             "direction": prediction.direction,
@@ -7883,7 +8050,11 @@ def historical_opportunity_analytics(
         outcome_version = dict(outcome.get("version") or {})
         if feature_version and str(outcome_version.get("feature") or "") != feature_version:
             continue
-        if decision_version and str(outcome_version.get("decision") or "") != decision_version:
+        if (
+            selected_decision_version != "all"
+            and str(outcome_version.get("decision") or "")
+            != selected_decision_version
+        ):
             continue
         if market_session != "all" and outcome_market_session != market_session:
             continue
@@ -7958,9 +8129,9 @@ def historical_opportunity_analytics(
         gate_rejection_conditions.append(
             OpportunityGateDecision.feature_version == feature_version
         )
-    if decision_version:
+    if selected_decision_version != "all":
         gate_rejection_conditions.append(
-            OpportunityGateDecision.decision_version == decision_version
+            OpportunityGateDecision.decision_version == selected_decision_version
         )
     if include_ablation:
         observed_gate_rejection_count = int(
@@ -8039,7 +8210,7 @@ def historical_opportunity_analytics(
             "gex_score_min": float(gex_score_min),
             "min_data_coverage": float(min_data_coverage),
             "feature_version": feature_version,
-            "decision_version": decision_version,
+            "decision_version": selected_decision_version,
             "settlement_version": selected_settlement_version,
             "direction": direction,
             "market_session": market_session,
@@ -8745,7 +8916,9 @@ def annotate_event_cluster_selection(
         if selected:
             for news_id in news_ids:
                 claimed[(direction, news_id)] = symbol
-        cluster_seed = ",".join(news_ids) or f"{direction}:{symbol}:no-new-event"
+        cluster_seed = f"{direction}|{','.join(news_ids)}"
+        if not news_ids:
+            cluster_seed = f"{direction}:{symbol}:no-new-event"
         trigger["event_cluster"] = {
             "version": "shared_news_event_v1",
             "cluster_id": hashlib.sha256(cluster_seed.encode("utf-8")).hexdigest()[:16],
@@ -8756,6 +8929,23 @@ def annotate_event_cluster_selection(
         }
         candidate["news_trigger"] = trigger
     return list(candidates)
+
+
+def fresh_candidate_news_ids(
+    candidate_news_ids: Sequence[str] | set[str],
+    *,
+    direction: str,
+    consumed_by_direction: Mapping[str, set[str]],
+) -> list[str]:
+    """Return trigger news not already consumed by another correlated symbol."""
+
+    normalized = {str(item).strip() for item in candidate_news_ids if str(item).strip()}
+    consumed = {
+        str(item).strip()
+        for item in consumed_by_direction.get(str(direction), set())
+        if str(item).strip()
+    }
+    return sorted(normalized - consumed)
 
 
 def strongest_candidate_per_symbol(
@@ -9423,7 +9613,11 @@ def _scan_opportunities(
     unmapped_candidates = [item for item in all_candidates if not item.get("contract_symbol")]
     monitor_symbols = list(config.get("monitor_symbols") or [])
     candidates = filter_monitored_candidates(all_candidates, monitor_symbols)
-    consumed_news_ids: dict[tuple[str, str], set[str]] = {}
+    # A news event is consumed once per user and direction, not once per symbol.
+    # The event-cluster gate chooses the strongest related symbol in the first
+    # scan.  Keeping consumption symbol-scoped allowed the next scan to reuse
+    # the same story for another correlated stock and inflated hit-rate samples.
+    consumed_news_ids_by_direction: dict[str, set[str]] = {}
     consumed_rows = db.execute(
         select(
             AiMonitorOpportunity.symbol,
@@ -9440,8 +9634,8 @@ def _scan_opportunities(
             >= now - timedelta(hours=int(config["news_lookback_hours"])),
         )
     ).all()
-    for symbol, direction, row_news_ids in consumed_rows:
-        consumed_news_ids.setdefault((str(symbol), str(direction)), set()).update(
+    for _symbol, direction, row_news_ids in consumed_rows:
+        consumed_news_ids_by_direction.setdefault(str(direction), set()).update(
             str(news_id) for news_id in (row_news_ids or []) if str(news_id)
         )
     active_candidate_keys = {
@@ -9462,7 +9656,11 @@ def _scan_opportunities(
             str(item.get("id") or "") for item in candidate.get("news", [])
         } - {""}
         key = (str(candidate["symbol"]), str(candidate["direction"]))
-        new_news_ids = sorted(candidate_news_ids - consumed_news_ids.get(key, set()))
+        new_news_ids = fresh_candidate_news_ids(
+            candidate_news_ids,
+            direction=str(candidate["direction"]),
+            consumed_by_direction=consumed_news_ids_by_direction,
+        )
         actionability_by_id = {
             str(item.get("id") or ""): news_actionability_snapshot(item)
             for item in candidate.get("news", [])
@@ -10007,6 +10205,9 @@ def _scan_opportunities(
                 or existing_prediction is not None
             ),
             require_new_trigger_news=require_new_news,
+            event_cluster_selected=bool(
+                dict(news_trigger.get("event_cluster") or {}).get("selected", True)
+            ),
             market_quality_passed=decision_market_quality_passed,
             require_market_quality=require_market_quality,
             macro_entry_allowed=macro_entry_allowed,

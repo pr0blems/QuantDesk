@@ -26,6 +26,7 @@ from quantdesk_v2.ai_monitor import (
     effective_opportunity_score_weights,
     enqueue_news_analysis,
     filter_monitored_candidates,
+    fresh_candidate_news_ids,
     historical_closed_settlement_price,
     historical_settlement_price,
     indicator_catalog,
@@ -39,6 +40,8 @@ from quantdesk_v2.ai_monitor import (
     merged_opportunity_expiration,
     multi_timeframe_technical_snapshot,
     news_actionability_snapshot,
+    news_event_cluster_id,
+    normalized_decision_version,
     opportunity_score_weights,
     prediction_actionability_gate_summary,
     prediction_adaptive_path_exit,
@@ -55,6 +58,7 @@ from quantdesk_v2.ai_monitor import (
     prediction_soft_exit_policy,
     refresh_pending_prediction_scores,
     reopen_legacy_prediction_settlements,
+    resolved_news_event_cluster_id,
     select_directional_candidates_with_technical_context,
     settle_due_predictions,
     settleable_historical_outcomes,
@@ -1739,6 +1743,32 @@ def test_virtual_entry_gate_requires_every_signal_condition_and_a_real_price() -
     }
 
 
+def test_virtual_entry_gate_blocks_a_correlated_news_event_loser() -> None:
+    blocked = virtual_entry_gate_snapshot(
+        direction="long",
+        news_score=82,
+        news_mention_count=1,
+        minimum_news_score=60,
+        minimum_news_mentions=1,
+        indicator_policy_passed=True,
+        indicator_score=88,
+        minimum_indicator_score=65,
+        combined_score=84,
+        minimum_combined_score=70,
+        market_flow_hard_conflict=False,
+        entry_price=100,
+        checked_at="2026-08-28T15:00:00+00:00",
+        event_cluster_selected=False,
+    )
+
+    event_check = next(
+        item for item in blocked["checks"] if item["key"] == "event_cluster_selected"
+    )
+    assert event_check["passed"] is False
+    assert blocked["signal_confirmed"] is False
+    assert blocked["entry_ready"] is False
+
+
 def test_virtual_entry_gate_allows_neutral_order_book_for_research() -> None:
     neutral = virtual_entry_gate_snapshot(
         direction="long",
@@ -1984,6 +2014,21 @@ def test_shared_news_event_only_selects_the_strongest_symbol() -> None:
 
     assert selected == {"MSFT": False, "META": True, "AMZN": True}
     assert candidates[0]["news_trigger"]["event_cluster"]["selected_symbol"] == "META"
+
+
+def test_consumed_news_is_global_per_direction_not_per_symbol() -> None:
+    consumed = {"long": {"cloud-capex"}, "short": set()}
+
+    assert fresh_candidate_news_ids(
+        {"cloud-capex", "new-guidance"},
+        direction="long",
+        consumed_by_direction=consumed,
+    ) == ["new-guidance"]
+    assert fresh_candidate_news_ids(
+        {"cloud-capex"},
+        direction="short",
+        consumed_by_direction=consumed,
+    ) == ["cloud-capex"]
 
 
 def test_configured_indicators_match_the_requested_short_direction() -> None:
@@ -2962,6 +3007,65 @@ def test_historical_opportunity_analytics_uses_expiry_price_and_summarizes_hits(
     assert summary["short_count"] == 2
 
 
+def test_historical_summary_reports_independent_news_event_metrics() -> None:
+    shared_cluster = news_event_cluster_id(["same-news"], fallback="unused")
+    other_cluster = news_event_cluster_id(["other-news"], fallback="unused")
+    summary = summarize_historical_opportunities(
+        [
+            {
+                "prediction_id": "one",
+                "event_cluster_id": shared_cluster,
+                "result": "win",
+                "direction": "long",
+                "directional_return_bps": 40,
+            },
+            {
+                "prediction_id": "two",
+                "event_cluster_id": shared_cluster,
+                "result": "loss",
+                "direction": "long",
+                "directional_return_bps": -20,
+            },
+            {
+                "prediction_id": "three",
+                "event_cluster_id": other_cluster,
+                "result": "loss",
+                "direction": "short",
+                "directional_return_bps": -30,
+            },
+        ]
+    )
+
+    assert summary["settled_count"] == 3
+    assert summary["independent_event_count"] == 2
+    assert summary["correlated_prediction_count"] == 1
+    assert summary["event_adjusted_win_count"] == 1
+    assert summary["event_adjusted_loss_count"] == 1
+    assert summary["event_adjusted_hit_rate"] == 50.0
+    assert summary["event_adjusted_average_return_bps"] == -10.0
+
+
+def test_event_metrics_prefer_the_frozen_signal_cluster_id() -> None:
+    assert (
+        resolved_news_event_cluster_id(
+            '"frozen-cluster"',
+            ["later", "mutable", "news"],
+            fallback=1,
+        )
+        == "frozen-cluster"
+    )
+    assert news_event_cluster_id(
+        ["same-news"], fallback=1, direction="long"
+    ) != news_event_cluster_id(["same-news"], fallback=2, direction="short")
+
+
+def test_analytics_defaults_to_the_current_decision_generation() -> None:
+    assert normalized_decision_version("") == "actionable_entry_v10"
+    assert normalized_decision_version("current") == "actionable_entry_v10"
+    assert normalized_decision_version("all") == "all"
+    assert normalized_decision_version("actionable_entry_v9") == "actionable_entry_v9"
+
+
 def test_historical_statistics_exclude_insufficient_expiry_market_data() -> None:
     outcomes = settleable_historical_outcomes(
         [
@@ -3928,7 +4032,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260828-opportunity-footer1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260828-event-samples1"' in entrypoint
     assert '"/assets/monitor.js?v=20260826-research-ws1"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
@@ -3938,8 +4042,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260828-opportunity-footer1"' in legacy_index
-    assert 'href="/assets/ai-monitor.css?v=20260828-opportunity-footer1"' in component
+    assert 'src="/assets/ai-monitor.js?v=20260828-event-samples1"' in legacy_index
+    assert 'href="/assets/ai-monitor.css?v=20260828-event-samples1"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
     assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
@@ -4328,6 +4432,8 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert "flow.score ?? 50" not in component
     assert ".virtual-entry-check.missing" in stylesheet
     assert "筛选样本" in component
+    assert "独立新闻事件" in component
+    assert "按独立事件" in component
     assert "多 / 空方向" in component
     assert 'this.api("/prediction-records?limit=200")' not in component
     for label in ("历史机会", "筛选样本", "命中次数", "命中概率", "x 仓位ROE"):

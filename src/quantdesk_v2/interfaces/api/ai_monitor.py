@@ -4521,7 +4521,7 @@ def opportunity_analytics(
     gex_score_min: float = Query(default=0, ge=0, le=100),
     min_data_coverage: float = Query(default=0, ge=0, le=100),
     feature_version: str = Query(default="", max_length=32),
-    decision_version: str = Query(default="", max_length=32),
+    decision_version: str = Query(default="current", max_length=32),
     settlement_version: str = Query(default="current", max_length=32),
     direction: Literal["all", "long", "short"] = Query(default="all"),
     market_session: Literal[

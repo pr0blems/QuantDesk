@@ -47,7 +47,7 @@ class AiMonitorDashboard extends HTMLElement {
         gexScoreMin: 0,
         dataCoverageMin: 0,
         featureVersion: "",
-        decisionVersion: "",
+        decisionVersion: "current",
         settlementVersion: "current",
         direction: "all",
         marketSession: "all",
@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260828-opportunity-footer1">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260828-event-samples1">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -363,7 +363,7 @@ class AiMonitorDashboard extends HTMLElement {
                     <label><span>GEX 评分不低于</span><div><input id="prediction-gex-score-min" type="number" min="0" max="100" step="1" value="0"><em>分</em></div></label>
                     <label><span>数据覆盖率不低于</span><div><input id="prediction-data-coverage-min" type="number" min="0" max="100" step="1" value="0"><em>%</em></div></label>
                     <label><span>特征版本</span><input id="prediction-feature-version" type="search" maxlength="32" autocomplete="off" placeholder="全部版本"></label>
-                    <label><span>决策版本</span><input id="prediction-decision-version" type="search" maxlength="32" autocomplete="off" placeholder="全部版本"></label>
+                    <label><span>决策版本</span><input id="prediction-decision-version" type="search" maxlength="32" autocomplete="off" placeholder="当前版本；输入 all 查看全部"></label>
                     <label><span>结算策略版本</span><select id="prediction-settlement-version"><option value="current">当前版本</option><option value="all">全部版本</option></select></label>
                     <label><span>方向筛选</span><select id="prediction-direction"><option value="all">全部方向</option><option value="long">只看做多</option><option value="short">只看做空</option></select></label>
                     <label><span>交易时段</span><select id="prediction-market-session"><option value="all">全部时段</option><option value="premarket">盘前</option><option value="regular">盘中</option><option value="postmarket">盘后</option><option value="closed">休市</option></select></label>
@@ -5151,7 +5151,7 @@ class AiMonitorDashboard extends HTMLElement {
       gexScoreMin: clampScore(params.get("gex_score_min")),
       dataCoverageMin: clampScore(params.get("min_data_coverage")),
       featureVersion: cleanVersion(params.get("feature_version")),
-      decisionVersion: cleanVersion(params.get("decision_version")),
+      decisionVersion: cleanVersion(params.get("decision_version")) || "current",
       settlementVersion: cleanVersion(params.get("settlement_version")) || "current",
       direction: oneOf(params.get("direction"), ["long", "short"]),
       marketSession: oneOf(params.get("market_session"), ["premarket", "regular", "postmarket", "closed"]),
@@ -5249,7 +5249,7 @@ class AiMonitorDashboard extends HTMLElement {
       gex_score_min: filters.gexScoreMin || "",
       min_data_coverage: filters.dataCoverageMin || "",
       feature_version: filters.featureVersion,
-      decision_version: filters.decisionVersion,
+      decision_version: filters.decisionVersion === "current" ? "" : filters.decisionVersion,
       settlement_version: filters.settlementVersion === "current" ? "" : filters.settlementVersion,
       direction: filters.direction === "all" ? "" : filters.direction,
       market_session: filters.marketSession === "all" ? "" : filters.marketSession,
@@ -5418,7 +5418,7 @@ class AiMonitorDashboard extends HTMLElement {
       gexScoreMin: 0,
       dataCoverageMin: 0,
       featureVersion: "",
-      decisionVersion: "",
+      decisionVersion: "current",
       settlementVersion: "current",
       direction: "all",
       marketSession: "all",
@@ -5736,10 +5736,10 @@ class AiMonitorDashboard extends HTMLElement {
     this.renderMarketAblation(data.ablation);
     this.q("#prediction-note").textContent = `${data.note || "按历史预测的成本后结果统计，不执行任何下单。"} 页面展示 ${this.state.displayLeverage}x 仓位保证金 ROE，并保留标的原始收益；仓位 ROE 不代表账户总收益。`;
     this.q("#analytics-summary").innerHTML = `
-      <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>当前策略 ${this.escape(summary.settlement_policy_version || "--")} · 等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)}</small></article>
+      <article><span>筛选样本</span><strong>${this.number(summary.historical_count)}</strong><small>独立新闻事件 ${this.number(summary.independent_event_count)} · 相关重复 ${this.number(summary.correlated_prediction_count)}</small><small>当前策略 ${this.escape(summary.settlement_policy_version || "--")} · 等待 ${this.number(summary.pending_count)} · 已剔除行情不足 ${this.number(summary.discarded_unavailable_count)}</small></article>
       <article><span>多 / 空方向</span><strong class="analytics-directions"><b>${this.number(summary.long_count)}</b><i>/</i><em>${this.number(summary.short_count)}</em></strong><small>做多 / 做空样本分布</small></article>
       <article class="positive"><span>命中次数</span><strong>${this.number(summary.win_count)}</strong><small>未命中 ${this.number(summary.loss_count)} · 持平 ${this.number(summary.flat_count)}</small></article>
-      <article class="${Number(summary.hit_rate || 0) >= 50 ? "positive" : "negative"}"><span>命中概率</span><strong>${hitRate}</strong><small>命中 ÷ 有方向结果</small></article>
+      <article class="${Number(summary.hit_rate || 0) >= 50 ? "positive" : "negative"}"><span>命中概率</span><strong>${hitRate}</strong><small>逐笔口径 · 按独立事件 ${summary.event_adjusted_hit_rate == null ? "--" : `${Number(summary.event_adjusted_hit_rate).toFixed(1)}%`}</small></article>
       <article class="${Number(summary.average_directional_return_bps || 0) >= 0 ? "positive" : "negative"}"><span>平均虚拟持仓 ${this.state.displayLeverage}x 成本后 ROE</span><strong>${this.formatLeveragedReturnFromBps(summary.average_directional_return_bps)}</strong><small>标的净 ${metricBps(summary.average_directional_return_bps)} · 毛 ${metricBps(summary.average_gross_return_bps)}</small><small>${this.state.displayLeverage}x 成本 ${this.formatLeveragedReturnFromBps(-Math.abs(Number(summary.average_estimated_cost_bps || 0)))} · 模拟值，非账户实际收益</small></article>
       <article><span>平均 MFE / MAE</span><strong class="analytics-range"><b>${metricBps(summary.average_max_favorable_bps)}</b><i>${metricBps(summary.average_max_adverse_bps)}</i></strong><small>持有期最大有利 / 不利波动</small></article>
       <article><span>影子候选 / 研究</span><strong class="analytics-directions"><b>${this.number(summary.shadow_ready_count)}</b><i>/</i><em>${this.number(summary.research_only_count)}</em></strong><small>生成信号时的准入状态</small></article>`;
