@@ -480,7 +480,7 @@ button:disabled { cursor: wait; opacity: .55; }
 .macro-yield-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .macro-yield-card header span { color: var(--ai-muted); font: 800 13px Consolas, monospace; }
 .macro-yield-card header b { color: var(--ai-text); font: 800 22px Consolas, monospace; }
-.macro-yield-card > div { display: flex; flex-wrap: wrap; gap: 4px; margin: 9px 0 6px; }
+.macro-yield-card > .macro-yield-changes { display: flex; flex-wrap: wrap; gap: 4px; margin: 9px 0 6px; }
 .macro-yield-card em { padding: 3px 5px; border: 1px solid var(--ai-line); color: var(--ai-muted); font: normal 11px Consolas, monospace; }
 .macro-yield-card small { color: var(--ai-dim); font-size: 10px; }
 .macro-yield-card.unavailable { opacity: .55; }

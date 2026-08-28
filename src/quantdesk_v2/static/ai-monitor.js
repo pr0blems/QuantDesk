@@ -151,7 +151,7 @@ class AiMonitorDashboard extends HTMLElement {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260828-treasury-tenor1">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260828-treasury-tenor2">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -1488,7 +1488,7 @@ class AiMonitorDashboard extends HTMLElement {
         <dl><div><dt>主要驱动</dt><dd>${this.escape(profile.drivers)}</dd></div><div><dt>常见影响</dt><dd>${this.escape(profile.impact)}</dd></div><div><dt>当前解读</dt><dd>${this.escape(currentRead)}</dd></div></dl>
         <small>这是美国财政部 CMT 平价曲线的固定期限读数，不是某一只债券的实际成交收益，也不构成交易建议。</small>
       </div>` : "";
-      return `<article class="macro-yield-card ${item.available ? "" : "unavailable"}"${profile ? ` tabindex="0" aria-describedby="${this.escape(tooltipId)}"` : ""}><header><span>${this.escape(item.key || "--")}</span><b>${numberOrDash(item.value, 3)}%</b></header><div><em>1日 ${bp(item.change_bps?.["1d"])}</em><em>5日 ${bp(item.change_bps?.["5d"])}</em><em>20日 ${bp(item.change_bps?.["20d"])}</em></div><small>Z-Score ${numberOrDash(item.zscore, 2)} · ${this.escape(item.as_of || "等待官方数据")}</small>${profile ? '<i class="macro-card-help" aria-hidden="true">?</i>' : ""}${tooltip}</article>`;
+      return `<article class="macro-yield-card ${item.available ? "" : "unavailable"}"${profile ? ` tabindex="0" aria-describedby="${this.escape(tooltipId)}"` : ""}><header><span>${this.escape(item.key || "--")}</span><b>${numberOrDash(item.value, 3)}%</b></header><div class="macro-yield-changes"><em>1日 ${bp(item.change_bps?.["1d"])}</em><em>5日 ${bp(item.change_bps?.["5d"])}</em><em>20日 ${bp(item.change_bps?.["20d"])}</em></div><small>Z-Score ${numberOrDash(item.zscore, 2)} · ${this.escape(item.as_of || "等待官方数据")}</small>${profile ? '<i class="macro-card-help" aria-hidden="true">?</i>' : ""}${tooltip}</article>`;
     }).join("");
     const curveCards = curveItems.map((item) => `<article><span>${this.escape(item.label || item.key || "--")}</span><b>${numberOrDash(item.value, 2)}${item.unit === "bps" ? "bp" : "%"}</b><small>5日 ${bp(item.change_bps?.["5d"])}</small></article>`).join("");
     const bankRows = (Array.isArray(banks.rows) ? banks.rows : []).map((item) => `<tr><td><strong>${this.escape(item.label || item.key)}</strong></td><td>${this.escape(item.policy_rate || "--")}</td><td>${this.escape(item.last_action || "--")}</td><td>${this.escape(item.vote_split || "--")}</td><td>${this.escape(item.next_meeting || "--")}</td><td class="${item.market_path?.available ? "positive" : "flat"}">${this.escape(item.market_path?.label || "未接入")}</td></tr>`).join("");

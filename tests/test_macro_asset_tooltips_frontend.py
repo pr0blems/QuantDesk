@@ -94,6 +94,7 @@ def test_treasury_tenor_cards_explain_meaning_drivers_and_market_impact() -> Non
         assert phrase in script
     assert 'class="macro-yield-card ${item.available ? "" : "unavailable"}"${profile ? ` tabindex="0" aria-describedby="${this.escape(tooltipId)}"`' in script
     assert 'id="${this.escape(tooltipId)}" class="macro-asset-tooltip macro-card-tooltip" role="tooltip"' in script
+    assert 'class="macro-yield-changes"' in script
     assert "不是某一只债券的实际成交收益" in script
 
 
@@ -106,3 +107,5 @@ def test_treasury_tenor_tooltips_support_hover_and_keyboard_focus() -> None:
     assert ".macro-yield-card:focus-visible > .macro-card-tooltip" in styles
     assert ".macro-yield-card[tabindex]:hover" in styles
     assert ".macro-yield-card[tabindex]:focus-visible" in styles
+    assert ".macro-yield-card > .macro-yield-changes" in styles
+    assert ".macro-yield-card > div {" not in styles
