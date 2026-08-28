@@ -736,7 +736,57 @@ def test_news_candidates_group_by_direction_and_require_confidence() -> None:
     assert candidates[0]["contract_symbol"] == "AAPLUSDT"
     assert candidates[0]["direction"] == "long"
     assert candidates[0]["news_score"] == 66.0
+    assert candidates[0]["event_count"] == 1
     assert {item["id"] for item in candidates[0]["news"]} == {"news-1", "news-2"}
+
+
+def test_news_score_balances_same_source_wire_bursts_as_independent_events() -> None:
+    candidates = aggregate_news_candidates(
+        [
+            {
+                "id": "speech-1",
+                "ts": 1_000,
+                "source": "wire",
+                "ai_category": "macro",
+                "ai_confidence": 0.9,
+                "related_us_stocks": [
+                    {"symbol": "AAPL", "relevance": 1.0, "direction": "bear"}
+                ],
+            },
+            {
+                "id": "speech-2",
+                "ts": 1_030,
+                "source": "wire",
+                "ai_category": "macro",
+                "ai_confidence": 0.3,
+                "related_us_stocks": [
+                    {"symbol": "AAPL", "relevance": 1.0, "direction": "bear"}
+                ],
+            },
+            {
+                "id": "earnings",
+                "ts": 2_000,
+                "source": "wire",
+                "ai_category": "macro",
+                "ai_confidence": 0.9,
+                "related_us_stocks": [
+                    {"symbol": "AAPL", "relevance": 1.0, "direction": "bear"}
+                ],
+            },
+        ],
+        {"AAPL": "AAPLUSDT"},
+        minimum_confidence=0.2,
+        minimum_mentions=1,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["event_count"] == 2
+    assert candidates[0]["news_score"] == 75.0
+    cluster_ids = {
+        item["id"]: item["event_cluster_id"] for item in candidates[0]["news"]
+    }
+    assert cluster_ids["speech-1"] == cluster_ids["speech-2"]
+    assert cluster_ids["speech-1"] != cluster_ids["earnings"]
 
 
 def test_news_candidates_include_bearish_stocks_as_short_opportunities() -> None:
@@ -2029,6 +2079,21 @@ def test_consumed_news_is_global_per_direction_not_per_symbol() -> None:
         direction="short",
         consumed_by_direction=consumed,
     ) == ["cloud-capex"]
+
+
+def test_consumed_wire_burst_suppresses_later_fragments_of_the_same_event() -> None:
+    news_items = [
+        {"id": "speech-1", "ts": 1_000, "source": "wire", "category": "macro"},
+        {"id": "speech-2", "ts": 1_060, "source": "wire", "category": "macro"},
+        {"id": "new-event", "ts": 1_500, "source": "wire", "category": "macro"},
+    ]
+
+    assert fresh_candidate_news_ids(
+        {"speech-1", "speech-2", "new-event"},
+        direction="long",
+        consumed_by_direction={"long": {"speech-1"}},
+        news_items=news_items,
+    ) == ["new-event"]
 
 
 def test_configured_indicators_match_the_requested_short_direction() -> None:

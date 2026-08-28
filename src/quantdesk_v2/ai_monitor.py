@@ -115,6 +115,8 @@ MARKET_RISK_EVENT_LOOKAHEAD_HOURS = 48
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
 FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS = 15 * 60
+NEWS_EVENT_BURST_SECONDS = 2 * 60
+NEWS_EVENT_BURST_MAX_SPAN_SECONDS = 10 * 60
 
 
 def prediction_soft_exit_policy(
@@ -8767,6 +8769,51 @@ def backfill_prediction_path_metrics(
     return {"scanned": len(items), "completed": completed, "unavailable": unavailable}
 
 
+def news_event_bursts(
+    news_items: Sequence[Mapping[str, Any]],
+    *,
+    maximum_gap_seconds: int = NEWS_EVENT_BURST_SECONDS,
+    maximum_span_seconds: int = NEWS_EVENT_BURST_MAX_SPAN_SECONDS,
+) -> list[list[Mapping[str, Any]]]:
+    """Cluster same-source/category wire updates without mutating source records."""
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for index, item in enumerate(news_items):
+        source = str(item.get("source") or "").strip().casefold()
+        category = str(item.get("category") or "").strip().casefold()
+        item_id = str(item.get("id") or index).strip()
+        group_key = f"{source}|{category}" if source else f"id:{item_id}"
+        grouped.setdefault(group_key, []).append(item)
+
+    bursts: list[list[Mapping[str, Any]]] = []
+    for items in grouped.values():
+        ordered = sorted(
+            items,
+            key=lambda item: (int(item.get("ts") or 0), str(item.get("id") or "")),
+        )
+        current: list[Mapping[str, Any]] = []
+        previous_ts = 0
+        first_ts = 0
+        for item in ordered:
+            item_ts = int(item.get("ts") or 0)
+            if current and (
+                previous_ts <= 0
+                or item_ts <= 0
+                or item_ts - previous_ts > max(0, int(maximum_gap_seconds))
+                or item_ts - first_ts > max(0, int(maximum_span_seconds))
+            ):
+                bursts.append(current)
+                current = []
+                first_ts = 0
+            if not current:
+                first_ts = item_ts
+            current.append(item)
+            previous_ts = item_ts
+        if current:
+            bursts.append(current)
+    return bursts
+
+
 def aggregate_news_candidates(
     news_rows: Sequence[Any],
     symbol_map: Mapping[str, str],
@@ -8832,6 +8879,7 @@ def aggregate_news_candidates(
                     "memory_reason": related.get("memory_reason"),
                     "position_effect": related.get("position_effect"),
                     "position_reason": related.get("position_reason"),
+                    "category": _row_value(row, "ai_category"),
                 }
             )
     result: list[dict[str, Any]] = []
@@ -8839,8 +8887,25 @@ def aggregate_news_candidates(
         unique_news = {item["id"] for item in candidate["news"] if item["id"]}
         if len(unique_news) < minimum_mentions:
             continue
-        scores = candidate.pop("scores")
-        candidate["news_score"] = round(sum(scores) / len(scores) * 100, 4)
+        candidate.pop("scores")
+        event_bursts = news_event_bursts(candidate["news"])
+        event_scores: list[float] = []
+        for burst in event_bursts:
+            burst_scores = [float(item.get("score") or 0) for item in burst]
+            if burst_scores:
+                event_scores.append(sum(burst_scores) / len(burst_scores))
+            cluster_id = news_event_cluster_id(
+                [item.get("id") for item in burst],
+                fallback=burst[0].get("id") if burst else candidate["symbol"],
+                direction=str(candidate["direction"]),
+            )
+            for item in burst:
+                item["event_cluster_id"] = cluster_id
+        candidate["event_count"] = len(event_bursts)
+        candidate["news_score"] = round(
+            (sum(event_scores) / len(event_scores) if event_scores else 0) * 100,
+            4,
+        )
         candidate["news"].sort(key=lambda item: (item["score"], item["ts"]), reverse=True)
         result.append(candidate)
     return sorted(result, key=lambda item: item["news_score"], reverse=True)
@@ -8936,8 +9001,9 @@ def fresh_candidate_news_ids(
     *,
     direction: str,
     consumed_by_direction: Mapping[str, set[str]],
+    news_items: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[str]:
-    """Return trigger news not already consumed by another correlated symbol."""
+    """Return fresh event news, suppressing follow-ups from a consumed wire burst."""
 
     normalized = {str(item).strip() for item in candidate_news_ids if str(item).strip()}
     consumed = {
@@ -8945,6 +9011,14 @@ def fresh_candidate_news_ids(
         for item in consumed_by_direction.get(str(direction), set())
         if str(item).strip()
     }
+    for burst in news_event_bursts(list(news_items or [])):
+        burst_ids = {
+            str(item.get("id") or "").strip()
+            for item in burst
+            if str(item.get("id") or "").strip()
+        }
+        if burst_ids.intersection(consumed):
+            consumed.update(burst_ids)
     return sorted(normalized - consumed)
 
 
@@ -9660,6 +9734,7 @@ def _scan_opportunities(
             candidate_news_ids,
             direction=str(candidate["direction"]),
             consumed_by_direction=consumed_news_ids_by_direction,
+            news_items=list(candidate.get("news", [])),
         )
         actionability_by_id = {
             str(item.get("id") or ""): news_actionability_snapshot(item)
