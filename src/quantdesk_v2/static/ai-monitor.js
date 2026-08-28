@@ -4358,7 +4358,7 @@ class AiMonitorDashboard extends HTMLElement {
           <ul class="opportunity-news" data-patch-key="news-evidence">${news}</ul>
           <div class="opportunity-footer-meta"><span>发现 ${this.formatDate(item.discovered_at)}</span><span>评分更新 ${this.formatDate(scoreUpdatedAt)}</span><span>有效至 ${this.formatDate(item.expires_at)}</span><em>${historicalTab ? `历史机会 · ${outcomeLabel}` : entryState.tone === "blocked" ? `已阻断 · ${this.escape(entryState.detail)}` : entryState.tone === "data_error" ? `数据异常 · ${this.escape(entryState.detail)}` : shadowReady ? "影子候选 · 仍不执行交易" : confirmed ? `研究预测 · ${(readiness.failed_reasons || ["未通过影子准入"]).slice(0, 1).join("")}` : item.status === "candidate" ? marketAvailable ? "等待策略组与评分确认" : "新闻候选 · 暂无技术行情" : "历史机会"}</em></div>
         </div></div>
-        <footer class="opportunity-card-footer" data-patch-key="card-actions"><span class="opportunity-card-note">预测仅供研判，不构成投资建议</span>${liveSummaryActions ? "" : `<div class="opportunity-card-actions">${conclusionControl}${detailControl}</div>`}</footer>
+        ${liveSummaryActions ? "" : `<footer class="opportunity-card-footer" data-patch-key="card-actions"><div class="opportunity-card-actions">${conclusionControl}${detailControl}</div></footer>`}
       </article>`;
     }).join("");
     this.patchOpportunityCards(target, markup + this.opportunityPaginationMarkup());

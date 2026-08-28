@@ -20,7 +20,8 @@ def test_opportunity_card_has_distinct_summary_details_and_actions() -> None:
     ):
         assert marker in SCRIPT
 
-    assert "预测仅供研判，不构成投资建议" in SCRIPT
+    assert "预测仅供研判，不构成投资建议" not in SCRIPT
+    assert '${liveSummaryActions ? "" : `<footer class="opportunity-card-footer"' in SCRIPT
     assert 'const positionPanel = triggeredPosition ?' in SCRIPT
     assert 'const candidatePositionPanel = candidateSummaryVisible ?' in SCRIPT
     assert '${compactSummaryPanel}' in SCRIPT

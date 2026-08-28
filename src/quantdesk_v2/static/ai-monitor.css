@@ -2216,7 +2216,6 @@ td.negative { color: var(--ai-red); }
   color: var(--ai-dim);
   background: transparent;
 }
-.opportunity-card-note { font-size: 10px; }
 .opportunity-card-actions { margin-left: auto; display: flex; align-items: stretch; gap: 9px; }
 .opportunity-card-actions .ai-conclusion-trigger,
 .virtual-position-action .ai-conclusion-trigger,
@@ -2278,7 +2277,6 @@ td.negative { color: var(--ai-red); }
   .virtual-position-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .opportunity-signal { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .opportunity-item > .opportunity-card-footer { align-items: stretch; flex-direction: column; }
-  .opportunity-card-note { text-align: center; }
   .opportunity-card-actions { width: 100%; margin-left: 0; }
   .opportunity-card-actions > button { flex: 1; min-width: 0; }
 }
