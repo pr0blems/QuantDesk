@@ -2943,6 +2943,13 @@ class AiMonitorDashboard extends HTMLElement {
       const directions = data.direction_counts || { long: 0, short: 0 };
       if (tab === "current") this.state.opportunityDirectionCounts = directions;
       else this.state.historyOpportunityDirectionCounts = directions;
+      const historySummary = data.history_summary || {};
+      if (historySummary.direction_counts) {
+        this.state.historyOpportunityDirectionCounts = historySummary.direction_counts;
+      }
+      if (historySummary.settlement_counts) {
+        this.state.historyOpportunitySettlementCounts = historySummary.settlement_counts;
+      }
       if (tab === "history") {
         this.state.historyOpportunitySettlementCounts = data.settlement_counts || { total: 0, pending: 0, unavailable: 0 };
       }
@@ -4112,6 +4119,8 @@ class AiMonitorDashboard extends HTMLElement {
         ? "等待结算"
         : item.prediction_status === "unavailable"
         ? "行情不足"
+        : item.prediction_status === "completed"
+        ? "已结算"
         : item.status === "dismissed" ? "已结束" : "已过期";
       const marketAvailable = evidence.market_available !== false;
       const directionLabel = item.direction === "short" ? "做空" : "做多";
@@ -4233,7 +4242,18 @@ class AiMonitorDashboard extends HTMLElement {
         <span><em>${historicalTab ? "历史方向" : "候选方向"}</em><b class="signal-${directionClass}">${directionLabel}</b><small>${historicalTab ? "按该方向统计结果" : "仅为研判方向，尚未买入"}</small></span>
         <span class="trigger-progress ${entryState.tone}"><em>${historicalTab ? "触发结果" : "触发进度"}</em><b>${passedGateCount} / ${signalGateChecks.length}</b><small>${historicalTab ? entryState.triggered ? "已生成预测" : "未生成预测" : waitingDetail}</small></span>
       </div>`;
-      const outcome = historicalTab ? item.outcome : null;
+      const persistedOutcome = item.prediction_status === "completed"
+        ? {
+            result: item.prediction_net_result || item.prediction_result,
+            directional_return_bps: this.firstValue(
+              item.prediction_net_directional_return_bps,
+              item.prediction_directional_return_bps,
+            ),
+            exit_price: item.prediction_exit_price,
+            completed_at: item.prediction_completed_at,
+          }
+        : null;
+      const outcome = historicalTab ? (item.outcome || persistedOutcome) : null;
       const predictionStatus = String(item.prediction_status || "");
       const settlementState = this.predictionSettlementState(item);
       const outcomeResult = outcome?.result

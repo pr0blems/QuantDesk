@@ -107,9 +107,9 @@ PREDICTION_SCORE_EXIT_POLICY_VERSION = "horizon_aligned_closed_bar_v3"
 PREDICTION_SOFT_EXIT_MIN_HORIZON_FRACTION = 0.5
 MARKET_FEATURE_VERSION = "uw_features_v2"
 OPPORTUNITY_WEIGHTS_VERSION = "opportunity_weights_v3_six_domain"
-OPPORTUNITY_DECISION_VERSION = "actionable_entry_v10"
+OPPORTUNITY_DECISION_VERSION = "actionable_entry_v11"
 OPPORTUNITY_API_VERSION = "ai_opportunity.v3"
-MULTI_TIMEFRAME_TECHNICAL_VERSION = "directional_mtf_15m_1h_4h_v2"
+MULTI_TIMEFRAME_TECHNICAL_VERSION = "directional_mtf_15m_1h_4h_v3"
 MULTI_TIMEFRAME_TECHNICAL_WEIGHTS = {"15m": 0.25, "1h": 0.45, "4h": 0.30}
 MARKET_RISK_EVENT_LOOKAHEAD_HOURS = 48
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
@@ -9138,6 +9138,7 @@ def select_directional_candidates_with_technical_context(
     indicator_keys: Sequence[str],
     *,
     market_direction: str = "neutral",
+    market_tide: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Choose one auditable side after evaluating both technical directions.
 
@@ -9170,6 +9171,9 @@ def select_directional_candidates_with_technical_context(
 
     selected: list[dict[str, Any]] = []
     normalized_market_direction = str(market_direction or "neutral").lower()
+    tide_signal = macro_market.market_tide_directional_signal(market_tide)
+    tide_direction = str(tide_signal.get("direction") or "neutral")
+    tide_strength = 10.0 if tide_signal.get("strong") else 6.0
     for symbol_key, alternatives in grouped.items():
         explicit_by_direction: dict[str, dict[str, Any]] = {}
         for candidate in alternatives:
@@ -9236,11 +9240,27 @@ def select_directional_candidates_with_technical_context(
                 or (direction == "short" and normalized_market_direction == "bull")
                 else 0.0
             )
+            tide_bias = (
+                tide_strength
+                if tide_signal.get("available")
+                and (
+                    (direction == "long" and tide_direction == "bull")
+                    or (direction == "short" and tide_direction == "bear")
+                )
+                else -tide_strength
+                if tide_signal.get("available")
+                and (
+                    (direction == "long" and tide_direction == "bear")
+                    or (direction == "short" and tide_direction == "bull")
+                )
+                else 0.0
+            )
             ranking_score = (
                 directional_news_score * 0.40
                 + float(technical["technical_score"]) * 0.55
                 + (5.0 if technical["eligible"] else 0.0)
                 + macro_bias
+                + tide_bias
             )
             if not explicit_news_direction and not bool(technical["eligible"]):
                 ranking_score = -1.0
@@ -9259,6 +9279,7 @@ def select_directional_candidates_with_technical_context(
                 "one_hour_conflict": one_hour_conflict,
                 "confirmed_timeframes": list(technical["confirmed_timeframes"]),
                 "macro_bias": macro_bias,
+                "market_tide_bias": tide_bias,
                 "ranking_score": round(ranking_score, 4),
             }
             selection_rows.append(row)
@@ -9280,6 +9301,7 @@ def select_directional_candidates_with_technical_context(
                 -5.0 if bool(winner.get("synthetic_direction")) else 0.0
             ),
             "market_direction": normalized_market_direction,
+            "market_tide": tide_signal,
             "alternatives": sorted(
                 selection_rows,
                 key=lambda item: float(item["ranking_score"]),
@@ -9288,6 +9310,7 @@ def select_directional_candidates_with_technical_context(
             "weights": {"news_direction": 0.40, "technical": 0.55},
             "technical_eligibility_bonus": 5.0,
             "macro_alignment_bonus": 4.0,
+            "market_tide_alignment_bonus": tide_strength,
         }
         selected.append(winner)
     return sorted(
@@ -9818,6 +9841,7 @@ def _scan_opportunities(
             dict(macro_snapshot.get("sentiment") or {}).get("direction")
             or "neutral"
         ),
+        market_tide=dict(macro_snapshot.get("market_tide") or {}),
     )
     run.input_count = len(candidates)
     stored = 0

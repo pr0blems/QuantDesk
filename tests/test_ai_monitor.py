@@ -1159,6 +1159,60 @@ def test_direction_selection_can_choose_bearish_side_when_technical_structure_is
     assert selected[0]["direction_selection"]["alternatives"][0]["direction"] == "short"
 
 
+def test_direction_selection_uses_fresh_market_tide_to_break_equal_sides() -> None:
+    def two_sided_scan(evaluated_at: int) -> dict:
+        return {
+            "evaluated_at": evaluated_at,
+            "items": [
+                {
+                    "key": key,
+                    "available": True,
+                    "status": "triggered",
+                    "bullish_triggered": True,
+                    "bearish_triggered": True,
+                    "bullish_strength": 80,
+                    "bearish_strength": 80,
+                }
+                for key in ("moving_average_bull", "ma_golden_cross")
+            ],
+            "prediction_features": {"items": []},
+        }
+
+    selected = select_directional_candidates_with_technical_context(
+        [
+            {
+                "symbol": "TEST",
+                "contract_symbol": "TESTUSDT",
+                "direction": direction,
+                "news_score": 75,
+                "news": [{"id": f"news-{direction}", "ts": 100}],
+            }
+            for direction in ("long", "short")
+        ],
+        {
+            "TESTUSDT": {
+                "15m": two_sided_scan(1),
+                "1h": two_sided_scan(2),
+                "4h": two_sided_scan(3),
+            }
+        },
+        ["moving_average_bull", "ma_golden_cross"],
+        market_direction="neutral",
+        market_tide={
+            "available": True,
+            "directional_data_available": True,
+            "bias": "bear",
+            "samples": 10,
+            "quality": {"valid": True, "stale": False},
+        },
+    )
+
+    assert selected[0]["direction"] == "short"
+    selection = selected[0]["direction_selection"]
+    assert selection["market_tide"]["strong"] is True
+    assert selection["alternatives"][0]["market_tide_bias"] == 10.0
+
+
 def test_news_candidates_keep_unmapped_us_stocks_visible() -> None:
     candidates = aggregate_news_candidates(
         [
@@ -3125,8 +3179,8 @@ def test_event_metrics_prefer_the_frozen_signal_cluster_id() -> None:
 
 
 def test_analytics_defaults_to_the_current_decision_generation() -> None:
-    assert normalized_decision_version("") == "actionable_entry_v10"
-    assert normalized_decision_version("current") == "actionable_entry_v10"
+    assert normalized_decision_version("") == "actionable_entry_v11"
+    assert normalized_decision_version("current") == "actionable_entry_v11"
     assert normalized_decision_version("all") == "all"
     assert normalized_decision_version("actionable_entry_v9") == "actionable_entry_v9"
 
@@ -4039,11 +4093,15 @@ def test_opportunities_are_ordered_by_signal_time_descending() -> None:
     assert "prediction_by_opportunity_id" in endpoint
     assert "AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id" in endpoint
     assert 'scope: Literal["legacy", "current", "history"]' in endpoint
+    assert "_historical_opportunity_conditions" in api
+    assert 'AiMonitorPrediction.status.in_(("completed", "unavailable"))' in api
+    assert '"history_summary": _historical_opportunity_summary' in endpoint
     assert '"pagination"' in endpoint
     assert 'live_tickers.get((item.contract_symbol or "").upper())' in endpoint
     assert '"prediction_entry_price"' in api
     assert '"prediction_combined_score"' in api
     assert '"prediction_market_flow_score"' in api
+    assert '"prediction_net_directional_return_bps"' in api
     assert '"virtual_position"' in api
     assert "ai_monitor.virtual_position_snapshot(prediction, live_market)" in api
     assert '"prediction_entry_gate"' in api

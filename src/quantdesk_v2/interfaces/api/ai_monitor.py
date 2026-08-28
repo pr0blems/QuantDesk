@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -2002,6 +2002,26 @@ def _opportunity_out(
         "prediction_status": prediction.status if prediction is not None else None,
         "prediction_settlement": _prediction_settlement_out(prediction),
         "prediction_result": prediction.result if prediction is not None else None,
+        "prediction_net_result": prediction.net_result if prediction is not None else None,
+        "prediction_directional_return_bps": (
+            float(prediction.directional_return_bps)
+            if prediction is not None and prediction.directional_return_bps is not None
+            else None
+        ),
+        "prediction_net_directional_return_bps": (
+            float(prediction.net_directional_return_bps)
+            if prediction is not None
+            and prediction.net_directional_return_bps is not None
+            else None
+        ),
+        "prediction_exit_price": (
+            float(prediction.exit_price)
+            if prediction is not None and prediction.exit_price is not None
+            else None
+        ),
+        "prediction_completed_at": (
+            _utc_out(prediction.completed_at) if prediction is not None else None
+        ),
         "prediction_entry_price": (
             float(prediction.entry_price)
             if prediction is not None and prediction.entry_price is not None
@@ -3715,6 +3735,64 @@ def _current_opportunity_projection_page(
     }
 
 
+def _historical_opportunity_conditions(
+    *, user_id: int, now: datetime
+) -> tuple[Any, ...]:
+    """Keep completed results plus genuinely inactive unsettled predictions."""
+
+    return (
+        AiMonitorOpportunity.user_id == user_id,
+        AiMonitorPrediction.user_id == user_id,
+        AiMonitorPrediction.settlement_version
+        == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
+        or_(
+            AiMonitorPrediction.status.in_(("completed", "unavailable")),
+            AiMonitorOpportunity.status.in_(("expired", "dismissed")),
+            AiMonitorOpportunity.expires_at <= now,
+        ),
+    )
+
+
+def _historical_opportunity_summary(
+    db: Session, *, user_id: int, now: datetime
+) -> dict[str, Any]:
+    counts = list(
+        db.execute(
+            select(
+                AiMonitorOpportunity.direction,
+                AiMonitorPrediction.status,
+                func.count(AiMonitorOpportunity.id),
+            )
+            .join(
+                AiMonitorPrediction,
+                AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id,
+            )
+            .where(*_historical_opportunity_conditions(user_id=user_id, now=now))
+            .group_by(
+                AiMonitorOpportunity.direction,
+                AiMonitorPrediction.status,
+            )
+        ).all()
+    )
+    direction_counts = {"long": 0, "short": 0}
+    prediction_counts = {"pending": 0, "unavailable": 0, "completed": 0}
+    for direction, status, count in counts:
+        normalized_count = int(count)
+        if str(direction) in direction_counts:
+            direction_counts[str(direction)] += normalized_count
+        if str(status) in prediction_counts:
+            prediction_counts[str(status)] += normalized_count
+    pending_total = prediction_counts["pending"] + prediction_counts["unavailable"]
+    return {
+        "total": sum(direction_counts.values()),
+        "direction_counts": direction_counts,
+        "settlement_counts": {
+            "total": pending_total,
+            **prediction_counts,
+        },
+    }
+
+
 @router.get("/opportunities")
 def opportunities(
     request: Request,
@@ -3746,13 +3824,7 @@ def opportunities(
                 AiMonitorPrediction,
                 AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id,
             )
-            .where(
-                AiMonitorOpportunity.user_id == user.id,
-                AiMonitorPrediction.user_id == user.id,
-                AiMonitorPrediction.status.in_(("pending", "unavailable")),
-                AiMonitorPrediction.settlement_version
-                == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
-            )
+            .where(*_historical_opportunity_conditions(user_id=user.id, now=now))
         )
     elif projection_page is None:
         statement = (
@@ -3809,7 +3881,11 @@ def opportunities(
         dict(projection_page["settlement_counts"])
         if projection_page is not None
         else {
-            "total": len(rows),
+            "total": sum(
+                prediction is not None
+                and prediction.status in {"pending", "unavailable"}
+                for _opportunity, prediction in rows
+            ),
             "pending": sum(
                 prediction is not None and prediction.status == "pending"
                 for _opportunity, prediction in rows
@@ -3921,6 +3997,9 @@ def opportunities(
         ],
         "direction_counts": direction_counts,
         "settlement_counts": settlement_counts,
+        "history_summary": _historical_opportunity_summary(
+            db, user_id=user.id, now=now
+        ),
     }
     if scope != "legacy":
         response["pagination"] = (

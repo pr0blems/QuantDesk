@@ -850,6 +850,56 @@ def market_tide_stream_history() -> list[dict[str, Any]]:
         return [dict(item) for item in _MARKET_TIDE_STREAM_POINTS]
 
 
+def market_tide_directional_signal(
+    payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Normalize Market Tide into a decision-grade directional signal.
+
+    A display ``bias`` is not enough for an entry veto.  The payload must be
+    fresh and have either provider-side samples or locally observed
+    persistence.  Provider samples survive worker restarts while the local
+    trend history supplies an additional auditable confirmation.
+    """
+
+    source = dict(payload or {})
+    quality = dict(source.get("quality") or {})
+    trend = dict(source.get("trend") or {})
+    direction = str(source.get("bias") or "neutral").lower()
+    provider_samples = max(0, int(_number(source.get("samples")) or 0))
+    persistent_points = max(
+        0,
+        int(_number(trend.get("same_direction_points")) or 0),
+        int(
+            _number(
+                dict(dict(trend.get("windows") or {}).get("15m") or {}).get(
+                    "same_direction_points"
+                )
+            )
+            or 0
+        ),
+    )
+    fresh = bool(quality.get("valid", True) and not quality.get("stale", False))
+    available = bool(
+        source.get("available")
+        and source.get("directional_data_available")
+        and direction in {"bull", "bear"}
+        and fresh
+    )
+    strong = bool(
+        available and (provider_samples >= 3 or persistent_points >= 3)
+    )
+    return {
+        "available": available,
+        "direction": direction if available else "neutral",
+        "strong": strong,
+        "confidence": "strong" if strong else "observed" if available else "unavailable",
+        "provider_samples": provider_samples,
+        "persistent_points": persistent_points,
+        "fresh": fresh,
+        "source": str(source.get("source") or "unavailable"),
+    }
+
+
 def _quote_payload(quote: FinnhubQuote, *, key: str, label: str) -> dict[str, Any]:
     previous_close = quote.previous_close
     intraday = (
@@ -2474,7 +2524,7 @@ def opportunity_market_context(
                 "the research prediction remains enabled but live copy stays gated."
             )
         return {
-            "version": "macro_directional_adjustment_v5",
+            "version": "macro_directional_adjustment_v6",
             "available": False,
             "adjustment": 0.0,
             "resonance": "unknown",
@@ -2557,19 +2607,21 @@ def opportunity_market_context(
         add("market_session", "美股休市", -6, session_key)
 
     market_tide = snapshot.get("market_tide") or {}
-    tide_bias = str(market_tide.get("bias") or "neutral")
-    if (
-        market_tide.get("available")
-        and market_tide.get("directional_data_available")
-        and tide_bias in {"bull", "bear"}
-    ):
+    tide_signal = market_tide_directional_signal(market_tide)
+    tide_bias = str(tide_signal.get("direction") or "neutral")
+    tide_aligned = False
+    tide_opposed = False
+    if tide_signal.get("available"):
         tide_aligned = (long_side and tide_bias == "bull") or (
             not long_side and tide_bias == "bear"
         )
+        tide_opposed = not tide_aligned
         add(
             "market_tide",
             "期权资金潮共振" if tide_aligned else "期权资金潮逆向",
-            3 if tide_aligned else -4,
+            (8 if tide_signal.get("strong") else 5)
+            if tide_aligned
+            else (-10 if tide_signal.get("strong") else -6),
             tide_bias,
         )
 
@@ -2601,11 +2653,19 @@ def opportunity_market_context(
     blocked_reasons: list[str] = []
     if global_direction_blocked:
         blocked_reasons.append("GLOBAL_RISK_POLICY")
+    if tide_opposed and tide_signal.get("strong"):
+        blocked_reasons.append("MARKET_TIDE_DIRECTION_CONFLICT")
     blocked_reason_labels = {
         "GLOBAL_RISK_POLICY": "重大事件或信用压力环境暂停新增顺势多单",
+        "MARKET_TIDE_DIRECTION_CONFLICT": "新鲜且连续的 Market Tide 资金方向与候选方向相反",
     }
     warnings = [
         *(["MACRO_DIRECTION_DIVERGENT"] if opposed else []),
+        *(
+            ["MARKET_TIDE_DIRECTION_DIVERGENT"]
+            if tide_opposed and not tide_signal.get("strong")
+            else []
+        ),
         *(["NON_REGULAR_US_SESSION"] if session_blocked else []),
     ]
     direction_blocked = bool(blocked_reasons)
@@ -2634,7 +2694,7 @@ def opportunity_market_context(
         ),
     }
     return {
-        "version": "macro_directional_adjustment_v5",
+        "version": "macro_directional_adjustment_v6",
         "available": True,
         "adjustment": round(adjustment, 4),
         "resonance": resonance,
@@ -2652,6 +2712,7 @@ def opportunity_market_context(
         "sector_macro_impact": selected_sector_impact,
         "market_session": session,
         "market_tide": market_tide,
+        "market_tide_signal": tide_signal,
         "factors": factors,
     }
 

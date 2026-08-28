@@ -9,6 +9,7 @@ from quantdesk_v2.macro_market import (
     global_central_bank_matrix,
     macro_entry_policy,
     macro_event_calendar,
+    market_tide_directional_signal,
     opportunity_market_context,
     sector_key,
     treasury_curve_snapshot,
@@ -259,6 +260,45 @@ def test_market_sentiment_direction_scores_short_and_penalizes_long() -> None:
         item["key"] == "market_sentiment_direction"
         for item in short_context["factors"]
     )
+
+
+def test_fresh_sampled_market_tide_blocks_only_the_opposing_direction() -> None:
+    snapshot = {
+        "available": True,
+        "indices": [],
+        "vix": {"available": False},
+        "breadth": {"available": False},
+        "sectors": [],
+        "sentiment": {"direction": "neutral"},
+        "events": {"risk_level": "normal"},
+        "entry_policy": {},
+        "market_tide": {
+            "available": True,
+            "directional_data_available": True,
+            "bias": "bear",
+            "samples": 12,
+            "source": "unusual_whales_market_tide",
+            "quality": {"valid": True, "stale": False},
+            "trend": {"same_direction_points": 2},
+        },
+    }
+
+    signal = market_tide_directional_signal(snapshot["market_tide"])
+    long_context = opportunity_market_context(
+        snapshot, direction="long", symbol="AAPL"
+    )
+    short_context = opportunity_market_context(
+        snapshot, direction="short", symbol="AAPL"
+    )
+
+    assert signal["strong"] is True
+    assert signal["direction"] == "bear"
+    assert "MARKET_TIDE_DIRECTION_CONFLICT" in long_context["entry_policy"][
+        "blocked_reasons"
+    ]
+    assert long_context["entry_policy"]["simulation_entry_allowed"] is False
+    assert short_context["entry_policy"]["simulation_entry_allowed"] is True
+    assert short_context["adjustment"] > long_context["adjustment"]
 
 
 def test_sector_mapping_uses_symbol_and_company_profile() -> None:
