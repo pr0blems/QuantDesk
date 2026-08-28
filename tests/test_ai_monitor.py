@@ -19,6 +19,7 @@ from quantdesk_v2.ai_monitor import (
     aggregate_news_candidates,
     annotate_event_cluster_selection,
     append_score_history,
+    backfill_prediction_event_contexts,
     backfill_prediction_path_metrics,
     configured_indicator_policy,
     edge_calibration_summary,
@@ -994,6 +995,62 @@ def test_event_context_keeps_upcoming_release_visible_with_utc_timestamp() -> No
     assert event["minutes_until_event"] == 360
     assert event["blocking_active"] is False
     assert event["proximity"] == "upcoming"
+
+
+def test_event_context_backfill_repairs_legacy_prediction_snapshot() -> None:
+    signal_at = datetime(2026, 8, 28, 12, 0, 0)
+    prediction = SimpleNamespace(
+        id=1,
+        user_id=7,
+        symbol="AAPL",
+        predicted_at=signal_at,
+        evidence_json={"version": {"decision": "actionable_entry_v9"}},
+        updated_at=signal_at,
+    )
+    event = SimpleNamespace(
+        public_id="event-2",
+        event_type="report",
+        event_name="消费者信心指数",
+        symbol=None,
+        risk_level="medium",
+        status="completed",
+        scheduled_at=signal_at + timedelta(hours=1),
+        actual_at=None,
+        blocking_before_seconds=1800,
+        blocking_after_seconds=900,
+        provider="calendar",
+    )
+
+    class ScalarRows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Database:
+        def __init__(self):
+            self.calls = 0
+            self.flushed = False
+
+        def scalars(self, _statement):
+            self.calls += 1
+            return ScalarRows([prediction] if self.calls == 1 else [event])
+
+        def flush(self):
+            self.flushed = True
+
+    database = Database()
+    result = backfill_prediction_event_contexts(
+        database,
+        7,
+        now=signal_at + timedelta(hours=2),
+    )
+
+    assert result == {"scanned": 1, "updated": 1}
+    assert database.flushed is True
+    assert prediction.evidence_json["risk_events"][0]["minutes_until_event"] == 60
+    assert prediction.evidence_json["event_gate"]["status"] == "warning"
 
 
 def test_direction_selection_can_choose_bearish_side_when_technical_structure_is_short() -> None:

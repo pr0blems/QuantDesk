@@ -3912,6 +3912,62 @@ def _utc_event_iso(value: datetime | None) -> str | None:
     return normalized.astimezone(UTC).isoformat()
 
 
+def market_risk_event_snapshot(
+    row: MarketRiskEvent,
+    *,
+    now: datetime,
+    blocking_before_minutes: int | None = None,
+    blocking_after_minutes: int | None = None,
+) -> dict[str, Any]:
+    """Freeze one event's visibility and block timing at a signal timestamp."""
+
+    normalized_now = now.astimezone(UTC).replace(tzinfo=None) if now.tzinfo else now
+    anchor = row.actual_at or row.scheduled_at
+    before_seconds = (
+        max(0, int(blocking_before_minutes)) * 60
+        if blocking_before_minutes is not None
+        else max(0, row.blocking_before_seconds)
+    )
+    after_seconds = (
+        max(0, int(blocking_after_minutes)) * 60
+        if blocking_after_minutes is not None
+        else max(0, row.blocking_after_seconds)
+    )
+    starts_at = anchor - timedelta(seconds=before_seconds)
+    ends_at = anchor + timedelta(seconds=after_seconds)
+    blocking_active = bool(
+        row.risk_level in {"high", "critical"}
+        and (row.status == "active" or starts_at <= normalized_now <= ends_at)
+    )
+    minutes_until_event = round(
+        (anchor - normalized_now).total_seconds() / 60,
+        2,
+    )
+    return {
+        "id": row.public_id,
+        "event_type": row.event_type,
+        "event_name": row.event_name,
+        "title": row.event_name,
+        "symbol": row.symbol,
+        "risk_level": row.risk_level,
+        "status": row.status,
+        "scheduled_at": _utc_event_iso(row.scheduled_at),
+        "actual_at": _utc_event_iso(row.actual_at),
+        "blocking_starts_at": _utc_event_iso(starts_at),
+        "blocking_ends_at": _utc_event_iso(ends_at),
+        "minutes_until_event": minutes_until_event,
+        "blocking_active": blocking_active,
+        "proximity": (
+            "blocking"
+            if blocking_active
+            else "upcoming"
+            if minutes_until_event >= 0
+            else "recent"
+        ),
+        "provider": row.provider,
+    }
+
+
 def market_risk_event_contexts(
     db: Session,
     *,
@@ -3957,50 +4013,12 @@ def market_risk_event_contexts(
     ).all()
     result: dict[str, list[dict[str, Any]]] = {"*": []}
     for row in rows:
-        anchor = row.actual_at or row.scheduled_at
-        before_seconds = (
-            max(0, int(blocking_before_minutes)) * 60
-            if blocking_before_minutes is not None
-            else max(0, row.blocking_before_seconds)
+        item = market_risk_event_snapshot(
+            row,
+            now=normalized_now,
+            blocking_before_minutes=blocking_before_minutes,
+            blocking_after_minutes=blocking_after_minutes,
         )
-        after_seconds = (
-            max(0, int(blocking_after_minutes)) * 60
-            if blocking_after_minutes is not None
-            else max(0, row.blocking_after_seconds)
-        )
-        starts_at = anchor - timedelta(seconds=before_seconds)
-        ends_at = anchor + timedelta(seconds=after_seconds)
-        blocking_active = bool(
-            row.risk_level in {"high", "critical"}
-            and (row.status == "active" or starts_at <= normalized_now <= ends_at)
-        )
-        minutes_until_event = round(
-            (anchor - normalized_now).total_seconds() / 60,
-            2,
-        )
-        item = {
-            "id": row.public_id,
-            "event_type": row.event_type,
-            "event_name": row.event_name,
-            "title": row.event_name,
-            "symbol": row.symbol,
-            "risk_level": row.risk_level,
-            "status": row.status,
-            "scheduled_at": _utc_event_iso(row.scheduled_at),
-            "actual_at": _utc_event_iso(row.actual_at),
-            "blocking_starts_at": _utc_event_iso(starts_at),
-            "blocking_ends_at": _utc_event_iso(ends_at),
-            "minutes_until_event": minutes_until_event,
-            "blocking_active": blocking_active,
-            "proximity": (
-                "blocking"
-                if blocking_active
-                else "upcoming"
-                if minutes_until_event >= 0
-                else "recent"
-            ),
-            "provider": row.provider,
-        }
         result.setdefault((row.symbol or "*").strip().upper(), []).append(item)
     return result
 
@@ -4063,6 +4081,96 @@ def market_risk_event_gate_snapshot(
         "scheduled_at": nearest.get("scheduled_at") if nearest else None,
         "minutes_until_event": nearest.get("minutes_until_event") if nearest else None,
     }
+
+
+def backfill_prediction_event_contexts(
+    db: Session,
+    user_id: int,
+    *,
+    now: datetime | None = None,
+    lookback_days: int = 14,
+    limit: int = 1000,
+) -> dict[str, int]:
+    """Repair legacy prediction snapshots that omitted scheduled-event context."""
+
+    updated_at = now or utcnow()
+    predictions = list(
+        db.scalars(
+            select(AiMonitorPrediction)
+            .where(
+                AiMonitorPrediction.user_id == user_id,
+                AiMonitorPrediction.predicted_at
+                >= updated_at - timedelta(days=max(1, int(lookback_days))),
+            )
+            .order_by(
+                AiMonitorPrediction.predicted_at.desc(),
+                AiMonitorPrediction.id.desc(),
+            )
+            .limit(max(1, int(limit)))
+        ).all()
+    )
+    missing = [
+        prediction
+        for prediction in predictions
+        if "event_gate" not in dict(prediction.evidence_json or {})
+    ]
+    if not missing:
+        return {"scanned": len(predictions), "updated": 0}
+    first_signal = min(item.predicted_at for item in missing)
+    last_signal = max(item.predicted_at for item in missing)
+    events = list(
+        db.scalars(
+            select(MarketRiskEvent)
+            .where(
+                MarketRiskEvent.status != "cancelled",
+                MarketRiskEvent.scheduled_at >= first_signal - timedelta(hours=2),
+                MarketRiskEvent.scheduled_at
+                <= last_signal + timedelta(hours=MARKET_RISK_EVENT_LOOKAHEAD_HOURS),
+            )
+            .order_by(MarketRiskEvent.scheduled_at, MarketRiskEvent.id)
+        ).all()
+    )
+    updated = 0
+    for prediction in missing:
+        signal_at = prediction.predicted_at
+        symbol = str(prediction.symbol or "").strip().upper()
+        nearby: list[dict[str, Any]] = []
+        for event in events:
+            event_symbol = str(event.symbol or "").strip().upper()
+            if event_symbol and event_symbol != symbol:
+                continue
+            anchor = event.actual_at or event.scheduled_at
+            delta = anchor - signal_at
+            if not (-timedelta(hours=2) <= delta <= timedelta(hours=MARKET_RISK_EVENT_LOOKAHEAD_HOURS)):
+                continue
+            nearby.append(
+                market_risk_event_snapshot(
+                    event,
+                    now=signal_at,
+                )
+            )
+        nearby.sort(
+            key=lambda item: (
+                abs(float(item.get("minutes_until_event") or 0.0)),
+                str(item.get("scheduled_at") or ""),
+            )
+        )
+        evidence = dict(prediction.evidence_json or {})
+        evidence["risk_events"] = nearby
+        evidence["blocking_risk_events"] = [
+            item for item in nearby if bool(item.get("blocking_active"))
+        ]
+        evidence["event_gate"] = market_risk_event_gate_snapshot(nearby)
+        evidence["event_context_backfill"] = {
+            "version": "event_visibility_v2",
+            "backfilled_at": _utc_event_iso(updated_at),
+        }
+        prediction.evidence_json = evidence
+        prediction.updated_at = updated_at
+        updated += 1
+    if updated:
+        db.flush()
+    return {"scanned": len(predictions), "updated": updated}
 
 
 def _market_domain(
@@ -9238,6 +9346,11 @@ def _scan_opportunities(
         )
     settlement = settle_due_predictions(db, repository, user_id=run.user_id)
     path_backfill = backfill_prediction_path_metrics(db, repository, user_id=run.user_id)
+    event_context_backfill = backfill_prediction_event_contexts(
+        db,
+        run.user_id,
+        now=now,
+    )
     directional_candidates = aggregate_news_candidates(
         trigger_news_rows,
         symbol_map,
@@ -10226,6 +10339,7 @@ def _scan_opportunities(
         "unmapped_symbols": unmapped_symbols[:50],
         "settled_predictions": settlement,
         "path_metrics_backfill": path_backfill,
+        "event_context_backfill": event_context_backfill,
         "opportunity_cleanup": cleanup,
         "risk_plan_backfill": risk_plan_backfill,
         "rescored_pending_predictions": rescored_pending_predictions,
