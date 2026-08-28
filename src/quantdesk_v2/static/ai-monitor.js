@@ -1442,7 +1442,54 @@ class AiMonitorDashboard extends HTMLElement {
     const bp = (value) => Number.isFinite(Number(value)) ? `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(1)}bp` : "--";
     const nominal = Array.isArray(curve.nominal) ? curve.nominal : [];
     const curveItems = [curve.real_10y, curve.breakeven_10y, ...(Array.isArray(curve.curves) ? curve.curves : [])].filter(Boolean);
-    const yieldCards = nominal.map((item) => `<article class="macro-yield-card ${item.available ? "" : "unavailable"}"><header><span>${this.escape(item.key || "--")}</span><b>${numberOrDash(item.value, 3)}%</b></header><div><em>1日 ${bp(item.change_bps?.["1d"])}</em><em>5日 ${bp(item.change_bps?.["5d"])}</em><em>20日 ${bp(item.change_bps?.["20d"])}</em></div><small>Z-Score ${numberOrDash(item.zscore, 2)} · ${this.escape(item.as_of || "等待官方数据")}</small></article>`).join("");
+    const treasuryYieldProfiles = {
+      "2Y": {
+        title: "2年期美债收益率 · 近端政策温度计",
+        meaning: "美国财政部日度平价收益率曲线上理论新发 2 年期国债的年化收益率。它覆盖的期限较短，通常对未来数年政策利率路径最敏感。",
+        drivers: "美联储加息或降息预期、CPI/PCE、就业与工资、FOMC 指引，以及短端资金与流动性变化。",
+        impact: "上行常表示市场提高“利率更高更久”的定价，对高估值成长资产和短期融资成本偏不利；下行可能来自降息预期，也可能来自增长或风险担忧。",
+      },
+      "5Y": {
+        title: "5年期美债收益率 · 中期周期定价",
+        meaning: "美国财政部日度平价收益率曲线上理论新发 5 年期国债的年化收益率，连接短端政策预期与长端经济、通胀定价。",
+        drivers: "未来数年的平均短端利率预期、中期通胀和增长预期、国债供给、避险需求与期限溢价。",
+        impact: "上行通常收紧中期金融条件并提高企业融资与估值折现压力；下行通常放松金融条件，但若由衰退担忧推动，则不一定利好风险资产。",
+      },
+      "10Y": {
+        title: "10年期美债收益率 · 全球基准折现率",
+        meaning: "美国财政部日度平价收益率曲线上理论新发 10 年期国债的年化收益率，是全球常用的无风险利率与资产估值参照。",
+        drivers: "长期平均短端利率预期、通胀与增长、期限溢价、财政赤字和发债供给，以及全球机构与避险资金需求。",
+        impact: "上行通常抬高股票折现率、按揭和公司融资成本，长久期成长股更敏感；下行通常缓解估值压力，但也要区分通胀降温与增长恶化。",
+      },
+      "30Y": {
+        title: "30年期美债收益率 · 超长期风险定价",
+        meaning: "美国财政部日度平价收益率曲线上理论新发 30 年期国债的年化收益率，反映超长期资金价格和久期风险补偿。",
+        drivers: "长期通胀与潜在增长、财政可持续性和长债供给、期限溢价，以及养老金、保险机构和海外投资者的久期需求。",
+        impact: "上行常表示长期通胀、供给或期限溢价压力增大，对房地产、公用事业和高久期资产偏不利；下行常表示长端需求增强或长期增长/通胀预期回落。",
+      },
+    };
+    const yieldCards = nominal.map((item) => {
+      const key = String(item.key || "--").trim().toUpperCase();
+      const profile = treasuryYieldProfiles[key] || null;
+      const tooltipId = `treasury-yield-impact-${key.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+      const change5d = Number(item.change_bps?.["5d"]);
+      const direction = Number.isFinite(change5d) && change5d >= 2 ? "up" : Number.isFinite(change5d) && change5d <= -2 ? "down" : "flat";
+      const directionLabel = direction === "up" ? "近 5 日收益率上行" : direction === "down" ? "近 5 日收益率下行" : "近 5 日变化有限";
+      const currentRead = direction === "up"
+        ? "债券价格与收益率通常反向变化；当前上行表示对应期限的市场要求回报提高。"
+        : direction === "down"
+          ? "债券价格与收益率通常反向变化；当前下行表示对应期限的市场要求回报降低。"
+          : "当前波动尚小，需结合曲线斜率、实际利率和数据发布共同判断。";
+      const tooltip = profile ? `<div id="${this.escape(tooltipId)}" class="macro-asset-tooltip macro-card-tooltip" role="tooltip">
+        <span class="macro-asset-tooltip-kicker">TREASURY TENOR GUIDE</span>
+        <strong>${this.escape(profile.title)}</strong>
+        <span class="macro-asset-tooltip-state ${direction}">${this.escape(directionLabel)} · ${bp(item.change_bps?.["5d"])}</span>
+        <p>${this.escape(profile.meaning)}</p>
+        <dl><div><dt>主要驱动</dt><dd>${this.escape(profile.drivers)}</dd></div><div><dt>常见影响</dt><dd>${this.escape(profile.impact)}</dd></div><div><dt>当前解读</dt><dd>${this.escape(currentRead)}</dd></div></dl>
+        <small>这是美国财政部 CMT 平价曲线的固定期限读数，不是某一只债券的实际成交收益，也不构成交易建议。</small>
+      </div>` : "";
+      return `<article class="macro-yield-card ${item.available ? "" : "unavailable"}"${profile ? ` tabindex="0" aria-describedby="${this.escape(tooltipId)}"` : ""}><header><span>${this.escape(item.key || "--")}</span><b>${numberOrDash(item.value, 3)}%</b></header><div><em>1日 ${bp(item.change_bps?.["1d"])}</em><em>5日 ${bp(item.change_bps?.["5d"])}</em><em>20日 ${bp(item.change_bps?.["20d"])}</em></div><small>Z-Score ${numberOrDash(item.zscore, 2)} · ${this.escape(item.as_of || "等待官方数据")}</small>${profile ? '<i class="macro-card-help" aria-hidden="true">?</i>' : ""}${tooltip}</article>`;
+    }).join("");
     const curveCards = curveItems.map((item) => `<article><span>${this.escape(item.label || item.key || "--")}</span><b>${numberOrDash(item.value, 2)}${item.unit === "bps" ? "bp" : "%"}</b><small>5日 ${bp(item.change_bps?.["5d"])}</small></article>`).join("");
     const bankRows = (Array.isArray(banks.rows) ? banks.rows : []).map((item) => `<tr><td><strong>${this.escape(item.label || item.key)}</strong></td><td>${this.escape(item.policy_rate || "--")}</td><td>${this.escape(item.last_action || "--")}</td><td>${this.escape(item.vote_split || "--")}</td><td>${this.escape(item.next_meeting || "--")}</td><td class="${item.market_path?.available ? "positive" : "flat"}">${this.escape(item.market_path?.label || "未接入")}</td></tr>`).join("");
     const retreatChecks = (Array.isArray(retreat.checks) ? retreat.checks : []).map((item) => `<article class="${item.met ? "met" : item.available ? "clear" : "unknown"}"><span>${item.met ? "✓" : item.available ? "○" : "--"}</span><div><strong>${this.escape(item.label || "确认项")}</strong><small>${this.escape(item.detail || "暂无说明")}</small></div></article>`).join("");

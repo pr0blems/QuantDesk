@@ -474,7 +474,9 @@ button:disabled { cursor: wait; opacity: .55; }
 .macro-impact-section > header h3 { margin: 3px 0 0; color: var(--ai-text); font-size: 18px; }
 .macro-impact-section > header small { color: var(--ai-dim); font-size: 11px; text-align: right; }
 .macro-yield-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--ai-line); }
-.macro-yield-card { min-width: 0; padding: 12px 14px; background: #101310; }
+.macro-yield-card { min-width: 0; position: relative; padding: 12px 14px; background: #101310; }
+.macro-yield-card[tabindex] { cursor: help; outline: 0; transition: background .16s ease, box-shadow .16s ease; }
+.macro-yield-card[tabindex]:hover, .macro-yield-card[tabindex]:focus-visible { z-index: 12; background: #141914; box-shadow: inset 0 0 0 1px rgba(173, 156, 255, .62); }
 .macro-yield-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .macro-yield-card header span { color: var(--ai-muted); font: 800 13px Consolas, monospace; }
 .macro-yield-card header b { color: var(--ai-text); font: 800 22px Consolas, monospace; }
@@ -482,6 +484,13 @@ button:disabled { cursor: wait; opacity: .55; }
 .macro-yield-card em { padding: 3px 5px; border: 1px solid var(--ai-line); color: var(--ai-muted); font: normal 11px Consolas, monospace; }
 .macro-yield-card small { color: var(--ai-dim); font-size: 10px; }
 .macro-yield-card.unavailable { opacity: .55; }
+.macro-yield-card:hover > .macro-card-tooltip, .macro-yield-card:focus-visible > .macro-card-tooltip { opacity: 1; visibility: visible; transform: translate(-50%, 0); }
+.macro-yield-card:first-child > .macro-card-tooltip { left: 8px; transform: translate(0, -6px); }
+.macro-yield-card:first-child:hover > .macro-card-tooltip, .macro-yield-card:first-child:focus-visible > .macro-card-tooltip { transform: translate(0, 0); }
+.macro-yield-card:first-child > .macro-card-tooltip::after { left: 28px; }
+.macro-yield-card:last-child > .macro-card-tooltip { right: 8px; left: auto; transform: translate(0, -6px); }
+.macro-yield-card:last-child:hover > .macro-card-tooltip, .macro-yield-card:last-child:focus-visible > .macro-card-tooltip { transform: translate(0, 0); }
+.macro-yield-card:last-child > .macro-card-tooltip::after { right: 28px; left: auto; }
 .macro-curve-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-top: 1px; background: var(--ai-line); }
 .macro-curve-grid article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 2px 10px; padding: 9px 13px; background: #121512; }
 .macro-curve-grid span { color: var(--ai-muted); font-size: 12px; }

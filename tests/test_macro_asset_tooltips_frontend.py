@@ -73,3 +73,36 @@ def test_macro_policy_labels_directional_values_as_independent_caps() -> None:
     assert "多头仓位上限" in script
     assert "空头仓位上限" in script
     assert "多/空仓位上限" in script
+
+
+def test_treasury_tenor_cards_explain_meaning_drivers_and_market_impact() -> None:
+    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+        encoding="utf-8"
+    )
+
+    for tenor in ('"2Y"', '"5Y"', '"10Y"', '"30Y"'):
+        assert f"{tenor}: {{" in script
+    for phrase in (
+        "近端政策温度计",
+        "中期周期定价",
+        "全球基准折现率",
+        "超长期风险定价",
+        "主要驱动",
+        "常见影响",
+        "当前解读",
+    ):
+        assert phrase in script
+    assert 'class="macro-yield-card ${item.available ? "" : "unavailable"}"${profile ? ` tabindex="0" aria-describedby="${this.escape(tooltipId)}"`' in script
+    assert 'id="${this.escape(tooltipId)}" class="macro-asset-tooltip macro-card-tooltip" role="tooltip"' in script
+    assert "不是某一只债券的实际成交收益" in script
+
+
+def test_treasury_tenor_tooltips_support_hover_and_keyboard_focus() -> None:
+    styles = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".macro-yield-card:hover > .macro-card-tooltip" in styles
+    assert ".macro-yield-card:focus-visible > .macro-card-tooltip" in styles
+    assert ".macro-yield-card[tabindex]:hover" in styles
+    assert ".macro-yield-card[tabindex]:focus-visible" in styles
