@@ -1021,6 +1021,8 @@ def update_binance_credentials(
     user.binance_api_key_encrypted = cipher.encrypt(api_key)
     user.binance_api_secret_encrypted = cipher.encrypt(api_secret)
     user.binance_key_fingerprint = api_key_fingerprint(api_key)
+    if not user.binance_physical_account_id:
+        user.binance_physical_account_id = f"binance-usdm:{uuid.uuid4().hex}"
     user.binance_permissions = {"requested": sorted(set(payload.permissions))}
     user.binance_key_updated_at = utcnow()
     user.binance_key_version += 1
@@ -3057,6 +3059,11 @@ def arm_live_account(
         encrypted_key=encrypted_key,
         encrypted_secret=encrypted_secret,
     )
+    locked_user = db.scalar(select(User).where(User.id == user.id).with_for_update())
+    if locked_user is None:
+        raise HTTPException(status_code=409, detail="user account is unavailable")
+    if not locked_user.binance_physical_account_id:
+        locked_user.binance_physical_account_id = f"binance-usdm:{uuid.uuid4().hex}"
     account.status = "active"
     account_config = dict(account.config_json or {})
     account_config.update(

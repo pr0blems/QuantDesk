@@ -7,6 +7,14 @@ import pytest
 
 from quantdesk_v2 import live_engine
 from quantdesk_v2.binance_client import BinanceAccountClientError
+from quantdesk_v2.domain.trading import (
+    BrokerOrder,
+    OrderReference,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PositionSide,
+)
 
 
 class _Rules:
@@ -44,6 +52,8 @@ def _account(position_mode: str = "hedge") -> dict:
         "id": 1,
         "user_id": 2,
         "deployment_id": 3,
+        "strategy_revision_id": 4,
+        "binance_physical_account_id": "binance-usdm:test-wallet",
         "config_json": {
             "position_mode": position_mode,
             "leverage": 3,
@@ -1454,17 +1464,17 @@ def test_paused_account_can_still_send_risk_reducing_close(
 ) -> None:
     exchange_calls: list[str] = []
 
-    class Trading(_TradingClient):
-        @staticmethod
-        def place_market_order(*_args, **_kwargs) -> dict:
-            exchange_calls.append("close")
-            return {"orderId": 99, "status": "FILLED"}
-
-    monkeypatch.setattr(live_engine, "_trading_client", Trading())
+    runtime = SimpleNamespace(
+        broker=SimpleNamespace(configure_leverage=lambda *_args: None),
+        last_settlement_error=None,
+        execute=lambda _intent: exchange_calls.append("close")
+        or SimpleNamespace(state=live_engine.ExecutionState.FILLED),
+    )
+    monkeypatch.setattr(live_engine, "_live_execution_runtime", lambda *_args: runtime)
     monkeypatch.setattr(
         live_engine,
-        "_create_intent",
-        lambda *_args, **_kwargs: {"id": 40, "client_order_id": "close-40"},
+        "_project_unified_market_result",
+        lambda *_args, **_kwargs: {"orderId": 99, "status": "FILLED"},
     )
     monkeypatch.setattr(
         live_engine,
@@ -1496,17 +1506,17 @@ def test_market_intent_persists_exit_decision_trace(
 ) -> None:
     created: dict = {}
 
-    class Trading(_TradingClient):
-        @staticmethod
-        def place_market_order(*_args, **_kwargs) -> dict:
-            return {"orderId": 99, "status": "FILLED"}
-
-    monkeypatch.setattr(live_engine, "_trading_client", Trading())
+    runtime = SimpleNamespace(
+        broker=SimpleNamespace(configure_leverage=lambda *_args: None),
+        last_settlement_error=None,
+        execute=lambda _intent: SimpleNamespace(state=live_engine.ExecutionState.FILLED),
+    )
+    monkeypatch.setattr(live_engine, "_live_execution_runtime", lambda *_args: runtime)
     monkeypatch.setattr(
         live_engine,
-        "_create_intent",
+        "_project_unified_market_result",
         lambda *_args, **kwargs: created.update(kwargs)
-        or {"id": 40, "client_order_id": "close-40"},
+        or {"orderId": 99, "status": "FILLED"},
     )
     monkeypatch.setattr(live_engine, "_safety_write_enabled", lambda *_args: True)
     monkeypatch.setattr(live_engine, "_update_intent", lambda *_args, **_kwargs: None)
@@ -1529,7 +1539,7 @@ def test_market_intent_persists_exit_decision_trace(
     )
 
     assert response == {"orderId": 99, "status": "FILLED"}
-    assert created["request_json"]["exit_decision"] == {
+    assert created["decision_trace"] == {
         "version": "unified_exit_decision_v1",
         "reason": "strategy_reversal",
     }
@@ -1540,16 +1550,6 @@ def test_filled_audit_failure_still_returns_fill_and_installs_open_protection(
 ) -> None:
     protected: list[dict] = []
     reconciliation: list[int] = []
-
-    class Trading(_TradingClient):
-        @staticmethod
-        def place_market_order(*_args, **_kwargs) -> dict:
-            return {
-                "orderId": 99,
-                "clientOrderId": "open-40",
-                "status": "FILLED",
-                "avgPrice": "100",
-            }
 
     snapshot = SimpleNamespace(
         available_balance=Decimal("1000"),
@@ -1571,7 +1571,7 @@ def test_filled_audit_failure_still_returns_fill_and_installs_open_protection(
     )
     account = _account()
 
-    monkeypatch.setattr(live_engine, "_trading_client", Trading())
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
     monkeypatch.setattr(
         live_engine,
         "_account_service",
@@ -1583,6 +1583,29 @@ def test_filled_audit_failure_still_returns_fill_and_installs_open_protection(
         lambda *_args, **_kwargs: {"id": 40, "client_order_id": "open-40"},
     )
     monkeypatch.setattr(live_engine, "_execution_enabled", lambda *_args: True)
+    broker_order = BrokerOrder(
+        reference=OrderReference("open-40", "AAPLUSDT"),
+        exchange_order_id="99",
+        symbol="AAPLUSDT",
+        side=OrderSide.BUY,
+        position_side=PositionSide.LONG,
+        order_type=OrderType.MARKET,
+        status=OrderStatus.FILLED,
+        exchange_status="FILLED",
+        quantity=Decimal("0.5"),
+        executed_quantity=Decimal("0.5"),
+        average_price=Decimal("100"),
+    )
+    runtime = SimpleNamespace(
+        broker=SimpleNamespace(configure_leverage=lambda *_args: None),
+        last_settlement_error=None,
+        execute=lambda _intent: SimpleNamespace(
+            state=live_engine.ExecutionState.FILLED,
+            broker_order=broker_order,
+            error_code=None,
+        ),
+    )
+    monkeypatch.setattr(live_engine, "_live_execution_runtime", lambda *_args: runtime)
     monkeypatch.setattr(
         live_engine,
         "_update_intent",
@@ -1735,31 +1758,22 @@ def test_protection_rejects_terminal_post_and_query_status(
     monkeypatch: pytest.MonkeyPatch,
     timeout_then_query: bool,
 ) -> None:
-    updates: list[dict] = []
+    del timeout_then_query
+    reconciliations: list[int] = []
 
-    class Trading(_TradingClient):
+    class FailedProtection:
         @staticmethod
-        def place_close_trigger(*_args, **_kwargs) -> dict:
-            if timeout_then_query:
-                raise BinanceAccountClientError("timeout")
-            return {"algoId": 70, "algoStatus": "REJECTED"}
+        def ensure(*_args, **_kwargs):
+            raise live_engine.ProtectionInstallationError(
+                "unknown_stop_outcome", rollback_complete=False
+            )
 
-        @staticmethod
-        def query_algo_order(*_args, **_kwargs) -> dict:
-            return {"algoId": 70, "algoStatus": "REJECTED"}
-
-    monkeypatch.setattr(live_engine, "_trading_client", Trading())
-    monkeypatch.setattr(
-        live_engine,
-        "_create_intent",
-        lambda *_args, **_kwargs: {"id": 70, "client_order_id": "protect-70"},
-    )
+    monkeypatch.setattr(live_engine, "_account_service", SimpleNamespace(client=object()))
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(live_engine, "BinanceBroker", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(live_engine, "ProtectionService", lambda _broker: FailedProtection())
     monkeypatch.setattr(live_engine, "_safety_write_enabled", lambda *_args: True)
-    monkeypatch.setattr(
-        live_engine,
-        "_update_intent",
-        lambda _intent_id, _user_id, **kwargs: updates.append(kwargs),
-    )
+    monkeypatch.setattr(live_engine, "_request_reconciliation", reconciliations.append)
 
     result = live_engine._place_protection(
         _account(),
@@ -1775,52 +1789,27 @@ def test_protection_rejects_terminal_post_and_query_status(
     )
 
     assert result is False
-    assert updates[-1]["status"] == "rejected"
-    assert all(update["status"] != "submitted" for update in updates)
+    assert reconciliations == [1]
 
 
 def test_protection_rollback_failure_is_unknown_and_alerted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    updates: list[tuple[int, dict]] = []
-    failures: list[str] = []
-    responses = iter(
-        (
-            {"algoId": 80, "algoStatus": "NEW"},
-            {"algoId": 81, "algoStatus": "REJECTED"},
-        )
-    )
-    intent_ids = iter((80, 81))
+    reconciliations: list[int] = []
 
-    class Trading(_TradingClient):
+    class FailedProtection:
         @staticmethod
-        def place_close_trigger(*_args, **_kwargs) -> dict:
-            return next(responses)
+        def ensure(*_args, **_kwargs):
+            raise live_engine.ProtectionInstallationError(
+                "unknown_take_profit_outcome", rollback_complete=False
+            )
 
-        @staticmethod
-        def cancel_algo_order(*_args, **_kwargs) -> dict:
-            raise BinanceAccountClientError("network")
-
-    monkeypatch.setattr(live_engine, "_trading_client", Trading())
-    monkeypatch.setattr(
-        live_engine,
-        "_create_intent",
-        lambda *_args, **_kwargs: {
-            "id": (intent_id := next(intent_ids)),
-            "client_order_id": f"protect-{intent_id}",
-        },
-    )
+    monkeypatch.setattr(live_engine, "_account_service", SimpleNamespace(client=object()))
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(live_engine, "BinanceBroker", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(live_engine, "ProtectionService", lambda _broker: FailedProtection())
     monkeypatch.setattr(live_engine, "_safety_write_enabled", lambda *_args: True)
-    monkeypatch.setattr(
-        live_engine,
-        "_update_intent",
-        lambda intent_id, _user_id, **kwargs: updates.append((intent_id, kwargs)),
-    )
-    monkeypatch.setattr(
-        live_engine,
-        "_fail_account",
-        lambda _account, reason: failures.append(reason),
-    )
+    monkeypatch.setattr(live_engine, "_request_reconciliation", reconciliations.append)
 
     result = live_engine._place_protection(
         _account(),
@@ -1836,8 +1825,78 @@ def test_protection_rollback_failure_is_unknown_and_alerted(
     )
 
     assert result is False
-    assert any(intent_id == 80 and item["status"] == "unknown" for intent_id, item in updates)
-    assert failures == ["protective_cancel_failed"]
+    assert reconciliations == [1]
+
+
+def test_installed_protection_survives_projection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    reconciliations: list[int] = []
+    orders = (
+        BrokerOrder(
+            reference=OrderReference("qp-stop", conditional=True),
+            exchange_order_id="80",
+            symbol="AAPLUSDT",
+            side=OrderSide.SELL,
+            position_side=PositionSide.LONG,
+            order_type=OrderType.STOP_MARKET,
+            status=OrderStatus.NEW,
+            exchange_status="NEW",
+            quantity=Decimal("0.5"),
+            trigger_price=Decimal("90"),
+        ),
+        BrokerOrder(
+            reference=OrderReference("qp-target", conditional=True),
+            exchange_order_id="81",
+            symbol="AAPLUSDT",
+            side=OrderSide.SELL,
+            position_side=PositionSide.LONG,
+            order_type=OrderType.TAKE_PROFIT_MARKET,
+            status=OrderStatus.NEW,
+            exchange_status="NEW",
+            quantity=Decimal("0.5"),
+            trigger_price=Decimal("110"),
+        ),
+    )
+
+    class InstalledProtection:
+        @staticmethod
+        def ensure(*_args, **_kwargs):
+            return orders
+
+    monkeypatch.setattr(live_engine, "_account_service", SimpleNamespace(client=object()))
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(live_engine, "BinanceBroker", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        live_engine,
+        "ProtectionService",
+        lambda _broker: InstalledProtection(),
+    )
+    monkeypatch.setattr(live_engine, "_safety_write_enabled", lambda *_args: True)
+    monkeypatch.setattr(
+        live_engine,
+        "_create_intent",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("deadlock")),
+    )
+    monkeypatch.setattr(live_engine, "_request_reconciliation", reconciliations.append)
+
+    result = live_engine._place_protection(
+        account,
+        "key",
+        "secret",
+        symbol="AAPLUSDT",
+        side="SELL",
+        position_side="LONG",
+        quantity=Decimal("0.5"),
+        signal_time=123,
+        stop=Decimal("90"),
+        target=Decimal("110"),
+    )
+
+    assert result is True
+    assert account["_local_audit_pending"] is True
+    assert reconciliations == [1]
 
 
 def test_submitted_market_reconciliation_keeps_account_fenced(

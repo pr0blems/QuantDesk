@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,8 @@ def _account() -> dict:
         "id": 11,
         "public_id": "00000000-0000-0000-0000-000000000011",
         "user_id": 7,
+        "deployment_id": 51,
+        "strategy_revision_id": 61,
         "name": "ATR 模拟盘",
         "status": "active",
         "initial_balance": 10_000.0,
@@ -85,7 +88,32 @@ def _mock_open_transaction(
 
     monkeypatch.setattr(paper.store, "transaction", transaction)
     monkeypatch.setattr(paper.store, "add_alert", lambda *args, **kwargs: None)
+    _mock_execution(monkeypatch)
     return state
+
+
+def _mock_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    def execute(account, positions, intent, submit):
+        del account, positions
+        try:
+            submit(
+                paper.MarketOrder(
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    quantity=intent.quantity,
+                    client_order_id="paper-test-order",
+                    position_side=intent.position_side,
+                    reduce_only=intent.reduce_only,
+                )
+            )
+        except paper.BrokerError as exc:
+            return SimpleNamespace(
+                state=paper.ExecutionState.BROKER_REJECTED,
+                error_code=f"broker_{exc.category}",
+            )
+        return SimpleNamespace(state=paper.ExecutionState.FILLED, error_code=None)
+
+    monkeypatch.setattr(paper, "_paper_execute", execute)
 
 
 @pytest.mark.parametrize(
@@ -848,6 +876,7 @@ def test_close_position_deducts_accrued_funding_from_balance_and_trade(
 
     monkeypatch.setattr(paper.store, "transaction", transaction)
     monkeypatch.setattr(paper.store, "add_alert", lambda *args, **kwargs: None)
+    _mock_execution(monkeypatch)
 
     closed = paper._close_position(account, position, 100, "max_holding_bars", 1_000)
 
@@ -915,6 +944,7 @@ def test_close_position_requires_atomic_row_ownership(
         "add_alert",
         lambda *args, **kwargs: pytest.fail("lost close ownership must not alert"),
     )
+    _mock_execution(monkeypatch)
 
     closed = paper._close_position(account, position, 105, "take_profit", 1_000)
 

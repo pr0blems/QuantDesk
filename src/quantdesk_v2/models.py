@@ -482,6 +482,9 @@ class User(Base):
     binance_key_fingerprint: Mapped[str | None] = mapped_column(
         String(16), comment="API Key 的 SHA-256 短指纹，仅用于识别"
     )
+    binance_physical_account_id: Mapped[str | None] = mapped_column(
+        String(191), unique=True, comment="Binance wallet registration identity"
+    )
     binance_key_version: Mapped[int] = mapped_column(
         Integer, default=1, nullable=False, comment="Binance 凭据版本号，每次更新或删除递增"
     )

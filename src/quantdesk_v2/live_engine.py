@@ -14,19 +14,31 @@ import math
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from . import macro_market
 from . import market_store as store
 from .ai_monitor import PREDICTION_SETTLEMENT_VERSION
+from .application.execution_service import deterministic_client_order_id
+from .application.protection import ProtectionInstallationError, ProtectionService
+from .application.risk import RiskPolicy
 from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings
+from .domain.execution import (
+    ExecutionMode,
+    ExecutionState,
+    IntentAction,
+    OrderIntent,
+)
 from .domain.exit_policy import DEFAULT_EXIT_POLICY
 from .domain.protection import ProtectionCoverage, ProtectionPlan
+from .domain.trading import OrderSide, PositionSide
+from .infrastructure.binance_broker import BinanceBroker
+from .infrastructure.live_execution import LiveExecutionRuntime
 from .live_risk import (
     OpenPositionRisk,
     account_loss_limits,
@@ -548,7 +560,8 @@ def _active_accounts(account_id: int | None = None) -> list[dict[str, Any]]:
     base_query = """SELECT l.*,d.id AS deployment_id,d.strategy_revision_id,
                            d.runtime_state_json,
                            u.binance_api_key_encrypted,u.binance_api_secret_encrypted,
-                           u.binance_key_version,u.binance_permissions
+                           u.binance_key_version,u.binance_permissions,
+                           u.binance_physical_account_id
                     FROM live_trading_accounts l
                     JOIN strategy_deployments d
                       ON d.user_id=l.user_id AND d.mode='live' AND d.target_account_id=l.id
@@ -581,7 +594,8 @@ def _recovery_accounts() -> list[dict[str, Any]]:
         """SELECT l.*,d.id AS deployment_id,d.strategy_revision_id,
                   d.runtime_state_json,
                   u.binance_api_key_encrypted,u.binance_api_secret_encrypted,
-                  u.binance_key_version,u.binance_permissions
+                  u.binance_key_version,u.binance_permissions,
+                  u.binance_physical_account_id
            FROM live_trading_accounts l
            JOIN strategy_deployments d
              ON d.user_id=l.user_id AND d.mode='live' AND d.target_account_id=l.id
@@ -717,8 +731,9 @@ def _create_intent(
     request_json: dict[str, Any],
     strategy_signal_id: int | None = None,
     entry_basis: dict[str, Any] | None = None,
+    client_order_id: str | None = None,
 ) -> dict[str, Any] | None:
-    client_id = _client_id(int(account["id"]), signal_key)
+    client_id = client_order_id or _client_id(int(account["id"]), signal_key)
     created = store.execute(
         """INSERT IGNORE INTO live_order_intents(
                public_id,user_id,live_account_id,deployment_id,signal_key,client_order_id,
@@ -1077,7 +1092,7 @@ def _reconcile_intents(
     return market_state_changed
 
 
-def _place_market(
+def _legacy_place_market_unused(
     account: dict[str, Any],
     api_key: str,
     api_secret: str,
@@ -1217,6 +1232,293 @@ def _place_market(
     return response
 
 
+def _live_timeframe(account: dict[str, Any], entry_basis: dict[str, Any] | None) -> str:
+    captured = (entry_basis or {}).get("execution_policy")
+    if isinstance(captured, dict):
+        value = str(captured.get("trigger_timeframe") or "").strip().lower()
+        if value:
+            return value
+    try:
+        snapshots = account.get("strategy_snapshot_json")
+        snapshot = snapshots if isinstance(snapshots, dict) else {}
+        return resolve_strategy_timing_policy(snapshot, account.get("config_json")).trigger_timeframe
+    except (KeyError, StrategyEvaluationError, TypeError, ValueError):
+        return "1h"
+
+
+def _live_execution_runtime(
+    account: dict[str, Any], api_key: str, api_secret: str
+) -> LiveExecutionRuntime:
+    if _account_service is None or _trading_client is None:
+        raise RuntimeError("live engine is not configured")
+    physical_account_id = str(account.get("binance_physical_account_id") or "").strip()
+    if not physical_account_id:
+        raise RuntimeError("trusted Binance physical account binding is missing")
+    config = account.get("config_json")
+    config = config if isinstance(config, dict) else {}
+    symbols = frozenset(str(item).upper() for item in config.get("symbols", ()) if item)
+    policy = RiskPolicy(
+        max_open_positions=max(1, min(int(config.get("max_positions", 20)), 20)),
+        max_notional_to_equity=Decimal(
+            str(max(1, min(int(config.get("risk_max_leverage", config.get("leverage", 1))), 20)))
+        ),
+        allowed_symbols=symbols or frozenset(tradfi_symbols()),
+    )
+    return LiveExecutionRuntime(
+        account_client=_account_service.client,
+        trading_client=_trading_client,
+        engine=store.get_engine(),
+        api_key=api_key,
+        api_secret=api_secret,
+        tenant_scope=f"tenant:{account['user_id']}",
+        user_scope=f"user:{account['user_id']}",
+        account_scope=f"live-account:{account['id']}",
+        physical_account_id=physical_account_id,
+        risk_policy=policy,
+    )
+
+
+def _unified_live_intent(
+    account: dict[str, Any],
+    *,
+    signal_key: str,
+    symbol: str,
+    action: str,
+    side: str,
+    position_side: str,
+    quantity: Decimal,
+    reduce_only: bool,
+    signal_time: int | None,
+    timeframe: str,
+) -> OrderIntent:
+    now = datetime.now(UTC)
+    event_seconds = min(int(signal_time or now.timestamp()), int(now.timestamp()))
+    normalized_key = signal_key
+    if len(normalized_key) > 191:
+        normalized_key = f"live:{hashlib.sha256(normalized_key.encode('utf-8')).hexdigest()}"
+    return OrderIntent(
+        intent_id=f"intent-{hashlib.sha256(normalized_key.encode('utf-8')).hexdigest()[:48]}",
+        idempotency_key=normalized_key,
+        strategy_version_id=f"revision-{account['strategy_revision_id']}",
+        tenant_scope=f"tenant:{account['user_id']}",
+        user_scope=f"user:{account['user_id']}",
+        account_scope=f"live-account:{account['id']}",
+        deployment_scope=f"deployment:{account['deployment_id']}",
+        mode=ExecutionMode.LIVE,
+        market="binance_usdm",
+        symbol=symbol,
+        timeframe=timeframe,
+        action=IntentAction(action),
+        side=OrderSide(side),
+        quantity=quantity,
+        signal_time=datetime.fromtimestamp(event_seconds, tz=UTC),
+        valid_until=now + timedelta(minutes=5),
+        created_at=now,
+        position_side=PositionSide(position_side),
+        reduce_only=reduce_only,
+    )
+
+
+def _project_unified_market_result(
+    account: dict[str, Any],
+    intent: OrderIntent,
+    result: Any,
+    *,
+    signal_key: str,
+    action: str,
+    leverage: int | None,
+    strategy_signal_id: int | None,
+    entry_basis: dict[str, Any] | None,
+    decision_trace: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    order = result.broker_order
+    response = _unified_order_response(order)
+    client_order_id = deterministic_client_order_id(intent)
+    projected = _create_intent(
+        account,
+        signal_key=signal_key,
+        symbol=intent.symbol,
+        action=action,
+        side=intent.side.value,
+        position_side=intent.position_side.value,
+        order_type="MARKET",
+        quantity=intent.quantity,
+        request_json={
+            "symbol": intent.symbol,
+            "side": intent.side.value,
+            "position_side": intent.position_side.value,
+            "type": "MARKET",
+            "quantity": format(intent.quantity, "f"),
+            "reduce_only": intent.reduce_only,
+            "leverage": leverage,
+            **({"exit_decision": decision_trace} if isinstance(decision_trace, dict) else {}),
+            "execution_core": "unified_v1",
+        },
+        strategy_signal_id=strategy_signal_id,
+        entry_basis=entry_basis,
+        client_order_id=client_order_id,
+    )
+    if projected is None:
+        rows = store.query(
+            "SELECT * FROM live_order_intents WHERE signal_key=? AND user_id=? LIMIT 1",
+            (signal_key, account["user_id"]),
+        )
+        projected = dict(rows[0]) if rows else None
+    if projected is not None:
+        if result.state is ExecutionState.FILLED:
+            status = "filled"
+        elif result.state in {ExecutionState.SUBMITTED, ExecutionState.PARTIALLY_FILLED}:
+            status = "submitted"
+        elif result.state is ExecutionState.UNKNOWN:
+            status = "unknown"
+        elif result.state is ExecutionState.CANCELED:
+            status = "canceled"
+        else:
+            status = "rejected"
+        _update_intent(
+            int(projected["id"]),
+            int(account["user_id"]),
+            status=status,
+            response=response,
+            error_code=result.error_code,
+        )
+    return response if result.state is ExecutionState.FILLED else None
+
+
+def _unified_order_response(order: Any) -> dict[str, Any] | None:
+    if order is None:
+        return None
+    return {
+        "orderId": order.exchange_order_id,
+        "clientOrderId": order.reference.client_order_id,
+        "symbol": order.symbol,
+        "status": order.exchange_status or order.status.value,
+        "type": order.order_type.value,
+        "side": order.side.value,
+        "positionSide": order.position_side.value,
+        "reduceOnly": order.reduce_only,
+        "avgPrice": str(order.average_price or 0),
+        "origQty": str(order.quantity),
+        "executedQty": str(order.executed_quantity),
+    }
+
+
+def _place_market(
+    account: dict[str, Any],
+    api_key: str,
+    api_secret: str,
+    *,
+    signal_key: str,
+    symbol: str,
+    action: str,
+    side: str,
+    position_side: str,
+    quantity: Decimal,
+    reduce_only: bool,
+    leverage: int | None = None,
+    strategy_signal_id: int | None = None,
+    entry_basis: dict[str, Any] | None = None,
+    decision_trace: dict[str, Any] | None = None,
+    signal_time: int | None = None,
+    timeframe: str | None = None,
+) -> dict[str, Any] | None:
+    write_enabled = (
+        _safety_write_enabled(account)
+        if action == "close" or reduce_only
+        else _execution_enabled(account, symbol)
+    )
+    if not write_enabled:
+        projected = _create_intent(
+            account,
+            signal_key=signal_key,
+            symbol=symbol,
+            action=action,
+            side=side,
+            position_side=position_side,
+            order_type="MARKET",
+            quantity=quantity,
+            request_json={
+                "symbol": symbol,
+                "side": side,
+                "position_side": position_side,
+                "type": "MARKET",
+                "quantity": format(quantity, "f"),
+                "reduce_only": reduce_only,
+                "leverage": leverage,
+                "execution_core": "unified_v1",
+            },
+            strategy_signal_id=strategy_signal_id,
+            entry_basis=entry_basis,
+        )
+        if projected is not None:
+            _update_intent(
+                int(projected["id"]),
+                int(account["user_id"]),
+                status="canceled",
+                error_code=(
+                    "kill_switch_engaged"
+                    if account.get("_trading_control_blockers")
+                    else "execution_stopped"
+                ),
+            )
+        return None
+    try:
+        runtime = _live_execution_runtime(account, api_key, api_secret)
+        if action == "open" and leverage is not None:
+            runtime.broker.configure_leverage(symbol, leverage)
+        intent = _unified_live_intent(
+            account,
+            signal_key=signal_key,
+            symbol=symbol,
+            action=action,
+            side=side,
+            position_side=position_side,
+            quantity=quantity,
+            reduce_only=reduce_only,
+            signal_time=signal_time,
+            timeframe=timeframe or _live_timeframe(account, entry_basis),
+        )
+        result = runtime.execute(intent)
+    except Exception as exc:
+        print(f"[live] unified execution failed: {type(exc).__name__}")
+        _fail_account(account, "unified_execution_failed")
+        return None
+    try:
+        response = _project_unified_market_result(
+            account,
+            intent,
+            result,
+            signal_key=signal_key,
+            action=action,
+            leverage=leverage,
+            strategy_signal_id=strategy_signal_id,
+            entry_basis=entry_basis,
+            decision_trace=decision_trace,
+        )
+    except Exception as exc:
+        # The durable execution journal is authoritative.  A compatibility
+        # projection failure must not hide an exchange fill from the protection
+        # workflow or cause a second order submission.
+        print(f"[live] execution projection pending: {type(exc).__name__}")
+        account["_local_audit_pending"] = True
+        _request_reconciliation(int(account["id"]))
+        response = (
+            _unified_order_response(result.broker_order)
+            if result.state is ExecutionState.FILLED
+            else None
+        )
+    if result.state is ExecutionState.UNKNOWN:
+        _request_reconciliation(int(account["id"]))
+        _fail_account(account, "order_state_unknown")
+    elif runtime.last_settlement_error:
+        # The fill is returned so protection can be installed.  Durable risk
+        # remains reserved, which blocks any additional exposure until the next
+        # authoritative account reconciliation settles it.
+        _request_reconciliation(int(account["id"]))
+        print(f"[live] risk reflection pending: {runtime.last_settlement_error}")
+    return response
+
+
 def _rollback_protection_orders(
     account: dict[str, Any],
     api_key: str,
@@ -1253,7 +1555,7 @@ def _rollback_protection_orders(
             _fail_account(account, "protective_cancel_failed")
 
 
-def _place_protection(
+def _legacy_place_protection_unused(
     account: dict[str, Any],
     api_key: str,
     api_secret: str,
@@ -1370,6 +1672,150 @@ def _place_protection(
             _rollback_protection_orders(account, api_key, api_secret, created)
             return False
         created.append(intent)
+    return True
+
+
+def _place_protection(
+    account: dict[str, Any],
+    api_key: str,
+    api_secret: str,
+    *,
+    symbol: str,
+    side: str,
+    position_side: str,
+    quantity: Decimal | None,
+    signal_time: int,
+    stop: Decimal,
+    target: Decimal,
+    signal_key_suffix: str = "",
+) -> bool:
+    if not _safety_write_enabled(account):
+        try:
+            blocked_plan = ProtectionPlan.create(
+                symbol=symbol,
+                close_side=side,
+                position_side=position_side,
+                quantity=quantity,
+                signal_time=signal_time,
+                stop=stop,
+                target=target,
+            )
+            blocked = blocked_plan.orders[0]
+            projected = _create_intent(
+                account,
+                signal_key=blocked_plan.signal_key(account["deployment_id"], blocked.action),
+                symbol=symbol,
+                action=blocked.action.value,
+                side=side,
+                position_side=position_side,
+                order_type=blocked.order_type.value,
+                quantity=quantity,
+                request_json={"execution_core": "unified_protection_v1"},
+            )
+            if projected is not None:
+                _update_intent(
+                    int(projected["id"]),
+                    int(account["user_id"]),
+                    status="canceled",
+                    error_code="execution_stopped",
+                )
+        except (TypeError, ValueError):
+            pass
+        return False
+    if _account_service is None or _trading_client is None:
+        return False
+    physical_account_id = str(account.get("binance_physical_account_id") or "").strip()
+    if not physical_account_id:
+        return False
+    try:
+        plan = ProtectionPlan.create(
+            symbol=symbol,
+            close_side=side,
+            position_side=position_side,
+            quantity=quantity,
+            signal_time=signal_time,
+            stop=stop,
+            target=target,
+        )
+        broker = BinanceBroker(
+            _account_service.client,
+            _trading_client,
+            api_key=api_key,
+            api_secret=api_secret,
+            account_scope=f"live-account:{account['id']}",
+            physical_account_id=physical_account_id,
+        )
+        execution_scope = f"deployment:{account['deployment_id']}:signal:{signal_time}"
+        if signal_key_suffix:
+            execution_scope += f":{signal_key_suffix}"
+        orders = ProtectionService(broker).ensure(plan, execution_scope=execution_scope)
+    except (ProtectionInstallationError, TypeError, ValueError) as exc:
+        print(f"[live] unified protection failed: {type(exc).__name__}")
+        _request_reconciliation(int(account["id"]))
+        return False
+    except Exception as exc:
+        print(f"[live] unified protection adapter failed: {type(exc).__name__}")
+        _request_reconciliation(int(account["id"]))
+        return False
+
+    try:
+        for order, specification in zip(orders, plan.orders, strict=True):
+            action = specification.action.value
+            signal_key = plan.signal_key(account["deployment_id"], specification.action)
+            if signal_key_suffix:
+                signal_key = f"{signal_key}:{signal_key_suffix}"
+            projected = _create_intent(
+                account,
+                signal_key=signal_key,
+                symbol=order.symbol,
+                action=action,
+                side=order.side.value,
+                position_side=order.position_side.value,
+                order_type=order.order_type.value,
+                quantity=(order.quantity if order.quantity > 0 else None),
+                request_json={
+                    "symbol": order.symbol,
+                    "side": order.side.value,
+                    "position_side": order.position_side.value,
+                    "type": order.order_type.value,
+                    "stop_price": format(specification.trigger_price, "f"),
+                    "quantity": format(order.quantity, "f") if order.quantity > 0 else None,
+                    "close_position": quantity is None,
+                    "working_type": "MARK_PRICE",
+                    "execution_core": "unified_protection_v1",
+                },
+                client_order_id=order.reference.client_order_id,
+            )
+            if projected is None:
+                rows = store.query(
+                    "SELECT * FROM live_order_intents WHERE signal_key=? AND user_id=? LIMIT 1",
+                    (signal_key, account["user_id"]),
+                )
+                projected = dict(rows[0]) if rows else None
+            if projected is not None:
+                response = {
+                    "algoId": order.exchange_order_id,
+                    "clientAlgoId": order.reference.client_order_id,
+                    "symbol": order.symbol,
+                    "algoStatus": order.exchange_status or order.status.value,
+                    "orderType": order.order_type.value,
+                    "side": order.side.value,
+                    "positionSide": order.position_side.value,
+                    "triggerPrice": str(order.trigger_price or specification.trigger_price),
+                }
+                _update_intent(
+                    int(projected["id"]),
+                    int(account["user_id"]),
+                    status="submitted",
+                    response=response,
+                )
+    except Exception as exc:
+        # Exchange protection is already authoritative.  Keep the position
+        # protected, fence additional entries, and rebuild the read projection
+        # from deterministic client ids during reconciliation.
+        print(f"[live] protection projection pending: {type(exc).__name__}")
+        account["_local_audit_pending"] = True
+        _request_reconciliation(int(account["id"]))
     return True
 
 
@@ -2220,9 +2666,14 @@ def _close_position(
     managed_quantity = Decimal(str(managed.get("quantity") or actual_quantity))
     quantity = rules.quantity(min(actual_quantity, managed_quantity))
     side = "SELL" if position["side"] == "long" else "BUY"
+    managed_identity = managed.get("id") or hashlib.sha256(
+        str(managed.get("signal_key") or managed.get("client_order_id") or symbol).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
     signal_key = (
         f"live:{account['deployment_id']}:{symbol}:{position_side}:close:"
-        f"{reason}:{int(time.time()) // 60}"
+        f"managed-open:{managed_identity}"
     )
     observed_at = int(time.time())
     exit_decision = DEFAULT_EXIT_POLICY.decision_for_reason(
@@ -2248,6 +2699,8 @@ def _close_position(
             if exit_decision is not None
             else None
         ),
+        signal_time=observed_at,
+        timeframe=_live_timeframe(account, _json_object(managed.get("entry_basis_json"))),
     )
     if response is None:
         _fail_account(account, "position_close_failed")
@@ -2398,6 +2851,8 @@ def _open_position(
         leverage=leverage,
         strategy_signal_id=strategy_signal_id,
         entry_basis=entry_basis,
+        signal_time=signal_time,
+        timeframe=_live_timeframe(account, entry_basis),
     )
     if response is None:
         return False

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import threading
 import time
 import uuid
 from dataclasses import replace
-from datetime import UTC
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -35,15 +36,41 @@ from quantdesk_v2.strategy_source_runtime import (
 
 from . import indicators as ind
 from . import market_store as store
+from .application.risk import RiskPolicy
+from .application.safety import ExecutionSafetyController
 from .application.strategy_signals import (
     EvaluatedStrategySignal,
     evaluate_strategy_snapshot,
+)
+from .domain.execution import (
+    ExecutionMode,
+    ExecutionState,
+    IntentAction,
+    OrderIntent,
 )
 from .domain.exit_policy import DEFAULT_EXIT_POLICY, ExitLevelPlan
 from .domain.runtime import (
     decision_record_key,
     strategy_decision_id,
 )
+from .domain.trading import (
+    AccountSnapshot,
+    AccountType,
+    BrokerError,
+    BrokerOrder,
+    InstrumentRules,
+    MarketOrder,
+    OrderReference,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    PositionDirection,
+    PositionSide,
+)
+from .infrastructure.callback_broker import PaperBroker
+from .infrastructure.paper_execution import PaperExecutionRuntime
+from .infrastructure.store_market_data import StoreMarketDataFeed
 from .live_risk import (
     OpenPositionRisk,
     account_loss_limits,
@@ -80,6 +107,7 @@ PAPER_MAX_FUTURE_TICKER_SKEW_SECONDS = 15
 ENTRY_BASIS_SCHEMA_VERSION = 2
 
 _lock = threading.RLock()
+_paper_execution_safety: dict[int, ExecutionSafetyController] = {}
 
 
 class _PriceSnapshot(dict[str, float]):
@@ -128,7 +156,13 @@ def _strategy_display_name(account: dict[str, Any]) -> str:
 
 def _account(user_id: int, account_id: int) -> dict[str, Any]:
     rows = store.query(
-        "SELECT * FROM paper_accounts WHERE id=? AND user_id=? AND status<>'archived'",
+        """SELECT a.*,d.id AS deployment_id,d.strategy_revision_id
+           FROM paper_accounts a
+           LEFT JOIN strategy_deployments d
+             ON d.user_id=a.user_id AND d.mode='paper' AND d.target_account_id=a.id
+            AND d.strategy_id=a.strategy_id
+           WHERE a.id=? AND a.user_id=? AND a.status<>'archived'
+           ORDER BY d.id DESC LIMIT 1""",
         (account_id, user_id),
     )
     if not rows:
@@ -140,15 +174,23 @@ def _account(user_id: int, account_id: int) -> dict[str, Any]:
 
 
 def _tracked_accounts(account_id: int | None = None) -> list[dict[str, Any]]:
+    base = """SELECT a.*,d.id AS deployment_id,d.strategy_revision_id
+              FROM paper_accounts a
+              LEFT JOIN strategy_deployments d
+                ON d.user_id=a.user_id AND d.mode='paper' AND d.target_account_id=a.id
+               AND d.strategy_id=a.strategy_id
+              WHERE a.status<>'archived'"""
     if account_id is None:
-        rows = store.query("SELECT * FROM paper_accounts WHERE status<>'archived' ORDER BY id")
+        rows = store.query(base + " ORDER BY a.id,d.id DESC")
     else:
-        rows = store.query(
-            "SELECT * FROM paper_accounts WHERE id=? AND status<>'archived'", (account_id,)
-        )
+        rows = store.query(base + " AND a.id=? ORDER BY d.id DESC", (account_id,))
     result = []
+    seen: set[int] = set()
     for row in rows:
         account = dict(row)
+        if int(account["id"]) in seen:
+            continue
+        seen.add(int(account["id"]))
         account["config_json"] = _json_object(account.get("config_json"))
         account["strategy_snapshot_json"] = _json_object(
             account.get("strategy_snapshot_json")
@@ -203,6 +245,178 @@ def _positions(account: dict[str, Any]) -> list[dict[str, Any]]:
             (account["id"], account["user_id"]),
         )
     ]
+
+
+def _paper_timeframe(account: dict[str, Any]) -> str:
+    try:
+        return resolve_strategy_timing_policy(
+            (_strategy_snapshots(account) or [{}])[0],
+            account.get("config_json") if isinstance(account.get("config_json"), dict) else None,
+            default_max_holding_bars=DEFAULT_MAX_HOLDING_BARS,
+        ).trigger_timeframe
+    except (KeyError, StrategyEvaluationError, TypeError, ValueError):
+        return "1h"
+
+
+def _paper_execution_key(account: dict[str, Any], suffix: str) -> str:
+    started = account.get("started_at")
+    run = started.isoformat() if isinstance(started, datetime) else str(started or "initial")
+    digest = hashlib.sha256(f"{run}:{suffix}".encode()).hexdigest()[:32]
+    return f"paper:{account['id']}:{digest}"
+
+
+def _paper_intent(
+    account: dict[str, Any],
+    *,
+    suffix: str,
+    symbol: str,
+    action: IntentAction,
+    side: OrderSide,
+    quantity: Decimal,
+    signal_time: int,
+    valid_until: int,
+    reduce_only: bool,
+) -> OrderIntent | None:
+    deployment_id = account.get("deployment_id")
+    revision_id = account.get("strategy_revision_id")
+    if deployment_id is None or revision_id is None:
+        print(f"[paper] account {account.get('id')} has no immutable paper deployment")
+        return None
+    key = _paper_execution_key(account, suffix)
+    now = datetime.now(UTC)
+    normalized_valid_until = max(int(valid_until), int(now.timestamp()) + 300)
+    return OrderIntent(
+        intent_id=f"intent-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:48]}",
+        idempotency_key=key,
+        strategy_version_id=f"revision-{revision_id}",
+        tenant_scope=f"tenant:{account['user_id']}",
+        user_scope=f"user:{account['user_id']}",
+        account_scope=f"paper-account:{account['id']}",
+        deployment_scope=f"deployment:{deployment_id}",
+        mode=ExecutionMode.PAPER,
+        market="binance_usdm",
+        symbol=symbol,
+        timeframe=_paper_timeframe(account),
+        action=action,
+        side=side,
+        quantity=quantity,
+        signal_time=datetime.fromtimestamp(signal_time, tz=UTC),
+        valid_until=datetime.fromtimestamp(normalized_valid_until, tz=UTC),
+        created_at=now,
+        reduce_only=reduce_only,
+    )
+
+
+def _paper_account_snapshot(
+    account: dict[str, Any], positions: list[dict[str, Any]]
+) -> AccountSnapshot:
+    prices = _prices()
+    equity, unrealized = _equity(account, prices, positions)
+    now = datetime.now(UTC)
+    normalized_positions: list[Position] = []
+    for row in positions:
+        side = int(row["side"])
+        mark = Decimal(str(prices.get(row["symbol"], row["avg_entry"])))
+        quantity = Decimal(str(row["qty"]))
+        normalized_positions.append(
+            Position(
+                symbol=str(row["symbol"]),
+                direction=PositionDirection.LONG if side > 0 else PositionDirection.SHORT,
+                position_side=PositionSide.BOTH,
+                quantity=quantity,
+                entry_price=Decimal(str(row["avg_entry"])),
+                mark_price=mark,
+                liquidation_price=(Decimal(str(row["liq_price"])) if row.get("liq_price") is not None else None),
+                notional=quantity * mark,
+                initial_margin=Decimal(str(row["margin"])),
+                unrealized_pnl=Decimal(str(_upnl(row, float(mark)))),
+                leverage=int(row["leverage"]),
+                updated_at_ms=int(now.timestamp() * 1000),
+            )
+        )
+    return AccountSnapshot(
+        account_type=AccountType.USD_M_FUTURES,
+        can_trade=account.get("status") == "active",
+        wallet_balance=Decimal(str(equity)),
+        available_balance=Decimal(str(account["balance"])),
+        unrealized_pnl=Decimal(str(unrealized)),
+        currency="USDT",
+        updated_at=now,
+        observed_at=now,
+        positions=tuple(normalized_positions),
+    )
+
+
+def _paper_rules(symbol: str) -> InstrumentRules:
+    return InstrumentRules(
+        symbol=symbol,
+        quantity_step=Decimal("0.000000000000000001"),
+        minimum_quantity=Decimal("0.000000000000000001"),
+        maximum_quantity=Decimal("1000000000000"),
+        price_tick=Decimal("0.00000001"),
+        minimum_notional=Decimal("0.00000001"),
+    )
+
+
+def _paper_order(row: dict[str, Any] | Any) -> BrokerOrder:
+    return BrokerOrder(
+        reference=OrderReference(str(row["client_order_id"]), str(row["symbol"])),
+        exchange_order_id=f"paper-{row['id']}",
+        symbol=str(row["symbol"]),
+        side=OrderSide(str(row["side"])),
+        position_side=PositionSide(str(row["position_side"])),
+        order_type=OrderType.MARKET,
+        status=OrderStatus(str(row["status"])),
+        exchange_status=f"PAPER_{row['status']}",
+        quantity=Decimal(str(row["quantity"])),
+        executed_quantity=Decimal(str(row["executed_quantity"])),
+        average_price=Decimal(str(row["average_price"])),
+        reduce_only=str(row["action"]) == "close",
+    )
+
+
+def _paper_lookup(reference: OrderReference) -> BrokerOrder:
+    rows = store.query(
+        "SELECT * FROM paper_order_executions WHERE client_order_id=? LIMIT 1",
+        (reference.client_order_id,),
+    )
+    if not rows:
+        raise BrokerError("order_not_found")
+    return _paper_order(rows[0])
+
+
+def _paper_execute(
+    account: dict[str, Any],
+    positions: list[dict[str, Any]],
+    intent: OrderIntent,
+    submit: Any,
+) -> Any:
+    account_id = int(account["id"])
+    safety = _paper_execution_safety.setdefault(account_id, ExecutionSafetyController())
+    broker = PaperBroker(
+        account_scope=intent.account_scope,
+        physical_account_id=f"paper-wallet:{account_id}",
+        feed=StoreMarketDataFeed(),
+        account_snapshot=lambda: _paper_account_snapshot(account, _positions(account)),
+        rules=_paper_rules,
+        submit=submit,
+        lookup=_paper_lookup,
+    )
+    runtime = PaperExecutionRuntime(
+        broker=broker,
+        engine=store.get_engine(),
+        tenant_scope=intent.tenant_scope,
+        user_scope=intent.user_scope,
+        account_scope=intent.account_scope,
+        physical_account_id=broker.physical_account_id,
+        risk_policy=RiskPolicy(
+            max_open_positions=int(_config(account)["max_positions"]),
+            max_notional_to_equity=Decimal(str(_config(account)["leverage"])),
+            allowed_symbols=frozenset(tradfi_symbols()),
+        ),
+        safety=safety,
+    )
+    return runtime.execute(intent)
 
 
 def _prices() -> dict[str, float]:
@@ -1516,44 +1730,95 @@ def _open_position(
     score = entry_basis["signal"].get("score")
     stored_score = int(score) if isinstance(score, (int, float)) else None
     debit = margin + fee
-    with store.transaction() as transaction:
-        balance_rows = transaction.query(
-            """SELECT balance FROM paper_accounts
-               WHERE id=? AND user_id=? FOR UPDATE""",
-            (account["id"], account["user_id"]),
-        )
-        if not balance_rows:
-            return False
-        try:
-            locked_balance = float(balance_rows[0]["balance"])
-        except (KeyError, TypeError, ValueError):
-            return False
-        if (
-            not math.isfinite(locked_balance)
-            or locked_balance < 0
-            or locked_balance + 1e-8 < debit
-        ):
-            return False
-        new_balance = max(round(locked_balance - debit, 8), 0.0)
-        transaction.execute(
-            """UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP
-               WHERE id=? AND user_id=?""",
-            (new_balance, account["id"], account["user_id"]),
-        )
-        transaction.execute(
-            """INSERT INTO paper_positions(
-               paper_account_id,user_id,symbol,side,qty,avg_entry,margin,leverage,stop,target,
-                   adds,opened_ts,last_add_ts,open_score,basis,funding_acc,liq_price,funding_ts,
-                   atr_entry,peak_price,tp_done
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?, ?,0,?,?,?,?,0)""",
-            (
-                account["id"], account["user_id"], symbol, side, quantity, execution,
-                margin, leverage, stop, target, now, now, stored_score,
-                json.dumps(entry_basis, ensure_ascii=False), liquidation, now, atr,
-                execution,
-            ),
-        )
-    account["balance"] = new_balance
+    intent = _paper_intent(
+        account,
+        suffix=f"{symbol}:{signal_time or now}:open:{side}",
+        symbol=symbol,
+        action=IntentAction.OPEN,
+        side=OrderSide.BUY if side > 0 else OrderSide.SELL,
+        quantity=Decimal(str(quantity)),
+        signal_time=int(signal_time or now),
+        valid_until=now + 300,
+        reduce_only=False,
+    )
+    if intent is None:
+        return False
+    balance_after: list[float] = []
+
+    def submit(order: MarketOrder) -> BrokerOrder:
+        with store.transaction() as transaction:
+            balance_rows = transaction.query(
+                """SELECT balance FROM paper_accounts
+                   WHERE id=? AND user_id=? FOR UPDATE""",
+                (account["id"], account["user_id"]),
+            )
+            if not balance_rows:
+                raise BrokerError("paper_account_unavailable")
+            try:
+                locked_balance = float(balance_rows[0]["balance"])
+            except (KeyError, TypeError, ValueError):
+                raise BrokerError("paper_balance_invalid") from None
+            if (
+                not math.isfinite(locked_balance)
+                or locked_balance < 0
+                or locked_balance + 1e-8 < debit
+            ):
+                raise BrokerError("insufficient_margin")
+            new_balance = max(round(locked_balance - debit, 8), 0.0)
+            transaction.execute(
+                """UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND user_id=?""",
+                (new_balance, account["id"], account["user_id"]),
+            )
+            transaction.execute(
+                """INSERT INTO paper_positions(
+                   paper_account_id,user_id,symbol,side,qty,avg_entry,margin,leverage,stop,target,
+                       adds,opened_ts,last_add_ts,open_score,basis,funding_acc,liq_price,funding_ts,
+                       atr_entry,peak_price,tp_done
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?, ?,0,?,?,?,?,0)""",
+                (
+                    account["id"], account["user_id"], symbol, side, quantity, execution,
+                    margin, leverage, stop, target, now, now, stored_score,
+                    json.dumps(entry_basis, ensure_ascii=False), liquidation, now, atr,
+                    execution,
+                ),
+            )
+            transaction.execute(
+                """INSERT INTO paper_order_executions(
+                   public_id,user_id,paper_account_id,deployment_id,intent_id,client_order_id,
+                   symbol,action,side,position_side,quantity,executed_quantity,average_price,
+                   status,response_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'FILLED',?)""",
+                (
+                    str(uuid.uuid4()), account["user_id"], account["id"],
+                    account["deployment_id"], intent.intent_id, order.client_order_id,
+                    symbol, "open", order.side.value, order.position_side.value,
+                    order.quantity, order.quantity, execution,
+                    json.dumps({"simulated": True, "entry_basis": entry_basis}, ensure_ascii=False),
+                ),
+            )
+            balance_after.append(new_balance)
+            return _paper_order(
+                {
+                    "id": order.client_order_id,
+                    "client_order_id": order.client_order_id,
+                    "symbol": symbol,
+                    "side": order.side.value,
+                    "position_side": order.position_side.value,
+                    "quantity": order.quantity,
+                    "executed_quantity": order.quantity,
+                    "average_price": execution,
+                    "status": "FILLED",
+                    "action": "open",
+                }
+            )
+
+    result = _paper_execute(account, positions, intent, submit)
+    if result.state is not ExecutionState.FILLED:
+        print(f"[paper] unified open blocked: {result.error_code or result.state.value}")
+        return False
+    if balance_after:
+        account["balance"] = balance_after[-1]
     direction = "long" if side > 0 else "short"
     store.add_alert(
         symbol,
@@ -1598,40 +1863,92 @@ def _close_position(
             mode="paper",
             execution_price=execution,
         )
-    with store.transaction() as transaction:
-        ownership = transaction.query(
-            """SELECT a.balance FROM paper_positions p
-               JOIN paper_accounts a ON a.id=p.paper_account_id AND a.user_id=p.user_id
-               WHERE p.id=? AND p.paper_account_id=? AND p.user_id=? FOR UPDATE""",
-            (position["id"], account["id"], account["user_id"]),
-        )
-        if not ownership:
-            return False
-        deleted = transaction.execute(
-            "DELETE FROM paper_positions WHERE id=? AND paper_account_id=? AND user_id=?",
-            (position["id"], account["id"], account["user_id"]),
-        )
-        if deleted != 1:
-            return False
-        new_balance = max(round(float(ownership[0]["balance"]) + returned, 8), 0.0)
-        transaction.execute(
-            """UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP
-               WHERE id=? AND user_id=?""",
-            (new_balance, account["id"], account["user_id"]),
-        )
-        transaction.execute(
-            """INSERT INTO paper_trades(
-                   paper_account_id,user_id,symbol,side,qty,entry_price,exit_price,margin,pnl,
-                   fee,funding,reason,open_score,opened_ts,closed_ts,entry_basis_json
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                account["id"], account["user_id"], position["symbol"], position["side"],
-                quantity, position["avg_entry"], execution, margin, max(pnl, -margin), fee,
-                position.get("funding_acc") or 0, reason, position.get("open_score"),
-                position["opened_ts"], now, json.dumps(trade_basis, ensure_ascii=False),
-            ),
-        )
-    account["balance"] = new_balance
+    close_side = OrderSide.SELL if int(position["side"]) > 0 else OrderSide.BUY
+    intent = _paper_intent(
+        account,
+        suffix=f"position:{position['id']}:{position['opened_ts']}:close",
+        symbol=str(position["symbol"]),
+        action=IntentAction.CLOSE,
+        side=close_side,
+        quantity=Decimal(str(quantity)),
+        signal_time=now,
+        valid_until=now + 300,
+        reduce_only=True,
+    )
+    if intent is None:
+        return False
+    balance_after: list[float] = []
+
+    def submit(order: MarketOrder) -> BrokerOrder:
+        with store.transaction() as transaction:
+            ownership = transaction.query(
+                """SELECT a.balance FROM paper_positions p
+                   JOIN paper_accounts a ON a.id=p.paper_account_id AND a.user_id=p.user_id
+                   WHERE p.id=? AND p.paper_account_id=? AND p.user_id=? FOR UPDATE""",
+                (position["id"], account["id"], account["user_id"]),
+            )
+            if not ownership:
+                raise BrokerError("position_to_reduce_not_found")
+            deleted = transaction.execute(
+                "DELETE FROM paper_positions WHERE id=? AND paper_account_id=? AND user_id=?",
+                (position["id"], account["id"], account["user_id"]),
+            )
+            if deleted != 1:
+                raise BrokerError("paper_position_concurrent_change")
+            new_balance = max(round(float(ownership[0]["balance"]) + returned, 8), 0.0)
+            transaction.execute(
+                """UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND user_id=?""",
+                (new_balance, account["id"], account["user_id"]),
+            )
+            transaction.execute(
+                """INSERT INTO paper_trades(
+                       paper_account_id,user_id,symbol,side,qty,entry_price,exit_price,margin,pnl,
+                       fee,funding,reason,open_score,opened_ts,closed_ts,entry_basis_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    account["id"], account["user_id"], position["symbol"], position["side"],
+                    quantity, position["avg_entry"], execution, margin, max(pnl, -margin), fee,
+                    position.get("funding_acc") or 0, reason, position.get("open_score"),
+                    position["opened_ts"], now, json.dumps(trade_basis, ensure_ascii=False),
+                ),
+            )
+            transaction.execute(
+                """INSERT INTO paper_order_executions(
+                   public_id,user_id,paper_account_id,deployment_id,intent_id,client_order_id,
+                   symbol,action,side,position_side,quantity,executed_quantity,average_price,
+                   status,response_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'FILLED',?)""",
+                (
+                    str(uuid.uuid4()), account["user_id"], account["id"],
+                    account["deployment_id"], intent.intent_id, order.client_order_id,
+                    position["symbol"], "close", order.side.value, order.position_side.value,
+                    order.quantity, order.quantity, execution,
+                    json.dumps({"simulated": True, "reason": reason}, ensure_ascii=False),
+                ),
+            )
+            balance_after.append(new_balance)
+            return _paper_order(
+                {
+                    "id": order.client_order_id,
+                    "client_order_id": order.client_order_id,
+                    "symbol": position["symbol"],
+                    "side": order.side.value,
+                    "position_side": order.position_side.value,
+                    "quantity": order.quantity,
+                    "executed_quantity": order.quantity,
+                    "average_price": execution,
+                    "status": "FILLED",
+                    "action": "close",
+                }
+            )
+
+    result = _paper_execute(account, [position], intent, submit)
+    if result.state is not ExecutionState.FILLED:
+        print(f"[paper] unified close blocked: {result.error_code or result.state.value}")
+        return False
+    if balance_after:
+        account["balance"] = balance_after[-1]
     direction = "long" if int(position["side"]) > 0 else "short"
     store.add_alert(
         position["symbol"],
@@ -1872,6 +2189,10 @@ def reset(user_id: int, account_id: int) -> None:
         )
         store.execute(
             "DELETE FROM paper_trades WHERE paper_account_id=? AND user_id=?",
+            (account_id, user_id),
+        )
+        store.execute(
+            "DELETE FROM paper_order_executions WHERE paper_account_id=? AND user_id=?",
             (account_id, user_id),
         )
         store.execute(
