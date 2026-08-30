@@ -21,6 +21,7 @@ from quantdesk_v2.domain.trading import (
     PositionDirection,
     Quote,
 )
+from quantdesk_v2.infrastructure.memory_execution import InMemoryIdempotencyStore
 from quantdesk_v2.infrastructure.shadow_execution import ShadowExecutionRuntime
 
 NOW = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
@@ -42,6 +43,7 @@ def _runtime(
     feed: MemoryFeed | None = None,
     rules: dict[str, InstrumentRules] | None = None,
     risk_policy: RiskPolicy | None = None,
+    idempotency: InMemoryIdempotencyStore | None = None,
 ) -> ShadowExecutionRuntime:
     account = AccountSnapshot(
         account_type=AccountType.USD_M_FUTURES,
@@ -62,6 +64,7 @@ def _runtime(
         physical_account_id="shadow-wallet-1",
         slippage_bps=Decimal("5"),
         risk_policy=risk_policy,
+        idempotency=idempotency,
         clock=lambda: NOW,
     )
 
@@ -129,6 +132,21 @@ def test_shadow_runtime_is_a_real_broker_entry_without_exchange_writes() -> None
     assert result.fills[0].simulated is True
     assert replay is result
     assert runtime.broker.open_orders() == ()
+
+
+def test_shadow_restart_uses_the_same_persisted_claim_without_a_second_fill() -> None:
+    journal = InMemoryIdempotencyStore()
+    first_runtime = _runtime(idempotency=journal)
+    restarted_runtime = _runtime(idempotency=journal)
+    intent = _intent("restart-safe", quantity=Decimal("0.1"))
+
+    first = first_runtime.execute(intent)
+    replay = restarted_runtime.execute(intent)
+
+    assert first.state is ExecutionState.FILLED
+    assert replay == first
+    assert len(first_runtime.broker.account_snapshot().positions) == 1
+    assert restarted_runtime.broker.account_snapshot().positions == ()
 
 
 def test_shadow_runtime_honors_the_same_kill_switch_as_other_modes() -> None:

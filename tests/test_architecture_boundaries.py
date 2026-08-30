@@ -71,3 +71,10 @@ def test_paper_runtime_does_not_reach_into_backtest_private_helpers() -> None:
 
     assert private_imports == []
 
+
+def test_shadow_worker_does_not_import_the_paper_runtime() -> None:
+    imports = _imports(PACKAGE_ROOT / "shadow_worker.py")
+
+    assert "paper_engine" not in imports
+    assert "quantdesk_v2.paper_engine" not in imports
+

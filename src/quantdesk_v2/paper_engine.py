@@ -8,12 +8,11 @@ import threading
 import time
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from quantdesk_v2.strategy_evaluator import (
-    DEFAULT_STRATEGY_EVALUATOR,
     StrategyCandle,
     StrategyEvaluationError,
     bollinger_bands,
@@ -26,24 +25,22 @@ from quantdesk_v2.strategy_evaluator import (
     strategy_timeframe_seconds,
 )
 from quantdesk_v2.strategy_runtime import (
-    StrategyMarketDataError,
-    StrategySpecError,
     evaluate_strategy,
     validate_strategy_spec,
 )
 from quantdesk_v2.strategy_source_runtime import (
-    StrategySourceError,
-    StrategySourceExecutionError,
     evaluate_source,
     validate_source,
 )
 
 from . import indicators as ind
 from . import market_store as store
+from .application.strategy_signals import (
+    EvaluatedStrategySignal,
+    evaluate_strategy_snapshot,
+)
 from .domain.exit_policy import DEFAULT_EXIT_POLICY, ExitLevelPlan
 from .domain.runtime import (
-    build_decision_envelope,
-    canonical_event_hash,
     decision_record_key,
     strategy_decision_id,
 )
@@ -915,69 +912,6 @@ def _engine_signal_evidence(
     return evidence
 
 
-def _decision_datetime(value: object) -> datetime | None:
-    if value is None:
-        return None
-    try:
-        timestamp = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    while timestamp >= 100_000_000_000:
-        timestamp /= 1_000
-    if not math.isfinite(timestamp) or timestamp < 0:
-        return None
-    return datetime.fromtimestamp(timestamp, tz=UTC)
-
-
-def _runtime_decision_envelope(
-    snapshot: dict[str, Any],
-    symbol: str,
-    timeframe: str,
-    decision: Any,
-) -> dict[str, Any] | None:
-    event_time = _decision_datetime(getattr(decision, "signal_time", None))
-    if event_time is None:
-        return None
-    valid_until = _decision_datetime(getattr(decision, "valid_until", None))
-    confidence = getattr(decision, "confidence", None)
-    try:
-        parsed_confidence = (
-            Decimal(str(confidence)) if confidence is not None else None
-        )
-    except (InvalidOperation, TypeError, ValueError):
-        parsed_confidence = None
-    fingerprint = str(
-        snapshot.get("source_hash") or snapshot.get("spec_hash") or ""
-    ).strip() or canonical_event_hash(
-        {
-            "public_id": snapshot.get("public_id"),
-            "version": snapshot.get("version"),
-            "strategy_kind": snapshot.get("strategy_kind"),
-        }
-    )
-    envelope = build_decision_envelope(
-        revision_fingerprint=fingerprint,
-        event_id=canonical_event_hash(
-            {
-                "type": "bar_closed",
-                "symbol": symbol.strip().upper(),
-                "timeframe": timeframe,
-                "event_time": event_time.isoformat(),
-            }
-        ),
-        symbol=symbol,
-        timeframe=timeframe,
-        event_time=event_time,
-        decision=decision.decision,
-        confidence=parsed_confidence,
-        reason_codes=tuple(getattr(decision, "reason_codes", ()) or ()),
-        evidence=dict(getattr(decision, "evidence", {}) or {}),
-        risk_proposal=dict(getattr(decision, "risk_proposal", {}) or {}),
-        valid_until=valid_until,
-    )
-    return envelope.snapshot()
-
-
 def _strategy_signal(
     account: dict[str, Any], symbol: str, snapshot: dict[str, Any] | None = None
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
@@ -987,67 +921,29 @@ def _strategy_signal(
     if selected.get("strategy_kind") == "full_strategy":
         return _full_strategy_signal(account, selected, symbol)
 
-    engine_key = str(selected.get("engine_key") or "multi_factor")
-    parameters = _json_object(selected.get("parameters"))
-    try:
-        timeframe = resolve_legacy_strategy_timeframe(
-            selected,
-            account.get("config_json")
-            if isinstance(account.get("config_json"), dict)
-            else None,
-        )
-    except StrategyEvaluationError:
-        return 0, None, [], None, {}
-    candles, rows = _candles(symbol, timeframe)
-    if len(candles) < 3:
-        return 0, None, [], None, {}
-    try:
-        envelopes = DEFAULT_STRATEGY_EVALUATOR.evaluate_envelopes(
-            engine_key,
-            candles,
-            parameters,
-            symbol=symbol,
-            timeframe=timeframe,
-            revision_fingerprint=(
-                str(selected.get("source_hash") or selected.get("spec_hash") or "").strip()
-                or None
-            ),
-        )
-    except (KeyError, TypeError, ValueError):
-        return 0, None, [], None, {}
-    envelope = envelopes[-1] if envelopes else None
-    direction = envelope.direction if envelope is not None else 0
-    atr = None
-    if len(rows) > 15:
-        atr = ind.atr(
-            [float(row["high"]) for row in rows],
-            [float(row["low"]) for row in rows],
-            [float(row["close"]) for row in rows],
-        )
-    basis = [
-        f"策略：{selected.get('name') or engine_key}",
-        f"引擎：{engine_key}",
-        f"周期：{timeframe}",
-    ]
-    try:
-        evidence = _engine_signal_evidence(engine_key, candles, parameters)
-    except (KeyError, TypeError, ValueError):
-        evidence = {"engine_key": engine_key}
-    reason_codes = evidence.get("reason_codes")
-    if isinstance(reason_codes, list) and reason_codes:
-        basis.append(f"信号：{' / '.join(str(item) for item in reason_codes)}")
-    if evidence.get("score") is not None:
-        basis.append(
-            f"实际评分：{evidence['score']:+g} / 阈值：{evidence.get('threshold', '--')}"
-        )
-    if envelope is not None:
-        evidence.update(
-            {
-                "decision": envelope.decision.value,
-                "decision_envelope": envelope.snapshot(),
-            }
-        )
-    return direction, atr, basis, int(rows[-1]["open_time"]), evidence
+    return _shared_snapshot_signal(account, selected, symbol).legacy_tuple()
+
+
+def _shared_snapshot_signal(
+    account: dict[str, Any],
+    snapshot: dict[str, Any],
+    symbol: str,
+) -> EvaluatedStrategySignal:
+    return evaluate_strategy_snapshot(
+        snapshot,
+        symbol,
+        account.get("config_json")
+        if isinstance(account.get("config_json"), dict)
+        else None,
+        load_klines=lambda selected_symbol, timeframe, limit: store.get_klines(
+            selected_symbol, timeframe, limit
+        ),
+        evidence_builder=_engine_signal_evidence,
+        full_validator=validate_strategy_spec,
+        full_evaluator=evaluate_strategy,
+        source_validator=validate_source,
+        source_evaluator=evaluate_source,
+    )
 
 
 def _paper_strategy_signal(
@@ -1142,62 +1038,26 @@ def _full_strategy_signal(
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
     """Evaluate one immutable full-strategy snapshot on its declared timeframes."""
 
-    raw_spec = snapshot.get("spec") or snapshot.get("spec_json")
-    try:
-        spec = validate_strategy_spec(raw_spec)
-        timeframes = set(spec["timeframes"].values())
-        market = {
-            timeframe: store.get_klines(symbol, timeframe, 600)
-            for timeframe in timeframes
-        }
-        decision = evaluate_strategy(spec, market)
-    except (StrategySpecError, StrategyMarketDataError, KeyError, TypeError, ValueError) as exc:
-        return 0, None, [f"完整策略不可用：{type(exc).__name__}"], None, {}
-
-    direction = {
-        "LONG_ENTRY": 1,
-        "SHORT_ENTRY": -1,
-    }.get(decision.decision, 0)
-    setup = decision.evidence.get("setup")
-    atr = None
-    if isinstance(setup, dict):
-        try:
-            candidate = float(setup.get("atr"))
-        except (TypeError, ValueError):
-            candidate = math.nan
-        if math.isfinite(candidate) and candidate > 0:
-            atr = candidate
-    basis = [
-        f"策略：{snapshot.get('name') or spec['strategy_type']}",
-        "类型：完整策略",
-        f"周期：{spec['timeframes']['regime']}/{spec['timeframes']['setup']}/{spec['timeframes']['trigger']}",
-        f"决策：{decision.decision}",
-    ]
-    if decision.reason_codes:
-        basis.append(f"依据：{' / '.join(decision.reason_codes)}")
-    if decision.confidence is not None:
-        basis.append(f"置信度：{decision.confidence:.2%}")
-    if direction and not _record_full_strategy_decision(
-        account, symbol, spec, decision, snapshot
+    result = _shared_snapshot_signal(account, snapshot, symbol)
+    if result.direction and (
+        result.runtime_decision is None
+        or result.audit_spec is None
+        or not _record_full_strategy_decision(
+            account,
+            symbol,
+            result.audit_spec,
+            result.runtime_decision,
+            snapshot,
+        )
     ):
-        return 0, atr, [*basis, "信号未执行：缺少可审计的策略部署记录"], decision.signal_time, {}
-    evidence = {
-        "decision": decision.decision,
-        "confidence": decision.confidence,
-        "valid_until": decision.valid_until,
-        "reason_codes": list(decision.reason_codes),
-        "evidence": decision.evidence,
-        "risk_proposal": decision.risk_proposal,
-    }
-    envelope = _runtime_decision_envelope(
-        snapshot,
-        symbol,
-        spec["timeframes"]["trigger"],
-        decision,
-    )
-    if envelope is not None:
-        evidence["decision_envelope"] = envelope
-    return direction, atr, basis, decision.signal_time, evidence
+        return (
+            0,
+            result.atr,
+            [*result.basis, "信号未执行：缺少可审计的策略部署记录"],
+            result.signal_time,
+            {},
+        )
+    return result.legacy_tuple()
 
 
 def _source_strategy_signal(
@@ -1205,91 +1065,26 @@ def _source_strategy_signal(
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
     """Evaluate one immutable Python source revision in the isolated worker."""
 
-    source_code = snapshot.get("source_code")
-    language = str(snapshot.get("source_language") or "python")
-    parameters = _json_object(snapshot.get("parameters"))
-    try:
-        if not isinstance(source_code, str) or not source_code.strip():
-            raise StrategySourceError("策略源码不可用")
-        metadata = validate_source(source_code, language)
-        market = {
-            timeframe: [
-                {
-                    "open_time": int(row["open_time"]),
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row["volume"]),
-                }
-                for row in store.get_klines(symbol, timeframe, metadata.lookback_bars)
-            ]
-            for timeframe in metadata.timeframes
-        }
-        decision = evaluate_source(
-            source_code,
-            {
-                "symbol": symbol,
-                "decision_time": int(time.time()),
-                "bars": market,
-            },
-            parameters,
-            language=language,
+    result = _shared_snapshot_signal(account, snapshot, symbol)
+    if result.direction and (
+        result.runtime_decision is None
+        or result.audit_spec is None
+        or not _record_full_strategy_decision(
+            account,
+            symbol,
+            result.audit_spec,
+            result.runtime_decision,
+            snapshot,
         )
-    except (
-        StrategySourceError,
-        StrategySourceExecutionError,
-        KeyError,
-        TypeError,
-        ValueError,
-    ) as exc:
-        return 0, None, [f"源码策略不可用：{type(exc).__name__}"], None, {}
-
-    direction = {"LONG_ENTRY": 1, "SHORT_ENTRY": -1}.get(decision.decision, 0)
-    atr = None
-    for candidate_source in (decision.evidence, decision.risk_proposal):
-        try:
-            candidate = float(candidate_source.get("atr"))
-        except (AttributeError, TypeError, ValueError):
-            candidate = math.nan
-        if math.isfinite(candidate) and candidate > 0:
-            atr = candidate
-            break
-    basis = [
-        f"策略：{snapshot.get('name') or 'Python 源码策略'}",
-        f"类型：源码策略 / {language}",
-        f"周期：{'/'.join(metadata.timeframes)}（触发 {metadata.trigger_timeframe}）",
-        f"决策：{decision.decision}",
-    ]
-    if decision.reason_codes:
-        basis.append(f"依据：{' / '.join(decision.reason_codes)}")
-    if decision.confidence is not None:
-        basis.append(f"置信度：{decision.confidence:.2%}")
-    audit_spec = {"timeframes": {"trigger": metadata.trigger_timeframe}}
-    if direction and not _record_full_strategy_decision(
-        account, symbol, audit_spec, decision, snapshot
     ):
-        return 0, atr, [*basis, "信号未执行：缺少可审计的策略部署记录"], decision.signal_time, {}
-    evidence = {
-        "source": "python_source_strategy_v1",
-        "source_hash": metadata.source_hash,
-        "runtime_version": metadata.runtime_version,
-        "decision": decision.decision,
-        "confidence": decision.confidence,
-        "valid_until": decision.valid_until,
-        "reason_codes": list(decision.reason_codes),
-        "evidence": decision.evidence,
-        "risk_proposal": decision.risk_proposal,
-    }
-    envelope = _runtime_decision_envelope(
-        snapshot,
-        symbol,
-        metadata.trigger_timeframe,
-        decision,
-    )
-    if envelope is not None:
-        evidence["decision_envelope"] = envelope
-    return direction, atr, basis, decision.signal_time, evidence
+        return (
+            0,
+            result.atr,
+            [*result.basis, "信号未执行：缺少可审计的策略部署记录"],
+            result.signal_time,
+            {},
+        )
+    return result.legacy_tuple()
 
 
 def _record_full_strategy_decision(

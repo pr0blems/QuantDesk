@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from ..application.execution_service import ExecutionService
-from ..application.ports import MarketDataFeed
+from ..application.ports import IdempotencyStore, MarketDataFeed
 from ..application.risk import DeterministicRiskEvaluator, RiskPolicy
 from ..application.safety import (
     ExecutionSafetyController,
@@ -40,6 +40,7 @@ class ShadowExecutionRuntime:
         slippage_bps: Decimal = Decimal("0"),
         risk_policy: RiskPolicy | None = None,
         preflight_policy: PreflightPolicy | None = None,
+        idempotency: IdempotencyStore | None = None,
         failure_threshold: int = 3,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -54,7 +55,7 @@ class ShadowExecutionRuntime:
             slippage_bps=slippage_bps,
             clock=clock,
         )
-        self.idempotency = InMemoryIdempotencyStore()
+        self.idempotency = idempotency or InMemoryIdempotencyStore()
         self.safety = ExecutionSafetyController(
             failure_threshold=failure_threshold,
             clock=clock,
