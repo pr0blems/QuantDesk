@@ -16,13 +16,8 @@ from typing import Any
 from quantdesk_v2.strategy_evaluator import (
     StrategyCandle,
     StrategyEvaluationError,
-    bollinger_bands,
-    exponential_moving_average,
-    optional_exponential_moving_average,
-    relative_strength_index,
     resolve_legacy_strategy_timeframe,
     resolve_strategy_timing_policy,
-    simple_moving_average,
     strategy_timeframe_seconds,
 )
 from quantdesk_v2.strategy_runtime import (
@@ -38,21 +33,22 @@ from . import indicators as ind
 from . import market_store as store
 from .application.risk import RiskPolicy
 from .application.safety import ExecutionSafetyController
-from .application.strategy_signals import (
-    EvaluatedStrategySignal,
-    evaluate_strategy_snapshot,
+from .application.strategy_execution import (
+    build_entry_basis_snapshot as build_shared_entry_basis_snapshot,
 )
+from .application.strategy_execution import (
+    evaluate_account_strategy,
+    record_strategy_decision,
+    strategy_snapshots,
+)
+from .application.strategy_signals import build_legacy_signal_evidence
 from .domain.execution import (
     ExecutionMode,
     ExecutionState,
     IntentAction,
     OrderIntent,
 )
-from .domain.exit_policy import DEFAULT_EXIT_POLICY, ExitLevelPlan
-from .domain.runtime import (
-    decision_record_key,
-    strategy_decision_id,
-)
+from .domain.exit_policy import DEFAULT_EXIT_POLICY
 from .domain.trading import (
     AccountSnapshot,
     AccountType,
@@ -104,8 +100,6 @@ STRATEGY_EVENT_SIGNAL_MODE = "strategy_event_v2"
 LEGACY_ENTRY_SCORE = 60.0
 LEGACY_TREND_MA_PERIOD = 150
 PAPER_MAX_FUTURE_TICKER_SKEW_SECONDS = 15
-ENTRY_BASIS_SCHEMA_VERSION = 2
-
 _lock = threading.RLock()
 _paper_execution_safety: dict[int, ExecutionSafetyController] = {}
 
@@ -139,14 +133,9 @@ def _json_object(value: Any, default: dict[str, Any] | None = None) -> dict[str,
 
 
 def _strategy_snapshots(account: dict[str, Any]) -> list[dict[str, Any]]:
-    snapshot = account.get("strategy_snapshot_json")
-    selected = snapshot if isinstance(snapshot, dict) else {}
-    bundled = selected.get("strategy_snapshots")
-    if isinstance(bundled, list):
-        normalized = [item for item in bundled if isinstance(item, dict)]
-        if normalized:
-            return normalized
-    return [selected] if selected else []
+    """Compatibility alias for account readers while execution uses the public service."""
+
+    return strategy_snapshots(account)
 
 
 def _strategy_display_name(account: dict[str, Any]) -> str:
@@ -990,174 +979,27 @@ def _engine_signal_evidence(
     candles: list[StrategyCandle],
     parameters: dict[str, Any],
 ) -> dict[str, Any]:
-    """Explain the exact final-bar values used by the built-in signal engines."""
+    """Compatibility alias for the public legacy evidence builder."""
 
-    closes = [item.close for item in candles]
-    if not closes:
-        return {}
-    index = len(closes) - 1
-    evidence: dict[str, Any] = {
-        "engine_key": engine_key,
-        "market": {
-            "open": candles[index].open,
-            "high": candles[index].high,
-            "low": candles[index].low,
-            "close": candles[index].close,
-            "volume": candles[index].volume,
-        },
-        "components": [],
-        "reason_codes": [],
-    }
-
-    if engine_key == "ma_cross":
-        fast = simple_moving_average(closes, int(parameters["fast_period"]))
-        slow = simple_moving_average(closes, int(parameters["slow_period"]))
-        evidence["indicators"] = {"fast_ma": fast[index], "slow_ma": slow[index]}
-        evidence["reason_codes"] = ["MA_CROSS"]
-        return evidence
-
-    if engine_key == "macd_momentum":
-        fast = exponential_moving_average(closes, int(parameters["fast_period"]))
-        slow = exponential_moving_average(closes, int(parameters["slow_period"]))
-        macd = [
-            left - right if left is not None and right is not None else None
-            for left, right in zip(fast, slow, strict=True)
-        ]
-        signal_line = optional_exponential_moving_average(
-            macd, int(parameters["signal_period"])
-        )
-        histogram = [
-            value - signal if value is not None and signal is not None else None
-            for value, signal in zip(macd, signal_line, strict=True)
-        ]
-        evidence["indicators"] = {
-            "macd": macd[index],
-            "signal": signal_line[index],
-            "histogram": histogram[index],
-        }
-        evidence["reason_codes"] = ["MACD_ZERO_CROSS"]
-        return evidence
-
-    if engine_key == "rsi_reversal":
-        values = relative_strength_index(closes, int(parameters["period"]))
-        evidence["indicators"] = {
-            "rsi": values[index],
-            "oversold": float(parameters["oversold"]),
-            "overbought": float(parameters["overbought"]),
-        }
-        evidence["reason_codes"] = ["RSI_REENTRY"]
-        return evidence
-
-    if engine_key == "bollinger_reversion":
-        middle, lower, upper = bollinger_bands(
-            closes, int(parameters["period"]), float(parameters["stddev"])
-        )
-        evidence["indicators"] = {
-            "middle": middle[index],
-            "lower": lower[index],
-            "upper": upper[index],
-        }
-        evidence["reason_codes"] = ["BOLLINGER_REENTRY"]
-        return evidence
-
-    fast = simple_moving_average(closes, int(parameters["fast_period"]))
-    slow = simple_moving_average(closes, int(parameters["slow_period"]))
-    ema_fast = exponential_moving_average(closes, 12)
-    ema_slow = exponential_moving_average(closes, 26)
-    rsi = relative_strength_index(closes, int(parameters["rsi_period"]))
-    _, lower, upper = bollinger_bands(closes, 20, 2)
-    components: list[dict[str, Any]] = []
-    score = 0
-
-    ma_value = 1 if fast[index] > slow[index] else -1
-    score += ma_value
-    components.append(
-        {"code": "MA_BULLISH" if ma_value > 0 else "MA_BEARISH", "value": ma_value}
-    )
-    macd_value = 1 if ema_fast[index] > ema_slow[index] else -1
-    score += macd_value
-    components.append(
-        {
-            "code": "MACD_BULLISH" if macd_value > 0 else "MACD_BEARISH",
-            "value": macd_value,
-        }
-    )
-    rsi_value = 0
-    if rsi[index] is not None and rsi[index] <= 35:
-        rsi_value = 1
-    elif rsi[index] is not None and rsi[index] >= 65:
-        rsi_value = -1
-    score += rsi_value
-    components.append(
-        {
-            "code": "RSI_OVERSOLD" if rsi_value > 0 else "RSI_OVERBOUGHT" if rsi_value < 0 else "RSI_NEUTRAL",
-            "value": rsi_value,
-        }
-    )
-    band_value = 0
-    if lower[index] is not None and closes[index] < lower[index]:
-        band_value = 1
-    elif upper[index] is not None and closes[index] > upper[index]:
-        band_value = -1
-    score += band_value
-    components.append(
-        {
-            "code": "BELOW_LOWER_BAND" if band_value > 0 else "ABOVE_UPPER_BAND" if band_value < 0 else "INSIDE_BANDS",
-            "value": band_value,
-        }
-    )
-    evidence.update(
-        {
-            "score": score,
-            "threshold": float(parameters["threshold"]),
-            "components": components,
-            "reason_codes": [item["code"] for item in components],
-            "indicators": {
-                "fast_ma": fast[index],
-                "slow_ma": slow[index],
-                "ema12": ema_fast[index],
-                "ema26": ema_slow[index],
-                "rsi": rsi[index],
-                "bollinger_lower": lower[index],
-                "bollinger_upper": upper[index],
-            },
-        }
-    )
-    return evidence
+    return build_legacy_signal_evidence(engine_key, candles, parameters)
 
 
 def _strategy_signal(
     account: dict[str, Any], symbol: str, snapshot: dict[str, Any] | None = None
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
-    selected = snapshot or (_strategy_snapshots(account)[0] if _strategy_snapshots(account) else {})
-    if selected.get("strategy_kind") == "source_strategy":
-        return _source_strategy_signal(account, selected, symbol)
-    if selected.get("strategy_kind") == "full_strategy":
-        return _full_strategy_signal(account, selected, symbol)
-
-    return _shared_snapshot_signal(account, selected, symbol).legacy_tuple()
-
-
-def _shared_snapshot_signal(
-    account: dict[str, Any],
-    snapshot: dict[str, Any],
-    symbol: str,
-) -> EvaluatedStrategySignal:
-    return evaluate_strategy_snapshot(
-        snapshot,
+    return evaluate_account_strategy(
+        account,
         symbol,
-        account.get("config_json")
-        if isinstance(account.get("config_json"), dict)
-        else None,
+        snapshot,
         load_klines=lambda selected_symbol, timeframe, limit: store.get_klines(
             selected_symbol, timeframe, limit
         ),
-        evidence_builder=_engine_signal_evidence,
+        record_decision=_record_full_strategy_decision,
         full_validator=validate_strategy_spec,
         full_evaluator=evaluate_strategy,
         source_validator=validate_source,
         source_evaluator=evaluate_source,
-    )
+    ).legacy_tuple()
 
 
 def _paper_strategy_signal(
@@ -1247,60 +1089,6 @@ def _combined_strategy_signal(
     return direction, atr, combined_basis, aggregate_time, evidence
 
 
-def _full_strategy_signal(
-    account: dict[str, Any], snapshot: dict[str, Any], symbol: str
-) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
-    """Evaluate one immutable full-strategy snapshot on its declared timeframes."""
-
-    result = _shared_snapshot_signal(account, snapshot, symbol)
-    if result.direction and (
-        result.runtime_decision is None
-        or result.audit_spec is None
-        or not _record_full_strategy_decision(
-            account,
-            symbol,
-            result.audit_spec,
-            result.runtime_decision,
-            snapshot,
-        )
-    ):
-        return (
-            0,
-            result.atr,
-            [*result.basis, "信号未执行：缺少可审计的策略部署记录"],
-            result.signal_time,
-            {},
-        )
-    return result.legacy_tuple()
-
-
-def _source_strategy_signal(
-    account: dict[str, Any], snapshot: dict[str, Any], symbol: str
-) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
-    """Evaluate one immutable Python source revision in the isolated worker."""
-
-    result = _shared_snapshot_signal(account, snapshot, symbol)
-    if result.direction and (
-        result.runtime_decision is None
-        or result.audit_spec is None
-        or not _record_full_strategy_decision(
-            account,
-            symbol,
-            result.audit_spec,
-            result.runtime_decision,
-            snapshot,
-        )
-    ):
-        return (
-            0,
-            result.atr,
-            [*result.basis, "信号未执行：缺少可审计的策略部署记录"],
-            result.signal_time,
-            {},
-        )
-    return result.legacy_tuple()
-
-
 def _record_full_strategy_decision(
     account: dict[str, Any],
     symbol: str,
@@ -1308,114 +1096,16 @@ def _record_full_strategy_decision(
     decision: Any,
     snapshot: dict[str, Any] | None = None,
 ) -> bool:
-    deployment_mode = str(account.get("deployment_mode") or "paper")
-    if deployment_mode not in {"paper", "shadow", "live"}:
-        return False
-    # The shadow worker owns the append-only signal write.  The evaluator is
-    # shared with paper/live, but writing here as well would race a second
-    # transaction on the same deterministic idempotency key.
-    if deployment_mode == "shadow":
-        return decision.signal_time is not None
-    strategy_public_id = (snapshot or {}).get("public_id")
-    if strategy_public_id:
-        deployments = store.query(
-            """SELECT d.id,d.strategy_revision_id FROM strategy_deployments d
-               JOIN user_strategies s ON s.id=d.strategy_id AND s.user_id=d.user_id
-               WHERE d.user_id=? AND d.mode=? AND d.target_account_id=?
-                 AND d.status='running' AND s.public_id=?
-               ORDER BY d.id DESC LIMIT 1""",
-            (account["user_id"], deployment_mode, account["id"], strategy_public_id),
-        )
-    else:
-        deployments = store.query(
-            """SELECT id,strategy_revision_id FROM strategy_deployments
-               WHERE user_id=? AND mode=? AND target_account_id=? AND status='running'
-               ORDER BY id DESC LIMIT 1""",
-            (account["user_id"], deployment_mode, account["id"]),
-        )
-    if not deployments or decision.signal_time is None:
-        return False
-    deployment = deployments[0]
-    timeframe = str(spec["timeframes"]["trigger"])
-    revision_fingerprint = str(
-        (snapshot or {}).get("source_hash")
-        or (snapshot or {}).get("spec_hash")
-        or f"strategy-revision:{deployment['strategy_revision_id']}"
-    )
-    stable_decision_id = strategy_decision_id(
-        revision_fingerprint,
+    return record_strategy_decision(
+        account,
         symbol,
-        timeframe,
-        int(decision.signal_time),
-        str(decision.decision),
+        spec,
+        decision,
+        snapshot,
+        query=store.query,
+        execute=store.execute,
+        log_mode="paper",
     )
-    idempotency_key = decision_record_key(
-        deployment_mode,
-        deployment["id"],
-        stable_decision_id,
-    )
-    opportunity_direction = {
-        "LONG_ENTRY": "long",
-        "SHORT_ENTRY": "short",
-    }.get(decision.decision)
-    opportunity_id = None
-    if opportunity_direction:
-        opportunities = store.query(
-            """SELECT id FROM market_opportunities
-               WHERE symbol=? AND direction=?
-                 AND status IN ('detected','watching','confirmed')
-                 AND detected_bar_time<=? AND expires_bar_time>=?
-               ORDER BY quality_score DESC,detected_bar_time DESC,id DESC LIMIT 1""",
-            (
-                symbol,
-                opportunity_direction,
-                decision.signal_time,
-                decision.signal_time,
-            ),
-        )
-        if opportunities:
-            opportunity_id = opportunities[0]["id"]
-    valid_until = decision.valid_until
-    if valid_until is not None and int(valid_until) >= 100_000_000_000:
-        valid_until = int(valid_until) // 1_000
-    try:
-        store.execute(
-            """INSERT IGNORE INTO strategy_signals(
-                   public_id,user_id,deployment_id,strategy_revision_id,opportunity_id,
-                   symbol,timeframe,signal_bar_time,decision,confidence,status,valid_until,
-                   reason_codes_json,evidence_json,risk_decision_json,idempotency_key,created_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,'approved',FROM_UNIXTIME(?),?,?,?,?,CURRENT_TIMESTAMP)""",
-            (
-                str(uuid.uuid4()),
-                account["user_id"],
-                deployment["id"],
-                deployment["strategy_revision_id"],
-                opportunity_id,
-                symbol,
-                timeframe,
-                decision.signal_time,
-                decision.decision,
-                decision.confidence,
-                valid_until,
-                json.dumps(list(decision.reason_codes), ensure_ascii=False),
-                json.dumps(
-                    {**decision.evidence, "decision_id": stable_decision_id},
-                    ensure_ascii=False,
-                ),
-                json.dumps(decision.risk_proposal, ensure_ascii=False),
-                idempotency_key,
-            ),
-        )
-        store.execute(
-            """UPDATE strategy_deployments
-               SET last_evaluated_bar_time=?,last_error_code=NULL,updated_at=CURRENT_TIMESTAMP
-               WHERE id=? AND user_id=?""",
-            (decision.signal_time, deployment["id"], account["user_id"]),
-        )
-    except Exception as exc:
-        print(f"[paper] full strategy signal persistence failed: {type(exc).__name__}")
-        return False
-    return True
 
 
 def build_entry_basis_snapshot(
@@ -1434,134 +1124,23 @@ def build_entry_basis_snapshot(
     leverage: int,
     margin: float | None,
 ) -> tuple[dict[str, Any], int | None]:
-    """Build one immutable, self-contained entry audit snapshot."""
-
-    strategies = _strategy_snapshots(account)
-    strategy = dict(strategies[0]) if strategies else {}
-    signal_evidence = dict(evidence or {})
-    strategy_signal_id = None
-    strategy_revision_id = account.get("strategy_revision_id")
-    deployment_id = account.get("deployment_id")
-    if deployment_id is not None and signal_time is not None:
-        try:
-            rows = store.query(
-                """SELECT id,strategy_revision_id,decision,confidence,reason_codes_json,
-                          evidence_json,risk_decision_json
-                   FROM strategy_signals
-                   WHERE user_id=? AND deployment_id=? AND symbol=? AND signal_bar_time=?
-                     AND decision IN ('LONG_ENTRY','SHORT_ENTRY')
-                   ORDER BY id DESC LIMIT 1""",
-                (account["user_id"], deployment_id, symbol, signal_time),
-            )
-        except Exception as exc:
-            print(f"[{mode}] strategy signal lookup failed: {type(exc).__name__}")
-            rows = []
-        if rows:
-            signal = dict(rows[0])
-            strategy_signal_id = int(signal["id"])
-            strategy_revision_id = signal.get("strategy_revision_id")
-            persisted_evidence = _json_object(signal.get("evidence_json"))
-            if persisted_evidence:
-                signal_evidence = persisted_evidence
-            persisted_reasons = signal.get("reason_codes_json")
-            if isinstance(persisted_reasons, str):
-                try:
-                    persisted_reasons = json.loads(persisted_reasons)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    persisted_reasons = None
-            if isinstance(persisted_reasons, list) and persisted_reasons:
-                reasons = [*reasons, f"信号代码：{' / '.join(map(str, persisted_reasons))}"]
-            signal_evidence = {
-                **signal_evidence,
-                "decision": signal.get("decision"),
-                "confidence": (
-                    float(signal["confidence"])
-                    if signal.get("confidence") is not None
-                    else signal_evidence.get("confidence")
-                ),
-                "risk_decision": _json_object(signal.get("risk_decision_json")),
-            }
-
-    score = signal_evidence.get("score")
-    timing_policy = resolve_strategy_timing_policy(
-        strategy,
-        account.get("config_json")
-        if isinstance(account.get("config_json"), dict)
-        else None,
-        evidence=signal_evidence,
+    return build_shared_entry_basis_snapshot(
+        account,
+        mode=mode,
+        symbol=symbol,
+        direction=direction,
+        signal_time=signal_time,
+        reasons=reasons,
+        evidence=evidence,
+        entry_price=entry_price,
+        atr=atr,
+        stop=stop,
+        target=target,
+        leverage=leverage,
+        margin=margin,
+        query=store.query,
         default_max_holding_bars=DEFAULT_MAX_HOLDING_BARS,
     )
-    risk_proposal = signal_evidence.get("risk_proposal")
-    try:
-        valid_atr = atr is not None and math.isfinite(float(atr)) and float(atr) > 0
-    except (TypeError, ValueError, OverflowError):
-        valid_atr = False
-    exit_source = (
-        "strategy_risk_proposal"
-        if isinstance(risk_proposal, dict)
-        else "atr"
-        if valid_atr
-        else "configured_percentage"
-    )
-    exit_policy = ExitLevelPlan(
-        entry_price=float(entry_price),
-        direction=direction,
-        stop=float(stop),
-        target=float(target),
-        source=exit_source,
-    ).snapshot()
-    snapshot = {
-        "schema_version": ENTRY_BASIS_SCHEMA_VERSION,
-        "availability": "captured",
-        "mode": mode,
-        "captured_at": int(time.time()),
-        "symbol": symbol,
-        "direction": "long" if direction > 0 else "short",
-        "reasons": list(dict.fromkeys(str(item) for item in reasons if item)),
-        "strategy": {
-            "public_id": strategy.get("public_id"),
-            "name": strategy.get("name"),
-            "kind": strategy.get("strategy_kind"),
-            "engine_key": strategy.get("engine_key"),
-            "version": strategy.get("version"),
-            "spec_schema_version": strategy.get("spec_schema_version"),
-            "spec_hash": strategy.get("spec_hash"),
-            "parameters": strategy.get("parameters"),
-        },
-        "strategies": [
-            {
-                "public_id": item.get("public_id"),
-                "name": item.get("name"),
-                "kind": item.get("strategy_kind"),
-                "engine_key": item.get("engine_key"),
-                "version": item.get("version"),
-                "spec_schema_version": item.get("spec_schema_version"),
-                "spec_hash": item.get("spec_hash"),
-                "parameters": item.get("parameters"),
-            }
-            for item in strategies
-        ],
-        "combination_mode": "all",
-        "execution_policy": timing_policy.snapshot(),
-        "exit_policy": exit_policy,
-        "signal": {
-            "strategy_signal_id": strategy_signal_id,
-            "deployment_id": deployment_id,
-            "strategy_revision_id": strategy_revision_id,
-            "bar_time": signal_time,
-            "score": score,
-            "evidence": signal_evidence,
-        },
-        "execution": {
-            "entry_price": entry_price,
-            "atr": atr,
-            "stop": stop,
-            "target": target,
-            "leverage": leverage,
-            "margin": margin,
-        },
-    }
-    return snapshot, strategy_signal_id
 
 
 def _execution_price(price: float, side: int, opening: bool, slippage_bps: float) -> float:

@@ -20,7 +20,12 @@ from ..strategy_evaluator import (
     DEFAULT_STRATEGY_EVALUATOR,
     StrategyCandle,
     StrategyEvaluationError,
+    bollinger_bands,
+    exponential_moving_average,
+    optional_exponential_moving_average,
+    relative_strength_index,
     resolve_legacy_strategy_timeframe,
+    simple_moving_average,
 )
 from ..strategy_runtime import (
     StrategyMarketDataError,
@@ -64,6 +69,159 @@ class EvaluatedStrategySignal:
             self.signal_time,
             dict(self.evidence),
         )
+
+
+def build_legacy_signal_evidence(
+    engine_key: str,
+    candles: list[StrategyCandle],
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Explain the exact final-bar values used by the built-in signal engines."""
+
+    closes = [item.close for item in candles]
+    if not closes:
+        return {}
+    index = len(closes) - 1
+    evidence: dict[str, Any] = {
+        "engine_key": engine_key,
+        "market": {
+            "open": candles[index].open,
+            "high": candles[index].high,
+            "low": candles[index].low,
+            "close": candles[index].close,
+            "volume": candles[index].volume,
+        },
+        "components": [],
+        "reason_codes": [],
+    }
+
+    if engine_key == "ma_cross":
+        fast = simple_moving_average(closes, int(parameters["fast_period"]))
+        slow = simple_moving_average(closes, int(parameters["slow_period"]))
+        evidence["indicators"] = {"fast_ma": fast[index], "slow_ma": slow[index]}
+        evidence["reason_codes"] = ["MA_CROSS"]
+        return evidence
+
+    if engine_key == "macd_momentum":
+        fast = exponential_moving_average(closes, int(parameters["fast_period"]))
+        slow = exponential_moving_average(closes, int(parameters["slow_period"]))
+        macd = [
+            left - right if left is not None and right is not None else None
+            for left, right in zip(fast, slow, strict=True)
+        ]
+        signal_line = optional_exponential_moving_average(
+            macd, int(parameters["signal_period"])
+        )
+        histogram = [
+            value - signal if value is not None and signal is not None else None
+            for value, signal in zip(macd, signal_line, strict=True)
+        ]
+        evidence["indicators"] = {
+            "macd": macd[index],
+            "signal": signal_line[index],
+            "histogram": histogram[index],
+        }
+        evidence["reason_codes"] = ["MACD_ZERO_CROSS"]
+        return evidence
+
+    if engine_key == "rsi_reversal":
+        values = relative_strength_index(closes, int(parameters["period"]))
+        evidence["indicators"] = {
+            "rsi": values[index],
+            "oversold": float(parameters["oversold"]),
+            "overbought": float(parameters["overbought"]),
+        }
+        evidence["reason_codes"] = ["RSI_REENTRY"]
+        return evidence
+
+    if engine_key == "bollinger_reversion":
+        middle, lower, upper = bollinger_bands(
+            closes, int(parameters["period"]), float(parameters["stddev"])
+        )
+        evidence["indicators"] = {
+            "middle": middle[index],
+            "lower": lower[index],
+            "upper": upper[index],
+        }
+        evidence["reason_codes"] = ["BOLLINGER_REENTRY"]
+        return evidence
+
+    fast = simple_moving_average(closes, int(parameters["fast_period"]))
+    slow = simple_moving_average(closes, int(parameters["slow_period"]))
+    ema_fast = exponential_moving_average(closes, 12)
+    ema_slow = exponential_moving_average(closes, 26)
+    rsi = relative_strength_index(closes, int(parameters["rsi_period"]))
+    _, lower, upper = bollinger_bands(closes, 20, 2)
+    components: list[dict[str, Any]] = []
+    score = 0
+
+    ma_value = 1 if fast[index] > slow[index] else -1
+    score += ma_value
+    components.append(
+        {"code": "MA_BULLISH" if ma_value > 0 else "MA_BEARISH", "value": ma_value}
+    )
+    macd_value = 1 if ema_fast[index] > ema_slow[index] else -1
+    score += macd_value
+    components.append(
+        {
+            "code": "MACD_BULLISH" if macd_value > 0 else "MACD_BEARISH",
+            "value": macd_value,
+        }
+    )
+    rsi_value = 0
+    if rsi[index] is not None and rsi[index] <= 35:
+        rsi_value = 1
+    elif rsi[index] is not None and rsi[index] >= 65:
+        rsi_value = -1
+    score += rsi_value
+    components.append(
+        {
+            "code": (
+                "RSI_OVERSOLD"
+                if rsi_value > 0
+                else "RSI_OVERBOUGHT"
+                if rsi_value < 0
+                else "RSI_NEUTRAL"
+            ),
+            "value": rsi_value,
+        }
+    )
+    band_value = 0
+    if lower[index] is not None and closes[index] < lower[index]:
+        band_value = 1
+    elif upper[index] is not None and closes[index] > upper[index]:
+        band_value = -1
+    score += band_value
+    components.append(
+        {
+            "code": (
+                "BELOW_LOWER_BAND"
+                if band_value > 0
+                else "ABOVE_UPPER_BAND"
+                if band_value < 0
+                else "INSIDE_BANDS"
+            ),
+            "value": band_value,
+        }
+    )
+    evidence.update(
+        {
+            "score": score,
+            "threshold": float(parameters["threshold"]),
+            "components": components,
+            "reason_codes": [item["code"] for item in components],
+            "indicators": {
+                "fast_ma": fast[index],
+                "slow_ma": slow[index],
+                "ema12": ema_fast[index],
+                "ema26": ema_slow[index],
+                "rsi": rsi[index],
+                "bollinger_lower": lower[index],
+                "bollinger_upper": upper[index],
+            },
+        }
+    )
+    return evidence
 
 
 def evaluate_strategy_snapshot(

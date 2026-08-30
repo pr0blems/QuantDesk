@@ -24,6 +24,14 @@ from .ai_monitor import PREDICTION_SETTLEMENT_VERSION
 from .application.execution_service import deterministic_client_order_id
 from .application.protection import ProtectionInstallationError, ProtectionService
 from .application.risk import RiskPolicy
+from .application.strategy_execution import (
+    ENTRY_BASIS_SCHEMA_VERSION,
+    evaluate_account_strategy,
+    record_strategy_decision,
+)
+from .application.strategy_execution import (
+    build_entry_basis_snapshot as build_shared_entry_basis_snapshot,
+)
 from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
@@ -56,12 +64,6 @@ from .live_risk import (
 )
 from .market_config import tradfi_symbols
 from .market_microstructure import order_book_gate_snapshot
-from .paper_engine import (
-    ENTRY_BASIS_SCHEMA_VERSION,
-    _exit_levels,
-    _strategy_signal,
-    build_entry_basis_snapshot,
-)
 from .security import CredentialCipher, SecurityError
 from .strategy_evaluator import (
     StrategyEvaluationError,
@@ -541,6 +543,76 @@ def _execution_signal(
             return 0, None, [], None, {}
         return _ai_monitor_signal(account, symbol, price=price)
     return _strategy_signal(account, symbol)
+
+
+def _strategy_signal(
+    account: dict[str, Any], symbol: str
+) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
+    """Evaluate live entries through the same public service as paper execution."""
+
+    return evaluate_account_strategy(
+        account,
+        symbol,
+        load_klines=lambda selected_symbol, timeframe, limit: store.get_klines(
+            selected_symbol, timeframe, limit
+        ),
+        record_decision=_record_live_strategy_decision,
+    ).legacy_tuple()
+
+
+def _record_live_strategy_decision(
+    account: dict[str, Any],
+    symbol: str,
+    spec: dict[str, Any],
+    decision: Any,
+    snapshot: dict[str, Any] | None = None,
+) -> bool:
+    return record_strategy_decision(
+        account,
+        symbol,
+        spec,
+        decision,
+        snapshot,
+        query=store.query,
+        execute=store.execute,
+        log_mode="live",
+    )
+
+
+def build_entry_basis_snapshot(
+    account: dict[str, Any],
+    *,
+    mode: str,
+    symbol: str,
+    direction: int,
+    signal_time: int | None,
+    reasons: list[str],
+    evidence: dict[str, Any] | None,
+    entry_price: float,
+    atr: float | None,
+    stop: float | None,
+    target: float | None,
+    leverage: int,
+    margin: float | None,
+) -> tuple[dict[str, Any], int | None]:
+    """Compatibility façade over the mode-neutral entry snapshot builder."""
+
+    return build_shared_entry_basis_snapshot(
+        account,
+        mode=mode,
+        symbol=symbol,
+        direction=direction,
+        signal_time=signal_time,
+        reasons=reasons,
+        evidence=evidence,
+        entry_price=entry_price,
+        atr=atr,
+        stop=stop,
+        target=target,
+        leverage=leverage,
+        margin=margin,
+        query=store.query,
+    )
 
 
 def _strategy_position_side(position_mode: str, direction: int) -> str:
@@ -1092,146 +1164,6 @@ def _reconcile_intents(
     return market_state_changed
 
 
-def _legacy_place_market_unused(
-    account: dict[str, Any],
-    api_key: str,
-    api_secret: str,
-    *,
-    signal_key: str,
-    symbol: str,
-    action: str,
-    side: str,
-    position_side: str,
-    quantity: Decimal,
-    reduce_only: bool,
-    leverage: int | None = None,
-    strategy_signal_id: int | None = None,
-    entry_basis: dict[str, Any] | None = None,
-    decision_trace: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    if _trading_client is None:
-        raise RuntimeError("live engine is not configured")
-    intent = _create_intent(
-        account,
-        signal_key=signal_key,
-        symbol=symbol,
-        action=action,
-        side=side,
-        position_side=position_side,
-        order_type="MARKET",
-        quantity=quantity,
-        request_json={
-            **(
-                {"exit_decision": decision_trace}
-                if isinstance(decision_trace, dict)
-                else {}
-            ),
-            "symbol": symbol,
-            "side": side,
-            "position_side": position_side,
-            "type": "MARKET",
-            "quantity": format(quantity, "f"),
-            "reduce_only": reduce_only,
-            "leverage": leverage,
-        },
-        strategy_signal_id=strategy_signal_id,
-        entry_basis=entry_basis,
-    )
-    if intent is None:
-        return None
-    write_enabled = (
-        _safety_write_enabled(account)
-        if action == "close" or reduce_only
-        else _execution_enabled(account, symbol)
-    )
-    if not write_enabled:
-        _update_intent(
-            intent["id"],
-            account["user_id"],
-            status="canceled",
-            error_code=(
-                "kill_switch_engaged"
-                if account.get("_trading_control_blockers")
-                else "execution_stopped"
-            ),
-        )
-        return None
-    if action == "open" and leverage is not None:
-        try:
-            _trading_client.change_leverage(
-                api_key,
-                api_secret,
-                symbol=symbol,
-                leverage=leverage,
-            )
-        except BinanceAccountClientError as exc:
-            # No market order has been sent yet, so this intent is terminal and
-            # safe to retry with a future signal rather than reconcile as an
-            # uncertain exchange fill.
-            _update_intent(
-                intent["id"],
-                account["user_id"],
-                status="rejected",
-                error_code=f"leverage_{exc.category}",
-            )
-            return None
-    try:
-        response = _trading_client.place_market_order(
-            api_key,
-            api_secret,
-            symbol=symbol,
-            side=side,  # type: ignore[arg-type]
-            quantity=quantity,
-            client_order_id=intent["client_order_id"],
-            position_side=position_side,  # type: ignore[arg-type]
-            reduce_only=reduce_only,
-        )
-    except BinanceAccountClientError as exc:
-        if exc.category in {"timeout", "network", "upstream"}:
-            try:
-                response = _trading_client.query_order(
-                    api_key,
-                    api_secret,
-                    symbol=symbol,
-                    client_order_id=intent["client_order_id"],
-                )
-            except BinanceAccountClientError:
-                _update_intent(
-                    intent["id"], account["user_id"], status="unknown", error_code=exc.category
-                )
-                _request_reconciliation(int(account["id"]))
-                _fail_account(account, "order_state_unknown")
-                return None
-        else:
-            _update_intent(
-                intent["id"], account["user_id"], status="rejected", error_code=exc.category
-            )
-            return None
-    order_status = str(response.get("status") or "").upper()
-    if order_status != "FILLED":
-        _update_intent(
-            intent["id"],
-            account["user_id"],
-            status="unknown",
-            response=response,
-            error_code="unexpected_order_status",
-        )
-        _request_reconciliation(int(account["id"]))
-        _fail_account(account, "order_state_unknown")
-        return None
-    try:
-        _update_intent(intent["id"], account["user_id"], status="filled", response=response)
-    except Exception as exc:
-        # Binance is authoritative once it confirms FILLED. The pre-created
-        # intent and deterministic client id make this recoverable, while
-        # returning the fill lets an open install protection immediately and
-        # lets a close finish without submitting a duplicate market order.
-        account["_local_audit_pending"] = True
-        _request_reconciliation(int(account["id"]))
-        print(f"[live] filled order audit pending: {type(exc).__name__}")
-    return response
-
-
 def _live_timeframe(account: dict[str, Any], entry_basis: dict[str, Any] | None) -> str:
     captured = (entry_basis or {}).get("execution_policy")
     if isinstance(captured, dict):
@@ -1517,162 +1449,6 @@ def _place_market(
         _request_reconciliation(int(account["id"]))
         print(f"[live] risk reflection pending: {runtime.last_settlement_error}")
     return response
-
-
-def _rollback_protection_orders(
-    account: dict[str, Any],
-    api_key: str,
-    api_secret: str,
-    created: list[dict[str, Any]],
-) -> None:
-    """Best-effort rollback that never hides an uncertain protective order."""
-    if _trading_client is None:
-        return
-    for previous in created:
-        try:
-            _trading_client.cancel_algo_order(
-                api_key,
-                api_secret,
-                client_order_id=previous["client_order_id"],
-            )
-            _update_intent(previous["id"], account["user_id"], status="canceled")
-        except BinanceAccountClientError as exc:
-            if exc.code in {-2011, -2013}:
-                _update_intent(
-                    previous["id"],
-                    account["user_id"],
-                    status="canceled",
-                    error_code="exchange_order_not_found",
-                )
-                continue
-            _update_intent(
-                previous["id"],
-                account["user_id"],
-                status="unknown",
-                error_code=f"protective_cancel_{exc.category}"[:64],
-            )
-            _request_reconciliation(int(account["id"]))
-            _fail_account(account, "protective_cancel_failed")
-
-
-def _legacy_place_protection_unused(
-    account: dict[str, Any],
-    api_key: str,
-    api_secret: str,
-    *,
-    symbol: str,
-    side: str,
-    position_side: str,
-    quantity: Decimal | None,
-    signal_time: int,
-    stop: Decimal,
-    target: Decimal,
-    signal_key_suffix: str = "",
-) -> bool:
-    if _trading_client is None:
-        return False
-    try:
-        plan = ProtectionPlan.create(
-            symbol=symbol,
-            close_side=side,
-            position_side=position_side,
-            quantity=quantity,
-            signal_time=signal_time,
-            stop=stop,
-            target=target,
-        )
-    except (TypeError, ValueError):
-        return False
-    created: list[dict[str, Any]] = []
-    for protection in plan.orders:
-        action = protection.action.value
-        order_type = protection.order_type.value
-        trigger = protection.trigger_price
-        signal_key = plan.signal_key(account["deployment_id"], protection.action)
-        if signal_key_suffix:
-            signal_key = f"{signal_key}:{signal_key_suffix}"
-        intent = _create_intent(
-            account,
-            signal_key=signal_key,
-            symbol=plan.symbol,
-            action=action,
-            side=plan.close_side.value,
-            position_side=plan.position_side.value,
-            order_type=order_type,
-            quantity=plan.quantity,
-            request_json={
-                "symbol": plan.symbol,
-                "side": plan.close_side.value,
-                "position_side": plan.position_side.value,
-                "type": order_type,
-                "stop_price": format(trigger, "f"),
-                "quantity": (
-                    format(plan.quantity, "f") if plan.quantity is not None else None
-                ),
-                "close_position": plan.quantity is None,
-                "working_type": "MARK_PRICE",
-            },
-        )
-        if intent is None:
-            return False
-        if not _safety_write_enabled(account):
-            _update_intent(
-                intent["id"],
-                account["user_id"],
-                status="canceled",
-                error_code="execution_stopped",
-            )
-            return False
-        try:
-            response = _trading_client.place_close_trigger(
-                api_key,
-                api_secret,
-                symbol=plan.symbol,
-                side=plan.close_side.value,  # type: ignore[arg-type]
-                order_type=order_type,  # type: ignore[arg-type]
-                stop_price=trigger,
-                client_order_id=intent["client_order_id"],
-                position_side=plan.position_side.value,  # type: ignore[arg-type]
-                quantity=plan.quantity,
-            )
-        except BinanceAccountClientError as exc:
-            if exc.category in {"timeout", "network", "upstream"}:
-                try:
-                    response = _trading_client.query_algo_order(
-                        api_key,
-                        api_secret,
-                        client_order_id=intent["client_order_id"],
-                    )
-                except BinanceAccountClientError:
-                    _update_intent(
-                        intent["id"],
-                        account["user_id"],
-                        status="unknown",
-                        error_code=exc.category,
-                    )
-                    _request_reconciliation(int(account["id"]))
-                    return False
-            else:
-                _update_intent(
-                    intent["id"], account["user_id"], status="rejected", error_code=exc.category
-                )
-                _rollback_protection_orders(account, api_key, api_secret, created)
-                return False
-        status = _exchange_intent_status(response)
-        _update_intent(
-            intent["id"],
-            account["user_id"],
-            status=status,
-            response=response,
-            error_code="unrecognized_exchange_status" if status == "unknown" else None,
-        )
-        if status != "submitted":
-            if status == "unknown":
-                _request_reconciliation(int(account["id"]))
-            _rollback_protection_orders(account, api_key, api_secret, created)
-            return False
-        created.append(intent)
-    return True
 
 
 def _place_protection(
@@ -2487,6 +2263,26 @@ def _execution_timeframe_seconds(account: dict[str, Any]) -> int:
         else None,
     )
     return policy.timeframe_seconds
+
+
+def _exit_levels(
+    entry: float,
+    direction: int,
+    atr: float | None,
+    config: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    """Compatibility façade over the shared deterministic exit policy."""
+
+    plan = DEFAULT_EXIT_POLICY.resolve_levels(
+        entry,
+        direction,
+        stop_loss_pct=config.get("stop_loss_pct"),
+        take_profit_pct=config.get("take_profit_pct"),
+        atr=atr,
+        atr_stop_multiplier=1.5,
+        atr_take_profit_multiplier=2.5,
+    )
+    return (plan.stop, plan.target) if plan is not None else (None, None)
 
 
 def _signal_exit_levels(

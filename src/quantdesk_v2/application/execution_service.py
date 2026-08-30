@@ -45,8 +45,8 @@ from .safety import ExecutionSafetyController, PreflightService
 class ExecutionService:
     """Execute an intent exactly once through safety, preflight and risk gates.
 
-    A durable live adapter can implement the same ports without changing this
-    orchestration.  The legacy live worker is deliberately not wired here yet.
+    Paper, Shadow and live runtimes bind mode-specific brokers to this same
+    orchestration; strategy semantics remain outside the broker adapter.
     """
 
     __slots__ = (

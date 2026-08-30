@@ -78,3 +78,28 @@ def test_shadow_worker_does_not_import_the_paper_runtime() -> None:
     assert "paper_engine" not in imports
     assert "quantdesk_v2.paper_engine" not in imports
 
+
+def test_live_runtime_does_not_import_the_paper_runtime() -> None:
+    imports = _imports(PACKAGE_ROOT / "live_engine.py")
+
+    assert "paper_engine" not in imports
+    assert "quantdesk_v2.paper_engine" not in imports
+
+
+def test_live_runtime_cannot_bypass_broker_order_writes() -> None:
+    path = PACKAGE_ROOT / "live_engine.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    forbidden_calls: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        owner = node.func.value
+        if (
+            isinstance(owner, ast.Name)
+            and owner.id == "_trading_client"
+            and node.func.attr in {"place_market_order", "place_close_trigger"}
+        ):
+            forbidden_calls.append(node.func.attr)
+
+    assert forbidden_calls == []
+
