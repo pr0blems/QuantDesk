@@ -513,6 +513,16 @@ def test_open_position_always_persists_take_profit(
     assert entry_basis["availability"] == "captured"
     assert entry_basis["reasons"] == ["4h signal"]
     assert entry_basis["execution"]["entry_price"] == pytest.approx(entry)
+    assert entry_basis["exit_policy"] == {
+        "version": "unified_exit_v1",
+        "source": "atr",
+        "entry_price": pytest.approx(entry),
+        "direction": side,
+        "stop": pytest.approx(stop),
+        "target": pytest.approx(target),
+        "risk_distance": pytest.approx(abs(entry - stop)),
+        "reward_distance": pytest.approx(abs(target - entry)),
+    }
     assert entry_basis["execution_policy"] == {
         "trigger_timeframe": "4h",
         "timeframe_seconds": 4 * 3_600,

@@ -40,6 +40,11 @@ from quantdesk_v2.strategy_source_runtime import (
 
 from . import indicators as ind
 from . import market_store as store
+from .domain.exit_policy import (
+    ExitLevelPlan,
+    evaluate_mark_exit,
+    resolve_exit_level_plan,
+)
 from .domain.runtime import decision_record_key, strategy_decision_id
 from .live_risk import (
     OpenPositionRisk,
@@ -1367,6 +1372,25 @@ def build_entry_basis_snapshot(
         evidence=signal_evidence,
         default_max_holding_bars=DEFAULT_MAX_HOLDING_BARS,
     )
+    risk_proposal = signal_evidence.get("risk_proposal")
+    try:
+        valid_atr = atr is not None and math.isfinite(float(atr)) and float(atr) > 0
+    except (TypeError, ValueError, OverflowError):
+        valid_atr = False
+    exit_source = (
+        "strategy_risk_proposal"
+        if isinstance(risk_proposal, dict)
+        else "atr"
+        if valid_atr
+        else "configured_percentage"
+    )
+    exit_policy = ExitLevelPlan(
+        entry_price=float(entry_price),
+        direction=direction,
+        stop=float(stop),
+        target=float(target),
+        source=exit_source,
+    ).snapshot()
     snapshot = {
         "schema_version": ENTRY_BASIS_SCHEMA_VERSION,
         "availability": "captured",
@@ -1400,6 +1424,7 @@ def build_entry_basis_snapshot(
         ],
         "combination_mode": "all",
         "execution_policy": timing_policy.snapshot(),
+        "exit_policy": exit_policy,
         "signal": {
             "strategy_signal_id": strategy_signal_id,
             "deployment_id": deployment_id,
@@ -1432,48 +1457,18 @@ def _exit_levels(
     atr: float | None,
     config: dict[str, float | int],
 ) -> tuple[float | None, float | None]:
-    """Return direction-safe stop and take-profit levels for one position.
+    """Compatibility wrapper around the shared exit-level policy."""
 
-    The default paper strategy is ATR based. Percentage values remain a fallback
-    for symbols that do not yet have enough configured-timeframe candles for ATR.
-    """
-
-    entry = float(entry)
-    if side not in {-1, 1} or not math.isfinite(entry) or entry <= 0:
-        return None, None
-    try:
-        atr_value = float(atr) if atr is not None else 0.0
-    except (TypeError, ValueError):
-        atr_value = 0.0
-    use_atr = math.isfinite(atr_value) and atr_value > 0
-    if use_atr:
-        stop_distance = ATR_STOP_MULTIPLIER * atr_value
-        take_distance = ATR_TAKE_PROFIT_MULTIPLIER * atr_value
-    else:
-        stop_distance = entry * float(config["stop_loss_pct"]) / 100
-        take_distance = entry * float(config["take_profit_pct"]) / 100
-
-    stop = entry - side * stop_distance if stop_distance > 0 else None
-    target = entry + side * take_distance if take_distance > 0 else None
-    if stop is not None and (
-        not math.isfinite(stop) or stop <= 0 or (entry - stop) * side <= 0
-    ):
-        fallback = entry * float(config["stop_loss_pct"]) / 100
-        stop = entry - side * fallback if fallback > 0 else None
-    if target is not None and (
-        not math.isfinite(target) or target <= 0 or (target - entry) * side <= 0
-    ):
-        fallback = entry * float(config["take_profit_pct"]) / 100
-        target = entry + side * fallback if fallback > 0 else None
-    if stop is not None and (
-        not math.isfinite(stop) or stop <= 0 or (entry - stop) * side <= 0
-    ):
-        stop = None
-    if target is not None and (
-        not math.isfinite(target) or target <= 0 or (target - entry) * side <= 0
-    ):
-        target = None
-    return stop, target
+    plan = resolve_exit_level_plan(
+        entry,
+        side,
+        stop_loss_pct=config.get("stop_loss_pct"),
+        take_profit_pct=config.get("take_profit_pct"),
+        atr=atr,
+        atr_stop_multiplier=ATR_STOP_MULTIPLIER,
+        atr_take_profit_multiplier=ATR_TAKE_PROFIT_MULTIPLIER,
+    )
+    return (plan.stop, plan.target) if plan is not None else (None, None)
 
 
 def _signal_exit_levels(
@@ -1486,24 +1481,17 @@ def _signal_exit_levels(
     """Use the full strategy's immutable distances, else the legacy ATR rule."""
 
     proposal = (signal_evidence or {}).get("risk_proposal")
-    if isinstance(proposal, dict):
-        try:
-            stop_distance = float(proposal["stop_distance"])
-            take_distance = float(proposal["take_profit_distance"])
-        except (KeyError, TypeError, ValueError):
-            return None, None
-        if (
-            math.isfinite(stop_distance)
-            and math.isfinite(take_distance)
-            and stop_distance > 0
-            and take_distance > 0
-        ):
-            stop = entry - side * stop_distance
-            target = entry + side * take_distance
-            if stop > 0 and target > 0:
-                return stop, target
-        return None, None
-    return _exit_levels(entry, side, atr, config)
+    plan = resolve_exit_level_plan(
+        entry,
+        side,
+        stop_loss_pct=config.get("stop_loss_pct"),
+        take_profit_pct=config.get("take_profit_pct"),
+        atr=atr,
+        risk_proposal=proposal if isinstance(proposal, dict) else None,
+        atr_stop_multiplier=ATR_STOP_MULTIPLIER,
+        atr_take_profit_multiplier=ATR_TAKE_PROFIT_MULTIPLIER,
+    )
+    return (plan.stop, plan.target) if plan is not None else (None, None)
 
 
 def _repair_missing_target(
@@ -1800,23 +1788,15 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             print(
                 f"[paper] holding policy unavailable for position={position.get('id')}"
             )
-        reason = None
-        if position.get("liq_price") and (
-            (side > 0 and price <= float(position["liq_price"]))
-            or (side < 0 and price >= float(position["liq_price"]))
-        ):
-            reason = "liquidation"
-        elif position.get("stop") and (
-            (side > 0 and price <= float(position["stop"]))
-            or (side < 0 and price >= float(position["stop"]))
-        ):
-            reason = "stop_loss"
-        elif position.get("target") and (
-            (side > 0 and price >= float(position["target"]))
-            or (side < 0 and price <= float(position["target"]))
-        ):
-            reason = "take_profit"
-        else:
+        exit_decision = evaluate_mark_exit(
+            price,
+            side,
+            stop=position.get("stop"),
+            target=position.get("target"),
+            liquidation=position.get("liq_price"),
+        )
+        reason = exit_decision.reason if exit_decision is not None else None
+        if reason is None:
             direction = 0
             signal_time = None
             signal_evidence: dict[str, Any] = {}

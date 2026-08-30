@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from .domain.exit_policy import evaluate_bar_exit, resolve_exit_level_plan
 from .market_data_client import fetch_klines_range
 from .strategy_evaluator import (
     DEFAULT_STRATEGY_EVALUATOR,
@@ -1241,27 +1242,25 @@ def _run_engine(
         notional = margin * config["leverage"]
         if notional <= 0 or entry_price <= 0:
             return
+        level_plan = None
+        if isinstance(risk_proposal, dict) or (
+            config["stop_loss_pct"] > 0 and config["take_profit_pct"] > 0
+        ):
+            level_plan = resolve_exit_level_plan(
+                entry_price,
+                direction,
+                stop_loss_pct=config["stop_loss_pct"],
+                take_profit_pct=config["take_profit_pct"],
+                risk_proposal=(risk_proposal if isinstance(risk_proposal, dict) else None),
+            )
+        if isinstance(risk_proposal, dict) and level_plan is None:
+            return
         quantity = notional / entry_price
         entry_fee = notional * fee_rate
         balance -= entry_fee
         total_fees += entry_fee
-        stop_price = None
-        take_price = None
-        if isinstance(risk_proposal, dict):
-            try:
-                stop_distance = float(risk_proposal.get("stop_distance"))
-                take_distance = float(risk_proposal.get("take_profit_distance"))
-            except (TypeError, ValueError):
-                stop_distance = math.nan
-                take_distance = math.nan
-            if math.isfinite(stop_distance) and stop_distance > 0:
-                candidate = entry_price - direction * stop_distance
-                if candidate > 0:
-                    stop_price = candidate
-            if math.isfinite(take_distance) and take_distance > 0:
-                candidate = entry_price + direction * take_distance
-                if candidate > 0:
-                    take_price = candidate
+        stop_price = level_plan.stop if level_plan is not None else None
+        take_price = level_plan.target if level_plan is not None else None
         position = {
             "direction": direction,
             "entry_ts": candle.ts,
@@ -1315,57 +1314,17 @@ def _run_engine(
             if take_price is None and take_pct:
                 take_price = entry_price * (1 + direction * take_pct)
             liquidation_price = position["liquidation_price"]
-            stop_hit = bool(
-                stop_price is not None
-                and (candle.low <= stop_price if direction == 1 else candle.high >= stop_price)
+            exit_decision = evaluate_bar_exit(
+                open_price=candle.open,
+                high=candle.high,
+                low=candle.low,
+                direction=direction,
+                stop=stop_price,
+                target=take_price,
+                liquidation=liquidation_price,
             )
-            take_hit = bool(
-                take_price is not None
-                and (candle.high >= take_price if direction == 1 else candle.low <= take_price)
-            )
-            liquidation_hit = (
-                candle.low <= liquidation_price
-                if direction == 1
-                else candle.high >= liquidation_price
-            )
-
-            # An adverse exit always wins over a take-profit when OHLC data cannot
-            # reveal the intrabar path. Between stop and liquidation, execute the
-            # first level encountered while moving from the open in the adverse
-            # direction. A gap through liquidation is handled before signals above.
-            adverse_price: float | None = None
-            adverse_reason: str | None = None
-            if stop_hit and liquidation_hit:
-                stop_is_first = (
-                    stop_price > liquidation_price
-                    if direction == 1
-                    else stop_price < liquidation_price
-                )
-                if stop_is_first:
-                    adverse_price = stop_price
-                    adverse_reason = "stop_loss"
-                else:
-                    adverse_price = liquidation_price
-                    adverse_reason = "liquidation"
-            elif liquidation_hit:
-                adverse_price = liquidation_price
-                adverse_reason = "liquidation"
-            elif stop_hit:
-                adverse_price = stop_price
-                adverse_reason = "stop_loss"
-
-            if adverse_price is not None and adverse_reason is not None:
-                if direction == 1:
-                    base_price = candle.open if candle.open <= adverse_price else adverse_price
-                else:
-                    base_price = candle.open if candle.open >= adverse_price else adverse_price
-                close_position(candle, base_price, adverse_reason)
-            elif take_hit:
-                if direction == 1:
-                    base_price = candle.open if candle.open >= take_price else take_price
-                else:
-                    base_price = candle.open if candle.open <= take_price else take_price
-                close_position(candle, base_price, "take_profit")
+            if exit_decision is not None:
+                close_position(candle, exit_decision.price, exit_decision.reason)
             elif (
                 config["max_holding_bars"]
                 and position["holding_bars"] >= config["max_holding_bars"]

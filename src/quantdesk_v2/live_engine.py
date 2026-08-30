@@ -25,6 +25,7 @@ from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings
+from .domain.exit_policy import advance_profit_guard, resolve_exit_level_plan
 from .domain.protection import ProtectionCoverage, ProtectionPlan
 from .live_risk import (
     OpenPositionRisk,
@@ -2046,24 +2047,19 @@ def _signal_exit_levels(
     """Use a full strategy's fixed risk proposal, otherwise the legacy ATR rule."""
 
     proposal = (evidence or {}).get("risk_proposal")
-    if isinstance(proposal, dict):
-        try:
-            stop_distance = float(proposal["stop_distance"])
-            take_distance = float(proposal["take_profit_distance"])
-        except (KeyError, TypeError, ValueError):
-            return None, None
-        if (
-            math.isfinite(stop_distance)
-            and math.isfinite(take_distance)
-            and stop_distance > 0
-            and take_distance > 0
-        ):
-            return (
-                entry - direction * stop_distance,
-                entry + direction * take_distance,
-            )
-        return None, None
-    return _exit_levels(entry, direction, atr, config)
+    if not isinstance(proposal, dict):
+        # Keep this compatibility seam for existing recovery paths and tests;
+        # the paper helper itself delegates to the shared policy.
+        return _exit_levels(entry, direction, atr, config)
+    plan = resolve_exit_level_plan(
+        entry,
+        direction,
+        stop_loss_pct=config.get("stop_loss_pct"),
+        take_profit_pct=config.get("take_profit_pct"),
+        atr=atr,
+        risk_proposal=proposal,
+    )
+    return (plan.stop, plan.target) if plan is not None else (None, None)
 
 
 def _opened_at_seconds(managed_open: dict[str, Any]) -> float | None:
@@ -2086,13 +2082,7 @@ def _live_profit_guard_snapshot(
     exit_cost_bps: Decimal | float | int | str,
     observed_at: int,
 ) -> tuple[dict[str, Any] | None, bool]:
-    """Advance a causal R-based profit guard from Binance mark prices.
-
-    The exchange-native initial stop remains the hard-loss backstop.  Once an
-    automatic position proves at least 0.5R of favorable movement, this state
-    protects costs; after 1R it trails the best observed mark by 0.5R.  The
-    returned exit flag is acted on by the normal crash-safe market-close path.
-    """
+    """Adapt live position records to the shared causal profit guard."""
 
     basis = _json_object(managed_open.get("entry_basis_json"))
     execution = _json_object(basis.get("execution"))
@@ -2100,134 +2090,44 @@ def _live_profit_guard_snapshot(
     evidence = _json_object(signal.get("evidence"))
     risk_plan = _json_object(evidence.get("risk_plan"))
     protection = _json_object(risk_plan.get("profit_protection"))
-    try:
-        entry_price = float(position.get("entry_price") or execution.get("entry_price"))
-        mark_price = float(position.get("mark_price"))
-        initial_stop = float(execution.get("stop"))
-        cost_bps = max(16.0, float(exit_cost_bps))
-    except (TypeError, ValueError, OverflowError):
-        return None, False
     direction = 1 if str(position.get("side") or "").lower() == "long" else -1
     if str(position.get("position_side") or "BOTH").upper() == "LONG":
         direction = 1
     elif str(position.get("position_side") or "BOTH").upper() == "SHORT":
         direction = -1
-    risk_distance = abs(entry_price - initial_stop)
-    if not (
-        math.isfinite(entry_price)
-        and math.isfinite(mark_price)
-        and math.isfinite(initial_stop)
-        and entry_price > 0
-        and mark_price > 0
-        and initial_stop > 0
-        and risk_distance > 0
-        and direction * (entry_price - initial_stop) > 0
-    ):
-        return None, False
-
-    def risk_multiple(name: str, default: float, *, minimum: float, maximum: float) -> float:
-        try:
-            parsed = float(protection.get(name, default))
-        except (TypeError, ValueError, OverflowError):
-            parsed = default
-        if not math.isfinite(parsed):
-            parsed = default
-        return max(minimum, min(parsed, maximum))
-
-    activation_r = risk_multiple(
-        "activation_r",
-        _LIVE_PROFIT_GUARD_ACTIVATION_R,
-        minimum=0.25,
-        maximum=2.0,
-    )
-    trailing_activation_r = max(
-        activation_r,
-        risk_multiple(
-            "trailing_activation_r",
-            _LIVE_PROFIT_GUARD_TRAILING_ACTIVATION_R,
-            minimum=0.5,
-            maximum=4.0,
+    guard, should_exit = advance_profit_guard(
+        entry_price=position.get("entry_price") or execution.get("entry_price"),
+        mark_price=position.get("mark_price"),
+        initial_stop=execution.get("stop"),
+        direction=direction,
+        previous=previous,
+        exit_cost_bps=exit_cost_bps,
+        observed_at=observed_at,
+        activation_r=protection.get(
+            "activation_r", _LIVE_PROFIT_GUARD_ACTIVATION_R
         ),
+        trailing_activation_r=protection.get(
+            "trailing_activation_r", _LIVE_PROFIT_GUARD_TRAILING_ACTIVATION_R
+        ),
+        maximum_giveback_r=protection.get(
+            "maximum_giveback_r", _LIVE_PROFIT_GUARD_GIVEBACK_R
+        ),
+        minimum_protected_r=protection.get("minimum_protected_r", 0.0),
+        cost_buffer_bps=_LIVE_PROFIT_GUARD_COST_BUFFER_BPS,
+        peak_write_step_r=_LIVE_PROFIT_GUARD_PEAK_WRITE_STEP_R,
     )
-    giveback_r = risk_multiple(
-        "maximum_giveback_r",
-        _LIVE_PROFIT_GUARD_GIVEBACK_R,
-        minimum=0.1,
-        maximum=1.5,
-    )
-    minimum_protected_r = risk_multiple(
-        "minimum_protected_r",
-        0.0,
-        minimum=0.0,
-        maximum=1.0,
-    )
-    prior = previous if isinstance(previous, dict) else {}
-    try:
-        prior_peak = float(prior.get("peak_price"))
-    except (TypeError, ValueError, OverflowError):
-        prior_peak = entry_price
-    if not math.isfinite(prior_peak) or direction * (prior_peak - entry_price) < 0:
-        prior_peak = entry_price
-    observed_peak = max(prior_peak, mark_price) if direction > 0 else min(prior_peak, mark_price)
-    peak_favorable_distance = max(0.0, direction * (observed_peak - entry_price))
-    peak_r = peak_favorable_distance / risk_distance
-    if peak_r < activation_r:
-        return None, False
-
-    cost_lock_distance = entry_price * (
-        cost_bps + _LIVE_PROFIT_GUARD_COST_BUFFER_BPS
-    ) / 10_000.0
-    protected_distance = max(cost_lock_distance, minimum_protected_r * risk_distance)
-    if peak_r >= trailing_activation_r:
-        protected_distance = max(
-            protected_distance,
-            peak_favorable_distance - giveback_r * risk_distance,
+    if guard is not None:
+        guard.update(
+            {
+                "version": _LIVE_PROFIT_GUARD_VERSION,
+                "open_intent_id": int(managed_open["id"]),
+                "symbol": str(position.get("symbol") or "").upper(),
+                "position_side": str(
+                    position.get("position_side") or "BOTH"
+                ).upper(),
+            }
         )
-    protected_price = entry_price + direction * protected_distance
-    should_exit = direction * (mark_price - protected_price) <= 0
-
-    try:
-        persisted_peak = float(prior.get("peak_price"))
-        persisted_peak_r = float(prior.get("peak_r"))
-    except (TypeError, ValueError, OverflowError):
-        persisted_peak = entry_price
-        persisted_peak_r = 0.0
-    threshold_crossed = (
-        persisted_peak_r < activation_r <= peak_r
-        or persisted_peak_r < trailing_activation_r <= peak_r
-    )
-    peak_advanced = direction * (observed_peak - persisted_peak) >= (
-        risk_distance * _LIVE_PROFIT_GUARD_PEAK_WRITE_STEP_R
-    )
-    if prior and not threshold_crossed and not peak_advanced:
-        # Reuse the durable peak/protected level between material advances.
-        try:
-            protected_price = float(prior["protected_price"])
-            should_exit = direction * (mark_price - protected_price) <= 0
-        except (KeyError, TypeError, ValueError, OverflowError):
-            pass
-        return dict(prior), should_exit
-
-    return (
-        {
-            "version": _LIVE_PROFIT_GUARD_VERSION,
-            "open_intent_id": int(managed_open["id"]),
-            "symbol": str(position.get("symbol") or "").upper(),
-            "position_side": str(position.get("position_side") or "BOTH").upper(),
-            "entry_price": entry_price,
-            "initial_stop": initial_stop,
-            "risk_distance": risk_distance,
-            "peak_price": observed_peak,
-            "peak_r": round(peak_r, 8),
-            "protected_price": protected_price,
-            "activation_r": activation_r,
-            "trailing_activation_r": trailing_activation_r,
-            "giveback_r": giveback_r,
-            "cost_floor_bps": cost_bps + _LIVE_PROFIT_GUARD_COST_BUFFER_BPS,
-            "observed_at": int(observed_at),
-        },
-        should_exit,
-    )
+    return guard, should_exit
 
 
 def _live_profit_guard_key(managed_open: dict[str, Any]) -> str:
@@ -2582,6 +2482,19 @@ def _open_position(
             "quantity": float(quantity),
         }
     )
+    final_risk_proposal = (signal_evidence or {}).get("risk_proposal")
+    final_exit_plan = resolve_exit_level_plan(
+        entry,
+        direction,
+        stop_loss_pct=config.get("stop_loss_pct"),
+        take_profit_pct=config.get("take_profit_pct"),
+        atr=atr,
+        risk_proposal=(
+            final_risk_proposal if isinstance(final_risk_proposal, dict) else None
+        ),
+    )
+    if final_exit_plan is not None:
+        entry_basis["exit_policy"] = final_exit_plan.snapshot()
     store.execute(
         """UPDATE live_order_intents SET entry_basis_json=?,updated_at=UTC_TIMESTAMP()
            WHERE user_id=? AND live_account_id=? AND signal_key=? AND action='open'""",
