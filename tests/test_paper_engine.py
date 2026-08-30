@@ -419,6 +419,21 @@ def test_legacy_paper_signal_remains_valid_until_a_new_score_replaces_it() -> No
     )
 
 
+def test_legacy_paper_signal_uses_configured_trigger_timeframe() -> None:
+    account = _account()
+    account["config_json"]["signal_mode"] = paper.LEGACY_PAPER_SIGNAL_MODE
+    account["config_json"]["timeframe"] = "1h"
+    policy = paper._paper_risk_policy(account)
+    bar_open = 1_700_000_000
+
+    assert not paper._paper_signal_is_fresh(
+        account, bar_open, {}, bar_open + 3_600 - 1, policy
+    )
+    assert paper._paper_signal_is_fresh(
+        account, bar_open, {}, bar_open + 3_600, policy
+    )
+
+
 def test_paper_ticker_freshness_tolerates_database_clock_drift() -> None:
     account = _account()
     policy = paper._paper_risk_policy(account)

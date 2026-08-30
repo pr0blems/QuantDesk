@@ -12,12 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from .domain.exit_policy import (
-    decision_for_reason,
-    evaluate_bar_exit,
-    resolve_exit_level_plan,
-    select_runtime_exit,
-)
+from .domain.exit_policy import DEFAULT_EXIT_POLICY
 from .market_data_client import fetch_klines_range
 from .strategy_evaluator import (
     DEFAULT_STRATEGY_EVALUATOR,
@@ -1169,9 +1164,14 @@ def _run_engine(
     risk_proposals: list[dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     if signals is None:
-        signals = DEFAULT_STRATEGY_EVALUATOR.evaluate(
-            config["strategy_id"], candles, config["params"]
+        envelopes = DEFAULT_STRATEGY_EVALUATOR.evaluate_envelopes(
+            config["strategy_id"],
+            candles,
+            config["params"],
+            symbol=config["symbol"],
+            timeframe=config["timeframe"],
         )
+        signals = [item.direction for item in envelopes]
     if len(signals) != len(candles):
         raise BacktestUnavailable("strategy signal count does not match trigger candles")
     if risk_proposals is not None and len(risk_proposals) != len(candles):
@@ -1209,7 +1209,9 @@ def _run_engine(
         fees = position["entry_fee"] + exit_fee
         net_pnl = gross_pnl - fees
         margin = position["notional"] / config["leverage"]
-        exit_decision = decision_for_reason(reason, base_price, observed_at=candle.ts)
+        exit_decision = DEFAULT_EXIT_POLICY.decision_for_reason(
+            reason, base_price, observed_at=candle.ts
+        )
         trades.append(
             {
                 "symbol": config["symbol"],
@@ -1259,7 +1261,7 @@ def _run_engine(
         if isinstance(risk_proposal, dict) or (
             config["stop_loss_pct"] > 0 and config["take_profit_pct"] > 0
         ):
-            level_plan = resolve_exit_level_plan(
+            level_plan = DEFAULT_EXIT_POLICY.resolve_levels(
                 entry_price,
                 direction,
                 stop_loss_pct=config["stop_loss_pct"],
@@ -1327,7 +1329,7 @@ def _run_engine(
             if take_price is None and take_pct:
                 take_price = entry_price * (1 + direction * take_pct)
             liquidation_price = position["liquidation_price"]
-            exit_decision = evaluate_bar_exit(
+            exit_decision = DEFAULT_EXIT_POLICY.evaluate_bar(
                 open_price=candle.open,
                 high=candle.high,
                 low=candle.low,
@@ -1337,7 +1339,7 @@ def _run_engine(
                 liquidation=liquidation_price,
                 observed_at=candle.ts,
             )
-            selected_exit = select_runtime_exit(
+            selected_exit = DEFAULT_EXIT_POLICY.select(
                 price=candle.close,
                 observed_at=candle.ts,
                 market_decision=exit_decision,

@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import replace
-from datetime import UTC
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -40,14 +40,13 @@ from quantdesk_v2.strategy_source_runtime import (
 
 from . import indicators as ind
 from . import market_store as store
-from .domain.exit_policy import (
-    ExitLevelPlan,
-    decision_for_reason,
-    evaluate_mark_exit,
-    resolve_exit_level_plan,
-    select_runtime_exit,
+from .domain.exit_policy import DEFAULT_EXIT_POLICY, ExitLevelPlan
+from .domain.runtime import (
+    build_decision_envelope,
+    canonical_event_hash,
+    decision_record_key,
+    strategy_decision_id,
 )
-from .domain.runtime import decision_record_key, strategy_decision_id
 from .live_risk import (
     OpenPositionRisk,
     account_loss_limits,
@@ -501,8 +500,8 @@ def _paper_signal_is_fresh(
 ) -> bool:
     """Validate paper signals without weakening live-trading freshness.
 
-    The original score is a state attached to the latest closed 4h bar, not a
-    one-shot crossing.  The legacy engine deliberately keeps that latest state
+    The original score is a state attached to the latest closed trigger bar, not
+    a one-shot crossing. The legacy engine deliberately keeps that latest state
     until a newer closed score replaces it; ticker freshness and portfolio risk
     are still enforced independently before any order can be created.
     """
@@ -511,8 +510,20 @@ def _paper_signal_is_fresh(
         return _signal_is_fresh(account, signal_time, signal_evidence, now, policy)
     try:
         opened = _epoch_seconds(signal_time)
-        return opened is not None and now >= opened + 4 * 60 * 60
-    except (TypeError, ValueError):
+        snapshot = (_strategy_snapshots(account) or [{}])[0]
+        timing_policy = resolve_strategy_timing_policy(
+            snapshot,
+            account.get("config_json")
+            if isinstance(account.get("config_json"), dict)
+            else None,
+            evidence=signal_evidence,
+            default_max_holding_bars=DEFAULT_MAX_HOLDING_BARS,
+        )
+        return (
+            opened is not None
+            and now >= opened + timing_policy.timeframe_seconds
+        )
+    except (StrategyEvaluationError, TypeError, ValueError):
         return False
 
 
@@ -904,6 +915,69 @@ def _engine_signal_evidence(
     return evidence
 
 
+def _decision_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    while timestamp >= 100_000_000_000:
+        timestamp /= 1_000
+    if not math.isfinite(timestamp) or timestamp < 0:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=UTC)
+
+
+def _runtime_decision_envelope(
+    snapshot: dict[str, Any],
+    symbol: str,
+    timeframe: str,
+    decision: Any,
+) -> dict[str, Any] | None:
+    event_time = _decision_datetime(getattr(decision, "signal_time", None))
+    if event_time is None:
+        return None
+    valid_until = _decision_datetime(getattr(decision, "valid_until", None))
+    confidence = getattr(decision, "confidence", None)
+    try:
+        parsed_confidence = (
+            Decimal(str(confidence)) if confidence is not None else None
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        parsed_confidence = None
+    fingerprint = str(
+        snapshot.get("source_hash") or snapshot.get("spec_hash") or ""
+    ).strip() or canonical_event_hash(
+        {
+            "public_id": snapshot.get("public_id"),
+            "version": snapshot.get("version"),
+            "strategy_kind": snapshot.get("strategy_kind"),
+        }
+    )
+    envelope = build_decision_envelope(
+        revision_fingerprint=fingerprint,
+        event_id=canonical_event_hash(
+            {
+                "type": "bar_closed",
+                "symbol": symbol.strip().upper(),
+                "timeframe": timeframe,
+                "event_time": event_time.isoformat(),
+            }
+        ),
+        symbol=symbol,
+        timeframe=timeframe,
+        event_time=event_time,
+        decision=decision.decision,
+        confidence=parsed_confidence,
+        reason_codes=tuple(getattr(decision, "reason_codes", ()) or ()),
+        evidence=dict(getattr(decision, "evidence", {}) or {}),
+        risk_proposal=dict(getattr(decision, "risk_proposal", {}) or {}),
+        valid_until=valid_until,
+    )
+    return envelope.snapshot()
+
+
 def _strategy_signal(
     account: dict[str, Any], symbol: str, snapshot: dict[str, Any] | None = None
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
@@ -928,10 +1002,21 @@ def _strategy_signal(
     if len(candles) < 3:
         return 0, None, [], None, {}
     try:
-        signals = DEFAULT_STRATEGY_EVALUATOR.evaluate(engine_key, candles, parameters)
+        envelopes = DEFAULT_STRATEGY_EVALUATOR.evaluate_envelopes(
+            engine_key,
+            candles,
+            parameters,
+            symbol=symbol,
+            timeframe=timeframe,
+            revision_fingerprint=(
+                str(selected.get("source_hash") or selected.get("spec_hash") or "").strip()
+                or None
+            ),
+        )
     except (KeyError, TypeError, ValueError):
         return 0, None, [], None, {}
-    direction = int(signals[-1]) if signals else 0
+    envelope = envelopes[-1] if envelopes else None
+    direction = envelope.direction if envelope is not None else 0
     atr = None
     if len(rows) > 15:
         atr = ind.atr(
@@ -954,6 +1039,13 @@ def _strategy_signal(
     if evidence.get("score") is not None:
         basis.append(
             f"实际评分：{evidence['score']:+g} / 阈值：{evidence.get('threshold', '--')}"
+        )
+    if envelope is not None:
+        evidence.update(
+            {
+                "decision": envelope.decision.value,
+                "decision_envelope": envelope.snapshot(),
+            }
         )
     return direction, atr, basis, int(rows[-1]["open_time"]), evidence
 
@@ -1097,6 +1189,14 @@ def _full_strategy_signal(
         "evidence": decision.evidence,
         "risk_proposal": decision.risk_proposal,
     }
+    envelope = _runtime_decision_envelope(
+        snapshot,
+        symbol,
+        spec["timeframes"]["trigger"],
+        decision,
+    )
+    if envelope is not None:
+        evidence["decision_envelope"] = envelope
     return direction, atr, basis, decision.signal_time, evidence
 
 
@@ -1181,6 +1281,14 @@ def _source_strategy_signal(
         "evidence": decision.evidence,
         "risk_proposal": decision.risk_proposal,
     }
+    envelope = _runtime_decision_envelope(
+        snapshot,
+        symbol,
+        metadata.trigger_timeframe,
+        decision,
+    )
+    if envelope is not None:
+        evidence["decision_envelope"] = envelope
     return direction, atr, basis, decision.signal_time, evidence
 
 
@@ -1461,7 +1569,7 @@ def _exit_levels(
 ) -> tuple[float | None, float | None]:
     """Compatibility wrapper around the shared exit-level policy."""
 
-    plan = resolve_exit_level_plan(
+    plan = DEFAULT_EXIT_POLICY.resolve_levels(
         entry,
         side,
         stop_loss_pct=config.get("stop_loss_pct"),
@@ -1483,7 +1591,7 @@ def _signal_exit_levels(
     """Use the full strategy's immutable distances, else the legacy ATR rule."""
 
     proposal = (signal_evidence or {}).get("risk_proposal")
-    plan = resolve_exit_level_plan(
+    plan = DEFAULT_EXIT_POLICY.resolve_levels(
         entry,
         side,
         stop_loss_pct=config.get("stop_loss_pct"),
@@ -1687,7 +1795,9 @@ def _close_position(
     margin = float(position["margin"])
     returned = max(margin + pnl - fee, 0.0)
     trade_basis = _json_object(position.get("basis"))
-    exit_decision = decision_for_reason(reason, price, observed_at=now)
+    exit_decision = DEFAULT_EXIT_POLICY.decision_for_reason(
+        reason, price, observed_at=now
+    )
     if exit_decision is not None:
         trade_basis["exit_decision"] = exit_decision.snapshot(
             mode="paper",
@@ -1797,7 +1907,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             print(
                 f"[paper] holding policy unavailable for position={position.get('id')}"
             )
-        exit_decision = evaluate_mark_exit(
+        exit_decision = DEFAULT_EXIT_POLICY.evaluate_mark(
             price,
             side,
             stop=position.get("stop"),
@@ -1826,7 +1936,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 )
                 and direction == -side
             )
-        selected_exit = select_runtime_exit(
+        selected_exit = DEFAULT_EXIT_POLICY.select(
             price=price,
             observed_at=now,
             market_decision=exit_decision,

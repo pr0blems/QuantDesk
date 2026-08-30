@@ -83,19 +83,20 @@ class ExitDecision:
     def snapshot(
         self,
         *,
-        mode: str,
+        mode: str | None = None,
         execution_price: Any = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "version": EXIT_DECISION_VERSION,
             "policy_version": EXIT_POLICY_VERSION,
-            "mode": str(mode),
             "reason": self.reason,
             "source": self.source,
             "priority": self.priority,
             "trigger_price": self.price,
             "observed_at": self.observed_at,
         }
+        if mode is not None:
+            payload["mode"] = str(mode).strip().lower()
         parsed_execution = _finite_positive(execution_price)
         if parsed_execution is not None:
             payload["execution_price"] = parsed_execution
@@ -120,6 +121,110 @@ class ExitDecisionComparison:
                 or self.trigger_price_delta_bps <= 0.01
             )
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ExitPolicy:
+    """Single exit-policy facade shared by replay, paper, shadow and live."""
+
+    version: str = EXIT_POLICY_VERSION
+    decision_version: str = EXIT_DECISION_VERSION
+
+    def resolve_levels(
+        self,
+        entry_price: Any,
+        direction: int,
+        *,
+        stop_loss_pct: Any,
+        take_profit_pct: Any,
+        atr: Any = None,
+        risk_proposal: Mapping[str, Any] | None = None,
+        atr_stop_multiplier: float = 1.5,
+        atr_take_profit_multiplier: float = 2.5,
+    ) -> ExitLevelPlan | None:
+        return resolve_exit_level_plan(
+            entry_price,
+            direction,
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+            atr=atr,
+            risk_proposal=risk_proposal,
+            atr_stop_multiplier=atr_stop_multiplier,
+            atr_take_profit_multiplier=atr_take_profit_multiplier,
+        )
+
+    def decision_for_reason(
+        self,
+        reason: str,
+        price: Any,
+        *,
+        observed_at: int | None = None,
+    ) -> ExitDecision | None:
+        return decision_for_reason(reason, price, observed_at=observed_at)
+
+    def evaluate_mark(
+        self,
+        mark_price: Any,
+        direction: int,
+        *,
+        stop: Any = None,
+        target: Any = None,
+        liquidation: Any = None,
+        observed_at: int | None = None,
+    ) -> ExitDecision | None:
+        return evaluate_mark_exit(
+            mark_price,
+            direction,
+            stop=stop,
+            target=target,
+            liquidation=liquidation,
+            observed_at=observed_at,
+        )
+
+    def evaluate_bar(
+        self,
+        *,
+        open_price: Any,
+        high: Any,
+        low: Any,
+        direction: int,
+        stop: Any = None,
+        target: Any = None,
+        liquidation: Any = None,
+        observed_at: int | None = None,
+    ) -> ExitDecision | None:
+        return evaluate_bar_exit(
+            open_price=open_price,
+            high=high,
+            low=low,
+            direction=direction,
+            stop=stop,
+            target=target,
+            liquidation=liquidation,
+            observed_at=observed_at,
+        )
+
+    def select(
+        self,
+        *,
+        price: Any,
+        observed_at: int | None = None,
+        market_decision: ExitDecision | None = None,
+        profit_guard_exit: bool = False,
+        strategy_reversal: bool = False,
+        holding_period_expired: bool = False,
+    ) -> ExitDecision | None:
+        return select_runtime_exit(
+            price=price,
+            observed_at=observed_at,
+            market_decision=market_decision,
+            profit_guard_exit=profit_guard_exit,
+            strategy_reversal=strategy_reversal,
+            holding_period_expired=holding_period_expired,
+        )
+
+    def advance_profit_guard(self, **kwargs: Any) -> tuple[dict[str, Any] | None, bool]:
+        return advance_profit_guard(**kwargs)
 
 
 def _finite_positive(value: Any) -> float | None:
@@ -495,3 +600,6 @@ def advance_profit_guard(
         },
         should_exit,
     )
+
+
+DEFAULT_EXIT_POLICY = ExitPolicy()

@@ -4,10 +4,13 @@ from decimal import Decimal
 import pytest
 
 from quantdesk_v2.domain.runtime import (
+    DECISION_ENVELOPE_VERSION,
+    DecisionEnvelope,
     MarketEvent,
     MarketEventType,
     StrategyDecision,
     StrategyDecisionType,
+    build_decision_envelope,
     canonical_event_hash,
     decision_record_key,
     strategy_decision_id,
@@ -67,4 +70,40 @@ def test_strategy_decision_rejects_forged_identity() -> None:
             confidence=Decimal("0.5"),
             reason_codes=("NO_ENTRY",),
             evidence={},
+        )
+
+
+def test_decision_envelope_is_mode_neutral_and_canonical() -> None:
+    envelope = build_decision_envelope(
+        revision_fingerprint="source-hash-1",
+        event_id="bar-1",
+        symbol="nvdausdt",
+        timeframe="1h",
+        event_time=NOW,
+        decision="SHORT_ENTRY",
+        confidence=Decimal("0.75"),
+        reason_codes=("EMA_CROSS_DOWN",),
+        evidence={"ema_fast": "99"},
+        risk_proposal={"stop_distance": "2"},
+        valid_until=NOW + timedelta(hours=1),
+    )
+
+    assert isinstance(envelope, DecisionEnvelope)
+    assert envelope.direction == -1
+    assert envelope.snapshot()["version"] == DECISION_ENVELOPE_VERSION
+    assert envelope.snapshot(mode="paper")["mode"] == "paper"
+    assert envelope.snapshot(mode="shadow")["decision_id"] == envelope.decision_id
+    assert "mode" not in envelope.snapshot()
+
+
+def test_decision_envelope_rejects_exit_metadata_on_entry() -> None:
+    with pytest.raises(ValueError, match="EXIT envelope"):
+        build_decision_envelope(
+            revision_fingerprint="source-hash-1",
+            event_id="bar-1",
+            symbol="NVDAUSDT",
+            timeframe="1h",
+            event_time=NOW,
+            decision="LONG_ENTRY",
+            exit_decision={"reason": "stop_loss"},
         )

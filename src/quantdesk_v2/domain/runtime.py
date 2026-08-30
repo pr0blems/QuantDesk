@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
 _SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9._-]{1,31}")
+DECISION_ENVELOPE_VERSION = "decision_envelope_v1"
 
 
 def _aware(value: datetime, name: str) -> None:
@@ -119,6 +120,154 @@ class StrategyDecision:
             not self.confidence.is_finite() or self.confidence < 0 or self.confidence > 1
         ):
             raise ValueError("confidence must be between zero and one")
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionEnvelope:
+    """Mode-neutral strategy decision consumed by every execution runtime.
+
+    ``mode`` deliberately does not belong to the immutable envelope.  Replay,
+    shadow, paper and live may persist different delivery records, but the
+    semantic decision generated from the same strategy revision and market
+    event must remain identical.
+    """
+
+    decision_id: str
+    revision_fingerprint: str
+    event_id: str
+    symbol: str
+    timeframe: str
+    event_time: datetime
+    decision: StrategyDecisionType
+    confidence: Decimal | None = None
+    reason_codes: tuple[str, ...] = ()
+    evidence: dict[str, Any] = field(default_factory=dict)
+    risk_proposal: dict[str, Any] = field(default_factory=dict)
+    valid_until: datetime | None = None
+    exit_decision: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        symbol = self.symbol.strip().upper()
+        if not _SYMBOL.fullmatch(symbol):
+            raise ValueError("invalid decision envelope symbol")
+        object.__setattr__(self, "symbol", symbol)
+        timeframe = self.timeframe.strip()
+        if not timeframe or len(timeframe) > 16:
+            raise ValueError("invalid decision envelope timeframe")
+        object.__setattr__(self, "timeframe", timeframe)
+        decision = StrategyDecisionType(self.decision)
+        object.__setattr__(self, "decision", decision)
+        _aware(self.event_time, "event_time")
+        if self.valid_until is not None:
+            _aware(self.valid_until, "valid_until")
+            if self.valid_until < self.event_time:
+                raise ValueError("valid_until cannot precede event_time")
+        expected = strategy_decision_id(
+            self.revision_fingerprint,
+            symbol,
+            timeframe,
+            self.event_time,
+            decision,
+        )
+        if self.decision_id != expected:
+            raise ValueError("decision envelope id mismatch")
+        if not self.event_id or len(self.event_id) > 191:
+            raise ValueError("invalid decision envelope event id")
+        if self.confidence is not None and (
+            not self.confidence.is_finite()
+            or self.confidence < 0
+            or self.confidence > 1
+        ):
+            raise ValueError("confidence must be between zero and one")
+        reasons = tuple(
+            item
+            for item in (str(value).strip() for value in self.reason_codes)
+            if item
+        )
+        object.__setattr__(self, "reason_codes", reasons)
+        if self.exit_decision is not None and decision is not StrategyDecisionType.EXIT:
+            raise ValueError("exit decision metadata requires an EXIT envelope")
+
+    @property
+    def direction(self) -> int:
+        return {
+            StrategyDecisionType.LONG_ENTRY: 1,
+            StrategyDecisionType.SHORT_ENTRY: -1,
+        }.get(self.decision, 0)
+
+    @property
+    def semantic_hash(self) -> str:
+        return canonical_event_hash(self.snapshot())
+
+    def snapshot(self, *, mode: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "version": DECISION_ENVELOPE_VERSION,
+            "decision_id": self.decision_id,
+            "revision_fingerprint": self.revision_fingerprint,
+            "event_id": self.event_id,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "event_time": self.event_time.isoformat(),
+            "decision": self.decision.value,
+            "direction": self.direction,
+            "confidence": (
+                str(self.confidence) if self.confidence is not None else None
+            ),
+            "reason_codes": list(self.reason_codes),
+            "evidence": self.evidence,
+            "risk_proposal": self.risk_proposal,
+            "valid_until": (
+                self.valid_until.isoformat() if self.valid_until is not None else None
+            ),
+            "exit_decision": self.exit_decision,
+        }
+        if mode is not None:
+            normalized_mode = str(mode).strip().lower()
+            if not normalized_mode:
+                raise ValueError("decision envelope mode is required")
+            payload["mode"] = normalized_mode
+        return payload
+
+
+def build_decision_envelope(
+    *,
+    revision_fingerprint: str,
+    event_id: str,
+    symbol: str,
+    timeframe: str,
+    event_time: datetime,
+    decision: StrategyDecisionType | str,
+    confidence: Decimal | None = None,
+    reason_codes: tuple[str, ...] = (),
+    evidence: dict[str, Any] | None = None,
+    risk_proposal: dict[str, Any] | None = None,
+    valid_until: datetime | None = None,
+    exit_decision: dict[str, Any] | None = None,
+) -> DecisionEnvelope:
+    """Create a validated envelope with its canonical cross-mode identity."""
+
+    normalized_decision = StrategyDecisionType(decision)
+    return DecisionEnvelope(
+        decision_id=strategy_decision_id(
+            revision_fingerprint,
+            symbol,
+            timeframe,
+            event_time,
+            normalized_decision,
+        ),
+        revision_fingerprint=revision_fingerprint,
+        event_id=event_id,
+        symbol=symbol,
+        timeframe=timeframe,
+        event_time=event_time,
+        decision=normalized_decision,
+        confidence=confidence,
+        reason_codes=reason_codes,
+        evidence=dict(evidence or {}),
+        risk_proposal=dict(risk_proposal or {}),
+        valid_until=valid_until,
+        exit_decision=dict(exit_decision) if exit_decision is not None else None,
+    )
 
 
 @dataclass(frozen=True, slots=True)

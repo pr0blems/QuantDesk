@@ -9,6 +9,7 @@ from .safety import (
     PreflightPolicy,
     PreflightService,
 )
+from .semantic_replay import SemanticReplayResult, replay_mode_semantics
 
 __all__ = [
     "Broker",
@@ -22,4 +23,6 @@ __all__ = [
     "PreflightService",
     "RiskEvaluator",
     "RiskPolicy",
+    "SemanticReplayResult",
+    "replay_mode_semantics",
 ]

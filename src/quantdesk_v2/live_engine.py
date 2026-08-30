@@ -25,11 +25,7 @@ from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings
-from .domain.exit_policy import (
-    advance_profit_guard,
-    decision_for_reason,
-    resolve_exit_level_plan,
-)
+from .domain.exit_policy import DEFAULT_EXIT_POLICY
 from .domain.protection import ProtectionCoverage, ProtectionPlan
 from .live_risk import (
     OpenPositionRisk,
@@ -2061,7 +2057,7 @@ def _signal_exit_levels(
         # Keep this compatibility seam for existing recovery paths and tests;
         # the paper helper itself delegates to the shared policy.
         return _exit_levels(entry, direction, atr, config)
-    plan = resolve_exit_level_plan(
+    plan = DEFAULT_EXIT_POLICY.resolve_levels(
         entry,
         direction,
         stop_loss_pct=config.get("stop_loss_pct"),
@@ -2105,7 +2101,7 @@ def _live_profit_guard_snapshot(
         direction = 1
     elif str(position.get("position_side") or "BOTH").upper() == "SHORT":
         direction = -1
-    guard, should_exit = advance_profit_guard(
+    guard, should_exit = DEFAULT_EXIT_POLICY.advance_profit_guard(
         entry_price=position.get("entry_price") or execution.get("entry_price"),
         mark_price=position.get("mark_price"),
         initial_stop=execution.get("stop"),
@@ -2229,7 +2225,7 @@ def _close_position(
         f"{reason}:{int(time.time()) // 60}"
     )
     observed_at = int(time.time())
-    exit_decision = decision_for_reason(
+    exit_decision = DEFAULT_EXIT_POLICY.decision_for_reason(
         reason,
         position.get("mark_price") or position.get("entry_price"),
         observed_at=observed_at,
@@ -2504,7 +2500,7 @@ def _open_position(
         }
     )
     final_risk_proposal = (signal_evidence or {}).get("risk_proposal")
-    final_exit_plan = resolve_exit_level_plan(
+    final_exit_plan = DEFAULT_EXIT_POLICY.resolve_levels(
         entry,
         direction,
         stop_loss_pct=config.get("stop_loss_pct"),
@@ -3055,6 +3051,10 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
             # protection remains on Binance until the position is gone.
             continue
         side = 1 if position_side == "LONG" or position["side"] == "long" else -1
+        observed_at = int(time.time())
+        profit_guard_key: str | None = None
+        profit_guard_exit = False
+        holding_period_expired = False
         if not _is_grandfathered_open(managed[key]):
             if protection_counts.get(key, 0) != 2:
                 _close_position(account, api_key, api_secret, position, "protection_missing")
@@ -3095,26 +3095,13 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                 managed[key],
                 profit_guards.get(profit_guard_key),
                 exit_cost_bps=policy.round_trip_cost_bps,
-                observed_at=int(time.time()),
+                observed_at=observed_at,
             )
             if profit_guard is not None and profit_guard != profit_guards.get(
                 profit_guard_key
             ):
                 profit_guards[profit_guard_key] = profit_guard
                 profit_guards_changed = True
-            if profit_guard_exit:
-                closed = _close_position(
-                    account,
-                    api_key,
-                    api_secret,
-                    position,
-                    "live_profit_guard",
-                )
-                positions_changed = closed or positions_changed
-                if closed:
-                    profit_guards.pop(profit_guard_key, None)
-                    profit_guards_changed = True
-                continue
             opened_at = _opened_at_seconds(managed[key])
             entry_basis = _json_object(managed[key].get("entry_basis_json"))
             captured_timing = entry_basis.get("execution_policy")
@@ -3132,20 +3119,14 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                     opened_at is not None
                     and timing_policy.expired(
                         opened_at=opened_at,
-                        observed_at=time.time(),
+                        observed_at=observed_at,
                     )
                 )
             except (StrategyEvaluationError, TypeError, ValueError):
                 _fail_account(account, "position_holding_policy_invalid")
                 return
-            if holding_period_expired:
-                positions_changed = (
-                    _close_position(account, api_key, api_secret, position, "max_holding_bars")
-                    or positions_changed
-                )
-                continue
         direction, _, _, signal_time, signal_evidence = _execution_signal(account, symbol)
-        if (
+        strategy_reversal = bool(
             signal_time is not None
             and _signal_is_fresh(
                 account,
@@ -3154,11 +3135,26 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                 signal_evidence,
             )
             and direction == -side
-        ):
-            positions_changed = (
-                _close_position(account, api_key, api_secret, position, "strategy_reversal")
-                or positions_changed
+        )
+        selected_exit = DEFAULT_EXIT_POLICY.select(
+            price=position.get("mark_price") or position.get("entry_price"),
+            observed_at=observed_at,
+            profit_guard_exit=profit_guard_exit,
+            strategy_reversal=strategy_reversal,
+            holding_period_expired=holding_period_expired,
+        )
+        if selected_exit is not None:
+            closed = _close_position(
+                account,
+                api_key,
+                api_secret,
+                position,
+                selected_exit.reason,
             )
+            positions_changed = closed or positions_changed
+            if closed and selected_exit.reason == "profit_guard" and profit_guard_key:
+                profit_guards.pop(profit_guard_key, None)
+                profit_guards_changed = True
 
     if profit_guards_changed:
         _persist_live_profit_guards(account, profit_guards)

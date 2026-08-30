@@ -11,7 +11,16 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
+
+from .domain.runtime import (
+    DecisionEnvelope,
+    StrategyDecisionType,
+    build_decision_envelope,
+    canonical_event_hash,
+)
 
 DEFAULT_LEGACY_STRATEGY_TIMEFRAME = "4h"
 SUPPORTED_STRATEGY_TIMEFRAMES = ("15m", "1h", "4h")
@@ -36,7 +45,7 @@ class StrategyCandle:
 
 
 @dataclass(frozen=True, slots=True)
-class StrategyTimingPolicy:
+class TimeframePolicy:
     """Immutable trigger interval and holding horizon used by every runtime."""
 
     trigger_timeframe: str
@@ -68,6 +77,10 @@ class StrategyTimingPolicy:
             "max_holding_bars": self.max_holding_bars,
             "max_holding_seconds": self.max_holding_seconds,
         }
+
+
+# Compatibility name for callers deployed before the unified policy was named.
+StrategyTimingPolicy = TimeframePolicy
 
 
 class StrategyEvaluator:
@@ -182,6 +195,68 @@ class StrategyEvaluator:
                 signals[index] = -1
         return signals
 
+    def evaluate_envelopes(
+        self,
+        strategy_id: str,
+        candles: Sequence[StrategyCandle],
+        params: Mapping[str, int | float],
+        *,
+        symbol: str,
+        timeframe: str,
+        revision_fingerprint: str | None = None,
+    ) -> list[DecisionEnvelope]:
+        """Evaluate legacy signals into the canonical cross-mode contract."""
+
+        normalized_timeframe = _validate_timeframe(timeframe)
+        fingerprint = revision_fingerprint or canonical_event_hash(
+            {
+                "strategy_id": str(strategy_id),
+                "params": dict(params),
+                "timeframe": normalized_timeframe,
+            }
+        )
+        signals = self.evaluate_legacy(strategy_id, candles, params)
+        validity = timedelta(seconds=strategy_timeframe_seconds(normalized_timeframe))
+        envelopes: list[DecisionEnvelope] = []
+        for candle, direction in zip(candles, signals, strict=True):
+            event_time = datetime.fromtimestamp(int(candle.ts), tz=UTC)
+            decision = {
+                1: StrategyDecisionType.LONG_ENTRY,
+                -1: StrategyDecisionType.SHORT_ENTRY,
+            }.get(int(direction), StrategyDecisionType.HOLD)
+            event_id = canonical_event_hash(
+                {
+                    "type": "bar_closed",
+                    "symbol": str(symbol).strip().upper(),
+                    "timeframe": normalized_timeframe,
+                    "open_time": int(candle.ts),
+                }
+            )
+            envelopes.append(
+                build_decision_envelope(
+                    revision_fingerprint=fingerprint,
+                    event_id=event_id,
+                    symbol=symbol,
+                    timeframe=normalized_timeframe,
+                    event_time=event_time,
+                    decision=decision,
+                    confidence=(
+                        Decimal("1")
+                        if decision is not StrategyDecisionType.HOLD
+                        else None
+                    ),
+                    reason_codes=(
+                        f"LEGACY_{decision.value}",
+                    ),
+                    evidence={
+                        "engine_key": str(strategy_id),
+                        "signal": int(direction),
+                    },
+                    valid_until=event_time + validity,
+                )
+            )
+        return envelopes
+
 
 DEFAULT_STRATEGY_EVALUATOR = StrategyEvaluator()
 
@@ -260,7 +335,7 @@ def resolve_strategy_timing_policy(
     evidence: Mapping[str, Any] | None = None,
     captured: Mapping[str, Any] | None = None,
     default_max_holding_bars: int = 12,
-) -> StrategyTimingPolicy:
+) -> TimeframePolicy:
     """Resolve the immutable timing policy used for one position."""
 
     if isinstance(captured, Mapping) and captured:
@@ -272,7 +347,7 @@ def resolve_strategy_timing_policy(
         captured_seconds = captured.get("timeframe_seconds")
         if captured_seconds is not None and captured_seconds != timeframe_seconds:
             raise StrategyEvaluationError("captured strategy timeframe is inconsistent")
-        return StrategyTimingPolicy(timeframe, timeframe_seconds, max_holding_bars)
+        return TimeframePolicy(timeframe, timeframe_seconds, max_holding_bars)
 
     selected = snapshot if isinstance(snapshot, Mapping) else {}
     timeframe = resolve_strategy_trigger_timeframe(selected, config)
@@ -298,7 +373,7 @@ def resolve_strategy_timing_policy(
         for candidate in candidates
         if candidate is not _MISSING and candidate is not None
     )
-    return StrategyTimingPolicy(
+    return TimeframePolicy(
         timeframe,
         strategy_timeframe_seconds(timeframe),
         max_holding_bars,

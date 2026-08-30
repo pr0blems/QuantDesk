@@ -24,7 +24,7 @@ from .models import (
     utcnow,
 )
 from .paper_engine import _strategy_signal
-from .strategy_evaluator import StrategyEvaluationError, resolve_legacy_strategy_timeframe
+from .strategy_evaluator import StrategyEvaluationError, resolve_strategy_timing_policy
 
 _LOOP_SECONDS = 5.0
 
@@ -34,20 +34,8 @@ def _json_safe(value: object) -> Any:
 
 
 def _timeframe(snapshot: dict[str, Any]) -> str:
-    spec = snapshot.get("spec") or snapshot.get("spec_json")
-    if isinstance(spec, dict):
-        timeframes = spec.get("timeframes")
-        if isinstance(timeframes, dict) and timeframes.get("trigger"):
-            return str(timeframes["trigger"])
-    validation = snapshot.get("source_validation") or snapshot.get("validation")
-    if isinstance(validation, dict):
-        requirements = validation.get("data_requirements")
-        if isinstance(requirements, dict) and requirements.get("trigger_timeframe"):
-            return str(requirements["trigger_timeframe"])
-        if validation.get("trigger_timeframe"):
-            return str(validation["trigger_timeframe"])
     try:
-        return resolve_legacy_strategy_timeframe(snapshot)
+        return resolve_strategy_timing_policy(snapshot).trigger_timeframe
     except StrategyEvaluationError:
         return "1h"
 
@@ -123,7 +111,13 @@ def _evaluate_deployment(
         decision = str((evidence or {}).get("decision") or "")
         if decision not in {"LONG_ENTRY", "SHORT_ENTRY", "EXIT", "HOLD", "SKIP"}:
             decision = {1: "LONG_ENTRY", -1: "SHORT_ENTRY"}.get(direction, "HOLD")
-        decision_id = _decision_id(
+        envelope = (evidence or {}).get("decision_envelope")
+        envelope_id = (
+            str(envelope.get("decision_id") or "").strip()
+            if isinstance(envelope, dict)
+            else ""
+        )
+        decision_id = envelope_id or _decision_id(
             revision,
             symbol,
             timeframe,
@@ -193,7 +187,7 @@ def _evaluate_deployment(
         )
     runtime.update(
         {
-            "decision_protocol_version": "strategy_decision_v2",
+            "decision_protocol_version": "decision_envelope_v1",
             "evaluations": evaluations,
             "decisions": decisions,
             "order_intents": order_intents,

@@ -4,7 +4,9 @@ import pytest
 
 from quantdesk_v2 import live_engine, paper_engine
 from quantdesk_v2.domain.exit_policy import (
+    DEFAULT_EXIT_POLICY,
     EXIT_POLICY_VERSION,
+    ExitPolicy,
     advance_profit_guard,
     compare_exit_decisions,
     decision_for_reason,
@@ -13,6 +15,19 @@ from quantdesk_v2.domain.exit_policy import (
     resolve_exit_level_plan,
     select_runtime_exit,
 )
+
+
+def test_default_exit_policy_is_the_shared_facade() -> None:
+    assert isinstance(DEFAULT_EXIT_POLICY, ExitPolicy)
+    assert DEFAULT_EXIT_POLICY.version == EXIT_POLICY_VERSION
+    plan = DEFAULT_EXIT_POLICY.resolve_levels(
+        100,
+        1,
+        stop_loss_pct=2,
+        take_profit_pct=4,
+    )
+    assert plan is not None
+    assert (plan.stop, plan.target) == pytest.approx((98, 104))
 
 
 @pytest.mark.parametrize(

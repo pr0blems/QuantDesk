@@ -7,6 +7,8 @@ from quantdesk_v2.strategy_evaluator import (
     DEFAULT_STRATEGY_EVALUATOR,
     StrategyCandle,
     StrategyEvaluationError,
+    StrategyTimingPolicy,
+    TimeframePolicy,
     resolve_legacy_strategy_timeframe,
     resolve_strategy_timing_policy,
     resolve_strategy_trigger_timeframe,
@@ -40,6 +42,26 @@ def test_public_evaluator_preserves_legacy_ma_cross_signals() -> None:
     assert backtest._build_signals(
         "ma_cross", candles, {"fast_period": 2, "slow_period": 3}
     ) == signals
+
+
+def test_legacy_evaluator_emits_mode_neutral_decision_envelopes() -> None:
+    candles = _candles([10, 10, 10, 12, 8, 7])
+
+    envelopes = DEFAULT_STRATEGY_EVALUATOR.evaluate_envelopes(
+        "ma_cross",
+        candles,
+        {"fast_period": 2, "slow_period": 3},
+        symbol="TESTUSDT",
+        timeframe="1h",
+        revision_fingerprint="revision-1",
+    )
+
+    assert [item.direction for item in envelopes] == [0, 0, 0, 1, 0, -1]
+    assert envelopes[3].snapshot()["decision"] == "LONG_ENTRY"
+    assert envelopes[5].snapshot()["decision"] == "SHORT_ENTRY"
+    assert envelopes[3].snapshot(mode="paper")["decision_id"] == (
+        envelopes[3].snapshot(mode="shadow")["decision_id"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -119,6 +141,8 @@ def test_timing_policy_prefers_immutable_strategy_and_entry_values() -> None:
         evidence={"risk_proposal": {"max_holding_bars": 6}},
     )
 
+    assert isinstance(policy, TimeframePolicy)
+    assert StrategyTimingPolicy is TimeframePolicy
     assert policy.snapshot() == {
         "trigger_timeframe": "1h",
         "timeframe_seconds": 3_600,
