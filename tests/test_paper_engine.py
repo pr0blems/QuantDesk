@@ -847,7 +847,19 @@ def test_close_position_deducts_accrued_funding_from_balance_and_trade(
     assert trade_params[8] == pytest.approx(-2)
     assert trade_params[9] == 0
     assert trade_params[10] == 2
-    assert trade_params[15] == position["basis"]
+    trade_basis = json.loads(trade_params[15])
+    assert trade_basis["schema_version"] == 1
+    assert trade_basis["exit_decision"] == {
+        "version": "unified_exit_decision_v1",
+        "policy_version": "unified_exit_v1",
+        "mode": "paper",
+        "reason": "max_holding_bars",
+        "source": "holding_policy",
+        "priority": 60,
+        "trigger_price": 100.0,
+        "observed_at": 1_000,
+        "execution_price": 100.0,
+    }
     assert account["balance"] == pytest.approx(9_998)
 
 

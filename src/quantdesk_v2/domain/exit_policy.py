@@ -13,7 +13,30 @@ from dataclasses import dataclass
 from typing import Any
 
 EXIT_POLICY_VERSION = "unified_exit_v1"
+EXIT_DECISION_VERSION = "unified_exit_decision_v1"
 PROFIT_GUARD_VERSION = "risk_unit_profit_guard_v1"
+
+_EXIT_REASON_PRIORITY = {
+    "liquidation": 10,
+    "stop_loss": 20,
+    "take_profit": 30,
+    "live_profit_guard": 40,
+    "profit_guard": 40,
+    "strategy_reversal": 50,
+    "max_holding_bars": 60,
+    "end_of_data": 70,
+}
+
+_EXIT_REASON_SOURCE = {
+    "liquidation": "exchange_risk",
+    "stop_loss": "price_barrier",
+    "take_profit": "price_barrier",
+    "live_profit_guard": "profit_guard",
+    "profit_guard": "profit_guard",
+    "strategy_reversal": "strategy_signal",
+    "max_holding_bars": "holding_policy",
+    "end_of_data": "data_boundary",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +76,50 @@ class ExitDecision:
 
     price: float
     reason: str
+    priority: int
+    source: str
+    observed_at: int | None = None
+
+    def snapshot(
+        self,
+        *,
+        mode: str,
+        execution_price: Any = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "version": EXIT_DECISION_VERSION,
+            "policy_version": EXIT_POLICY_VERSION,
+            "mode": str(mode),
+            "reason": self.reason,
+            "source": self.source,
+            "priority": self.priority,
+            "trigger_price": self.price,
+            "observed_at": self.observed_at,
+        }
+        parsed_execution = _finite_positive(execution_price)
+        if parsed_execution is not None:
+            payload["execution_price"] = parsed_execution
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ExitDecisionComparison:
+    """Normalized comparison between two execution-mode decisions."""
+
+    reason_matches: bool
+    priority_matches: bool
+    trigger_price_delta_bps: float | None
+
+    @property
+    def matches(self) -> bool:
+        return (
+            self.reason_matches
+            and self.priority_matches
+            and (
+                self.trigger_price_delta_bps is None
+                or self.trigger_price_delta_bps <= 0.01
+            )
+        )
 
 
 def _finite_positive(value: Any) -> float | None:
@@ -61,6 +128,74 @@ def _finite_positive(value: Any) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def decision_for_reason(
+    reason: str,
+    price: Any,
+    *,
+    observed_at: int | None = None,
+) -> ExitDecision | None:
+    """Build a standard decision without changing an engine's chosen reason."""
+
+    normalized_reason = str(reason or "").strip().lower()
+    parsed_price = _finite_positive(price)
+    if not normalized_reason or parsed_price is None:
+        return None
+    return ExitDecision(
+        price=parsed_price,
+        reason=normalized_reason,
+        priority=_EXIT_REASON_PRIORITY.get(normalized_reason, 90),
+        source=_EXIT_REASON_SOURCE.get(normalized_reason, "engine_control"),
+        observed_at=int(observed_at) if observed_at is not None else None,
+    )
+
+
+def select_runtime_exit(
+    *,
+    price: Any,
+    observed_at: int | None = None,
+    market_decision: ExitDecision | None = None,
+    profit_guard_exit: bool = False,
+    strategy_reversal: bool = False,
+    holding_period_expired: bool = False,
+) -> ExitDecision | None:
+    """Select one exit using the common risk-first runtime priority."""
+
+    if market_decision is not None:
+        return market_decision
+    if profit_guard_exit:
+        return decision_for_reason("profit_guard", price, observed_at=observed_at)
+    if strategy_reversal:
+        return decision_for_reason(
+            "strategy_reversal", price, observed_at=observed_at
+        )
+    if holding_period_expired:
+        return decision_for_reason(
+            "max_holding_bars", price, observed_at=observed_at
+        )
+    return None
+
+
+def compare_exit_decisions(
+    reference: ExitDecision | None,
+    candidate: ExitDecision | None,
+) -> ExitDecisionComparison:
+    """Compare mode decisions without treating two missing exits as a match."""
+
+    if reference is None or candidate is None:
+        return ExitDecisionComparison(False, False, None)
+    price_base = max(abs(reference.price), abs(candidate.price))
+    price_delta_bps = (
+        abs(reference.price - candidate.price) / price_base * 10_000
+        if price_base > 0
+        else None
+    )
+    return ExitDecisionComparison(
+        reason_matches=reference.reason == candidate.reason,
+        priority_matches=reference.priority == candidate.priority,
+        trigger_price_delta_bps=price_delta_bps,
+    )
 
 
 def resolve_exit_level_plan(
@@ -158,6 +293,7 @@ def evaluate_mark_exit(
     stop: Any = None,
     target: Any = None,
     liquidation: Any = None,
+    observed_at: int | None = None,
 ) -> ExitDecision | None:
     """Evaluate one mark with loss protection taking precedence over profit."""
 
@@ -170,15 +306,15 @@ def evaluate_mark_exit(
     if liquidation_price is not None and (
         mark <= liquidation_price if direction > 0 else mark >= liquidation_price
     ):
-        return ExitDecision(mark, "liquidation")
+        return decision_for_reason("liquidation", mark, observed_at=observed_at)
     if stop_price is not None and (
         mark <= stop_price if direction > 0 else mark >= stop_price
     ):
-        return ExitDecision(mark, "stop_loss")
+        return decision_for_reason("stop_loss", mark, observed_at=observed_at)
     if target_price is not None and (
         mark >= target_price if direction > 0 else mark <= target_price
     ):
-        return ExitDecision(mark, "take_profit")
+        return decision_for_reason("take_profit", mark, observed_at=observed_at)
     return None
 
 
@@ -191,6 +327,7 @@ def evaluate_bar_exit(
     stop: Any = None,
     target: Any = None,
     liquidation: Any = None,
+    observed_at: int | None = None,
 ) -> ExitDecision | None:
     """Evaluate an OHLC bar using conservative, direction-symmetric ordering."""
 
@@ -211,7 +348,7 @@ def evaluate_bar_exit(
     if liquidation_price is not None and (
         opened <= liquidation_price if direction > 0 else opened >= liquidation_price
     ):
-        return ExitDecision(opened, "liquidation")
+        return decision_for_reason("liquidation", opened, observed_at=observed_at)
 
     stop_hit = stop_price is not None and (
         bar_low <= stop_price if direction > 0 else bar_high >= stop_price
@@ -246,14 +383,14 @@ def evaluate_bar_exit(
             if direction > 0
             else max(opened, adverse_price)
         )
-        return ExitDecision(price, adverse_reason)
+        return decision_for_reason(adverse_reason, price, observed_at=observed_at)
     if target_hit and target_price is not None:
         price = (
             max(opened, target_price)
             if direction > 0
             else min(opened, target_price)
         )
-        return ExitDecision(price, "take_profit")
+        return decision_for_reason("take_profit", price, observed_at=observed_at)
     return None
 
 

@@ -25,7 +25,11 @@ from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
 from .config import Settings
-from .domain.exit_policy import advance_profit_guard, resolve_exit_level_plan
+from .domain.exit_policy import (
+    advance_profit_guard,
+    decision_for_reason,
+    resolve_exit_level_plan,
+)
 from .domain.protection import ProtectionCoverage, ProtectionPlan
 from .live_risk import (
     OpenPositionRisk,
@@ -1092,6 +1096,7 @@ def _place_market(
     leverage: int | None = None,
     strategy_signal_id: int | None = None,
     entry_basis: dict[str, Any] | None = None,
+    decision_trace: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if _trading_client is None:
         raise RuntimeError("live engine is not configured")
@@ -1105,6 +1110,11 @@ def _place_market(
         order_type="MARKET",
         quantity=quantity,
         request_json={
+            **(
+                {"exit_decision": decision_trace}
+                if isinstance(decision_trace, dict)
+                else {}
+            ),
             "symbol": symbol,
             "side": side,
             "position_side": position_side,
@@ -2218,6 +2228,12 @@ def _close_position(
         f"live:{account['deployment_id']}:{symbol}:{position_side}:close:"
         f"{reason}:{int(time.time()) // 60}"
     )
+    observed_at = int(time.time())
+    exit_decision = decision_for_reason(
+        reason,
+        position.get("mark_price") or position.get("entry_price"),
+        observed_at=observed_at,
+    )
     response = _place_market(
         account,
         api_key,
@@ -2231,6 +2247,11 @@ def _close_position(
         reduce_only=position_side == "BOTH",
         strategy_signal_id=managed.get("strategy_signal_id"),
         entry_basis=_json_object(managed.get("entry_basis_json")),
+        decision_trace=(
+            exit_decision.snapshot(mode="live")
+            if exit_decision is not None
+            else None
+        ),
     )
     if response is None:
         _fail_account(account, "position_close_failed")

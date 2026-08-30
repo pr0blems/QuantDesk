@@ -1491,6 +1491,50 @@ def test_paused_account_can_still_send_risk_reducing_close(
     assert exchange_calls == ["close"]
 
 
+def test_market_intent_persists_exit_decision_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: dict = {}
+
+    class Trading(_TradingClient):
+        @staticmethod
+        def place_market_order(*_args, **_kwargs) -> dict:
+            return {"orderId": 99, "status": "FILLED"}
+
+    monkeypatch.setattr(live_engine, "_trading_client", Trading())
+    monkeypatch.setattr(
+        live_engine,
+        "_create_intent",
+        lambda *_args, **kwargs: created.update(kwargs)
+        or {"id": 40, "client_order_id": "close-40"},
+    )
+    monkeypatch.setattr(live_engine, "_safety_write_enabled", lambda *_args: True)
+    monkeypatch.setattr(live_engine, "_update_intent", lambda *_args, **_kwargs: None)
+
+    response = live_engine._place_market(
+        _account(),
+        "key",
+        "secret",
+        signal_key="close",
+        symbol="AAPLUSDT",
+        action="close",
+        side="SELL",
+        position_side="LONG",
+        quantity=Decimal("0.5"),
+        reduce_only=False,
+        decision_trace={
+            "version": "unified_exit_decision_v1",
+            "reason": "strategy_reversal",
+        },
+    )
+
+    assert response == {"orderId": 99, "status": "FILLED"}
+    assert created["request_json"]["exit_decision"] == {
+        "version": "unified_exit_decision_v1",
+        "reason": "strategy_reversal",
+    }
+
+
 def test_filled_audit_failure_still_returns_fill_and_installs_open_protection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1874,6 +1918,53 @@ def test_pending_close_prevents_duplicate_market_close(
     )
 
     assert result is False
+
+
+def test_live_close_captures_standard_exit_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
+    monkeypatch.setattr(
+        live_engine,
+        "_managed_open",
+        lambda *_args: {
+            "quantity": Decimal("0.5"),
+            "strategy_signal_id": 77,
+            "entry_basis_json": {"schema_version": 2},
+        },
+    )
+    monkeypatch.setattr(live_engine, "_is_manual_follow_open", lambda *_args: False)
+    monkeypatch.setattr(live_engine, "_pending_market_intent", lambda *_args: False)
+    monkeypatch.setattr(
+        live_engine,
+        "_place_market",
+        lambda *_args, **kwargs: captured.update(kwargs) or {"status": "FILLED"},
+    )
+    monkeypatch.setattr(live_engine, "_cancel_protection", lambda *_args: None)
+
+    closed = live_engine._close_position(
+        _account(),
+        "key",
+        "secret",
+        {
+            "symbol": "AAPLUSDT",
+            "position_side": "LONG",
+            "side": "long",
+            "amt": 0.5,
+            "entry_price": 100,
+            "mark_price": 105,
+        },
+        "live_profit_guard",
+    )
+
+    assert closed is True
+    assert captured["decision_trace"]["version"] == "unified_exit_decision_v1"
+    assert captured["decision_trace"]["mode"] == "live"
+    assert captured["decision_trace"]["reason"] == "live_profit_guard"
+    assert captured["decision_trace"]["source"] == "profit_guard"
+    assert captured["decision_trace"]["priority"] == 40
+    assert captured["decision_trace"]["trigger_price"] == 105.0
 
 
 def test_orphan_protection_is_canceled_without_managed_generation(

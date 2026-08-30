@@ -6,9 +6,12 @@ from quantdesk_v2 import live_engine, paper_engine
 from quantdesk_v2.domain.exit_policy import (
     EXIT_POLICY_VERSION,
     advance_profit_guard,
+    compare_exit_decisions,
+    decision_for_reason,
     evaluate_bar_exit,
     evaluate_mark_exit,
     resolve_exit_level_plan,
+    select_runtime_exit,
 )
 
 
@@ -160,3 +163,61 @@ def test_profit_guard_is_direction_symmetric(
     )
     assert persisted == guard
     assert should_exit is True
+
+
+def test_runtime_exit_priority_is_risk_first() -> None:
+    market = decision_for_reason("stop_loss", 95, observed_at=10)
+
+    selected = select_runtime_exit(
+        price=100,
+        observed_at=10,
+        market_decision=market,
+        profit_guard_exit=True,
+        strategy_reversal=True,
+        holding_period_expired=True,
+    )
+
+    assert selected is market
+    assert selected is not None
+    assert selected.priority == 20
+    assert selected.snapshot(mode="paper", execution_price=94.9) == {
+        "version": "unified_exit_decision_v1",
+        "policy_version": "unified_exit_v1",
+        "mode": "paper",
+        "reason": "stop_loss",
+        "source": "price_barrier",
+        "priority": 20,
+        "trigger_price": 95.0,
+        "observed_at": 10,
+        "execution_price": 94.9,
+    }
+
+
+def test_runtime_exit_prefers_profit_guard_then_reversal_then_expiry() -> None:
+    protected = select_runtime_exit(
+        price=105,
+        profit_guard_exit=True,
+        strategy_reversal=True,
+        holding_period_expired=True,
+    )
+    reversed_signal = select_runtime_exit(
+        price=103,
+        strategy_reversal=True,
+        holding_period_expired=True,
+    )
+
+    assert protected is not None and protected.reason == "profit_guard"
+    assert reversed_signal is not None and reversed_signal.reason == "strategy_reversal"
+
+
+def test_exit_decision_comparison_reports_price_drift() -> None:
+    reference = decision_for_reason("take_profit", 110)
+    same = decision_for_reason("take_profit", 110)
+    drifted = decision_for_reason("take_profit", 109)
+
+    assert compare_exit_decisions(reference, same).matches
+    comparison = compare_exit_decisions(reference, drifted)
+    assert comparison.reason_matches
+    assert comparison.priority_matches
+    assert comparison.trigger_price_delta_bps == pytest.approx(90.9090909)
+    assert not comparison.matches

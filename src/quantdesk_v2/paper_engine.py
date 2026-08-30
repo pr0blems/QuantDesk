@@ -42,8 +42,10 @@ from . import indicators as ind
 from . import market_store as store
 from .domain.exit_policy import (
     ExitLevelPlan,
+    decision_for_reason,
     evaluate_mark_exit,
     resolve_exit_level_plan,
+    select_runtime_exit,
 )
 from .domain.runtime import decision_record_key, strategy_decision_id
 from .live_risk import (
@@ -1684,6 +1686,13 @@ def _close_position(
     )
     margin = float(position["margin"])
     returned = max(margin + pnl - fee, 0.0)
+    trade_basis = _json_object(position.get("basis"))
+    exit_decision = decision_for_reason(reason, price, observed_at=now)
+    if exit_decision is not None:
+        trade_basis["exit_decision"] = exit_decision.snapshot(
+            mode="paper",
+            execution_price=execution,
+        )
     with store.transaction() as transaction:
         ownership = transaction.query(
             """SELECT a.balance FROM paper_positions p
@@ -1714,7 +1723,7 @@ def _close_position(
                 account["id"], account["user_id"], position["symbol"], position["side"],
                 quantity, position["avg_entry"], execution, margin, max(pnl, -margin), fee,
                 position.get("funding_acc") or 0, reason, position.get("open_score"),
-                position["opened_ts"], now, position.get("basis"),
+                position["opened_ts"], now, json.dumps(trade_basis, ensure_ascii=False),
             ),
         )
     account["balance"] = new_balance
@@ -1794,9 +1803,10 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             stop=position.get("stop"),
             target=position.get("target"),
             liquidation=position.get("liq_price"),
+            observed_at=now,
         )
-        reason = exit_decision.reason if exit_decision is not None else None
-        if reason is None:
+        strategy_reversal = False
+        if exit_decision is None:
             direction = 0
             signal_time = None
             signal_evidence: dict[str, Any] = {}
@@ -1809,18 +1819,24 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                     f"[paper] signal unavailable for {position['symbol']}: "
                     f"{type(exc).__name__}"
                 )
-            if (
+            strategy_reversal = bool(
                 signal_time is not None
                 and _paper_signal_is_fresh(
                     account, signal_time, signal_evidence, now, policy
                 )
                 and direction == -side
+            )
+        selected_exit = select_runtime_exit(
+            price=price,
+            observed_at=now,
+            market_decision=exit_decision,
+            strategy_reversal=strategy_reversal,
+            holding_period_expired=holding_period_expired,
+        )
+        if selected_exit is not None:
+            if _close_position(
+                account, position, price, selected_exit.reason, now
             ):
-                reason = "strategy_reversal"
-            elif holding_period_expired:
-                reason = "max_holding_bars"
-        if reason:
-            if _close_position(account, position, price, reason, now):
                 closed_symbols.add(position["symbol"])
             positions = _positions(account)
 

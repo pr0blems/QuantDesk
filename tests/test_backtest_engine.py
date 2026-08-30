@@ -219,6 +219,17 @@ def test_same_bar_stop_and_take_uses_conservative_stop(repository_factory) -> No
     assert trade["exit_reason"] == "stop_loss"
     assert trade["exit_price"] == 95
     assert trade["net_pnl"] < 0
+    assert trade["exit_decision"] == {
+        "version": "unified_exit_decision_v1",
+        "policy_version": "unified_exit_v1",
+        "mode": "backtest",
+        "reason": "stop_loss",
+        "source": "price_barrier",
+        "priority": 20,
+        "trigger_price": 95.0,
+        "observed_at": BASE_TS + 5 * HOUR,
+        "execution_price": 95.0,
+    }
 
 
 def test_liquidation_uses_fixed_mmr_and_adverse_exit_precedes_take_profit(

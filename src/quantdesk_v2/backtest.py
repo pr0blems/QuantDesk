@@ -12,7 +12,12 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from .domain.exit_policy import evaluate_bar_exit, resolve_exit_level_plan
+from .domain.exit_policy import (
+    decision_for_reason,
+    evaluate_bar_exit,
+    resolve_exit_level_plan,
+    select_runtime_exit,
+)
 from .market_data_client import fetch_klines_range
 from .strategy_evaluator import (
     DEFAULT_STRATEGY_EVALUATOR,
@@ -1204,6 +1209,7 @@ def _run_engine(
         fees = position["entry_fee"] + exit_fee
         net_pnl = gross_pnl - fees
         margin = position["notional"] / config["leverage"]
+        exit_decision = decision_for_reason(reason, base_price, observed_at=candle.ts)
         trades.append(
             {
                 "symbol": config["symbol"],
@@ -1225,6 +1231,13 @@ def _run_engine(
                 "return_pct": _result_number(net_pnl / margin * 100, 8) if margin else None,
                 "holding_bars": max(1, int(position["holding_bars"])),
                 "exit_reason": reason,
+                "exit_decision": (
+                    exit_decision.snapshot(
+                        mode="backtest", execution_price=exit_price
+                    )
+                    if exit_decision is not None
+                    else None
+                ),
             }
         )
         position = None
@@ -1322,14 +1335,21 @@ def _run_engine(
                 stop=stop_price,
                 target=take_price,
                 liquidation=liquidation_price,
+                observed_at=candle.ts,
             )
-            if exit_decision is not None:
-                close_position(candle, exit_decision.price, exit_decision.reason)
-            elif (
-                config["max_holding_bars"]
-                and position["holding_bars"] >= config["max_holding_bars"]
-            ):
-                close_position(candle, candle.close, "max_holding_bars")
+            selected_exit = select_runtime_exit(
+                price=candle.close,
+                observed_at=candle.ts,
+                market_decision=exit_decision,
+                holding_period_expired=bool(
+                    config["max_holding_bars"]
+                    and position["holding_bars"] >= config["max_holding_bars"]
+                ),
+            )
+            if selected_exit is not None:
+                close_position(
+                    candle, selected_exit.price, selected_exit.reason
+                )
 
         if index == len(candles) - 1 and position is not None:
             close_position(candle, candle.close, "end_of_data")
