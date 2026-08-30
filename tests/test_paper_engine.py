@@ -513,6 +513,12 @@ def test_open_position_always_persists_take_profit(
     assert entry_basis["availability"] == "captured"
     assert entry_basis["reasons"] == ["4h signal"]
     assert entry_basis["execution"]["entry_price"] == pytest.approx(entry)
+    assert entry_basis["execution_policy"] == {
+        "trigger_timeframe": "4h",
+        "timeframe_seconds": 4 * 3_600,
+        "max_holding_bars": 12,
+        "max_holding_seconds": 12 * 4 * 3_600,
+    }
 
 
 def test_open_position_balance_and_insert_share_one_transaction(
@@ -724,6 +730,60 @@ def test_max_holding_exit_includes_funding_accrued_on_the_same_tick(
     paper._tick_account(account, {"TESTUSDT": 100}, now)
 
     assert closes == [("max_holding_bars", pytest.approx(0.6))]
+
+
+def test_max_holding_exit_uses_policy_captured_when_position_was_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["strategy_snapshot_json"]["timeframe"] = "4h"
+    account["config_json"]["max_holding_bars"] = 12
+    now = 2 * 3_600
+    position = {
+        "id": 37,
+        "paper_account_id": account["id"],
+        "user_id": account["user_id"],
+        "symbol": "TESTUSDT",
+        "side": 1,
+        "qty": 1,
+        "avg_entry": 100,
+        "margin": 50,
+        "stop": None,
+        "target": None,
+        "atr_entry": None,
+        "liq_price": None,
+        "funding_acc": 0,
+        "funding_ts": now,
+        "opened_ts": 0,
+        "basis": json.dumps(
+            {
+                "execution_policy": {
+                    "trigger_timeframe": "1h",
+                    "timeframe_seconds": 3_600,
+                    "max_holding_bars": 2,
+                }
+            }
+        ),
+    }
+    closes: list[str] = []
+    monkeypatch.setattr(paper, "_positions", lambda account: [position])
+    monkeypatch.setattr(
+        paper,
+        "_paper_strategy_signal",
+        lambda *_args: (0, None, [], now, {}),
+    )
+    monkeypatch.setattr(paper, "tradfi_symbols", lambda: [])
+    monkeypatch.setattr(paper.store, "execute", lambda sql, params=(): 1)
+    monkeypatch.setattr(paper, "_record_equity", lambda *args: None)
+    monkeypatch.setattr(
+        paper,
+        "_close_position",
+        lambda account, position, price, reason, now: closes.append(reason) or True,
+    )
+
+    paper._tick_account(account, {"TESTUSDT": 100}, now)
+
+    assert closes == ["max_holding_bars"]
 
 
 def test_close_position_deducts_accrued_funding_from_balance_and_trade(

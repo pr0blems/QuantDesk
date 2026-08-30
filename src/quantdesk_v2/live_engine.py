@@ -52,8 +52,7 @@ from .paper_engine import (
 from .security import CredentialCipher, SecurityError
 from .strategy_evaluator import (
     StrategyEvaluationError,
-    resolve_legacy_strategy_timeframe,
-    strategy_timeframe_seconds,
+    resolve_strategy_timing_policy,
 )
 from .trading_controls import effective_control_blockers
 
@@ -2028,34 +2027,13 @@ def _signal_is_fresh(
 def _execution_timeframe_seconds(account: dict[str, Any]) -> int:
     """Resolve the immutable trigger interval used by holding/freshness rules."""
 
-    snapshot = account.get("strategy_snapshot_json") or {}
-    if snapshot.get("strategy_kind") == "source_strategy":
-        validation = snapshot.get("source_validation")
-        requirements = (
-            validation.get("data_requirements") if isinstance(validation, dict) else None
-        )
-        trigger = (
-            requirements.get("trigger_timeframe")
-            if isinstance(requirements, dict)
-            else None
-        )
-        if not isinstance(trigger, str):
-            raise StrategyEvaluationError("source strategy trigger timeframe is unavailable")
-        return strategy_timeframe_seconds(trigger)
-    if snapshot.get("strategy_kind") == "full_strategy":
-        spec = snapshot.get("spec")
-        timeframes = spec.get("timeframes") if isinstance(spec, dict) else None
-        trigger = timeframes.get("trigger") if isinstance(timeframes, dict) else None
-        if not isinstance(trigger, str):
-            raise StrategyEvaluationError("full strategy trigger timeframe is unavailable")
-        return strategy_timeframe_seconds(trigger)
-    timeframe = resolve_legacy_strategy_timeframe(
-        snapshot,
+    policy = resolve_strategy_timing_policy(
+        account.get("strategy_snapshot_json") or {},
         account.get("config_json")
         if isinstance(account.get("config_json"), dict)
         else None,
     )
-    return strategy_timeframe_seconds(timeframe)
+    return policy.timeframe_seconds
 
 
 def _signal_exit_levels(
@@ -3083,7 +3061,7 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
     config = account["config_json"]
     policy = policy_from_config(config)
     try:
-        execution_timeframe_seconds = _execution_timeframe_seconds(account)
+        _execution_timeframe_seconds(account)
     except (StrategyEvaluationError, TypeError, ValueError):
         _fail_account(account, "strategy_timeframe_invalid")
         return
@@ -3203,16 +3181,30 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                     profit_guards.pop(profit_guard_key, None)
                     profit_guards_changed = True
                 continue
-            max_holding_bars = max(
-                0, min(int(config.get("max_holding_bars", 12)), 1_000)
-            )
             opened_at = _opened_at_seconds(managed[key])
-            if (
-                max_holding_bars
-                and opened_at is not None
-                and time.time() - opened_at
-                >= max_holding_bars * execution_timeframe_seconds
-            ):
+            entry_basis = _json_object(managed[key].get("entry_basis_json"))
+            captured_timing = entry_basis.get("execution_policy")
+            try:
+                timing_policy = resolve_strategy_timing_policy(
+                    account.get("strategy_snapshot_json") or {},
+                    config,
+                    captured=(
+                        captured_timing
+                        if isinstance(captured_timing, dict)
+                        else None
+                    ),
+                )
+                holding_period_expired = (
+                    opened_at is not None
+                    and timing_policy.expired(
+                        opened_at=opened_at,
+                        observed_at=time.time(),
+                    )
+                )
+            except (StrategyEvaluationError, TypeError, ValueError):
+                _fail_account(account, "position_holding_policy_invalid")
+                return
+            if holding_period_expired:
                 positions_changed = (
                     _close_position(account, api_key, api_secret, position, "max_holding_bars")
                     or positions_changed

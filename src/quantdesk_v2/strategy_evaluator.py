@@ -35,6 +35,41 @@ class StrategyCandle:
     volume: float
 
 
+@dataclass(frozen=True, slots=True)
+class StrategyTimingPolicy:
+    """Immutable trigger interval and holding horizon used by every runtime."""
+
+    trigger_timeframe: str
+    timeframe_seconds: int
+    max_holding_bars: int
+
+    @property
+    def max_holding_seconds(self) -> int:
+        if self.max_holding_bars <= 0:
+            return 0
+        return self.max_holding_bars * self.timeframe_seconds
+
+    def expired(self, *, opened_at: int | float, observed_at: int | float) -> bool:
+        if self.max_holding_seconds <= 0:
+            return False
+        try:
+            opened = float(opened_at)
+            observed = float(observed_at)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise StrategyEvaluationError("invalid holding-period timestamp") from exc
+        if not math.isfinite(opened) or not math.isfinite(observed):
+            raise StrategyEvaluationError("invalid holding-period timestamp")
+        return observed - opened >= self.max_holding_seconds
+
+    def snapshot(self) -> dict[str, int | str]:
+        return {
+            "trigger_timeframe": self.trigger_timeframe,
+            "timeframe_seconds": self.timeframe_seconds,
+            "max_holding_bars": self.max_holding_bars,
+            "max_holding_seconds": self.max_holding_seconds,
+        }
+
+
 class StrategyEvaluator:
     """Evaluate one built-in legacy strategy over an ordered candle series."""
 
@@ -179,6 +214,97 @@ def strategy_timeframe_seconds(timeframe: str) -> int:
     return _TIMEFRAME_SECONDS[normalized]
 
 
+def resolve_strategy_trigger_timeframe(
+    snapshot: Mapping[str, Any] | None,
+    config: Mapping[str, Any] | None = None,
+) -> str:
+    """Resolve the immutable trigger timeframe for every strategy kind."""
+
+    selected = snapshot if isinstance(snapshot, Mapping) else {}
+    strategy_kind = str(selected.get("strategy_kind") or "legacy_signal")
+    if strategy_kind == "source_strategy":
+        validation = selected.get("source_validation")
+        requirements = (
+            validation.get("data_requirements")
+            if isinstance(validation, Mapping)
+            else None
+        )
+        candidate = (
+            validation.get("trigger_timeframe")
+            if isinstance(validation, Mapping)
+            else None
+        )
+        if candidate is None and isinstance(requirements, Mapping):
+            candidate = requirements.get("trigger_timeframe")
+        if candidate is None:
+            raise StrategyEvaluationError(
+                "source strategy trigger timeframe is unavailable"
+            )
+        return _validate_timeframe(candidate)
+    if strategy_kind == "full_strategy":
+        spec = selected.get("spec") or selected.get("spec_json")
+        timeframes = spec.get("timeframes") if isinstance(spec, Mapping) else None
+        candidate = timeframes.get("trigger") if isinstance(timeframes, Mapping) else None
+        if candidate is None:
+            raise StrategyEvaluationError(
+                "full strategy trigger timeframe is unavailable"
+            )
+        return _validate_timeframe(candidate)
+    return resolve_legacy_strategy_timeframe(selected, config)
+
+
+def resolve_strategy_timing_policy(
+    snapshot: Mapping[str, Any] | None,
+    config: Mapping[str, Any] | None = None,
+    *,
+    evidence: Mapping[str, Any] | None = None,
+    captured: Mapping[str, Any] | None = None,
+    default_max_holding_bars: int = 12,
+) -> StrategyTimingPolicy:
+    """Resolve the immutable timing policy used for one position."""
+
+    if isinstance(captured, Mapping) and captured:
+        timeframe = _validate_timeframe(captured.get("trigger_timeframe"))
+        max_holding_bars = _validate_max_holding_bars(
+            captured.get("max_holding_bars")
+        )
+        timeframe_seconds = strategy_timeframe_seconds(timeframe)
+        captured_seconds = captured.get("timeframe_seconds")
+        if captured_seconds is not None and captured_seconds != timeframe_seconds:
+            raise StrategyEvaluationError("captured strategy timeframe is inconsistent")
+        return StrategyTimingPolicy(timeframe, timeframe_seconds, max_holding_bars)
+
+    selected = snapshot if isinstance(snapshot, Mapping) else {}
+    timeframe = resolve_strategy_trigger_timeframe(selected, config)
+    candidates: list[Any] = []
+    if isinstance(evidence, Mapping):
+        for key in ("risk_proposal", "risk_decision", "risk_plan"):
+            risk_proposal = evidence.get(key)
+            if isinstance(risk_proposal, Mapping):
+                candidates.append(risk_proposal.get("max_holding_bars", _MISSING))
+    if str(selected.get("strategy_kind") or "") == "full_strategy":
+        spec = selected.get("spec") or selected.get("spec_json")
+        exit_policy = spec.get("exit") if isinstance(spec, Mapping) else None
+        if isinstance(exit_policy, Mapping):
+            candidates.append(exit_policy.get("max_holding_bars", _MISSING))
+    risk_defaults = selected.get("risk_defaults")
+    if isinstance(risk_defaults, Mapping):
+        candidates.append(risk_defaults.get("max_holding_bars", _MISSING))
+    if isinstance(config, Mapping):
+        candidates.append(config.get("max_holding_bars", _MISSING))
+    candidates.append(default_max_holding_bars)
+    max_holding_bars = next(
+        _validate_max_holding_bars(candidate)
+        for candidate in candidates
+        if candidate is not _MISSING and candidate is not None
+    )
+    return StrategyTimingPolicy(
+        timeframe,
+        strategy_timeframe_seconds(timeframe),
+        max_holding_bars,
+    )
+
+
 def simple_moving_average(values: Sequence[float], period: int) -> list[float | None]:
     result: list[float | None] = [None] * len(values)
     rolling = 0.0
@@ -286,6 +412,21 @@ def _validate_timeframe(value: Any) -> str:
     if normalized not in _TIMEFRAME_SECONDS:
         raise StrategyEvaluationError(f"unsupported strategy timeframe: {normalized or '<empty>'}")
     return normalized
+
+
+def _validate_max_holding_bars(value: Any) -> int:
+    if isinstance(value, bool):
+        raise StrategyEvaluationError("max holding bars must be an integer")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise StrategyEvaluationError("max holding bars must be an integer") from exc
+    if not math.isfinite(numeric) or not numeric.is_integer():
+        raise StrategyEvaluationError("max holding bars must be an integer")
+    bars = int(numeric)
+    if bars < 0 or bars > 50_000:
+        raise StrategyEvaluationError("max holding bars is outside the supported range")
+    return bars
 
 
 def cross_signals(

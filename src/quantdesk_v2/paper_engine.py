@@ -21,6 +21,7 @@ from quantdesk_v2.strategy_evaluator import (
     optional_exponential_moving_average,
     relative_strength_index,
     resolve_legacy_strategy_timeframe,
+    resolve_strategy_timing_policy,
     simple_moving_average,
     strategy_timeframe_seconds,
 )
@@ -1358,6 +1359,14 @@ def build_entry_basis_snapshot(
             }
 
     score = signal_evidence.get("score")
+    timing_policy = resolve_strategy_timing_policy(
+        strategy,
+        account.get("config_json")
+        if isinstance(account.get("config_json"), dict)
+        else None,
+        evidence=signal_evidence,
+        default_max_holding_bars=DEFAULT_MAX_HOLDING_BARS,
+    )
     snapshot = {
         "schema_version": ENTRY_BASIS_SCHEMA_VERSION,
         "availability": "captured",
@@ -1390,6 +1399,7 @@ def build_entry_basis_snapshot(
             for item in strategies
         ],
         "combination_mode": "all",
+        "execution_policy": timing_policy.snapshot(),
         "signal": {
             "strategy_signal_id": strategy_signal_id,
             "deployment_id": deployment_id,
@@ -1768,7 +1778,28 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
         # Stored exchange-risk levels must remain effective even when indicator
         # calculation or historical market data is temporarily unavailable.
         _repair_missing_target(account, position, None, config)
-        held_bars = max((now - int(position["opened_ts"])) // (4 * 3600), 0)
+        entry_basis = _json_object(position.get("basis"))
+        captured_timing = entry_basis.get("execution_policy")
+        try:
+            timing_policy = resolve_strategy_timing_policy(
+                (_strategy_snapshots(account) or [{}])[0],
+                account.get("config_json")
+                if isinstance(account.get("config_json"), dict)
+                else None,
+                captured=(
+                    captured_timing if isinstance(captured_timing, dict) else None
+                ),
+                default_max_holding_bars=DEFAULT_MAX_HOLDING_BARS,
+            )
+            holding_period_expired = timing_policy.expired(
+                opened_at=position["opened_ts"],
+                observed_at=now,
+            )
+        except (KeyError, StrategyEvaluationError, TypeError, ValueError):
+            holding_period_expired = False
+            print(
+                f"[paper] holding policy unavailable for position={position.get('id')}"
+            )
         reason = None
         if position.get("liq_price") and (
             (side > 0 and price <= float(position["liq_price"]))
@@ -1806,7 +1837,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 and direction == -side
             ):
                 reason = "strategy_reversal"
-            elif config["max_holding_bars"] and held_bars >= config["max_holding_bars"]:
+            elif holding_period_expired:
                 reason = "max_holding_bars"
         if reason:
             if _close_position(account, position, price, reason, now):
