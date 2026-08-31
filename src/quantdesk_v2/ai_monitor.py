@@ -68,6 +68,9 @@ from .infrastructure.persistence.ai_monitor_opportunity_generation import (
 from .infrastructure.persistence.ai_monitor_opportunity_generation import (
     consumed_news_ids_by_direction as load_consumed_news_ids_by_direction,
 )
+from .infrastructure.persistence.ai_monitor_opportunity_generation import (
+    persist_candidate_opportunity,
+)
 from .market_microstructure import order_book_gate_snapshot
 from .models import (
     AdminSetting,
@@ -10089,57 +10092,35 @@ def _scan_opportunities(
                 "available": bool(frozen_model_call_ids),
             },
         }
-        if existing is None:
-            opportunity = AiMonitorOpportunity(
-                public_id=str(uuid.uuid4()),
-                user_id=run.user_id,
-                analysis_run_id=run.id,
-                symbol=candidate["symbol"],
-                contract_symbol=contract_symbol or candidate["symbol"],
-                direction=candidate["direction"],
-                status="discovered" if signal_confirmed else "candidate",
-                timeframe=timeframe,
-                news_score=Decimal(str(candidate["news_score"])),
-                indicator_score=Decimal(str(indicator_score)),
-                combined_score=Decimal(str(combined_score)),
-                matched_indicator_keys_json=matched_indicator_keys,
-                news_ids_json=news_ids,
-                news_ai_batch_ids_json=frozen_batch_ids,
-                news_ai_model_call_ids_json=frozen_model_call_ids,
-                evidence_json=evidence,
-                dedup_key=dedup_key,
-                discovered_at=now,
-                expires_at=expires_at,
-            )
-            db.add(opportunity)
+        opportunity, created = persist_candidate_opportunity(
+            db,
+            existing=existing,
+            existing_prediction=existing_prediction,
+            existing_status=existing_status,
+            user_id=run.user_id,
+            analysis_run_id=run.id,
+            symbol=str(candidate["symbol"]),
+            contract_symbol=contract_symbol,
+            direction=str(candidate["direction"]),
+            timeframe=timeframe,
+            signal_confirmed=signal_confirmed,
+            news_score=float(candidate["news_score"]),
+            indicator_score=indicator_score,
+            combined_score=combined_score,
+            matched_indicator_keys=matched_indicator_keys,
+            news_ids=news_ids,
+            frozen_batch_ids=frozen_batch_ids,
+            frozen_model_call_ids=frozen_model_call_ids,
+            evidence=evidence,
+            dedup_key=dedup_key,
+            now=now,
+            expires_at=expires_at,
+            has_new_material_news=has_new_material_news,
+            merge_expiration=merged_opportunity_expiration,
+        )
+        if created:
             stored += 1
         else:
-            opportunity = existing
-            opportunity.analysis_run_id = run.id
-            opportunity.contract_symbol = contract_symbol or candidate["symbol"]
-            opportunity.status = "discovered" if signal_confirmed else "candidate"
-            opportunity.news_score = Decimal(str(candidate["news_score"]))
-            opportunity.indicator_score = Decimal(str(indicator_score))
-            opportunity.combined_score = Decimal(str(combined_score))
-            opportunity.matched_indicator_keys_json = matched_indicator_keys
-            opportunity.news_ids_json = news_ids
-            opportunity.evidence_json = evidence
-            # Live scores are recalculated on every opportunity scan, but the
-            # signal lifetime must not slide forward forever just because the
-            # same news remains inside the lookback window.  A still-unconfirmed
-            # candidate may be extended only by genuinely new evidence.  Once
-            # a prediction exists its original lifetime remains immutable.
-            newly_confirmed = bool(signal_confirmed and existing_status != "discovered")
-            if existing_prediction is None and newly_confirmed:
-                opportunity.discovered_at = now
-            opportunity.expires_at = merged_opportunity_expiration(
-                opportunity.expires_at,
-                expires_at,
-                has_prediction=existing_prediction is not None,
-                has_new_material_news=has_new_material_news,
-                newly_confirmed=newly_confirmed,
-            )
-            opportunity.updated_at = now
             merged += 1
         db.flush()
         record_opportunity_gate_decision(

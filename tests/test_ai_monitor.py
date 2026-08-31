@@ -2192,10 +2192,15 @@ def test_configured_indicators_match_the_requested_short_direction() -> None:
 
 def test_opportunity_scan_persists_candidate_direction_and_deduplicates_per_side() -> None:
     source = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    persistence = (
+        ROOT
+        / "src/quantdesk_v2/infrastructure/persistence/ai_monitor_opportunity_generation.py"
+    ).read_text(encoding="utf-8")
 
     assert 'candidate["direction"],' in source
-    assert source.count('direction=candidate["direction"]') == 2
-    assert 'direction="long"' not in source
+    assert 'direction=str(candidate["direction"])' in source
+    assert "direction=direction" in persistence
+    assert 'direction="long"' not in persistence
     assert '"short_candidate_count"' in source
 
 
@@ -4011,7 +4016,10 @@ def test_ai_monitor_pipeline_migration_adds_pending_news_index() -> None:
 
 
 def test_news_candidates_are_visible_before_prediction_confirmation() -> None:
-    monitor = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    persistence = (
+        ROOT
+        / "src/quantdesk_v2/infrastructure/persistence/ai_monitor_opportunity_generation.py"
+    ).read_text(encoding="utf-8")
     api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
     migration = (ROOT / "migrations/versions/0040_ai_monitor_opportunity_candidates.py").read_text(
         encoding="utf-8"
@@ -4023,7 +4031,7 @@ def test_news_candidates_are_visible_before_prediction_confirmation() -> None:
     )
 
     assert "candidate" in str(opportunity_status.sqltext)
-    assert 'status="discovered" if signal_confirmed else "candidate"' in monitor
+    assert 'status="discovered" if signal_confirmed else "candidate"' in persistence
     assert 'AiMonitorOpportunity.status.in_(("candidate", "discovered"))' in api
     assert 'down_revision: str | None = "0039_news_ai_industries"' in migration
     assert "status IN ('candidate', 'discovered', 'expired', 'dismissed')" in migration
