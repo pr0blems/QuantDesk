@@ -110,6 +110,19 @@ def test_market_feature_production_paths_do_not_call_ai_monitor_private_storage(
     assert "repository._query" not in persistence_source
 
 
+def test_ai_monitor_no_longer_defines_market_feature_compatibility_facades() -> None:
+    orchestration_source = (
+        ROOT / "src/quantdesk_v2/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+
+    assert "def realtime_feature_payload(" not in orchestration_source
+    assert "def latest_realtime_feature_snapshots(" not in orchestration_source
+    assert "def _market_flow_input_maps(" not in orchestration_source
+    assert "normalize_realtime_feature_payload(" in orchestration_source
+    assert "load_latest_realtime_feature_snapshots" in orchestration_source
+    assert "load_market_flow_input_maps" in orchestration_source
+
+
 def test_historical_replay_uses_no_private_ai_monitor_symbols() -> None:
     replay_source = (
         ROOT / "src/quantdesk_v2/historical_replay.py"

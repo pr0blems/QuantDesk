@@ -38,7 +38,7 @@
 - [x] 新增 `infrastructure/persistence/ai_monitor_market_features.py`，负责最新特征快照和市场输入 Map 的数据库装配。
 - [x] 将实时市场特征响应标准化迁入 `application/ai_monitor/market_features.py`。
 - [x] 生产 API 不再调用 `ai_monitor._market_flow_input_maps`、`ai_monitor.latest_realtime_feature_snapshots` 或 `ai_monitor.realtime_feature_payload`。
-- [x] 旧函数暂时保留为薄兼容门面，内部不再保存第二套 SQL 或序列化实现。
+- [x] 旧函数曾暂时保留为薄兼容门面，C2-1B 已在全仓库调用方归零后删除。
 - [x] 增加响应形状、最新快照选择、公开仓储边界和架构防回退测试。
 
 ### C4：历史回放解除私有依赖
@@ -59,17 +59,18 @@
 
 ## 3. 待完成工作（按执行顺序）
 
-### C2-1B：删除市场特征兼容门面
+### C2-1B：删除市场特征兼容门面（已完成）
 
 优先级：高；风险：低；数据库迁移：否。
 
-- [ ] 将 `ai_monitor.py` 内剩余的市场特征内部调用切到公开应用函数。
-- [ ] 盘点插件、CLI、测试和运维脚本是否仍引用 3 个旧门面。
-- [ ] 在完整兼容观察窗口后删除：
+- [x] 将 `ai_monitor.py` 内剩余的市场特征内部调用切到公开应用函数。
+- [x] 盘点插件、CLI、测试和运维脚本，确认不再引用 3 个旧门面。
+- [x] 在调用方归零并完成兼容观察后删除：
   - `ai_monitor._market_flow_input_maps`
   - `ai_monitor.latest_realtime_feature_snapshots`
   - `ai_monitor.realtime_feature_payload`
-- [ ] 保留 API 响应快照测试，确保字段、空值和数值类型完全不变。
+- [x] 保留 API 响应快照测试，确保字段、空值和数值类型完全不变。
+- [x] 增加架构门禁，阻止旧门面定义再次进入 `ai_monitor.py`。
 
 完成定义：全仓库不再调用上述旧入口，删除后全量测试与线上 AI Monitor 当前/历史机会切换通过。
 
@@ -207,4 +208,4 @@
 
 ## 7. 推荐下一批
 
-下一批执行 **C2-1B：删除市场特征兼容门面**。C4 已经完成并由架构测试锁定；下一步可以在确认全仓库调用方归零后删除 3 个薄兼容入口。
+下一批执行 **C2-2：机会生成实现下沉**。C2-1B 和 C4 已完成并由架构测试锁定；下一步先迁移候选生成与准入编排的第一条确定性链路，不改机会方向、评分、状态或 API 投影。

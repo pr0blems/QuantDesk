@@ -3872,23 +3872,6 @@ def ingest_market_stream_events(
     return {"accepted": accepted, "duplicates": duplicates}
 
 
-def realtime_feature_payload(
-    snapshot: RealtimeMarketFeatureSnapshot | Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """Compatibility facade for the governed market-feature normalizer."""
-
-    return normalize_realtime_feature_payload(snapshot)
-
-
-def latest_realtime_feature_snapshots(
-    db: Session,
-    symbols: Sequence[str],
-) -> dict[str, RealtimeMarketFeatureSnapshot]:
-    """Compatibility facade for the market-feature persistence adapter."""
-
-    return load_latest_realtime_feature_snapshots(db, symbols)
-
-
 def _utc_event_iso(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -4211,7 +4194,7 @@ def apply_enhanced_market_domains(
 
     result = dict(legacy_market_flow or {})
     legacy_hard_conflict = bool(result.get("hard_conflict"))
-    normalized = realtime_feature_payload(feature)
+    normalized = normalize_realtime_feature_payload(feature)
     domains = {
         "option_flow": _market_domain(normalized.get("option_flow"), direction=direction),
         "gex": _market_domain(normalized.get("gex"), direction=direction),
@@ -4319,7 +4302,7 @@ def signal_market_quality(
         "kline_fresh": kline_fresh,
         "feature_quality": feature_quality_ok,
     }
-    normalized_feature = realtime_feature_payload(enhanced_feature)
+    normalized_feature = normalize_realtime_feature_payload(enhanced_feature)
     quote = dict(normalized_feature.get("quote") or {})
     snapshot_age_ms: float | None = None
     # Prefer the quote's own receive time, then the feature capture time.  The
@@ -4813,7 +4796,7 @@ def freeze_opportunity_market_snapshot(
     )
     if existing is not None:
         return existing
-    normalized = realtime_feature_payload(feature)
+    normalized = normalize_realtime_feature_payload(feature)
     market_flow = dict(evidence.get("market_flow") or {})
     snapshot = OpportunityMarketSnapshot(
         opportunity_id=opportunity.id,
@@ -4918,7 +4901,7 @@ def record_opportunity_gate_decision(
     if existing is not None:
         return existing
 
-    normalized = realtime_feature_payload(feature)
+    normalized = normalize_realtime_feature_payload(feature)
     raw_status = str(gate.get("status") or "").lower()
     if raw_status not in {"passed", "blocked", "degraded", "unavailable"}:
         raw_status = (
@@ -5077,15 +5060,6 @@ def _optional_flow_number(value: Any) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
-
-
-def _market_flow_input_maps(
-    db: Session,
-    repository: MonitorRepository,
-) -> dict[str, dict[str, dict[str, Any]]]:
-    """Compatibility facade retained for callers outside the production path."""
-
-    return load_market_flow_input_maps(db, repository)
 
 
 def market_flow_snapshot(
@@ -6049,7 +6023,7 @@ def _frozen_analytics_evidence(
             "macro_snapshot": dict(
                 getattr(snapshot, "macro_snapshot_json", None) or {}
             ),
-            "feature_snapshot": realtime_feature_payload(feature),
+            "feature_snapshot": normalize_realtime_feature_payload(feature),
             "gate_decision": gate_payload,
         },
     }
