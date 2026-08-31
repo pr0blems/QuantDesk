@@ -89,3 +89,22 @@ def test_ai_monitor_orchestration_uses_all_governed_domain_services() -> None:
         "EventGateService",
     ):
         assert service in source
+
+
+def test_market_feature_production_paths_do_not_call_ai_monitor_private_storage() -> None:
+    api_source = (
+        ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    orchestration_source = (
+        ROOT / "src/quantdesk_v2/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    persistence_source = (
+        ROOT
+        / "src/quantdesk_v2/infrastructure/persistence/ai_monitor_market_features.py"
+    ).read_text(encoding="utf-8")
+
+    assert "ai_monitor._market_flow_input_maps" not in api_source
+    assert "ai_monitor.latest_realtime_feature_snapshots" not in api_source
+    assert "ai_monitor.realtime_feature_payload" not in api_source
+    assert "market_flow_inputs = load_market_flow_input_maps" in orchestration_source
+    assert "repository._query" not in persistence_source

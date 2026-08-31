@@ -400,6 +400,36 @@ class MonitorRepository:
         except SQLAlchemyError as exc:
             raise MonitorUnavailable("contract monitor data query failed") from exc
 
+    def market_flow_input_rows(self) -> dict[str, list[dict[str, Any]]]:
+        """Load the raw market-flow datasets used by AI Monitor projections.
+
+        Each source remains optional during rolling migrations.  Keeping that
+        tolerance here prevents application and API layers from reaching into
+        the repository's private SQL execution method.
+        """
+
+        def optional_rows(sql: str) -> list[dict[str, Any]]:
+            try:
+                return [dict(item) for item in self._query(sql)]
+            except (MonitorUnavailable, KeyError, TypeError, ValueError):
+                return []
+
+        return {
+            "depth": optional_rows("SELECT * FROM market_microstructure"),
+            "positioning": optional_rows(
+                """SELECT p.* FROM market_positioning_snapshots p
+                   JOIN (
+                       SELECT symbol,MAX(snapshot_at_ms) AS latest
+                       FROM market_positioning_snapshots GROUP BY symbol
+                   ) current
+                     ON current.symbol=p.symbol AND current.latest=p.snapshot_at_ms"""
+            ),
+            "ticker": optional_rows(
+                "SELECT symbol,price,pct_24h,quote_volume,ts FROM ticker"
+            ),
+            "underlying": optional_rows("SELECT * FROM underlying_market_quotes"),
+        }
+
     def _validate_symbol(self, symbol: str) -> str:
         normalized = symbol.strip().upper()
         if normalized not in self.symbol_set:

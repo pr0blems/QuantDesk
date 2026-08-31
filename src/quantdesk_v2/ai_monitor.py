@@ -37,6 +37,15 @@ from .application.ai_monitor import (
     OpportunityGenerationService,
     PredictionSettlementService,
 )
+from .application.ai_monitor import (
+    realtime_feature_payload as normalize_realtime_feature_payload,
+)
+from .infrastructure.persistence.ai_monitor_market_features import (
+    latest_realtime_feature_snapshots as load_latest_realtime_feature_snapshots,
+)
+from .infrastructure.persistence.ai_monitor_market_features import (
+    load_market_flow_input_maps,
+)
 from .market_microstructure import order_book_gate_snapshot
 from .models import (
     AdminSetting,
@@ -45,7 +54,6 @@ from .models import (
     AiMonitorPrediction,
     AiMonitorPredictionFact,
     AiMonitorRun,
-    CompanyProfile,
     FinnhubQuoteSnapshot,
     MarketRiskEvent,
     MarketStreamEvent,
@@ -56,7 +64,6 @@ from .models import (
     OpportunityGateDecision,
     OpportunityMarketSnapshot,
     RealtimeMarketFeatureSnapshot,
-    Security,
     utcnow,
 )
 from .monitor import MonitorRepository, MonitorUnavailable
@@ -3867,66 +3874,18 @@ def ingest_market_stream_events(
 def realtime_feature_payload(
     snapshot: RealtimeMarketFeatureSnapshot | Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Normalize persisted market features without inventing absent domains."""
+    """Compatibility facade for the governed market-feature normalizer."""
 
-    if snapshot is None:
-        return {}
-    if isinstance(snapshot, Mapping):
-        return dict(snapshot)
-    quote = dict(snapshot.quote_snapshot_json or {})
-    typed_quote = {
-        "last_price": _finite_number(snapshot.last_price),
-        "bid": _finite_number(snapshot.bid),
-        "ask": _finite_number(snapshot.ask),
-        "spread_bps": _finite_number(snapshot.spread_bps),
-        "quote_age_ms": int(snapshot.quote_age_ms)
-        if snapshot.quote_age_ms is not None
-        else None,
-        "size_imbalance": _finite_number(snapshot.size_imbalance),
-        "market_session": snapshot.market_session,
-    }
-    quote.update({key: value for key, value in typed_quote.items() if value is not None})
-    return {
-        "id": snapshot.id,
-        "symbol": snapshot.symbol,
-        "bucket_at": snapshot.bucket_at.isoformat(),
-        "captured_at": snapshot.captured_at.isoformat(),
-        "quote": quote,
-        "option_flow": dict(snapshot.option_flow_snapshot_json or {}),
-        "gex": dict(snapshot.gex_snapshot_json or {}),
-        "institutional_flow": dict(
-            snapshot.institutional_flow_snapshot_json or {}
-        ),
-        "halt_status": snapshot.halt_status,
-        "data_coverage": _finite_number(snapshot.data_coverage) or 0.0,
-        "stale_fields": list(snapshot.stale_fields_json or []),
-        "quality": dict(snapshot.quality_json or {}),
-        "feature_version": snapshot.feature_version,
-    }
+    return normalize_realtime_feature_payload(snapshot)
 
 
 def latest_realtime_feature_snapshots(
     db: Session,
     symbols: Sequence[str],
 ) -> dict[str, RealtimeMarketFeatureSnapshot]:
-    """Load the newest feature bucket per requested symbol in one bounded query."""
+    """Compatibility facade for the market-feature persistence adapter."""
 
-    normalized = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
-    if not normalized:
-        return {}
-    rows = db.scalars(
-        select(RealtimeMarketFeatureSnapshot)
-        .where(RealtimeMarketFeatureSnapshot.symbol.in_(normalized))
-        .order_by(
-            RealtimeMarketFeatureSnapshot.bucket_at.desc(),
-            RealtimeMarketFeatureSnapshot.id.desc(),
-        )
-        .limit(max(100, len(normalized) * 4))
-    ).all()
-    result: dict[str, RealtimeMarketFeatureSnapshot] = {}
-    for row in rows:
-        result.setdefault(row.symbol.strip().upper(), row)
-    return result
+    return load_latest_realtime_feature_snapshots(db, symbols)
 
 
 def _utc_event_iso(value: datetime | None) -> str | None:
@@ -5123,56 +5082,9 @@ def _market_flow_input_maps(
     db: Session,
     repository: MonitorRepository,
 ) -> dict[str, dict[str, dict[str, Any]]]:
-    """Bulk-load the latest market-flow inputs once for an opportunity scan."""
+    """Compatibility facade retained for callers outside the production path."""
 
-    def rows(sql: str) -> list[dict[str, Any]]:
-        try:
-            return [dict(item) for item in repository._query(sql)]
-        except (MonitorUnavailable, KeyError, TypeError, ValueError):
-            return []
-
-    depth_rows = rows("SELECT * FROM market_microstructure")
-    positioning_rows = rows(
-        """SELECT p.* FROM market_positioning_snapshots p
-           JOIN (
-               SELECT symbol,MAX(snapshot_at_ms) AS latest
-               FROM market_positioning_snapshots GROUP BY symbol
-           ) current
-             ON current.symbol=p.symbol AND current.latest=p.snapshot_at_ms"""
-    )
-    ticker_rows = rows("SELECT symbol,price,pct_24h,quote_volume,ts FROM ticker")
-    underlying_rows = rows("SELECT * FROM underlying_market_quotes")
-    profile_rows = db.execute(
-        select(
-            Security.symbol,
-            CompanyProfile.market_cap,
-            CompanyProfile.shares_outstanding,
-            CompanyProfile.source,
-            CompanyProfile.sector,
-            CompanyProfile.industry,
-        ).outerjoin(CompanyProfile, CompanyProfile.security_id == Security.id)
-    ).all()
-    return {
-        "depth": {str(item.get("symbol") or "").upper(): item for item in depth_rows},
-        "positioning": {
-            str(item.get("symbol") or "").upper(): item for item in positioning_rows
-        },
-        "ticker": {str(item.get("symbol") or "").upper(): item for item in ticker_rows},
-        "underlying": {
-            str(item.get("contract_symbol") or "").upper(): item
-            for item in underlying_rows
-        },
-        "profile": {
-            str(symbol or "").upper(): {
-                "market_cap": market_cap,
-                "shares_outstanding": shares_outstanding,
-                "source": source,
-                "sector": sector,
-                "industry": industry,
-            }
-            for symbol, market_cap, shares_outstanding, source, sector, industry in profile_rows
-        },
-    }
+    return load_market_flow_input_maps(db, repository)
 
 
 def market_flow_snapshot(
@@ -9634,8 +9546,8 @@ def _scan_opportunities(
         version="news_scoring_v1",
     )
     market_feature_service = MarketFeatureService(
-        latest=latest_realtime_feature_snapshots,
-        normalize=realtime_feature_payload,
+        latest=load_latest_realtime_feature_snapshots,
+        normalize=normalize_realtime_feature_payload,
         version=MARKET_FEATURE_VERSION,
     )
     macro_regime_service = MacroRegimeService(
@@ -9903,7 +9815,7 @@ def _scan_opportunities(
     requires_prediction_features = any(
         key.startswith("prediction_") for key in indicator_keys
     )
-    market_flow_inputs = _market_flow_input_maps(db, repository)
+    market_flow_inputs = load_market_flow_input_maps(db, repository)
     realtime_features = market_feature_service.latest(
         db,
         [

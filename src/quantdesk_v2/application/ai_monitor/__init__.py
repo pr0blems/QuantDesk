@@ -3,7 +3,7 @@
 from .contracts import AiMonitorAuthority, AiMonitorStageResult
 from .event_gate import EventGateService
 from .macro_regime import MacroRegimeService
-from .market_features import MarketFeatureService
+from .market_features import MarketFeatureService, realtime_feature_payload
 from .news_scoring import NewsScoringService
 from .opportunity_generation import OpportunityGenerationService
 from .opportunity_projection import (
@@ -27,4 +27,5 @@ __all__ = [
     "OpportunityProjectionService",
     "OpportunityProjectionUnavailable",
     "PredictionSettlementService",
+    "realtime_feature_payload",
 ]

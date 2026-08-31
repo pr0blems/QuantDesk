@@ -27,11 +27,16 @@ from ...ai_model_config import global_ai_model_configured
 from ...application.ai_monitor import (
     OpportunityProjectionError,
     OpportunityProjectionService,
+    realtime_feature_payload,
 )
 from ...binance_client import BinanceAccountClientError
 from ...database import get_db
 from ...dependencies import bearer, get_current_user, require_admin_write
 from ...finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
+from ...infrastructure.persistence.ai_monitor_market_features import (
+    latest_realtime_feature_snapshots,
+    load_market_flow_input_maps,
+)
 from ...infrastructure.persistence.ai_monitor_projection import (
     SqlAlchemyOpportunityProjectionReader,
 )
@@ -3838,7 +3843,7 @@ def opportunities(
             live_tickers = repository.latest_tickers(
                 [item.contract_symbol for item in items]
             )
-            market_flow_inputs = ai_monitor._market_flow_input_maps(db, repository)
+            market_flow_inputs = load_market_flow_input_maps(db, repository)
             market_flow_now = datetime.now(UTC)
             current_market_flows = {
                 item.id: ai_monitor.market_flow_snapshot(
@@ -3856,7 +3861,7 @@ def opportunities(
         quote_service = getattr(request.app.state, "finnhub_us_quote_service", None)
         if isinstance(quote_service, FinnhubUsQuoteService) and quote_service.enabled:
             finnhub_spot_quotes = quote_service.latest_many(item.symbol for item in items)
-        enhanced_market_features = ai_monitor.latest_realtime_feature_snapshots(
+        enhanced_market_features = latest_realtime_feature_snapshots(
             db,
             [item.symbol for item in items],
         )
@@ -3872,7 +3877,7 @@ def opportunities(
                 finnhub_spot_quotes.get(
                     FinnhubUsQuoteService.normalize_symbol(item.symbol)
                 ),
-                ai_monitor.realtime_feature_payload(
+                realtime_feature_payload(
                     enhanced_market_features.get(item.symbol.strip().upper())
                 ),
                 # The frontend requests active and historical rows together so
