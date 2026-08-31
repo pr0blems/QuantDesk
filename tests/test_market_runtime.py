@@ -758,7 +758,6 @@ def test_market_engine_starts_one_ws_and_one_rest_fallback(monkeypatch) -> None:
 
     monkeypatch.setattr(market_engine.threading, "Thread", _Thread)
     monkeypatch.setattr(market_engine, "_restore_public_rest_circuit", lambda: False)
-    monkeypatch.setitem(market_engine.settings, "paper_trading", False)
     market_engine._state["started"] = False
     try:
         market_engine.start()
@@ -771,6 +770,8 @@ def test_market_engine_starts_one_ws_and_one_rest_fallback(monkeypatch) -> None:
     assert names.count("ticker-rest-fallback") == 1
     assert names.count("depth-ws") == 1
     assert names.count("depth-store") == 1
+    assert "paper" not in names
+    assert "paper-runtime" not in names
     assert "price" not in names
     assert "ticker" not in names
 

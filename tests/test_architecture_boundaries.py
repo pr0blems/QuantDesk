@@ -86,6 +86,16 @@ def test_live_runtime_does_not_import_the_paper_runtime() -> None:
     assert "quantdesk_v2.paper_engine" not in imports
 
 
+def test_market_runtime_does_not_import_or_start_the_paper_runtime() -> None:
+    path = PACKAGE_ROOT / "market_engine.py"
+    imports = _imports(path)
+    source = path.read_text(encoding="utf-8")
+
+    assert "paper_engine" not in imports
+    assert "quantdesk_v2.paper_engine" not in imports
+    assert "paper.paper_loop" not in source
+
+
 def test_live_runtime_cannot_bypass_broker_order_writes() -> None:
     path = PACKAGE_ROOT / "live_engine.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

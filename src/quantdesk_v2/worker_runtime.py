@@ -224,7 +224,7 @@ def _start_market(app, settings: Settings) -> Callable[[], None]:
         bool(_finnhub_runtime_config(engine).get("enabled", True))
     )
     app.state.finnhub_us_quote_service.start()
-    market_engine.start(include_paper=False)
+    market_engine.start()
     battle.start()
     underlying_quotes.start()
 
