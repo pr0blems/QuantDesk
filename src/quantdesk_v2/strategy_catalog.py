@@ -172,9 +172,9 @@ def _template(
     risk_defaults: dict[str, int | float] | None = None,
     parameter_schema: list[dict[str, Any]] | None = None,
     version: int = 1,
-    template_kind: str = "legacy_signal",
+    template_kind: str = "builtin_strategy",
     spec: dict[str, Any] | None = None,
-    implementation_version: str = "legacy_v1",
+    implementation_version: str = "builtin_v1",
 ) -> dict[str, Any]:
     return {
         "template_key": template_key,
@@ -591,7 +591,9 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
                 "version": 1,
                 "engine_key": template.engine_key,
                 "strategy_kind": (
-                    "full_strategy" if template.template_kind == "strategy" else "legacy_signal"
+                    "full_strategy"
+                    if template.template_kind == "strategy"
+                    else "builtin_strategy"
                 ),
                 "lifecycle_status": "validated",
                 "spec_schema_version": template.spec_schema_version,
@@ -643,7 +645,7 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
             "validation_json": (
                 {"valid": True, "engine": "strategy_runtime_v1"}
                 if strategy.strategy_kind == "full_strategy"
-                else {"valid": True, "legacy": True}
+                else {"valid": True, "builtin": True}
             ),
             "lifecycle_status": "validated",
             "published_at": now,

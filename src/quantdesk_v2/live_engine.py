@@ -546,7 +546,7 @@ def _execution_signal(
     config = config if isinstance(config, dict) else {}
     if str(config.get("signal_source") or "strategy") == "ai_monitor":
         if str(config.get("execution_scope") or "") != "ai_monitor":
-            # Pre-isolation accounts may still carry the legacy AI source flag.
+            # Pre-isolation accounts may still carry the earlier AI source flag.
             # Fail closed instead of resuming either AI or strategy entries.
             return 0, None, [], None, {}
         return _ai_monitor_signal(account, symbol, price=price)
@@ -565,7 +565,7 @@ def _strategy_signal(
             selected_symbol, timeframe, limit
         ),
         record_decision=_record_live_strategy_decision,
-    ).legacy_tuple()
+    ).execution_tuple()
 
 
 def _record_live_strategy_decision(
@@ -1863,7 +1863,7 @@ def _position_sizing_capital(
 ) -> _PositionSizingCapital:
     """Resolve the configured sizing base while respecting real collateral.
 
-    Missing configuration preserves the legacy account-equity behavior.  A fixed
+    Missing configuration preserves the account-equity behavior.  A fixed
     copy amount can only reduce the sizing base: it is capped by the account's
     non-negative wallet/equity collateral before any risk percentage is applied.
     """
@@ -2213,7 +2213,7 @@ def _signal_is_fresh(
             and time.time() <= valid_until
         )
     snapshot = account.get("strategy_snapshot_json") or {}
-    if snapshot.get("strategy_kind") == "legacy_signal":
+    if snapshot.get("strategy_kind") == "builtin_strategy":
         try:
             timeframe_seconds = _execution_timeframe_seconds(account)
         except (StrategyEvaluationError, TypeError, ValueError):
@@ -2289,7 +2289,7 @@ def _signal_exit_levels(
     config: dict[str, Any],
     evidence: dict[str, Any] | None,
 ) -> tuple[float | None, float | None]:
-    """Use a full strategy's fixed risk proposal, otherwise the legacy ATR rule."""
+    """Use a full strategy's fixed risk proposal, otherwise the built-in ATR rule."""
 
     proposal = (evidence or {}).get("risk_proposal")
     if not isinstance(proposal, dict):

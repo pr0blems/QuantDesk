@@ -4161,9 +4161,8 @@ def test_opportunity_fundamentals_endpoint_reads_existing_research_tables() -> N
 def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     entrypoint = (ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
-    legacy_index = (ROOT / "src/quantdesk_v2/static/index.html").read_text(encoding="utf-8")
-    legacy_app = (ROOT / "src/quantdesk_v2/static/app.js").read_text(encoding="utf-8")
-    legacy_styles = (ROOT / "src/quantdesk_v2/static/style.css").read_text(encoding="utf-8")
+    react_index = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    app_styles = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
     component = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
     stylesheet = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(encoding="utf-8")
 
@@ -4173,30 +4172,18 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert '"/assets/monitor.js?v=20260831-react1"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
-    assert legacy_index.index('data-panel-target="monitor"') < legacy_index.index(
-        'data-panel-target="ai-monitor"'
-    )
-    assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
-    assert 'data-panel="ai-monitor"' in legacy_index
-    assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260831-react1"' in legacy_index
     assert 'href="/assets/ai-monitor.css?v=20260828-event-samples1"' in component
-    assert '"ai-monitor": "/ai-monitor"' in legacy_app
-    assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
-    assert 'selected !== "ai-monitor" && typeof aiMonitor.pause === "function"' in legacy_app
-    assert 'classList.toggle("ai-monitor-mode", selected === "ai-monitor")' in legacy_app
-    assert ".workspace-content.ai-monitor-mode" in legacy_styles
+    assert ".workspace-content.ai-monitor-mode" in app_styles
+    assert "/assets/controller-runtime.js?v=20260831-react1" in react_index
+    assert "/assets/strategies.js?v=20260831-react1" in react_index
     for asset in (
-        "/assets/style.css?v=20260810-font1_6x-1",
-        "/assets/strategies.css?v=20260825-strategyi18n1",
-        "/assets/terminal.css?v=20260810-font1_6x-1",
-        "/assets/controller-runtime.js?v=20260831-react1",
-        "/assets/paper.js?v=20260831-react1",
-        "/assets/live.js?v=20260831-react1",
-        "/assets/backtest.js?v=20260831-react1",
-        "/assets/app.js?v=20260826-market-ws1",
+        '"/assets/ai-monitor.js?v=20260831-react1"',
+        '"/assets/monitor.js?v=20260831-react1"',
+        '"/assets/paper.js?v=20260831-react1"',
+        '"/assets/live.js?v=20260831-react1"',
+        '"/assets/backtest.js?v=20260831-react1"',
     ):
-        assert asset in legacy_index
+        assert asset in entrypoint
     assert 'view: "opportunities"' in component
     assert 'class="ai-nav-root active"' in component
     assert 'class="ai-subnav-group"' in component

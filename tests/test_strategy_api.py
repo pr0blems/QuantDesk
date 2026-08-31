@@ -649,7 +649,7 @@ def test_full_strategy_code_can_be_validated_and_published_as_a_revision(
             assert revision.spec_hash == saved["spec_hash"]
 
 
-def test_strategy_code_rejects_unknown_programs_legacy_engines_and_stale_versions(
+def test_strategy_code_rejects_unknown_programs_builtin_engines_and_stale_versions(
     mysql_test_engine: Engine,
 ) -> None:
     client, _ = build_test_client(mysql_test_engine)
@@ -657,7 +657,9 @@ def test_strategy_code_rejects_unknown_programs_legacy_engines_and_stale_version
         headers = register_and_login(client, "strategy-code-guard")
         items = client.get("/api/v2/strategies", headers=headers).json()["items"]
         full = next(item for item in items if item["strategy_kind"] == "full_strategy")
-        legacy = next(item for item in items if item["strategy_kind"] == "legacy_signal")
+        builtin = next(
+            item for item in items if item["strategy_kind"] == "builtin_strategy"
+        )
 
         unsafe = copy.deepcopy(full["spec"])
         unsafe["python"] = "import os"
@@ -669,7 +671,7 @@ def test_strategy_code_rejects_unknown_programs_legacy_engines_and_stale_version
         assert invalid.status_code == 422
 
         unsupported = client.post(
-            f"/api/v2/strategies/{legacy['id']}/code/validate",
+            f"/api/v2/strategies/{builtin['id']}/code/validate",
             headers=headers,
             json={"spec": full["spec"]},
         )

@@ -507,7 +507,7 @@ def _record_revision(
             else (
                 {"valid": True, "engine": "strategy_runtime_v1"}
                 if strategy.strategy_kind == "full_strategy"
-                else {"valid": True, "legacy": True}
+                else {"valid": True, "builtin": True}
             )
         ),
         lifecycle_status=strategy.lifecycle_status,
@@ -2080,7 +2080,9 @@ def create_strategy(
         parameter_schema = copy.deepcopy(template.parameter_schema_json)
         engine_key = template.engine_key
         strategy_kind = (
-            "full_strategy" if template.template_kind == "strategy" else "legacy_signal"
+            "full_strategy"
+            if template.template_kind == "strategy"
+            else "builtin_strategy"
         )
     strategy = UserStrategy(
         public_id=str(uuid.uuid4()),

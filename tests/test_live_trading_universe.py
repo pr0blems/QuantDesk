@@ -63,7 +63,7 @@ def test_live_strategy_adjustment_supports_up_to_twenty_positions() -> None:
         LiveAccountStrategyUpdate.model_validate({**payload, "max_positions": 21})
 
 
-def test_legacy_strategy_update_preserves_existing_new_risk_controls() -> None:
+def test_strategy_update_preserves_existing_new_risk_controls() -> None:
     update = LiveAccountStrategyUpdate.model_validate(
         {
             "strategy_id": "00000000-0000-0000-0000-000000000001",

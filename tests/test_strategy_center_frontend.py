@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
+def test_strategy_center_exposes_complete_strategy_workflow() -> None:
     script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
 
     for visible_contract in (
@@ -155,8 +155,8 @@ def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
     )[1].split('}', 1)[0]
 
 
-def test_legacy_shell_busts_the_current_strategy_asset_cache() -> None:
-    index = (ROOT / "src/quantdesk_v2/static/index.html").read_text(encoding="utf-8")
+def test_react_shell_loads_the_current_strategy_controller() -> None:
+    index = (ROOT / "web/index.html").read_text(encoding="utf-8")
 
     assert "/assets/controller-runtime.js?v=20260831-react1" in index
     assert "/assets/strategies.js?v=20260831-react1" in index

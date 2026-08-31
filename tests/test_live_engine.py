@@ -230,12 +230,12 @@ def test_fixed_copy_total_amount_is_the_live_sizing_base(
     assert captured["available_balance"] == Decimal("40.0")
 
 
-def test_ai_monitor_risk_proposal_tightens_legacy_live_policy(
+def test_ai_monitor_risk_proposal_tightens_builtin_live_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict = {}
     account = _account()
-    account["strategy_snapshot_json"] = {"strategy_kind": "legacy_signal"}
+    account["strategy_snapshot_json"] = {"strategy_kind": "builtin_strategy"}
     monkeypatch.setattr(live_engine, "_trading_client", _TradingClient())
     monkeypatch.setattr(
         live_engine,
@@ -713,7 +713,7 @@ def test_signal_freshness_requires_closed_bar_and_respects_exact_maximum_age(
 ) -> None:
     opened = 1_700_000_000
     account = {
-        "strategy_snapshot_json": {"strategy_kind": "legacy_signal"},
+        "strategy_snapshot_json": {"strategy_kind": "builtin_strategy"},
     }
     policy = live_engine.policy_from_config({"max_signal_age_seconds": 18_000})
 
@@ -725,13 +725,13 @@ def test_signal_freshness_requires_closed_bar_and_respects_exact_maximum_age(
     assert live_engine._signal_is_fresh(account, opened, policy) is False
 
 
-def test_live_signal_freshness_uses_frozen_legacy_timeframe(
+def test_live_signal_freshness_uses_frozen_builtin_timeframe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     opened = 1_700_000_000
     account = {
         "strategy_snapshot_json": {
-            "strategy_kind": "legacy_signal",
+            "strategy_kind": "builtin_strategy",
             "timeframe": "1h",
         },
         "config_json": {},

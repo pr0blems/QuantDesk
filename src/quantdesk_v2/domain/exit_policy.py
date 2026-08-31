@@ -366,7 +366,7 @@ def resolve_exit_level_plan(
             return None
         # A very large ATR can make a short target non-positive.  Preserve the
         # ATR stop when valid, but use the configured percentage for any invalid
-        # leg exactly as the legacy engines did.
+        # leg exactly as the original engines did.
         stop_pct = _finite_positive(stop_loss_pct)
         reward_pct = _finite_positive(take_profit_pct)
         if stop <= 0 or not math.isfinite(stop) or (entry - stop) * direction <= 0:

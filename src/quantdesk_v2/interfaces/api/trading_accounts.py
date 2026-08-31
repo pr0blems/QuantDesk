@@ -46,7 +46,7 @@ from ...schemas import (
 from ...security import CredentialCipher, SecurityError
 from ...strategy_artifacts import add_run_manifest
 from ...strategy_catalog import get_user_strategy
-from ...strategy_evaluator import StrategyEvaluationError, resolve_legacy_strategy_timeframe
+from ...strategy_evaluator import StrategyEvaluationError, resolve_builtin_strategy_timeframe
 from ...strategy_lifecycle import (
     LIVE_ELIGIBLE_STATUSES,
     PAPER_ELIGIBLE_STATUSES,
@@ -142,7 +142,7 @@ def _execution_strategy_snapshot(strategy: UserStrategy) -> dict[str, Any]:
     }
     if strategy.strategy_kind not in {"full_strategy", "source_strategy"}:
         try:
-            snapshot["timeframe"] = resolve_legacy_strategy_timeframe(
+            snapshot["timeframe"] = resolve_builtin_strategy_timeframe(
                 strategy.parameters_json,
                 strategy.risk_defaults_json,
             )
@@ -418,9 +418,7 @@ def create_paper_account(
         "stop_loss_pct": risk.get("stop_loss_pct", 3),
         "take_profit_pct": risk.get("take_profit_pct", 5),
         "max_holding_bars": risk.get("max_holding_bars", 12),
-        # Every new paper deployment uses the immutable strategy-event path.
-        # ``legacy_score_v1`` remains readable only for historical records and
-        # is never selected by a production mutation endpoint after 0076.
+        # Every paper deployment uses the immutable strategy-event path.
         "signal_mode": "strategy_event_v2",
         "strategy_combination_mode": "all",
     }
@@ -1423,5 +1421,4 @@ def live_trading_dashboard(
         "open_orders": [],
         "order_intents": intent_items,
     }
-
 

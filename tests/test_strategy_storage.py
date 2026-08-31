@@ -94,11 +94,18 @@ def test_strategy_models_are_commented_json_backed_and_tenant_scoped() -> None:
     assert UserStrategy.revisions.property.passive_deletes
 
 
-def test_system_catalog_has_full_strategy_and_all_legacy_defaults(session: Session) -> None:
+def test_system_catalog_has_full_strategy_and_all_builtin_defaults(session: Session) -> None:
     templates = ensure_system_templates(session)
 
     assert len(SYSTEM_STRATEGY_DEFINITIONS) == 20
     assert sum(item["template_kind"] == "strategy" for item in SYSTEM_STRATEGY_DEFINITIONS) == 1
+    assert (
+        sum(
+            item["template_kind"] == "builtin_strategy"
+            for item in SYSTEM_STRATEGY_DEFINITIONS
+        )
+        == 19
+    )
     assert [template.name for template in templates] == EXPECTED_NAMES
     assert {template.engine_key for template in templates} == {
         "multi_factor",

@@ -28,9 +28,9 @@ def _strategy(
     )
 
 
-def test_legacy_execution_snapshot_freezes_configured_timeframe() -> None:
+def test_builtin_execution_snapshot_freezes_configured_timeframe() -> None:
     strategy = _strategy(
-        kind="legacy_signal",
+        kind="builtin_strategy",
         risk_defaults={"timeframe": "1h"},
     )
 
@@ -39,8 +39,8 @@ def test_legacy_execution_snapshot_freezes_configured_timeframe() -> None:
     assert snapshot["timeframe"] == "1h"
 
 
-def test_legacy_execution_snapshot_defaults_to_historical_four_hours() -> None:
-    snapshot = api._execution_strategy_snapshot(_strategy(kind="legacy_signal"))
+def test_builtin_execution_snapshot_defaults_to_four_hours() -> None:
+    snapshot = api._execution_strategy_snapshot(_strategy(kind="builtin_strategy"))
 
     assert snapshot["timeframe"] == "4h"
 
@@ -52,9 +52,9 @@ def test_full_strategy_snapshot_uses_spec_timeframes_without_duplicate_field() -
     assert snapshot["spec"]["timeframes"]["trigger"] == "15m"
 
 
-def test_legacy_execution_snapshot_rejects_invalid_explicit_timeframe() -> None:
+def test_builtin_execution_snapshot_rejects_invalid_explicit_timeframe() -> None:
     strategy = _strategy(
-        kind="legacy_signal",
+        kind="builtin_strategy",
         risk_defaults={"timeframe": "5m"},
     )
 

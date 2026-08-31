@@ -15,7 +15,7 @@ from typing import Any
 
 from quantdesk_v2.strategy_evaluator import (
     StrategyEvaluationError,
-    resolve_legacy_strategy_timeframe,
+    resolve_builtin_strategy_timeframe,
     resolve_strategy_timing_policy,
     strategy_timeframe_seconds,
 )
@@ -627,7 +627,7 @@ def _current_open_risk(
             if repaired_stop is not None:
                 stop = Decimal(str(repaired_stop))
         if stop <= 0 or (entry - stop) * side <= 0:
-            # A legacy position without a usable stop must reserve at least its
+            # A pre-policy position without a usable stop must reserve at least its
             # full posted margin instead of disappearing from portfolio risk.
             margin = max(Decimal(str(position.get("margin") or 0)), Decimal(0))
             distance = margin / quantity if margin > 0 else entry
@@ -698,7 +698,7 @@ def _snapshot_signal_is_fresh(
                 return False
             valid_until = _epoch_seconds(evidence.get("valid_until"))
             return valid_until is not None and now <= valid_until
-        timeframe = resolve_legacy_strategy_timeframe(
+        timeframe = resolve_builtin_strategy_timeframe(
             snapshot,
             config,
         )
@@ -928,7 +928,7 @@ def _strategy_signal(
         full_evaluator=evaluate_strategy,
         source_validator=validate_source,
         source_evaluator=evaluate_source,
-    ).legacy_tuple()
+    ).execution_tuple()
 
 
 def _paper_strategy_signal(
@@ -1106,7 +1106,7 @@ def _signal_exit_levels(
     config: dict[str, float | int],
     signal_evidence: dict[str, Any] | None,
 ) -> tuple[float | None, float | None]:
-    """Use the full strategy's immutable distances, else the legacy ATR rule."""
+    """Use the full strategy's immutable distances, else the built-in ATR rule."""
 
     proposal = (signal_evidence or {}).get("risk_proposal")
     plan = DEFAULT_EXIT_POLICY.resolve_levels(

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -379,7 +379,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             react_index = runtime_settings.react_static_dir / "index.html"
             if react_index.is_file():
                 return FileResponse(react_index)
-            return FileResponse(runtime_settings.static_dir / "index.html")
+            raise HTTPException(
+                status_code=503,
+                detail="frontend build is unavailable",
+            )
 
         def admin_index() -> RedirectResponse:
             target = "/next/admin/#overview"
@@ -440,8 +443,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     if runtime_settings.react_static_dir.is_dir():
         # The same immutable React build serves both the canonical routes and
-        # /next rollback/canary assets. If the build is absent, index() falls
-        # back to the preserved static shell without affecting API routes.
+        # /next assets. A missing build fails closed instead of serving the
+        # retired static application shell.
         app.mount(
             "/next",
             StaticFiles(directory=runtime_settings.react_static_dir, html=True),

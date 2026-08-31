@@ -37,7 +37,7 @@ def _account(*, enabled: bool = True) -> dict:
             "leverage": 10,
             "risk_max_leverage": 10,
         },
-        "strategy_snapshot_json": {"strategy_kind": "legacy_signal"},
+        "strategy_snapshot_json": {"strategy_kind": "builtin_strategy"},
     }
 
 
@@ -757,11 +757,11 @@ def test_ai_monitor_live_signal_expires_without_falling_back_to_strategy(
     assert live_engine._execution_signal(_account(), "AAPLUSDT")[0] == 0
 
 
-def test_legacy_strategy_account_cannot_consume_ai_monitor_signals(
+def test_ordinary_strategy_account_cannot_consume_ai_monitor_signals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    legacy = _account()
-    legacy["config_json"].pop("execution_scope")
+    ordinary = _account()
+    ordinary["config_json"].pop("execution_scope")
     monkeypatch.setattr(
         live_engine,
         "_ai_monitor_signal",
@@ -773,11 +773,11 @@ def test_legacy_strategy_account_cannot_consume_ai_monitor_signals(
         live_engine,
         "_strategy_signal",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("legacy AI source must fail closed, not resume strategy")
+            AssertionError("AI source must fail closed, not resume an ordinary strategy")
         ),
     )
 
-    assert live_engine._execution_signal(legacy, "AAPLUSDT") == (0, None, [], None, {})
+    assert live_engine._execution_signal(ordinary, "AAPLUSDT") == (0, None, [], None, {})
 
 
 def test_independent_ai_account_runs_when_ordinary_live_server_is_off(

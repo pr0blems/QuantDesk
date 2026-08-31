@@ -9,7 +9,7 @@ from quantdesk_v2.strategy_evaluator import (
     StrategyEvaluationError,
     StrategyTimingPolicy,
     TimeframePolicy,
-    resolve_legacy_strategy_timeframe,
+    resolve_builtin_strategy_timeframe,
     resolve_strategy_timing_policy,
     resolve_strategy_trigger_timeframe,
     strategy_timeframe_seconds,
@@ -30,10 +30,10 @@ def _candles(closes: list[float]) -> list[StrategyCandle]:
     ]
 
 
-def test_public_evaluator_preserves_legacy_ma_cross_signals() -> None:
+def test_public_evaluator_preserves_builtin_ma_cross_signals() -> None:
     candles = _candles([10, 10, 10, 12, 8, 7])
 
-    signals = DEFAULT_STRATEGY_EVALUATOR.evaluate_legacy(
+    signals = DEFAULT_STRATEGY_EVALUATOR.evaluate_builtin(
         "ma_cross", candles, {"fast_period": 2, "slow_period": 3}
     )
 
@@ -44,7 +44,7 @@ def test_public_evaluator_preserves_legacy_ma_cross_signals() -> None:
     ) == signals
 
 
-def test_legacy_evaluator_emits_mode_neutral_decision_envelopes() -> None:
+def test_builtin_evaluator_emits_mode_neutral_decision_envelopes() -> None:
     candles = _candles([10, 10, 10, 12, 8, 7])
 
     envelopes = DEFAULT_STRATEGY_EVALUATOR.evaluate_envelopes(
@@ -74,22 +74,22 @@ def test_legacy_evaluator_emits_mode_neutral_decision_envelopes() -> None:
         ({}, {"timeframe": "15m"}, "15m"),
     ],
 )
-def test_legacy_timeframe_resolution_is_explicit_and_backward_compatible(
+def test_builtin_timeframe_resolution_is_explicit(
     snapshot: dict, config: dict, expected: str
 ) -> None:
-    assert resolve_legacy_strategy_timeframe(snapshot, config) == expected
+    assert resolve_builtin_strategy_timeframe(snapshot, config) == expected
     assert strategy_timeframe_seconds(expected) in {900, 3_600, 14_400}
 
 
 @pytest.mark.parametrize("invalid", ["5m", "", None, 60])
-def test_explicit_invalid_legacy_timeframe_fails_closed(invalid: object) -> None:
+def test_explicit_invalid_builtin_timeframe_fails_closed(invalid: object) -> None:
     with pytest.raises(StrategyEvaluationError, match="timeframe"):
-        resolve_legacy_strategy_timeframe({"timeframe": invalid})
+        resolve_builtin_strategy_timeframe({"timeframe": invalid})
 
 
-def test_unknown_legacy_engine_is_rejected() -> None:
-    with pytest.raises(StrategyEvaluationError, match="unsupported legacy strategy"):
-        DEFAULT_STRATEGY_EVALUATOR.evaluate_legacy("unknown", _candles([1, 2, 3]), {})
+def test_unknown_builtin_engine_is_rejected() -> None:
+    with pytest.raises(StrategyEvaluationError, match="unsupported built-in strategy"):
+        DEFAULT_STRATEGY_EVALUATOR.evaluate_builtin("unknown", _candles([1, 2, 3]), {})
 
 
 @pytest.mark.parametrize(
@@ -155,7 +155,7 @@ def test_timing_policy_prefers_immutable_strategy_and_entry_values() -> None:
 
 def test_captured_timing_policy_is_not_changed_by_account_edits() -> None:
     policy = resolve_strategy_timing_policy(
-        {"strategy_kind": "legacy_signal", "timeframe": "4h"},
+        {"strategy_kind": "builtin_strategy", "timeframe": "4h"},
         {"max_holding_bars": 99},
         captured={
             "trigger_timeframe": "15m",
@@ -170,7 +170,7 @@ def test_captured_timing_policy_is_not_changed_by_account_edits() -> None:
 
 
 def test_timing_policy_matches_public_max_holding_range() -> None:
-    snapshot = {"strategy_kind": "legacy_signal", "timeframe": "1h"}
+    snapshot = {"strategy_kind": "builtin_strategy", "timeframe": "1h"}
 
     policy = resolve_strategy_timing_policy(
         snapshot,

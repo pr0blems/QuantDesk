@@ -39,13 +39,32 @@ def _client() -> TestClient:
     return TestClient(create_app(settings))
 
 
+def _install_react_build(monkeypatch, tmp_path) -> None:
+    build_dir = tmp_path / "react_static"
+    build_dir.mkdir(parents=True)
+    (build_dir / "index.html").write_text(
+        '<!doctype html><html lang="zh-CN"><body><div id="root"></div></body></html>',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        Settings,
+        "react_static_dir",
+        property(lambda _: build_dir),
+    )
+
+
 def _assert_security_headers(response) -> None:
     for name, expected in SECURITY_HEADERS.items():
         assert response.headers[name] == expected
 
 
 @pytest.mark.parametrize("path", FRONTEND_ROUTES)
-def test_explicit_frontend_route_serves_the_same_index(path: str) -> None:
+def test_explicit_frontend_route_serves_the_same_index(
+    path: str,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _install_react_build(monkeypatch, tmp_path)
     client = _client()
     with client:
         index = client.get("/")
@@ -58,7 +77,11 @@ def test_explicit_frontend_route_serves_the_same_index(path: str) -> None:
     _assert_security_headers(page)
 
 
-def test_legacy_credentials_route_redirects_to_settings_without_shadowing_api() -> None:
+def test_legacy_credentials_route_redirects_to_settings_without_shadowing_api(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _install_react_build(monkeypatch, tmp_path)
     client = _client()
     with client:
         legacy_page = client.get("/credentials", follow_redirects=False)
@@ -81,17 +104,15 @@ def test_legacy_credentials_route_redirects_to_settings_without_shadowing_api() 
 def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     client = _client()
     with client:
-        asset = client.get("/assets/app.js")
+        asset = client.get("/assets/controller-runtime.js")
+        retired_asset = client.get("/assets/app.js")
         docs = client.get("/api/docs")
         api_missing = client.get("/api/v2/route-that-does-not-exist")
 
     assert asset.status_code == 200
     assert "javascript" in asset.headers["content-type"]
-    assert 'const TAB_USER_ID_KEY = "quantdesk.tab-user-id"' in asset.text
-    assert 'headers.set("X-QuantDesk-User-ID", authenticatedUserId)' in asset.text
-    assert "String(actualUser.id) !== authenticatedUserId" in asset.text
-    assert "if (refreshAccessPromise) return refreshAccessPromise" in asset.text
-    assert "rejectChangedIdentity(actualUser)" in asset.text
+    assert "customElements.define" in asset.text
+    assert retired_asset.status_code == 404
     live_asset = client.get("/assets/live.js")
     assert live_asset.status_code == 200
     assert "REAL FUNDS" in live_asset.text
@@ -116,7 +137,9 @@ def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
     assert 'max="20" step="1" value="20"' in paper_asset.text
     assert "syncCountKnown && Number(syncedTradfiSymbols) === 0" in paper_asset.text
     assert "Number(data.account?.synced_tradfi_symbols || 0) === 0" not in paper_asset.text
-    assert 'href="/live" data-panel-target="live"' in client.get("/").text
+    missing_build = client.get("/")
+    assert missing_build.status_code == 503
+    assert missing_build.json() == {"detail": "frontend build is unavailable"}
     assert docs.status_code == 200
     assert api_missing.status_code == 404
     assert api_missing.json() == {"detail": "Not Found"}

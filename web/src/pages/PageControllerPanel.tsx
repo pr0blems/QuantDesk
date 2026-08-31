@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import type { PageController, PageControllerName } from "../legacy-elements";
+import type { PageController, PageControllerName } from "../controller-elements";
 
 const registrationEvent = "quantdesk:page-controller-registered";
 
@@ -63,7 +63,7 @@ export function PageControllerPanel({ active, name }: { active: boolean; name: P
   }, [active, state]);
 
   return <>
-    {active && state !== "ready" ? <div className={`legacy-panel-state ${state}`} role="status">
+    {active && state !== "ready" ? <div className={`controller-panel-state ${state}`} role="status">
       <span aria-hidden="true">{state === "error" ? "!" : "·"}</span>
       <div><strong>{state === "error" ? "功能组件加载失败" : "正在加载功能组件"}</strong><small>{state === "error" ? "请刷新页面；若仍失败，请检查后端静态资源服务。" : "正在连接原版界面与数据服务…"}</small></div>
     </div> : null}

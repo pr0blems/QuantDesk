@@ -260,7 +260,7 @@ def test_full_strategy_signal_reads_declared_timeframes(
     assert recorded == [("TESTUSDT", "LONG_ENTRY")]
 
 
-def test_legacy_signal_reads_its_frozen_timeframe(
+def test_builtin_signal_reads_its_frozen_timeframe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     account = _account()
@@ -383,24 +383,6 @@ def test_combined_strategy_freshness_requires_every_component() -> None:
 
     evidence["strategy_signals"][1]["signal_time"] = now - 8 * 60 * 60
     assert not paper._signal_is_fresh(account, recent_bar, evidence, now, policy)
-
-
-def test_legacy_paper_config_is_forced_through_strategy_event_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    account = _account()
-    account["config_json"]["signal_mode"] = "legacy_score_v1"
-    expected = (1, 2.0, ["统一策略"], 1_700_000_000, {"source": "strategy_event_v2"})
-    monkeypatch.setattr(
-        paper,
-        "_strategy_signal",
-        lambda *_args, **_kwargs: expected,
-    )
-
-    result = paper._paper_strategy_signal(account, "TESTUSDT", 125)
-
-    assert paper._paper_signal_mode(account) == paper.STRATEGY_EVENT_SIGNAL_MODE
-    assert result == expected
 
 
 def test_paper_ticker_freshness_tolerates_database_clock_drift() -> None:
@@ -1058,14 +1040,14 @@ def test_paper_leverage_is_hard_capped_at_twenty() -> None:
     assert paper._config(account)["leverage"] == 20
 
 
-def test_paper_visible_leverage_is_the_policy_ceiling_for_legacy_accounts() -> None:
+def test_paper_visible_leverage_is_the_policy_ceiling_for_builtin_accounts() -> None:
     account = _account()
     account["config_json"]["risk_max_leverage"] = 10
 
     assert paper._paper_risk_policy(account).max_leverage == 20
 
 
-def test_legacy_signal_requires_a_closed_recent_four_hour_bar() -> None:
+def test_builtin_signal_requires_a_closed_recent_four_hour_bar() -> None:
     account = _account()
     policy = paper._paper_risk_policy(account)
     bar_open = 1_700_000_000
@@ -1081,7 +1063,7 @@ def test_legacy_signal_requires_a_closed_recent_four_hour_bar() -> None:
     )
 
 
-def test_legacy_signal_freshness_uses_its_frozen_timeframe() -> None:
+def test_builtin_signal_freshness_uses_its_frozen_timeframe() -> None:
     account = _account()
     account["strategy_snapshot_json"]["timeframe"] = "1h"
     policy = paper._paper_risk_policy(account)

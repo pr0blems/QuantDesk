@@ -229,7 +229,7 @@ def _evaluate_deployment(
             config,
             load_klines=market_store.get_klines,
         )
-        direction, atr, basis, signal_time, evidence = evaluated.legacy_tuple()
+        direction, atr, basis, signal_time, evidence = evaluated.execution_tuple()
         if signal_time is None or int(last_by_symbol.get(symbol) or 0) >= int(signal_time):
             continue
         envelope = evaluated.envelope

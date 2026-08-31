@@ -24,7 +24,7 @@ from ..strategy_evaluator import (
     exponential_moving_average,
     optional_exponential_moving_average,
     relative_strength_index,
-    resolve_legacy_strategy_timeframe,
+    resolve_builtin_strategy_timeframe,
     simple_moving_average,
 )
 from ..strategy_runtime import (
@@ -41,7 +41,7 @@ from ..strategy_source_runtime import (
 )
 
 KlineLoader = Callable[[str, str, int], Sequence[Mapping[str, Any]]]
-LegacyEvidenceBuilder = Callable[
+BuiltinEvidenceBuilder = Callable[
     [str, list[StrategyCandle], dict[str, Any]], dict[str, Any]
 ]
 
@@ -59,7 +59,7 @@ class EvaluatedStrategySignal:
     runtime_decision: Any = None
     audit_spec: dict[str, Any] | None = None
 
-    def legacy_tuple(
+    def execution_tuple(
         self,
     ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
         return (
@@ -71,7 +71,7 @@ class EvaluatedStrategySignal:
         )
 
 
-def build_legacy_signal_evidence(
+def build_builtin_strategy_evidence(
     engine_key: str,
     candles: list[StrategyCandle],
     parameters: dict[str, Any],
@@ -230,7 +230,7 @@ def evaluate_strategy_snapshot(
     config: Mapping[str, Any] | None,
     *,
     load_klines: KlineLoader,
-    evidence_builder: LegacyEvidenceBuilder | None = None,
+    evidence_builder: BuiltinEvidenceBuilder | None = None,
     full_validator: Callable[[Any], dict[str, Any]] = validate_strategy_spec,
     full_evaluator: Callable[[dict[str, Any], dict[str, Any]], Any] = evaluate_strategy,
     source_validator: Callable[[str, str], Any] = validate_source,
@@ -240,7 +240,7 @@ def evaluate_strategy_snapshot(
     """Evaluate one immutable revision without depending on an execution mode."""
 
     selected = dict(snapshot or {})
-    strategy_kind = str(selected.get("strategy_kind") or "")
+    strategy_kind = str(selected.get("strategy_kind") or "builtin_strategy")
     if strategy_kind == "source_strategy":
         return _evaluate_source(
             selected,
@@ -258,26 +258,28 @@ def evaluate_strategy_snapshot(
             full_validator,
             full_evaluator,
         )
-    return _evaluate_legacy(
-        selected,
-        symbol,
-        config,
-        load_klines,
-        evidence_builder,
-    )
+    if strategy_kind == "builtin_strategy":
+        return _evaluate_builtin(
+            selected,
+            symbol,
+            config,
+            load_klines,
+            evidence_builder,
+        )
+    return _empty(f"不支持的策略类型：{strategy_kind}")
 
 
-def _evaluate_legacy(
+def _evaluate_builtin(
     snapshot: dict[str, Any],
     symbol: str,
     config: Mapping[str, Any] | None,
     load_klines: KlineLoader,
-    evidence_builder: LegacyEvidenceBuilder | None,
+    evidence_builder: BuiltinEvidenceBuilder | None,
 ) -> EvaluatedStrategySignal:
     engine_key = str(snapshot.get("engine_key") or "multi_factor")
     parameters = _object(snapshot.get("parameters"))
     try:
-        timeframe = resolve_legacy_strategy_timeframe(snapshot, config)
+        timeframe = resolve_builtin_strategy_timeframe(snapshot, config)
         rows = [dict(row) for row in load_klines(symbol, timeframe, 600)]
         candles = _candles(rows)
         envelopes = DEFAULT_STRATEGY_EVALUATOR.evaluate_envelopes(

@@ -14,7 +14,7 @@ from ..domain.runtime import DecisionEnvelope, decision_record_key
 from ..strategy_evaluator import resolve_strategy_timing_policy
 from .strategy_signals import (
     EvaluatedStrategySignal,
-    build_legacy_signal_evidence,
+    build_builtin_strategy_evidence,
     evaluate_strategy_snapshot,
 )
 
@@ -81,7 +81,7 @@ def evaluate_account_strategy(
         if isinstance(account.get("config_json"), Mapping)
         else None,
         load_klines=load_klines,
-        evidence_builder=build_legacy_signal_evidence,
+        evidence_builder=build_builtin_strategy_evidence,
         **evaluator_options,
     )
     if str(selected.get("strategy_kind") or "") not in {

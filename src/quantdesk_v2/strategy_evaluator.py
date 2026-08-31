@@ -1,4 +1,4 @@
-"""Shared deterministic evaluator for legacy indicator strategies.
+"""Shared deterministic evaluator for built-in indicator strategies.
 
 The backtest and paper runtimes deliberately depend on this module instead of
 depending on each other.  Full, versioned strategy specifications continue to
@@ -22,7 +22,7 @@ from .domain.runtime import (
     canonical_event_hash,
 )
 
-DEFAULT_LEGACY_STRATEGY_TIMEFRAME = "4h"
+DEFAULT_BUILTIN_STRATEGY_TIMEFRAME = "4h"
 SUPPORTED_STRATEGY_TIMEFRAMES = ("15m", "1h", "4h")
 _TIMEFRAME_SECONDS = {"15m": 15 * 60, "1h": 60 * 60, "4h": 4 * 60 * 60}
 _MISSING = object()
@@ -84,7 +84,7 @@ StrategyTimingPolicy = TimeframePolicy
 
 
 class StrategyEvaluator:
-    """Evaluate one built-in legacy strategy over an ordered candle series."""
+    """Evaluate one built-in indicator strategy over an ordered candle series."""
 
     def evaluate(
         self,
@@ -94,9 +94,9 @@ class StrategyEvaluator:
     ) -> list[int]:
         """Public strategy-evaluation entry point for deterministic engines."""
 
-        return self.evaluate_legacy(strategy_id, candles, params)
+        return self.evaluate_builtin(strategy_id, candles, params)
 
-    def evaluate_legacy(
+    def evaluate_builtin(
         self,
         strategy_id: str,
         candles: Sequence[StrategyCandle],
@@ -158,7 +158,7 @@ class StrategyEvaluator:
                     signals[index] = -1
             return signals
         if strategy_id != "multi_factor":
-            raise StrategyEvaluationError(f"unsupported legacy strategy: {strategy_id}")
+            raise StrategyEvaluationError(f"unsupported built-in strategy: {strategy_id}")
 
         fast = simple_moving_average(closes, int(params["fast_period"]))
         slow = simple_moving_average(closes, int(params["slow_period"]))
@@ -205,7 +205,7 @@ class StrategyEvaluator:
         timeframe: str,
         revision_fingerprint: str | None = None,
     ) -> list[DecisionEnvelope]:
-        """Evaluate legacy signals into the canonical cross-mode contract."""
+        """Evaluate built-in signals into the canonical cross-mode contract."""
 
         normalized_timeframe = _validate_timeframe(timeframe)
         fingerprint = revision_fingerprint or canonical_event_hash(
@@ -215,7 +215,7 @@ class StrategyEvaluator:
                 "timeframe": normalized_timeframe,
             }
         )
-        signals = self.evaluate_legacy(strategy_id, candles, params)
+        signals = self.evaluate_builtin(strategy_id, candles, params)
         validity = timedelta(seconds=strategy_timeframe_seconds(normalized_timeframe))
         envelopes: list[DecisionEnvelope] = []
         for candle, direction in zip(candles, signals, strict=True):
@@ -261,13 +261,13 @@ class StrategyEvaluator:
 DEFAULT_STRATEGY_EVALUATOR = StrategyEvaluator()
 
 
-def resolve_legacy_strategy_timeframe(
+def resolve_builtin_strategy_timeframe(
     snapshot: Mapping[str, Any] | None,
     config: Mapping[str, Any] | None = None,
     *,
-    default: str = DEFAULT_LEGACY_STRATEGY_TIMEFRAME,
+    default: str = DEFAULT_BUILTIN_STRATEGY_TIMEFRAME,
 ) -> str:
-    """Resolve an immutable legacy strategy's candle timeframe.
+    """Resolve an immutable built-in strategy's candle timeframe.
 
     A timeframe embedded in the strategy snapshot wins over an account-level
     runtime override.  Snapshots created before timeframes were explicit retain
@@ -296,7 +296,7 @@ def resolve_strategy_trigger_timeframe(
     """Resolve the immutable trigger timeframe for every strategy kind."""
 
     selected = snapshot if isinstance(snapshot, Mapping) else {}
-    strategy_kind = str(selected.get("strategy_kind") or "legacy_signal")
+    strategy_kind = str(selected.get("strategy_kind") or "builtin_strategy")
     if strategy_kind == "source_strategy":
         validation = selected.get("source_validation")
         requirements = (
@@ -325,7 +325,7 @@ def resolve_strategy_trigger_timeframe(
                 "full strategy trigger timeframe is unavailable"
             )
         return _validate_timeframe(candidate)
-    return resolve_legacy_strategy_timeframe(selected, config)
+    return resolve_builtin_strategy_timeframe(selected, config)
 
 
 def resolve_strategy_timing_policy(

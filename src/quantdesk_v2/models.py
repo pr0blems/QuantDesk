@@ -2353,7 +2353,7 @@ class StrategyTemplate(Base):
             name="supported_engine",
         ),
         CheckConstraint(
-            "template_kind IN ('strategy', 'legacy_signal')", name="valid_template_kind"
+            "template_kind IN ('strategy', 'builtin_strategy')", name="valid_template_kind"
         ),
         UniqueConstraint("template_key", name="uq_strategy_templates_template_key"),
         Index("ix_strategy_templates_active_sort", "is_active", "sort_order"),
@@ -2382,9 +2382,9 @@ class StrategyTemplate(Base):
     )
     template_kind: Mapped[str] = mapped_column(
         String(24),
-        default="legacy_signal",
+        default="builtin_strategy",
         nullable=False,
-        comment="模板类型：完整策略 strategy 或旧版指标信号 legacy_signal",
+        comment="模板类型：完整策略 strategy 或内置指标策略 builtin_strategy",
     )
     spec_schema_version: Mapped[int | None] = mapped_column(
         Integer, comment="完整策略 DSL 结构版本；旧版指标信号为空"
@@ -2393,7 +2393,7 @@ class StrategyTemplate(Base):
         JSON, comment="完整且受约束的系统策略 DSL 定义"
     )
     implementation_version: Mapped[str] = mapped_column(
-        String(32), default="legacy_v1", nullable=False, comment="策略求值器实现版本"
+        String(32), default="builtin_v1", nullable=False, comment="策略求值器实现版本"
     )
     deprecated_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="模板停止用于新策略的时间（UTC）"
@@ -2446,7 +2446,7 @@ class UserStrategy(Base):
             name="supported_engine",
         ),
         CheckConstraint(
-            "strategy_kind IN ('full_strategy', 'source_strategy', 'legacy_signal')",
+            "strategy_kind IN ('full_strategy', 'source_strategy', 'builtin_strategy')",
             name="valid_strategy_kind",
         ),
         CheckConstraint(
@@ -2510,9 +2510,9 @@ class UserStrategy(Base):
     )
     strategy_kind: Mapped[str] = mapped_column(
         String(24),
-        default="legacy_signal",
+        default="builtin_strategy",
         nullable=False,
-        comment="策略类型：完整策略 full_strategy 或旧版指标信号 legacy_signal",
+        comment="策略类型：完整策略 full_strategy、源码策略 source_strategy 或内置指标策略 builtin_strategy",
     )
     lifecycle_status: Mapped[str] = mapped_column(
         String(16),

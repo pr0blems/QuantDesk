@@ -914,7 +914,7 @@ def _ai_monitor_live_adapter(
             status="archived",
             version=1,
             engine_key="multi_factor",
-            strategy_kind="legacy_signal",
+            strategy_kind="builtin_strategy",
             lifecycle_status="retired",
             spec_schema_version=None,
             spec_json=None,

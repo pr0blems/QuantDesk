@@ -1,6 +1,6 @@
 """Binance implementation of the exchange-neutral :class:`Broker` port.
 
-The legacy clients remain the only code that signs or transports requests.
+The existing clients remain the only code that signs or transports requests.
 This facade binds credentials once and translates their vendor payloads into
 domain value objects; it does not alter retry, rounding, or order behavior.
 """

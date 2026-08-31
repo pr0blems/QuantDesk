@@ -8,9 +8,6 @@ def test_ai_monitor_prefers_authenticated_websocket_with_stream_fallback() -> No
         encoding="utf-8"
     )
     client = (ROOT / "web/src/api/client.ts").read_text(encoding="utf-8")
-    legacy_client = (ROOT / "src/quantdesk_v2/static/app.js").read_text(
-        encoding="utf-8"
-    )
     entrypoint = (ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
 
     assert 'this.stream("/events"' in component
@@ -22,11 +19,6 @@ def test_ai_monitor_prefers_authenticated_websocket_with_stream_fallback() -> No
     assert 'new WebSocket(endpoint, [' in client
     assert '"quantdesk.ai-monitor.v1"' in client
     assert '`quantdesk.auth.${accessToken}`' in client
-    assert "window.quantdeskOpenAiMonitorSocket" in legacy_client
-    assert "window.quantdeskApiStream = apiStream" in legacy_client
-    assert 'headers.set("Accept", "text/event-stream")' in legacy_client
-    assert 'new URL("/api/v2/ai-monitor/ws", window.location.origin)' in legacy_client
-    assert '`quantdesk.auth.${accessToken}`' in legacy_client
     assert "this.consumePreferredUpdateStream(controller)" in component
     assert "(!hasWebSocket && !hasEventStream)" in component
     assert "await this.consumeUpdateWebSocket(controller)" in component
@@ -52,14 +44,10 @@ def test_ai_monitor_incremental_stream_never_places_token_in_query_string() -> N
         encoding="utf-8"
     )
     client = (ROOT / "web/src/api/client.ts").read_text(encoding="utf-8")
-    legacy_client = (ROOT / "src/quantdesk_v2/static/app.js").read_text(
-        encoding="utf-8"
-    )
 
     assert 'this.stream("/events", { signal: controller.signal, headers })' in component
     assert "/events?token=" not in component
     assert "/ai-monitor/ws?" not in client
-    assert "/ai-monitor/ws?" not in legacy_client
 
 
 def test_research_modal_prefers_live_market_websocket_before_rest_fallback() -> None:
@@ -67,9 +55,6 @@ def test_research_modal_prefers_live_market_websocket_before_rest_fallback() -> 
         encoding="utf-8"
     )
     client = (ROOT / "web/src/api/client.ts").read_text(encoding="utf-8")
-    legacy_client = (ROOT / "src/quantdesk_v2/static/app.js").read_text(
-        encoding="utf-8"
-    )
     endpoint = (
         ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py"
     ).read_text(encoding="utf-8")
@@ -84,6 +69,6 @@ def test_research_modal_prefers_live_market_websocket_before_rest_fallback() -> 
     assert 'rest: "REST 备选轮询"' in component
     assert "openMonitorMarketWebSocket" in client
     assert 'endpoint.searchParams.set("symbol", normalized)' in client
-    assert 'new URL("/api/v2/ai-monitor/market/ws", window.location.origin)' in legacy_client
+    assert 'new URL(`${apiRoot}/ai-monitor/market/ws`, window.location.origin)' in client
     assert '@router.websocket("/market/ws")' in endpoint
     assert "repository.market_snapshot" in endpoint
