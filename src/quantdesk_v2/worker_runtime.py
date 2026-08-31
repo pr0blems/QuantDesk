@@ -116,12 +116,31 @@ def _acquire_singleton(engine: Engine, worker_type: WorkerType) -> Connection:
 
 def _release_singleton(connection: Connection, worker_type: WorkerType) -> None:
     try:
-        connection.execute(
-            text("SELECT RELEASE_LOCK(:lock_name)"),
-            {"lock_name": f"quantdesk-worker-{worker_type}"},
-        )
+        try:
+            connection.execute(
+                text("SELECT RELEASE_LOCK(:lock_name)"),
+                {"lock_name": f"quantdesk-worker-{worker_type}"},
+            )
+        except Exception as exc:
+            # MySQL releases named locks when their connection disappears. A
+            # long-running worker may therefore find its lease connection was
+            # already recycled during an otherwise normal systemd shutdown.
+            # Cleanup must remain best-effort and must not turn a clean stop
+            # into a failed service result.
+            print(
+                f"[{worker_type}-worker] lease release skipped: "
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+            )
     finally:
-        connection.close()
+        try:
+            connection.close()
+        except Exception as exc:
+            print(
+                f"[{worker_type}-worker] lease connection close skipped: "
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+            )
 
 
 def _start_market(app, settings: Settings) -> Callable[[], None]:
