@@ -36,12 +36,6 @@ export type OpportunityPreferenceUpdate = components["schemas"]["OpportunityPref
 export type PredictionAlgorithmOptimizationRequest =
   components["schemas"]["PredictionAlgorithmOptimizationRequest"];
 export type PredictionAlgorithmUpdate = components["schemas"]["PredictionAlgorithmUpdate"];
-export type AdminAlertRulesUpdate = components["schemas"]["AdminAlertRulesUpdate"];
-export type AdminCleanupRequest = components["schemas"]["AdminCleanupRequest"];
-export type AdminNewsAiBatchCreate = components["schemas"]["AdminNewsAiBatchCreate"];
-export type AdminNewsSourceCreate = components["schemas"]["AdminNewsSourceCreate"];
-export type AdminNewsSourceUpdate = components["schemas"]["AdminNewsSourceUpdate"];
-export type AdminUserUpdate = components["schemas"]["AdminUserUpdate"];
 
 export interface Strategy {
   id: string;

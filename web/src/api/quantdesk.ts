@@ -6,12 +6,6 @@ import {
   setAccessToken,
 } from "./client";
 import type {
-  AdminAlertRulesUpdate,
-  AdminCleanupRequest,
-  AdminNewsAiBatchCreate,
-  AdminNewsSourceCreate,
-  AdminNewsSourceUpdate,
-  AdminUserUpdate,
   AiModelConfigCreate,
   AiModelConfigUpdate,
   ApiObject,
@@ -283,46 +277,4 @@ export const settingsApi = {
     apiRequest<ApiObject>(`/me/ai-model-configs/${encodeURIComponent(String(configId))}`, { method: "DELETE" }),
   testAiConfig: (configId: string | number) =>
     apiRequest<ApiObject>(`/me/ai-model-configs/${encodeURIComponent(String(configId))}/test`, { method: "POST" }),
-};
-
-export const adminApi = {
-  overview: () => apiRequest<ApiObject>("/admin/overview"),
-  collectors: () => apiRequest<ApiObject>("/admin/collectors"),
-  collectorAction: (name: string, action: string) =>
-    apiRequest<ApiObject>(`/admin/collectors/${encodeURIComponent(name)}/${encodeURIComponent(action)}`, { method: "POST" }),
-  alerts: (values: Record<string, QueryValue> = {}) => apiRequest<ApiObject>(withQuery("/admin/alerts", values)),
-  alertRules: () => apiRequest<ApiObject>("/admin/alert-rules"),
-  updateAlertRules: (input: AdminAlertRulesUpdate) =>
-    apiRequest<ApiObject>("/admin/alert-rules", { method: "PUT", body: jsonBody(input) }),
-  news: (values: Record<string, QueryValue> = {}) => apiRequest<ApiObject>(withQuery("/admin/news", values)),
-  newsSources: () => apiRequest<ApiObject>("/admin/news-sources"),
-  createNewsSource: (input: AdminNewsSourceCreate) =>
-    apiRequest<ApiObject>("/admin/news-sources", { method: "POST", body: jsonBody(input) }),
-  updateNewsSource: (name: string, input: AdminNewsSourceUpdate) =>
-    apiRequest<ApiObject>(`/admin/news-sources/${encodeURIComponent(name)}`, { method: "PATCH", body: jsonBody(input) }),
-  deleteNewsSource: (name: string) =>
-    apiRequest<ApiObject>(`/admin/news-sources/${encodeURIComponent(name)}`, { method: "DELETE" }),
-  testNewsSource: (name: string) =>
-    apiRequest<ApiObject>(`/admin/news-sources/${encodeURIComponent(name)}/test`, { method: "POST" }),
-  newsBatches: (limit = 20) => apiRequest<ApiObject>(withQuery("/admin/news-ai-batches", { limit })),
-  createNewsBatch: (input: AdminNewsAiBatchCreate) =>
-    apiRequest<ApiObject>("/admin/news-ai-batches", { method: "POST", body: jsonBody(input) }),
-  retryNewsBatch: (batchId: string | number) =>
-    apiRequest<ApiObject>(`/admin/news-ai-batches/${encodeURIComponent(String(batchId))}/retry`, { method: "POST" }),
-  users: (values: Record<string, QueryValue> = {}) => apiRequest<ApiObject>(withQuery("/admin/users", values)),
-  updateUser: (userId: string | number, input: AdminUserUpdate) =>
-    apiRequest<ApiObject>(`/admin/users/${encodeURIComponent(String(userId))}`, { method: "PATCH", body: jsonBody(input) }),
-  revokeSessions: (userId: string | number) =>
-    apiRequest<ApiObject>(`/admin/users/${encodeURIComponent(String(userId))}/revoke-sessions`, { method: "POST" }),
-  storage: () => apiRequest<ApiObject>("/admin/storage"),
-  audit: (values: Record<string, QueryValue> = {}) => apiRequest<ApiObject>(withQuery("/admin/audit", values)),
-  symbols: (values: Record<string, QueryValue> = {}) => apiRequest<ApiObject>(withQuery("/admin/symbols", values)),
-  stockLibrary: (values: Record<string, QueryValue> = {}) => apiRequest<ApiObject>(withQuery("/admin/stock-library", values)),
-  importStockLibrary: () => apiRequest<ApiObject>("/admin/stock-library/import", { method: "POST" }),
-  syncStock: (symbol: string) =>
-    apiRequest<ApiObject>(`/admin/stock-library/${encodeURIComponent(symbol)}/sync`, { method: "POST" }),
-  cleanupPreview: (input: AdminCleanupRequest) =>
-    apiRequest<ApiObject>("/admin/maintenance/cleanup-preview", { method: "POST", body: jsonBody(input) }),
-  cleanup: (input: AdminCleanupRequest) =>
-    apiRequest<ApiObject>("/admin/maintenance/cleanup", { method: "POST", body: jsonBody(input) }),
 };

@@ -8520,7 +8520,7 @@
             "name": "decision_version",
             "required": false,
             "schema": {
-              "default": "",
+              "default": "current",
               "maxLength": 32,
               "title": "Decision Version",
               "type": "string"
@@ -9631,7 +9631,6 @@
               "anyOf": [
                 {
                   "enum": [
-                    "backtest",
                     "paper",
                     "shadow",
                     "live"
@@ -11116,6 +11115,24 @@
     "/api/v2/monitor/overview": {
       "get": {
         "operationId": "monitor_overview_api_v2_monitor_overview_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Symbol"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -11128,6 +11145,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [

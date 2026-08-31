@@ -7517,7 +7517,7 @@ export interface operations {
     list_deployments_api_v2_deployments_get: {
         parameters: {
             query?: {
-                mode?: ("backtest" | "paper" | "shadow" | "live") | null;
+                mode?: ("paper" | "shadow" | "live") | null;
             };
             header?: never;
             path?: never;
@@ -8547,7 +8547,9 @@ export interface operations {
     };
     monitor_overview_api_v2_monitor_overview_get: {
         parameters: {
-            query?: never;
+            query?: {
+                symbol?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -8563,6 +8565,15 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
