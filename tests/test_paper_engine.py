@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
 from quantdesk_v2 import paper_engine as paper
+from quantdesk_v2.domain.runtime import build_decision_envelope
 from quantdesk_v2.strategy_catalog import SYSTEM_STRATEGY_DEFINITIONS
 from quantdesk_v2.strategy_runtime import StrategyDecision, build_trend_pullback_spec
 
@@ -220,7 +222,7 @@ def test_full_strategy_signal_reads_declared_timeframes(
     monkeypatch.setattr(
         paper,
         "_record_full_strategy_decision",
-        lambda account, symbol, spec, decision, snapshot=None: recorded.append(
+        lambda account, symbol, spec, decision, snapshot=None, envelope=None: recorded.append(
             (symbol, decision.decision)
         )
         or True,
@@ -437,9 +439,23 @@ def test_full_strategy_signal_persistence_is_tenant_scoped_and_idempotent(
         evidence={"setup": {"atr": 2.0}},
         risk_proposal={"stop_distance": 3.0},
     )
+    event_time = datetime.fromtimestamp(decision.signal_time / 1_000, tz=UTC)
+    envelope = build_decision_envelope(
+        revision_fingerprint="strategy-revision:61",
+        event_id="paper-test-closed-bar",
+        symbol="TESTUSDT",
+        timeframe="15m",
+        event_time=event_time,
+        decision=decision.decision,
+        confidence=Decimal(str(decision.confidence)),
+        reason_codes=tuple(decision.reason_codes),
+        evidence=decision.evidence,
+        risk_proposal=decision.risk_proposal,
+        valid_until=datetime.fromtimestamp(decision.valid_until / 1_000, tz=UTC),
+    )
 
     persisted = paper._record_full_strategy_decision(
-        account, "TESTUSDT", build_trend_pullback_spec(), decision
+        account, "TESTUSDT", build_trend_pullback_spec(), decision, None, envelope
     )
 
     assert persisted is True

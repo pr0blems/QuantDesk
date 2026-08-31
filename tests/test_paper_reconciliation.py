@@ -158,6 +158,7 @@ def test_open_fill_projection_is_idempotent_and_updates_balance_once() -> None:
     assert backend.ledger_source == 101
     assert backend.balance == pytest.approx(9_949)
     assert sum("INSERT INTO paper_positions" in sql for sql, _ in backend.writes) == 1
+    assert sum("INSERT IGNORE INTO position_snapshots" in sql for sql, _ in backend.writes) == 1
     assert sum("UPDATE paper_accounts SET balance" in sql for sql, _ in backend.writes) == 1
 
 
@@ -287,6 +288,7 @@ def test_close_fill_projection_removes_position_and_credits_balance_once() -> No
     assert backend.ledger_source == 202
     assert backend.balance == pytest.approx(10_003)
     assert sum("INSERT INTO paper_trades" in sql for sql, _ in backend.writes) == 1
+    assert sum("INSERT IGNORE INTO position_snapshots" in sql for sql, _ in backend.writes) == 1
     assert sum("UPDATE paper_accounts SET balance" in sql for sql, _ in backend.writes) == 1
 
 

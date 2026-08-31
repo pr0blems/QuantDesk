@@ -25,14 +25,99 @@ from ..application.live_recovery import (
     LivePositionSyncService,
     ProtectionRecoveryService,
 )
+from ..domain.runtime import canonical_event_hash
 from ..models import (
     LiveCanaryRun,
     LiveCanarySample,
     LiveOrderIntent,
     LiveTradingAccount,
+    StrategySignal,
     WorkerHeartbeat,
     utcnow,
 )
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _semantic_intent_metrics(
+    db: Session, run: LiveCanaryRun
+) -> tuple[int, int, int, list[int], list[int]]:
+    """Verify that live delivery preserved the persisted mode-neutral decision."""
+
+    intents = list(
+        db.scalars(
+            select(LiveOrderIntent).where(
+                LiveOrderIntent.user_id == run.user_id,
+                LiveOrderIntent.live_account_id == run.live_account_id,
+                LiveOrderIntent.action.in_(("open", "close")),
+                LiveOrderIntent.created_at >= run.started_at,
+            )
+        ).all()
+    )
+    automated: list[LiveOrderIntent] = []
+    manual_count = 0
+    for item in intents:
+        basis = _json_object(item.entry_basis_json)
+        evidence = _json_object(_json_object(basis.get("signal")).get("evidence"))
+        if evidence.get("manual_follow") is True:
+            manual_count += 1
+        else:
+            automated.append(item)
+    signal_ids = {
+        int(item.strategy_signal_id)
+        for item in automated
+        if item.strategy_signal_id is not None
+    }
+    signals = {
+        int(item.id): item
+        for item in db.scalars(
+            select(StrategySignal).where(
+                StrategySignal.user_id == run.user_id,
+                StrategySignal.id.in_(signal_ids),
+            )
+        ).all()
+    } if signal_ids else {}
+    missing: list[int] = []
+    mismatched: list[int] = []
+    expected_open_side = {"LONG_ENTRY": "BUY", "SHORT_ENTRY": "SELL"}
+    automated_open_fills = 0
+    for intent in automated:
+        if intent.action == "open" and intent.status == "filled":
+            automated_open_fills += 1
+        signal = signals.get(int(intent.strategy_signal_id or 0))
+        basis = _json_object(intent.entry_basis_json)
+        basis_signal = _json_object(basis.get("signal"))
+        basis_evidence = _json_object(basis_signal.get("evidence"))
+        intent_envelope = _json_object(basis_evidence.get("decision_envelope"))
+        signal_evidence = _json_object(signal.evidence_json) if signal is not None else {}
+        persisted_envelope = _json_object(signal_evidence.get("decision_envelope"))
+        if signal is None or not intent_envelope or not persisted_envelope:
+            missing.append(int(intent.id))
+            continue
+        valid = (
+            canonical_event_hash(intent_envelope)
+            == canonical_event_hash(persisted_envelope)
+            and str(intent.symbol).upper() == str(signal.symbol).upper()
+            and str(intent_envelope.get("symbol") or "").upper()
+            == str(signal.symbol).upper()
+            and str(intent_envelope.get("timeframe") or "") == str(signal.timeframe)
+            and str(intent_envelope.get("decision") or "") == str(signal.decision)
+            and basis_signal.get("strategy_revision_id") == signal.strategy_revision_id
+            and basis_signal.get("deployment_id") == signal.deployment_id
+        )
+        if intent.action == "open":
+            valid = valid and expected_open_side.get(signal.decision) == intent.side
+        if not valid:
+            mismatched.append(int(intent.id))
+    return (
+        len(automated),
+        automated_open_fills,
+        manual_count,
+        missing,
+        mismatched,
+    )
 
 
 def _managed_positions(
@@ -218,7 +303,7 @@ class LiveCanaryService:
                 "now": now,
             },
         ).mappings().one()
-        open_fills = int(
+        raw_open_fills = int(
             db.scalar(
                 select(func.count(LiveOrderIntent.id)).where(
                     LiveOrderIntent.user_id == run.user_id,
@@ -230,6 +315,13 @@ class LiveCanaryService:
             )
             or 0
         )
+        (
+            semantic_intents,
+            semantic_open_fills,
+            manual_intents,
+            semantic_missing,
+            semantic_mismatched,
+        ) = _semantic_intent_metrics(db, run)
         managed = _managed_positions(db, run)
         coverage = _protection_coverage(db, run, managed)
         unprotected = sorted(
@@ -263,6 +355,10 @@ class LiveCanaryService:
             failure_codes.append("execution_unknown")
         if unprotected:
             failure_codes.append("unprotected_position")
+        if semantic_missing:
+            failure_codes.append("semantic_signature_missing")
+        if semantic_mismatched:
+            failure_codes.append("semantic_signature_mismatch")
         metrics = {
             "account_status": account.status,
             "account_last_error_code": account.last_error_code,
@@ -277,7 +373,14 @@ class LiveCanaryService:
             "unknown_execution_count": int(execution_counts["unknown_count"] or 0),
             "managed_position_count": len(managed),
             "unprotected_managed_positions": unprotected,
-            "open_fills_during_window": open_fills,
+            "open_fills_during_window": semantic_open_fills,
+            "raw_open_fills_during_window": raw_open_fills,
+            "manual_intent_count": manual_intents,
+            "semantic_intent_count": semantic_intents,
+            "semantic_signature_missing_count": len(semantic_missing),
+            "semantic_signature_mismatch_count": len(semantic_mismatched),
+            "semantic_signature_missing_intent_ids": semantic_missing,
+            "semantic_signature_mismatch_intent_ids": semantic_mismatched,
         }
         return LiveCanaryObservation(
             passed=not failure_codes,

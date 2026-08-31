@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import uuid
@@ -104,6 +105,7 @@ class MySqlPaperProjectionStore:
                 self._project_close(transaction, execution, payload)
             else:
                 raise PaperProjectionError("paper execution action is invalid")
+            self._record_position_snapshot(transaction, execution, payload)
             updated = transaction.execute(
                 """UPDATE paper_order_executions
                    SET projection_status='applied',projection_error=NULL,
@@ -592,6 +594,77 @@ class MySqlPaperProjectionStore:
         returned = _finite_number(payload.get("balance_credit"), "balance_credit", minimum=0)
         MySqlPaperProjectionStore._apply_balance_delta(
             transaction, execution, returned, "close_credit"
+        )
+
+    @staticmethod
+    def _record_position_snapshot(
+        transaction: _Transaction,
+        execution: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        action = str(execution["action"])
+        source = (
+            _object(payload.get("position"), "position")
+            if action == "open"
+            else _object(payload.get("trade"), "trade")
+        )
+        direction = _direction(source.get("side"))
+        snapshot = {
+            "schema_version": 1,
+            "execution_id": int(execution["id"]),
+            "execution_public_id": execution.get("public_id"),
+            "action": action,
+            "state": "open" if action == "open" else "closed",
+            "symbol": str(execution["symbol"]),
+            "position_side": str(
+                execution.get("position_side")
+                or ("LONG" if direction > 0 else "SHORT")
+            ),
+            "quantity": _positive(source.get("qty"), "qty") if action == "open" else 0,
+            "average_entry_price": _positive(
+                source.get("avg_entry") if action == "open" else source.get("entry_price"),
+                "average_entry_price",
+            ),
+            "mark_price": _positive(
+                source.get("avg_entry") if action == "open" else source.get("exit_price"),
+                "mark_price",
+            ),
+        }
+        encoded = json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        observed_ts = _positive_integer(
+            source.get("opened_ts") if action == "open" else source.get("closed_ts"),
+            "observed_ts",
+        )
+        transaction.execute(
+            """INSERT IGNORE INTO position_snapshots(
+                   public_id,user_id,deployment_id,strategy_revision_id,mode,
+                   account_scope,symbol,position_side,position_state,quantity,
+                   average_entry_price,mark_price,source_type,source_key,
+                   snapshot_json,snapshot_hash,observed_at,created_at
+               ) SELECT UUID(),?,?,deployment_row.strategy_revision_id,'paper',
+                        ?,?,?,?,?,?,?,?,?,?,?,?,FROM_UNIXTIME(?),UTC_TIMESTAMP(6)
+                 FROM strategy_deployments AS deployment_row
+                WHERE deployment_row.id=? AND deployment_row.user_id=?""",
+            (
+                execution["user_id"],
+                execution.get("deployment_id"),
+                f"paper:{execution['paper_account_id']}",
+                execution["symbol"],
+                snapshot["position_side"],
+                snapshot["state"],
+                snapshot["quantity"],
+                snapshot["average_entry_price"],
+                snapshot["mark_price"],
+                "paper_execution",
+                str(execution.get("public_id") or execution["id"]),
+                encoded,
+                hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                observed_ts,
+                execution.get("deployment_id"),
+                execution["user_id"],
+            ),
         )
 
     @staticmethod

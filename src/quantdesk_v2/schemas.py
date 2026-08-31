@@ -1605,7 +1605,10 @@ class BacktestRunSummaryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    public_id: str
     user_id: int
+    user_strategy_id: int | None
+    strategy_revision_id: int | None
     strategy_id: str
     strategy_name: str
     symbol: str

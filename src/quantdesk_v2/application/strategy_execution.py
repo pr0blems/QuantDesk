@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ..domain.exit_policy import ExitLevelPlan
-from ..domain.runtime import decision_record_key, strategy_decision_id
+from ..domain.runtime import DecisionEnvelope, decision_record_key
 from ..strategy_evaluator import resolve_strategy_timing_policy
 from .strategy_signals import (
     EvaluatedStrategySignal,
@@ -24,7 +24,15 @@ DEFAULT_MAX_HOLDING_BARS = 12
 QueryRows = Callable[[str, tuple[Any, ...]], Sequence[Mapping[str, Any]]]
 ExecuteStatement = Callable[[str, tuple[Any, ...]], Any]
 DecisionRecorder = Callable[
-    [dict[str, Any], str, dict[str, Any], Any, dict[str, Any] | None], bool
+    [
+        dict[str, Any],
+        str,
+        dict[str, Any],
+        Any,
+        dict[str, Any] | None,
+        DecisionEnvelope | None,
+    ],
+    bool,
 ]
 
 
@@ -84,6 +92,7 @@ def evaluate_account_strategy(
     persisted = (
         result.runtime_decision is not None
         and result.audit_spec is not None
+        and result.envelope is not None
         and record_decision is not None
         and record_decision(
             account,
@@ -91,6 +100,7 @@ def evaluate_account_strategy(
             result.audit_spec,
             result.runtime_decision,
             selected,
+            result.envelope,
         )
     )
     if persisted:
@@ -111,6 +121,7 @@ def record_strategy_decision(
     spec: dict[str, Any],
     decision: Any,
     snapshot: dict[str, Any] | None = None,
+    envelope: DecisionEnvelope | None = None,
     *,
     query: QueryRows,
     execute: ExecuteStatement,
@@ -154,13 +165,19 @@ def record_strategy_decision(
         or (snapshot or {}).get("spec_hash")
         or f"strategy-revision:{deployment['strategy_revision_id']}"
     )
-    stable_decision_id = strategy_decision_id(
-        revision_fingerprint,
-        symbol,
-        timeframe,
-        int(decision.signal_time),
-        str(decision.decision),
-    )
+    signal_seconds = int(decision.signal_time)
+    if signal_seconds >= 100_000_000_000:
+        signal_seconds //= 1_000
+    if (
+        envelope is None
+        or envelope.revision_fingerprint != revision_fingerprint
+        or envelope.symbol != symbol.strip().upper()
+        or envelope.timeframe != timeframe
+        or envelope.decision.value != str(decision.decision)
+        or int(envelope.event_time.timestamp()) != signal_seconds
+    ):
+        return False
+    stable_decision_id = envelope.decision_id
     idempotency_key = decision_record_key(
         deployment_mode,
         deployment["id"],
@@ -211,7 +228,11 @@ def record_strategy_decision(
                 valid_until,
                 json.dumps(list(decision.reason_codes), ensure_ascii=False),
                 json.dumps(
-                    {**decision.evidence, "decision_id": stable_decision_id},
+                    {
+                        **decision.evidence,
+                        "decision_id": stable_decision_id,
+                        "decision_envelope": envelope.snapshot(),
+                    },
                     ensure_ascii=False,
                 ),
                 json.dumps(decision.risk_proposal, ensure_ascii=False),

@@ -3004,9 +3004,7 @@ class UserOpportunityState(Base):
 class StrategyDeployment(Base):
     __tablename__ = "strategy_deployments"
     __table_args__ = (
-        CheckConstraint(
-            "mode IN ('backtest', 'paper', 'shadow', 'live')", name="valid_mode"
-        ),
+        CheckConstraint("mode IN ('paper', 'shadow', 'live')", name="valid_mode"),
         CheckConstraint(
             "status IN ('created', 'running', 'paused', 'stopped', 'error')",
             name="valid_status",
@@ -3027,7 +3025,7 @@ class StrategyDeployment(Base):
         UniqueConstraint("id", "user_id", name="uq_strategy_deployments_id_user_id"),
         Index("ix_strategy_deployments_user_status", "user_id", "status", "updated_at"),
         {
-            "comment": "用户将固定策略修订绑定到回测、模拟、影子或实盘的部署实例",
+            "comment": "用户将固定策略修订绑定到模拟、影子或实盘的部署实例",
             "mysql_engine": "InnoDB",
             "mysql_charset": "utf8mb4",
         },
@@ -3052,7 +3050,7 @@ class StrategyDeployment(Base):
         BigInteger, nullable=False, comment="部署固定的不可变策略修订 ID"
     )
     mode: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="部署模式：回测、模拟、影子或实盘"
+        String(16), nullable=False, comment="部署模式：模拟、影子或实盘"
     )
     target_account_id: Mapped[int | None] = mapped_column(
         BigInteger, comment="模拟盘或实盘目标账户内部 ID"
@@ -3099,6 +3097,13 @@ class StrategyRunManifest(Base):
         CheckConstraint(
             "mode IN ('backtest', 'paper', 'shadow', 'live')", name="valid_mode"
         ),
+        CheckConstraint(
+            "(mode = 'backtest' AND backtest_run_id IS NOT NULL "
+            "AND deployment_id IS NULL) OR "
+            "(mode IN ('paper', 'shadow', 'live') AND deployment_id IS NOT NULL "
+            "AND backtest_run_id IS NULL)",
+            name="valid_owner",
+        ),
         ForeignKeyConstraint(
             ["deployment_id", "user_id"],
             ["strategy_deployments.id", "strategy_deployments.user_id"],
@@ -3111,12 +3116,19 @@ class StrategyRunManifest(Base):
             name="fk_strategy_run_manifests_revision_tenant",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["backtest_run_id", "user_id"],
+            ["backtest_runs.id", "backtest_runs.user_id"],
+            name="fk_strategy_run_manifests_backtest_tenant",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint("public_id", name="uq_strategy_run_manifests_public_id"),
         UniqueConstraint("deployment_id", name="uq_strategy_run_manifests_deployment"),
+        UniqueConstraint("backtest_run_id", name="uq_strategy_run_manifests_backtest"),
         UniqueConstraint("manifest_hash", name="uq_strategy_run_manifests_hash"),
         Index("ix_strategy_run_manifests_user_created", "user_id", "created_at"),
         {
-            "comment": "Frozen reproducibility manifest for every strategy deployment",
+            "comment": "Frozen reproducibility manifest for a deployment or backtest run",
             "mysql_engine": "InnoDB",
             "mysql_charset": "utf8mb4",
         },
@@ -3126,8 +3138,9 @@ class StrategyRunManifest(Base):
     public_id: Mapped[str] = mapped_column(
         String(36), default=lambda: str(uuid.uuid4()), nullable=False
     )
-    deployment_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    strategy_revision_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    deployment_id: Mapped[int | None] = mapped_column(BigInteger)
+    backtest_run_id: Mapped[int | None] = mapped_column(BigInteger)
+    strategy_revision_id: Mapped[int | None] = mapped_column(BigInteger)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     mode: Mapped[str] = mapped_column(String(16), nullable=False)
     data_set_id: Mapped[str | None] = mapped_column(String(191))
@@ -3245,9 +3258,28 @@ class BacktestRun(Base):
         CheckConstraint("end_at >= start_at", name="valid_period"),
         CheckConstraint("initial_capital > 0", name="positive_initial_capital"),
         CheckConstraint("trade_count >= 0", name="nonnegative_trade_count"),
+        ForeignKeyConstraint(
+            ["user_strategy_id", "user_id"],
+            ["user_strategies.id", "user_strategies.user_id"],
+            name="fk_backtest_runs_strategy_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_backtest_runs_revision_tenant",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("public_id", name="uq_backtest_runs_public_id"),
+        UniqueConstraint("id", "user_id", name="uq_backtest_runs_id_user_id"),
         Index("ix_backtest_runs_user_created", "user_id", "created_at"),
         Index("ix_backtest_runs_user_status_created", "user_id", "status", "created_at"),
         Index("ix_backtest_runs_user_strategy_created", "user_id", "strategy_id", "created_at"),
+        Index(
+            "ix_backtest_runs_revision_created",
+            "strategy_revision_id",
+            "created_at",
+        ),
         Index("ix_backtest_runs_user_symbol_timeframe", "user_id", "symbol", "timeframe"),
         {
             "comment": "用户策略回测任务、配置与汇总指标",
@@ -3259,11 +3291,25 @@ class BacktestRun(Base):
     id: Mapped[int] = mapped_column(
         BIGINT_PK, primary_key=True, autoincrement=True, comment="回测任务主键"
     )
+    public_id: Mapped[str] = mapped_column(
+        String(36),
+        default=lambda: str(uuid.uuid4()),
+        nullable=False,
+        comment="不可变回测任务的对外 UUID",
+    )
     user_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         comment="所属用户 ID，用于租户数据隔离",
+    )
+    user_strategy_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        comment="用户策略内部 ID；系统内置策略的历史回测可为空",
+    )
+    strategy_revision_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        comment="回测绑定的不可变策略修订 ID；旧内置策略回测可为空",
     )
     strategy_id: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="策略目录中的稳定策略标识"
@@ -3672,6 +3718,81 @@ class LiveOrderIntent(Base):
         nullable=False,
         comment="订单意图最后更新时间（UTC）",
     )
+
+
+class PositionSnapshot(Base):
+    """Append-only position state derived from an authoritative execution fact."""
+
+    __tablename__ = "position_snapshots"
+    __table_args__ = (
+        CheckConstraint("mode IN ('paper', 'shadow', 'live')", name="valid_mode"),
+        CheckConstraint("position_state IN ('open', 'closed')", name="valid_state"),
+        CheckConstraint(
+            "position_side IN ('BOTH', 'LONG', 'SHORT')", name="valid_position_side"
+        ),
+        CheckConstraint("quantity >= 0", name="nonnegative_quantity"),
+        ForeignKeyConstraint(
+            ["deployment_id", "user_id"],
+            ["strategy_deployments.id", "strategy_deployments.user_id"],
+            name="fk_position_snapshots_deployment_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_position_snapshots_revision_tenant",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("public_id", name="uq_position_snapshots_public_id"),
+        UniqueConstraint(
+            "mode",
+            "account_scope",
+            "source_type",
+            "source_key",
+            name="uq_position_snapshots_source",
+        ),
+        Index(
+            "ix_position_snapshots_account_observed",
+            "user_id",
+            "mode",
+            "account_scope",
+            "observed_at",
+        ),
+        Index(
+            "ix_position_snapshots_symbol_observed",
+            "symbol",
+            "observed_at",
+        ),
+        {
+            "comment": "Append-only position facts produced from durable execution outcomes",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    deployment_id: Mapped[int | None] = mapped_column(BigInteger)
+    strategy_revision_id: Mapped[int | None] = mapped_column(BigInteger)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_scope: Mapped[str] = mapped_column(String(191), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
+    position_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(30, 18), nullable=False)
+    average_entry_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 18))
+    mark_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 18))
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class LiveCanaryRun(Base):

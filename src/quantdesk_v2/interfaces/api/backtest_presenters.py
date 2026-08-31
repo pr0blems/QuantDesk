@@ -48,6 +48,9 @@ def backtest_run_summary(run: BacktestRun) -> dict[str, Any]:
     return {
         "id": run.id,
         "run_id": run.id,
+        "public_id": run.public_id,
+        "user_strategy_id": run.user_strategy_id,
+        "strategy_revision_id": run.strategy_revision_id,
         "strategy_id": run.strategy_id,
         "strategy_name": run.strategy_name,
         "symbol": run.symbol,
@@ -132,4 +135,3 @@ def backtest_run_detail(run: BacktestRun) -> dict[str, Any]:
             "data_quality": _json_safe(run.data_quality_json or {}),
         },
     }
-

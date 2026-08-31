@@ -574,6 +574,7 @@ def _record_live_strategy_decision(
     spec: dict[str, Any],
     decision: Any,
     snapshot: dict[str, Any] | None = None,
+    envelope: Any = None,
 ) -> bool:
     return record_strategy_decision(
         account,
@@ -581,6 +582,7 @@ def _record_live_strategy_decision(
         spec,
         decision,
         snapshot,
+        envelope,
         query=store.query,
         execute=store.execute,
         log_mode="live",
@@ -1226,6 +1228,14 @@ def _project_unified_market_result(
     order = result.broker_order
     response = _unified_order_response(order)
     client_order_id = deterministic_client_order_id(intent)
+    if result.state is ExecutionState.FILLED:
+        _record_live_position_snapshot(
+            account,
+            intent,
+            order,
+            action=action,
+            entry_basis=entry_basis,
+        )
     projected = _create_intent(
         account,
         signal_key=signal_key,
@@ -1275,6 +1285,71 @@ def _project_unified_market_result(
             error_code=result.error_code,
         )
     return response if result.state is ExecutionState.FILLED else None
+
+
+def _record_live_position_snapshot(
+    account: dict[str, Any],
+    intent: OrderIntent,
+    order: Any,
+    *,
+    action: str,
+    entry_basis: dict[str, Any] | None,
+) -> None:
+    """Persist the position state emitted by a durable unified execution result."""
+
+    basis = _json_object(entry_basis)
+    execution_basis = _json_object(basis.get("execution"))
+    average_price = getattr(order, "average_price", None)
+    average_entry_price = (
+        average_price if action == "open" else execution_basis.get("entry_price")
+    )
+    snapshot = {
+        "schema_version": 1,
+        "execution_intent_id": intent.intent_id,
+        "action": action,
+        "state": "open" if action == "open" else "closed",
+        "symbol": intent.symbol,
+        "position_side": intent.position_side.value,
+        "quantity": str(intent.quantity) if action == "open" else "0",
+        "average_entry_price": (
+            str(average_entry_price) if average_entry_price is not None else None
+        ),
+        "mark_price": str(average_price) if average_price is not None else None,
+        "strategy_signal_id": (
+            _json_object(basis.get("signal")).get("strategy_signal_id")
+        ),
+    }
+    encoded = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    store.execute(
+        """INSERT IGNORE INTO position_snapshots(
+               public_id,user_id,deployment_id,strategy_revision_id,mode,
+               account_scope,symbol,position_side,position_state,quantity,
+               average_entry_price,mark_price,source_type,source_key,
+               snapshot_json,snapshot_hash,observed_at,created_at
+           ) VALUES(UUID(),?,?,?,'live',?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6),
+                    UTC_TIMESTAMP(6))""",
+        (
+            account["user_id"],
+            account["deployment_id"],
+            account["strategy_revision_id"],
+            f"live:{account['id']}",
+            intent.symbol,
+            intent.position_side.value,
+            snapshot["state"],
+            intent.quantity if action == "open" else Decimal("0"),
+            average_entry_price,
+            average_price,
+            "live_execution",
+            intent.intent_id,
+            encoded,
+            hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        ),
+    )
 
 
 def _unified_order_response(order: Any) -> dict[str, Any] | None:

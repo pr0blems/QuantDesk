@@ -88,10 +88,16 @@ def test_backtest_models_are_tenant_scoped_commented_and_decimal_safe() -> None:
     assert trade_table.c.quantity.type.precision == 48
     assert trade_table.c.quantity.type.scale == 18
 
-    run_user_fk = next(iter(run_table.c.user_id.foreign_keys))
+    run_user_fks = tuple(run_table.c.user_id.foreign_keys)
     trade_run_fk = next(iter(trade_table.c.run_id.foreign_keys))
     trade_user_fk = next(iter(trade_table.c.user_id.foreign_keys))
-    assert run_user_fk.ondelete == "CASCADE"
+    # ``user_id`` also participates in tenant-scoped strategy/revision foreign
+    # keys.  The direct user ownership edge remains cascading, while immutable
+    # strategy facts intentionally use RESTRICT.
+    assert any(
+        fk.target_fullname == "users.id" and fk.ondelete == "CASCADE"
+        for fk in run_user_fks
+    )
     assert trade_run_fk.ondelete == "CASCADE"
     assert trade_user_fk.ondelete == "CASCADE"
     assert BacktestRun.trades.property.cascade.delete_orphan

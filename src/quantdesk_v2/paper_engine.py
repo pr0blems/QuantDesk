@@ -1023,6 +1023,7 @@ def _record_full_strategy_decision(
     spec: dict[str, Any],
     decision: Any,
     snapshot: dict[str, Any] | None = None,
+    envelope: Any = None,
 ) -> bool:
     return record_strategy_decision(
         account,
@@ -1030,6 +1031,7 @@ def _record_full_strategy_decision(
         spec,
         decision,
         snapshot,
+        envelope,
         query=store.query,
         execute=store.execute,
         log_mode="paper",

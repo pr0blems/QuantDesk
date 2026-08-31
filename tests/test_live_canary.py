@@ -14,6 +14,7 @@ from quantdesk_v2.models import (
     LiveCanarySample,
     LiveOrderIntent,
     LiveTradingAccount,
+    StrategySignal,
     WorkerHeartbeat,
     utcnow,
 )
@@ -30,6 +31,7 @@ def _session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     for table in (
         LiveTradingAccount.__table__,
+        StrategySignal.__table__,
         LiveOrderIntent.__table__,
         WorkerHeartbeat.__table__,
         LiveCanaryRun.__table__,
@@ -84,6 +86,72 @@ def _heartbeat() -> WorkerHeartbeat:
         last_seen_at=now,
         updated_at=now,
     )
+
+
+def _semantic_intent(*, envelope_symbol: str = "AAPLUSDT") -> tuple[StrategySignal, LiveOrderIntent]:
+    now = utcnow()
+    envelope = {
+        "version": "decision_envelope_v1",
+        "decision_id": "decision-1",
+        "revision_fingerprint": "revision-11",
+        "event_id": "event-1",
+        "symbol": envelope_symbol,
+        "timeframe": "1h",
+        "event_time": now.isoformat(),
+        "decision": "LONG_ENTRY",
+        "direction": 1,
+        "confidence": "0.8",
+        "reason_codes": ["trend"],
+        "evidence": {},
+        "risk_proposal": {},
+        "valid_until": None,
+        "exit_decision": None,
+    }
+    signal = StrategySignal(
+        id=41,
+        public_id="signal-41",
+        user_id=7,
+        deployment_id=19,
+        strategy_revision_id=11,
+        symbol="AAPLUSDT",
+        timeframe="1h",
+        signal_bar_time=int(now.timestamp()),
+        decision="LONG_ENTRY",
+        confidence=None,
+        status="approved",
+        reason_codes_json=["trend"],
+        evidence_json={"decision_envelope": envelope},
+        risk_decision_json={},
+        idempotency_key="decision-41",
+        created_at=now,
+    )
+    intent = LiveOrderIntent(
+        public_id="intent-semantic-1",
+        user_id=7,
+        live_account_id=3,
+        deployment_id=19,
+        strategy_signal_id=41,
+        signal_key="intent-semantic-1",
+        client_order_id="client-semantic-1",
+        symbol="AAPLUSDT",
+        action="open",
+        side="BUY",
+        position_side="BOTH",
+        order_type="MARKET",
+        status="canceled",
+        request_json={},
+        entry_basis_json={
+            "signal": {
+                "strategy_signal_id": 41,
+                "deployment_id": 19,
+                "strategy_revision_id": 11,
+                "evidence": {"decision_envelope": envelope},
+            }
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    return signal, intent
 
 
 def test_live_canary_persists_samples_and_passes_only_after_full_window() -> None:
@@ -194,6 +262,74 @@ def test_live_canary_never_enables_a_paused_account() -> None:
             live_account_id=3,
             window_seconds=15 * 60,
         )
+
+
+def test_live_canary_accepts_an_identical_production_decision_envelope() -> None:
+    db = _session()
+    db.add_all([_account(), _heartbeat()])
+    db.commit()
+    run = LiveCanaryService().start(
+        db,
+        user_id=7,
+        live_account_id=3,
+        window_seconds=15 * 60,
+        minimum_open_fills=0,
+    )
+    db.add_all(_semantic_intent())
+    db.flush()
+
+    observation = LiveCanaryService().observe(db, run)
+
+    assert observation.passed is True
+    assert observation.metrics["semantic_intent_count"] == 1
+    assert observation.metrics["semantic_signature_mismatch_count"] == 0
+
+
+def test_live_canary_rejects_a_changed_production_decision_envelope() -> None:
+    db = _session()
+    db.add_all([_account(), _heartbeat()])
+    db.commit()
+    run = LiveCanaryService().start(
+        db,
+        user_id=7,
+        live_account_id=3,
+        window_seconds=15 * 60,
+        minimum_open_fills=0,
+    )
+    db.add_all(_semantic_intent(envelope_symbol="MSFTUSDT"))
+    db.flush()
+
+    observation = LiveCanaryService().observe(db, run)
+
+    assert observation.passed is False
+    assert "semantic_signature_mismatch" in observation.failure_codes
+
+
+def test_live_canary_excludes_manual_follow_from_strategy_exercise_counts() -> None:
+    db = _session()
+    db.add_all([_account(), _heartbeat()])
+    db.commit()
+    run = LiveCanaryService().start(
+        db,
+        user_id=7,
+        live_account_id=3,
+        window_seconds=15 * 60,
+        minimum_open_fills=0,
+    )
+    _signal, intent = _semantic_intent()
+    intent.strategy_signal_id = None
+    intent.entry_basis_json = {
+        "signal": {"evidence": {"manual_follow": True}}
+    }
+    db.add(intent)
+    db.flush()
+
+    observation = LiveCanaryService().observe(db, run)
+
+    assert observation.passed is True
+    assert observation.metrics["semantic_intent_count"] == 0
+    assert observation.metrics["manual_intent_count"] == 1
+    assert observation.metrics["open_fills_during_window"] == 0
 
 
 def test_live_canary_migration_follows_legacy_paper_cutover() -> None:

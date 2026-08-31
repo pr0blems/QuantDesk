@@ -106,7 +106,7 @@ from .security import (
     verify_password,
 )
 from .strategy_ai import StrategyAiError, _chat_http_transport
-from .strategy_artifacts import add_run_manifest
+from .strategy_artifacts import add_backtest_run_manifest, add_run_manifest
 from .strategy_catalog import (
     ensure_user_default_strategies,
     get_user_strategy,
@@ -3661,7 +3661,10 @@ def create_backtest(
         }
         strategy_version = _strategy_version(strategy)
         run = BacktestRun(
+            public_id=str(uuid.uuid4()),
             user_id=user_id,
+            user_strategy_id=selected_strategy_id,
+            strategy_revision_id=selected_revision_id,
             strategy_id=payload.strategy_id,
             strategy_name=strategy["name"].strip(),
             symbol=payload.symbol,
@@ -3706,42 +3709,24 @@ def create_backtest(
         )
         db.add(run)
         db.flush()
+        selected_revision = None
         if selected_strategy_id is not None and selected_revision_id is not None:
             selected_revision = db.get(StrategyRevision, selected_revision_id)
             if selected_revision is None:
                 raise ValueError("selected strategy revision disappeared during backtest")
-            deployment = StrategyDeployment(
-                public_id=str(uuid.uuid4()),
-                user_id=user_id,
-                strategy_id=selected_strategy_id,
-                strategy_revision_id=selected_revision_id,
-                mode="backtest",
-                target_account_id=run.id,
-                name=f"回测 · {strategy['name'].strip()} · {payload.symbol}",
-                status="stopped",
-                runtime_state_json={
-                    "result": "completed",
-                    "backtest_run_id": run.id,
-                },
-                started_at=now,
-                created_at=now,
-                updated_at=now,
-            )
-            db.add(deployment)
-            add_run_manifest(
-                db,
-                deployment,
-                selected_revision,
-                data_set_id=(
-                    f"backtest:{payload.symbol}:{config['timeframe']}:"
-                    f"{config['start_ts']}:{config['end_ts']}"
-                ),
-                extra={
-                    "backtest_run_id": run.id,
-                    "data_quality": _json_safe(data_quality),
-                    "config": stored_config,
-                },
-            )
+        add_backtest_run_manifest(
+            db,
+            run,
+            selected_revision,
+            data_set_id=(
+                f"backtest:{payload.symbol}:{config['timeframe']}:"
+                f"{config['start_ts']}:{config['end_ts']}"
+            ),
+            extra={
+                "data_quality": _json_safe(data_quality),
+                "config": stored_config,
+            },
+        )
 
         known_trade_fields = {
             "side",

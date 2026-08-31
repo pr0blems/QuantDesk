@@ -136,7 +136,7 @@ def _owned_deployment(
 def list_deployments(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
-    mode: Literal["backtest", "paper", "shadow", "live"] | None = None,
+    mode: Literal["paper", "shadow", "live"] | None = None,
 ) -> dict[str, Any]:
     statement = select(StrategyDeployment).where(StrategyDeployment.user_id == user.id)
     if mode is not None:

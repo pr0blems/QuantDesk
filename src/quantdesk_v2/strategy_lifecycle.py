@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from .models import (
     BacktestRun,
-    StrategyDeployment,
     StrategyRevision,
     StrategyValidationRun,
     UserStrategy,
@@ -88,11 +87,8 @@ def _backtest_evidence(db: Session, revision_id: int | None) -> tuple[int, int |
         return 0, None
     rows = db.execute(
         select(func.count(BacktestRun.id), func.max(BacktestRun.id))
-        .select_from(StrategyDeployment)
-        .join(BacktestRun, BacktestRun.id == StrategyDeployment.target_account_id)
         .where(
-            StrategyDeployment.strategy_revision_id == revision_id,
-            StrategyDeployment.mode == "backtest",
+            BacktestRun.strategy_revision_id == revision_id,
             BacktestRun.status == "completed",
         )
     ).one()
