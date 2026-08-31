@@ -2999,17 +2999,16 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       const isHistory = selector === "#history-direction-counts";
       const settlement = this.state.historyOpportunitySettlementCounts || {};
       const historyTotal = Number(this.state.historyOpportunityRecordCount || 0);
-      const completed = Number(settlement.completed || 0);
       const pending = Number(settlement.pending || 0);
       const unavailable = Number(settlement.unavailable || 0);
       const settlementPrefix = isHistory
-        ? `<b class="history-total">共 ${this.number(historyTotal)}</b><i>·</i><b class="settled">已结算 ${this.number(completed)}</b>${pending ? `<i>·</i><b class="pending">待结算 ${this.number(pending)}</b>` : ""}${unavailable ? `<i>·</i><b class="unavailable">无结果 ${this.number(unavailable)}</b>` : ""}<i>·</i>`
+        ? `<b class="pending">待结算 ${this.number(pending)}</b>${unavailable ? `<i>·</i><b class="unavailable">行情不足 ${this.number(unavailable)}</b>` : ""}<i>·</i>`
         : "";
       target.innerHTML = `${settlementPrefix}<b class="long">多 ${this.number(counts.long)}</b><i>/</i><b class="short">空 ${this.number(counts.short)}</b>`;
       target.setAttribute(
         "aria-label",
         isHistory
-          ? `${label}：共 ${historyTotal} 条虚拟预测记录，已结算 ${completed} 条，待结算 ${pending} 条，无结果 ${unavailable} 条，做多 ${counts.long} 条，做空 ${counts.short} 条；不是交易订单`
+          ? `${label}：共 ${historyTotal} 条待处理虚拟预测，待结算 ${pending} 条，行情不足 ${unavailable} 条，做多 ${counts.long} 条，做空 ${counts.short} 条；已结算样本请到预测统计分析查看`
           : `${label}：做多 ${counts.long} 次，做空 ${counts.short} 次`,
       );
     });
@@ -4060,7 +4059,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     if (!visibleOpportunities.length) {
       const statusLabel = ({ candidate: "待评估", ready: "可触发", triggered: "已触发", blocked: "数据阻断", data_error: "异常" })[statusFilter];
       const emptyMarkup = historicalTab
-        ? '<div class="empty-state opportunity-empty"><strong>暂无历史机会</strong><span>信号过期或结束后会自动归入这里。</span></div>'
+        ? '<div class="empty-state opportunity-empty"><strong>暂无待结算历史机会</strong><span>已结算样本请到“预测统计分析”查看。</span></div>'
         : statusFilter !== "all"
         ? `<div class="empty-state opportunity-empty"><strong>当前没有“${statusLabel}”机会</strong><span>可切换其他状态，或等待下一轮机会扫描。</span></div>`
         : '<div class="empty-state opportunity-empty"><strong>尚未发现当前有效的美股候选</strong><span>系统会按新闻回看范围、置信度和关联股票继续扫描。</span></div>';

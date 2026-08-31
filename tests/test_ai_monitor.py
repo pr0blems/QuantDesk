@@ -77,6 +77,7 @@ from quantdesk_v2.application.ai_monitor import (
 from quantdesk_v2.interfaces.api.ai_monitor import (
     _ai_monitor_revisions,
     _changed_revision_scopes,
+    _historical_opportunity_conditions,
     _local_date_utc_window,
     _prediction_settlement_out,
     _price_comparison_out,
@@ -4108,7 +4109,7 @@ def test_opportunities_are_ordered_by_signal_time_descending() -> None:
     assert "AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id" in endpoint
     assert 'scope: Literal["legacy", "current", "history"]' in endpoint
     assert "_historical_opportunity_conditions" in api
-    assert 'AiMonitorPrediction.status.in_(("completed", "unavailable"))' in api
+    assert 'AiMonitorPrediction.status.in_(("pending", "unavailable"))' in api
     assert '"history_summary": _historical_opportunity_summary' in endpoint
     assert '"pagination"' in endpoint
     assert 'live_tickers.get((item.contract_symbol or "").upper())' in endpoint
@@ -4121,6 +4122,32 @@ def test_opportunities_are_ordered_by_signal_time_descending() -> None:
     assert '"prediction_entry_gate"' in api
     assert "ai_monitor.prediction_entry_gate_snapshot(prediction)" in api
     assert '"updated_at": _utc_out(item.updated_at)' in api
+
+
+def test_historical_opportunities_only_include_unsettled_predictions() -> None:
+    statement = (
+        AiMonitorOpportunity.__table__.select()
+        .join(
+            AiMonitorPrediction,
+            AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id,
+        )
+        .where(
+            *_historical_opportunity_conditions(
+                user_id=7,
+                now=datetime(2026, 8, 31, tzinfo=UTC),
+            )
+        )
+    )
+    sql = str(
+        statement.compile(
+            dialect=sqlite.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "ai_monitor_predictions.status IN ('pending', 'unavailable')" in sql
+    assert "completed" not in sql
+    assert "ai_monitor_opportunities.expires_at <=" in sql
 
 
 def test_opportunity_model_call_endpoint_is_tenant_scoped_and_returns_raw_audit() -> None:
@@ -4168,20 +4195,20 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'name="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260831-react2"' in entrypoint
-    assert '"/assets/monitor.js?v=20260831-react2"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260831-react3"' in entrypoint
+    assert '"/assets/monitor.js?v=20260831-react3"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
     assert 'href="/assets/ai-monitor.css?v=20260828-event-samples1"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
-    assert "/assets/controller-runtime.js?v=20260831-react2" in react_index
-    assert "/assets/strategies.js?v=20260831-react2" in react_index
+    assert "/assets/controller-runtime.js?v=20260831-react3" in react_index
+    assert "/assets/strategies.js?v=20260831-react3" in react_index
     for asset in (
-        '"/assets/ai-monitor.js?v=20260831-react2"',
-        '"/assets/monitor.js?v=20260831-react2"',
-        '"/assets/paper.js?v=20260831-react2"',
-        '"/assets/live.js?v=20260831-react2"',
-        '"/assets/backtest.js?v=20260831-react2"',
+        '"/assets/ai-monitor.js?v=20260831-react3"',
+        '"/assets/monitor.js?v=20260831-react3"',
+        '"/assets/paper.js?v=20260831-react3"',
+        '"/assets/live.js?v=20260831-react3"',
+        '"/assets/backtest.js?v=20260831-react3"',
     ):
         assert asset in entrypoint
     assert 'view: "opportunities"' in component
@@ -4258,9 +4285,8 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert "历史机会" in component
     assert "window.quantdeskGetMountedPageController?.(researchHost)" in component
     assert "historyOpportunityRecordCount" in component
-    assert 'class="history-total">共 ' in component
-    assert 'class="settled">已结算 ' in component
-    assert "不是交易订单" in component
+    assert 'class="pending">待结算 ' in component
+    assert "已结算样本请到预测统计分析查看" in component
     assert (
         'this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "connecting";'
         in component

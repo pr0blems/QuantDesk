@@ -124,10 +124,10 @@ def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     controller_panel = (ROOT / "web/src/pages/PageControllerPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/controller-runtime.js?v=20260831-react2" in index
-    assert "/assets/strategies.js?v=20260831-react2" in index
-    assert index.index("/assets/controller-runtime.js?v=20260831-react2") < index.index("/assets/strategies.js?v=20260831-react2")
-    assert index.index("/assets/strategies.js?v=20260831-react2") < index.index("/src/main.tsx")
+    assert "/assets/controller-runtime.js?v=20260831-react3" in index
+    assert "/assets/strategies.js?v=20260831-react3" in index
+    assert index.index("/assets/controller-runtime.js?v=20260831-react3") < index.index("/assets/strategies.js?v=20260831-react3")
+    assert index.index("/assets/strategies.js?v=20260831-react3") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.quantdeskMountPageController(name, host)" in controller_panel
     assert "document.createElement" not in controller_panel
@@ -158,8 +158,8 @@ def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
 def test_react_shell_loads_the_current_strategy_controller() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
 
-    assert "/assets/controller-runtime.js?v=20260831-react2" in index
-    assert "/assets/strategies.js?v=20260831-react2" in index
+    assert "/assets/controller-runtime.js?v=20260831-react3" in index
+    assert "/assets/strategies.js?v=20260831-react3" in index
 
 
 def test_strategy_controller_initializes_after_mount() -> None:

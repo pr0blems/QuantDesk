@@ -3587,15 +3587,15 @@ def _current_opportunity_projection_page(
 def _historical_opportunity_conditions(
     *, user_id: int, now: datetime
 ) -> tuple[Any, ...]:
-    """Keep completed results plus genuinely inactive unsettled predictions."""
+    """Keep only genuinely inactive predictions that still need settlement."""
 
     return (
         AiMonitorOpportunity.user_id == user_id,
         AiMonitorPrediction.user_id == user_id,
         AiMonitorPrediction.settlement_version
         == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
+        AiMonitorPrediction.status.in_(("pending", "unavailable")),
         or_(
-            AiMonitorPrediction.status.in_(("completed", "unavailable")),
             AiMonitorOpportunity.status.in_(("expired", "dismissed")),
             AiMonitorOpportunity.expires_at <= now,
         ),
