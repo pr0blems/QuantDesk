@@ -5,7 +5,19 @@ from .contracts import AiMonitorAuthority, AiMonitorStageResult
 from .event_gate import EventGateService
 from .macro_regime import MacroRegimeService
 from .market_features import MarketFeatureService, realtime_feature_payload
-from .news_scoring import NewsScoringService, news_event_bursts
+from .news_scoring import (
+    NewsScoringService,
+    aggregate_news_candidates,
+    configured_indicator_policy,
+    indicator_group,
+    match_configured_indicators,
+    multi_timeframe_technical_snapshot,
+    news_actionability_snapshot,
+    news_event_bursts,
+    news_event_cluster_id,
+    resolved_news_event_cluster_id,
+    select_directional_candidates_with_technical_context,
+)
 from .opportunity_generation import (
     OpportunityGenerationService,
     annotate_event_cluster_selection,
@@ -30,11 +42,18 @@ __all__ = [
     "MacroRegimeService",
     "MarketFeatureService",
     "NewsScoringService",
+    "aggregate_news_candidates",
+    "configured_indicator_policy",
+    "indicator_group",
     "OpportunityGenerationService",
     "annotate_event_cluster_selection",
     "filter_monitored_candidates",
     "fresh_candidate_news_ids",
     "news_event_bursts",
+    "news_actionability_snapshot",
+    "news_event_cluster_id",
+    "match_configured_indicators",
+    "multi_timeframe_technical_snapshot",
     "OpportunityProjectionError",
     "OpportunityProjectionLagging",
     "OpportunityProjectionService",
@@ -42,5 +61,7 @@ __all__ = [
     "PredictionSettlementService",
     "prepare_candidate_news_triggers",
     "realtime_feature_payload",
+    "resolved_news_event_cluster_id",
+    "select_directional_candidates_with_technical_context",
     "strongest_candidate_per_symbol",
 ]

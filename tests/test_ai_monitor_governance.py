@@ -149,6 +149,32 @@ def test_opportunity_candidate_policies_live_in_the_application_boundary() -> No
     assert "def news_event_bursts(" in news_source
 
 
+def test_news_candidate_authority_lives_in_the_application_boundary() -> None:
+    orchestration_source = (
+        ROOT / "src/quantdesk_v2/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    news_source = (
+        ROOT / "src/quantdesk_v2/application/ai_monitor/news_scoring.py"
+    ).read_text(encoding="utf-8")
+
+    assert "aggregate=score_news_candidates" in orchestration_source
+    assert "actionability=classify_news_actionability" in orchestration_source
+    assert "resolve_news_event_cluster_id(" in orchestration_source
+    for name in (
+        "aggregate_news_candidates",
+        "configured_indicator_policy",
+        "indicator_group",
+        "match_configured_indicators",
+        "multi_timeframe_technical_snapshot",
+        "news_actionability_snapshot",
+        "news_event_cluster_id",
+        "resolved_news_event_cluster_id",
+        "select_directional_candidates_with_technical_context",
+    ):
+        assert f"def {name}(" not in orchestration_source
+        assert f"def {name}(" in news_source
+
+
 def test_opportunity_admission_queries_live_in_the_persistence_boundary() -> None:
     orchestration_source = (
         ROOT / "src/quantdesk_v2/ai_monitor.py"
