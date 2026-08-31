@@ -7,6 +7,7 @@ from .executions import (
     ExecutionJournalStateError,
     MySqlExecutionJournal,
 )
+from .paper_projections import MySqlPaperProjectionStore, PaperProjectionError
 
 __all__ = [
     "BacktestQueryRepository",
@@ -15,4 +16,6 @@ __all__ = [
     "ExecutionJournalStateError",
     "MySqlDecisionLedger",
     "MySqlExecutionJournal",
+    "MySqlPaperProjectionStore",
+    "PaperProjectionError",
 ]

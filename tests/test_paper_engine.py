@@ -68,14 +68,12 @@ def _mock_open_transaction(
 
     class FakeTransaction:
         def query(self, sql: str, params=()):
-            assert "FOR UPDATE" in sql
-            assert tuple(params) == (account["id"], account["user_id"])
-            return [{"balance": account["balance"]}]
+            raise AssertionError(f"fill append must not read a projection table: {sql}")
 
         def execute(self, sql: str, params=()):
             writes.append((sql, tuple(params)))
-            if fail_on_insert and "INSERT INTO paper_positions" in sql:
-                raise RuntimeError("simulated position insert failure")
+            if fail_on_insert and "INSERT INTO paper_order_executions" in sql:
+                raise RuntimeError("simulated fill append failure")
             return 1
 
     @contextmanager
@@ -88,6 +86,7 @@ def _mock_open_transaction(
 
     monkeypatch.setattr(paper.store, "transaction", transaction)
     monkeypatch.setattr(paper.store, "add_alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(paper, "_reconcile_paper_account", lambda target: True)
     _mock_execution(monkeypatch)
     return state
 
@@ -546,13 +545,19 @@ def test_open_position_always_persists_take_profit(
     )
 
     assert opened is True
-    insert_params = next(params for sql, params in writes if "INSERT INTO paper_positions" in sql)
-    entry, stop, target = insert_params[5], insert_params[8], insert_params[9]
+    insert_params = next(
+        params for sql, params in writes if "INSERT INTO paper_order_executions" in sql
+    )
+    projection = json.loads(insert_params[-1])
+    projected_position = projection["position"]
+    entry = projected_position["avg_entry"]
+    stop = projected_position["stop"]
+    target = projected_position["target"]
     assert (entry - stop) * side > 0
     assert (target - entry) * side > 0
     assert target == pytest.approx(entry + side * 5)
-    assert insert_params[15] == 1_000
-    entry_basis = json.loads(insert_params[13])
+    assert projected_position["funding_ts"] == 1_000
+    entry_basis = projected_position["basis"]
     assert entry_basis["availability"] == "captured"
     assert entry_basis["reasons"] == ["4h signal"]
     assert entry_basis["execution"]["entry_price"] == pytest.approx(entry)
@@ -574,7 +579,7 @@ def test_open_position_always_persists_take_profit(
     }
 
 
-def test_open_position_balance_and_insert_share_one_transaction(
+def test_open_position_does_not_mutate_projection_when_fill_append_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     account = _account()
@@ -591,7 +596,7 @@ def test_open_position_balance_and_insert_share_one_transaction(
         fail_on_insert=True,
     )
 
-    with pytest.raises(RuntimeError, match="simulated position insert failure"):
+    with pytest.raises(RuntimeError, match="simulated fill append failure"):
         paper._open_position(
             account,
             "TESTUSDT",
@@ -605,8 +610,9 @@ def test_open_position_balance_and_insert_share_one_transaction(
 
     assert state["rolled_back"] is True
     assert account["balance"] == initial_balance
-    assert "UPDATE paper_accounts" in writes[0][0]
-    assert "INSERT INTO paper_positions" in writes[1][0]
+    assert len(writes) == 1
+    assert "INSERT INTO paper_order_executions" in writes[0][0]
+    assert "paper_positions" not in writes[0][0]
 
 
 @pytest.mark.parametrize(
@@ -876,22 +882,26 @@ def test_close_position_deducts_accrued_funding_from_balance_and_trade(
 
     monkeypatch.setattr(paper.store, "transaction", transaction)
     monkeypatch.setattr(paper.store, "add_alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        paper,
+        "_reconcile_paper_account",
+        lambda target: target.update(balance=9_998) is None,
+    )
     _mock_execution(monkeypatch)
 
     closed = paper._close_position(account, position, 100, "max_holding_bars", 1_000)
 
     assert closed is True
-    balance_params = next(
-        params for sql, params in statements if "UPDATE paper_accounts SET balance" in sql
+    fact_params = next(
+        params for sql, params in statements if "INSERT INTO paper_order_executions" in sql
     )
-    trade_params = next(
-        params for sql, params in statements if "INSERT INTO paper_trades" in sql
-    )
-    assert balance_params[0] == pytest.approx(9_998)
-    assert trade_params[8] == pytest.approx(-2)
-    assert trade_params[9] == 0
-    assert trade_params[10] == 2
-    trade_basis = json.loads(trade_params[15])
+    projection = json.loads(fact_params[-1])
+    trade = projection["trade"]
+    assert projection["balance_credit"] == pytest.approx(48)
+    assert trade["pnl"] == pytest.approx(-2)
+    assert trade["fee"] == 0
+    assert trade["funding"] == 2
+    trade_basis = trade["entry_basis"]
     assert trade_basis["schema_version"] == 1
     assert trade_basis["exit_decision"] == {
         "version": "unified_exit_decision_v1",
@@ -907,7 +917,7 @@ def test_close_position_deducts_accrued_funding_from_balance_and_trade(
     assert account["balance"] == pytest.approx(9_998)
 
 
-def test_close_position_requires_atomic_row_ownership(
+def test_close_position_requires_successful_fact_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     account = _account()
@@ -924,19 +934,15 @@ def test_close_position_requires_atomic_row_ownership(
     }
     statements: list[str] = []
 
-    class LostOwnershipTransaction:
-        @staticmethod
-        def query(sql, params=()):
-            return [{"balance": 10_000}]
-
+    class FillTransaction:
         @staticmethod
         def execute(sql, params=()):
             statements.append(sql)
-            return 0 if "DELETE FROM paper_positions" in sql else 1
+            return 1
 
     @contextmanager
     def transaction():
-        yield LostOwnershipTransaction()
+        yield FillTransaction()
 
     monkeypatch.setattr(paper.store, "transaction", transaction)
     monkeypatch.setattr(
@@ -944,13 +950,14 @@ def test_close_position_requires_atomic_row_ownership(
         "add_alert",
         lambda *args, **kwargs: pytest.fail("lost close ownership must not alert"),
     )
+    monkeypatch.setattr(paper, "_reconcile_paper_account", lambda account: False)
     _mock_execution(monkeypatch)
 
     closed = paper._close_position(account, position, 105, "take_profit", 1_000)
 
     assert closed is False
     assert len(statements) == 1
-    assert "DELETE FROM paper_positions" in statements[0]
+    assert "INSERT INTO paper_order_executions" in statements[0]
 
 
 def test_system_default_contains_the_fixed_paper_strategy() -> None:
@@ -975,6 +982,7 @@ def test_api_rules_publish_atr_take_profit(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(paper, "_account", lambda user_id, account_id: account)
     monkeypatch.setattr(paper, "_prices", lambda: {})
     monkeypatch.setattr(paper, "_positions", lambda account: [])
+    monkeypatch.setattr(paper, "_reconcile_paper_account", lambda account: True)
     monkeypatch.setattr(paper.store, "query", lambda sql, params=(): [])
 
     data = paper.api_data(account["user_id"], account["id"])
@@ -1036,6 +1044,7 @@ def test_paused_accounts_keep_recording_equity_without_running_strategy(
     monkeypatch.setattr(paper, "_prices", lambda: {"TESTUSDT": 100.0})
     monkeypatch.setattr(paper, "_tracked_accounts", lambda account_id=None: [active, paused])
     monkeypatch.setattr(paper, "_positions", lambda account: [])
+    monkeypatch.setattr(paper, "_reconcile_paper_account", lambda account: True)
     monkeypatch.setattr(
         paper, "_tick_account", lambda account, prices, now: ticked.append(account["id"])
     )
@@ -1049,6 +1058,34 @@ def test_paused_accounts_keep_recording_equity_without_running_strategy(
 
     assert ticked == [11]
     assert recorded == [12]
+
+
+def test_projection_failure_isolates_only_the_affected_paper_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broken = {**_account(), "id": 11, "status": "active"}
+    healthy = {**_account(), "id": 12, "status": "active"}
+    ticked: list[int] = []
+
+    @contextmanager
+    def advisory_lock(*args, **kwargs):
+        yield True
+
+    monkeypatch.setattr(paper.store, "advisory_lock", advisory_lock)
+    monkeypatch.setattr(paper, "_tracked_accounts", lambda account_id=None: [broken, healthy])
+    monkeypatch.setattr(paper, "_prices", lambda: {"TESTUSDT": 100.0})
+    monkeypatch.setattr(
+        paper,
+        "_reconcile_paper_account",
+        lambda account: account["id"] != broken["id"],
+    )
+    monkeypatch.setattr(
+        paper, "_tick_account", lambda account, prices, now: ticked.append(account["id"])
+    )
+
+    paper.tick()
+
+    assert ticked == [healthy["id"]]
 
 
 def test_paper_max_positions_is_hard_capped_at_twenty() -> None:
@@ -1290,8 +1327,14 @@ def test_atr_risk_sizing_keeps_configured_leverage_and_limits_risk(
     )
 
     assert opened is True
-    params = next(params for sql, params in writes if "INSERT INTO paper_positions" in sql)
-    quantity, margin, leverage, stop = params[4], params[6], params[7], params[8]
+    params = next(
+        params for sql, params in writes if "INSERT INTO paper_order_executions" in sql
+    )
+    position = json.loads(params[-1])["position"]
+    quantity = position["qty"]
+    margin = position["margin"]
+    leverage = position["leverage"]
+    stop = position["stop"]
     assert leverage == 20
     assert stop == pytest.approx(85)
     assert quantity * (100 - stop) == pytest.approx(50)

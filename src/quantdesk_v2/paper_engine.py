@@ -31,6 +31,7 @@ from quantdesk_v2.strategy_source_runtime import (
 
 from . import indicators as ind
 from . import market_store as store
+from .application.paper_reconciliation import PaperExecutionReconciliationService
 from .application.risk import RiskPolicy
 from .application.safety import ExecutionSafetyController
 from .application.strategy_execution import (
@@ -66,6 +67,7 @@ from .domain.trading import (
 )
 from .infrastructure.callback_broker import PaperBroker
 from .infrastructure.paper_execution import PaperExecutionRuntime
+from .infrastructure.persistence.paper_projections import MySqlPaperProjectionStore
 from .infrastructure.store_market_data import StoreMarketDataFeed
 from .live_risk import (
     OpenPositionRisk,
@@ -102,6 +104,9 @@ LEGACY_TREND_MA_PERIOD = 150
 PAPER_MAX_FUTURE_TICKER_SKEW_SECONDS = 15
 _lock = threading.RLock()
 _paper_execution_safety: dict[int, ExecutionSafetyController] = {}
+_paper_reconciliation = PaperExecutionReconciliationService(
+    MySqlPaperProjectionStore(store)
+)
 
 
 class _PriceSnapshot(dict[str, float]):
@@ -372,6 +377,91 @@ def _paper_lookup(reference: OrderReference) -> BrokerOrder:
     if not rows:
         raise BrokerError("order_not_found")
     return _paper_order(rows[0])
+
+
+def _reconcile_paper_account(account: dict[str, Any]) -> bool:
+    state_key = f"paper:{account['id']}:projection_health"
+    result = _paper_reconciliation.reconcile_account(
+        user_id=int(account["user_id"]),
+        paper_account_id=int(account["id"]),
+    )
+    if not result.ready:
+        details = ",".join((*result.drift_codes, *result.errors)) or "pending_projection"
+        previous = store.user_state_get(account["user_id"], state_key, {})
+        health = {
+            "status": "blocked",
+            "pending_count": result.remaining,
+            "drift_count": len(result.drift_codes),
+            "failed_count": result.failed,
+            "details": details[:500],
+            "checked_at": int(time.time()),
+        }
+        if not isinstance(previous, dict) or (
+            previous.get("status") != "blocked"
+            or previous.get("details") != health["details"]
+        ):
+            store.user_state_set(account["user_id"], state_key, health)
+            store.add_alert(
+                "SYSTEM",
+                "paper_projection_blocked",
+                "warning",
+                None,
+                f"模拟账户「{account['name']}」成交投影异常，已隔离新订单。",
+                {
+                    "paper_account_id": account["public_id"],
+                    "paper_account_name": account["name"],
+                    **health,
+                },
+                user_id=account["user_id"],
+            )
+        print(
+            f"[paper] account {account['id']} projection blocked: "
+            f"remaining={result.remaining} details={details[:500]}"
+        )
+        return False
+    previous = store.user_state_get(account["user_id"], state_key, {})
+    if isinstance(previous, dict) and previous.get("status") == "blocked":
+        recovered_at = int(time.time())
+        store.user_state_set(
+            account["user_id"],
+            state_key,
+            {
+                "status": "healthy",
+                "pending_count": 0,
+                "drift_count": 0,
+                "failed_count": 0,
+                "checked_at": recovered_at,
+                "last_success_at": recovered_at,
+            },
+        )
+        store.add_alert(
+            "SYSTEM",
+            "paper_projection_recovered",
+            "info",
+            None,
+            f"模拟账户「{account['name']}」成交投影已恢复。",
+            {
+                "paper_account_id": account["public_id"],
+                "paper_account_name": account["name"],
+                "recovered_at": recovered_at,
+            },
+            user_id=account["user_id"],
+        )
+    rows = store.query(
+        "SELECT balance FROM paper_accounts WHERE id=? AND user_id=? LIMIT 1",
+        (account["id"], account["user_id"]),
+    )
+    if not rows:
+        print(f"[paper] account {account['id']} disappeared during reconciliation")
+        return False
+    try:
+        balance = float(rows[0]["balance"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not math.isfinite(balance) or balance < 0:
+        return False
+    account["balance"] = balance
+    return True
 
 
 def _paper_execute(
@@ -1322,61 +1412,47 @@ def _open_position(
     )
     if intent is None:
         return False
-    balance_after: list[float] = []
+    projection = {
+        "schema_version": 1,
+        "action": "open",
+        "balance_debit": debit,
+        "position": {
+            "side": side,
+            "qty": quantity,
+            "avg_entry": execution,
+            "margin": margin,
+            "leverage": leverage,
+            "stop": stop,
+            "target": target,
+            "opened_ts": now,
+            "last_add_ts": now,
+            "open_score": stored_score,
+            "basis": entry_basis,
+            "liq_price": liquidation,
+            "funding_ts": now,
+            "atr_entry": atr,
+            "peak_price": execution,
+        },
+    }
 
     def submit(order: MarketOrder) -> BrokerOrder:
         with store.transaction() as transaction:
-            balance_rows = transaction.query(
-                """SELECT balance FROM paper_accounts
-                   WHERE id=? AND user_id=? FOR UPDATE""",
-                (account["id"], account["user_id"]),
-            )
-            if not balance_rows:
-                raise BrokerError("paper_account_unavailable")
-            try:
-                locked_balance = float(balance_rows[0]["balance"])
-            except (KeyError, TypeError, ValueError):
-                raise BrokerError("paper_balance_invalid") from None
-            if (
-                not math.isfinite(locked_balance)
-                or locked_balance < 0
-                or locked_balance + 1e-8 < debit
-            ):
-                raise BrokerError("insufficient_margin")
-            new_balance = max(round(locked_balance - debit, 8), 0.0)
-            transaction.execute(
-                """UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP
-                   WHERE id=? AND user_id=?""",
-                (new_balance, account["id"], account["user_id"]),
-            )
-            transaction.execute(
-                """INSERT INTO paper_positions(
-                   paper_account_id,user_id,symbol,side,qty,avg_entry,margin,leverage,stop,target,
-                       adds,opened_ts,last_add_ts,open_score,basis,funding_acc,liq_price,funding_ts,
-                       atr_entry,peak_price,tp_done
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?, ?,0,?,?,?,?,0)""",
-                (
-                    account["id"], account["user_id"], symbol, side, quantity, execution,
-                    margin, leverage, stop, target, now, now, stored_score,
-                    json.dumps(entry_basis, ensure_ascii=False), liquidation, now, atr,
-                    execution,
-                ),
-            )
             transaction.execute(
                 """INSERT INTO paper_order_executions(
                    public_id,user_id,paper_account_id,deployment_id,intent_id,client_order_id,
                    symbol,action,side,position_side,quantity,executed_quantity,average_price,
-                   status,response_json
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'FILLED',?)""",
+                   status,response_json,projection_status,projection_version,projection_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'FILLED',?,'pending',
+                            'paper_projection_v1',?)""",
                 (
                     str(uuid.uuid4()), account["user_id"], account["id"],
                     account["deployment_id"], intent.intent_id, order.client_order_id,
                     symbol, "open", order.side.value, order.position_side.value,
                     order.quantity, order.quantity, execution,
                     json.dumps({"simulated": True, "entry_basis": entry_basis}, ensure_ascii=False),
+                    json.dumps(projection, ensure_ascii=False),
                 ),
             )
-            balance_after.append(new_balance)
             return _paper_order(
                 {
                     "id": order.client_order_id,
@@ -1396,8 +1472,8 @@ def _open_position(
     if result.state is not ExecutionState.FILLED:
         print(f"[paper] unified open blocked: {result.error_code or result.state.value}")
         return False
-    if balance_after:
-        account["balance"] = balance_after[-1]
+    if not _reconcile_paper_account(account):
+        return False
     direction = "long" if side > 0 else "short"
     store.add_alert(
         symbol,
@@ -1456,57 +1532,46 @@ def _close_position(
     )
     if intent is None:
         return False
-    balance_after: list[float] = []
+    projection = {
+        "schema_version": 1,
+        "action": "close",
+        "position_id": int(position["id"]),
+        "balance_credit": returned,
+        "trade": {
+            "side": int(position["side"]),
+            "qty": quantity,
+            "entry_price": float(position["avg_entry"]),
+            "exit_price": execution,
+            "margin": margin,
+            "pnl": max(pnl, -margin),
+            "fee": fee,
+            "funding": float(position.get("funding_acc") or 0),
+            "reason": reason,
+            "open_score": position.get("open_score"),
+            "opened_ts": int(position["opened_ts"]),
+            "closed_ts": now,
+            "entry_basis": trade_basis,
+        },
+    }
 
     def submit(order: MarketOrder) -> BrokerOrder:
         with store.transaction() as transaction:
-            ownership = transaction.query(
-                """SELECT a.balance FROM paper_positions p
-                   JOIN paper_accounts a ON a.id=p.paper_account_id AND a.user_id=p.user_id
-                   WHERE p.id=? AND p.paper_account_id=? AND p.user_id=? FOR UPDATE""",
-                (position["id"], account["id"], account["user_id"]),
-            )
-            if not ownership:
-                raise BrokerError("position_to_reduce_not_found")
-            deleted = transaction.execute(
-                "DELETE FROM paper_positions WHERE id=? AND paper_account_id=? AND user_id=?",
-                (position["id"], account["id"], account["user_id"]),
-            )
-            if deleted != 1:
-                raise BrokerError("paper_position_concurrent_change")
-            new_balance = max(round(float(ownership[0]["balance"]) + returned, 8), 0.0)
-            transaction.execute(
-                """UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP
-                   WHERE id=? AND user_id=?""",
-                (new_balance, account["id"], account["user_id"]),
-            )
-            transaction.execute(
-                """INSERT INTO paper_trades(
-                       paper_account_id,user_id,symbol,side,qty,entry_price,exit_price,margin,pnl,
-                       fee,funding,reason,open_score,opened_ts,closed_ts,entry_basis_json
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    account["id"], account["user_id"], position["symbol"], position["side"],
-                    quantity, position["avg_entry"], execution, margin, max(pnl, -margin), fee,
-                    position.get("funding_acc") or 0, reason, position.get("open_score"),
-                    position["opened_ts"], now, json.dumps(trade_basis, ensure_ascii=False),
-                ),
-            )
             transaction.execute(
                 """INSERT INTO paper_order_executions(
                    public_id,user_id,paper_account_id,deployment_id,intent_id,client_order_id,
                    symbol,action,side,position_side,quantity,executed_quantity,average_price,
-                   status,response_json
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'FILLED',?)""",
+                   status,response_json,projection_status,projection_version,projection_json
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'FILLED',?,'pending',
+                            'paper_projection_v1',?)""",
                 (
                     str(uuid.uuid4()), account["user_id"], account["id"],
                     account["deployment_id"], intent.intent_id, order.client_order_id,
                     position["symbol"], "close", order.side.value, order.position_side.value,
                     order.quantity, order.quantity, execution,
                     json.dumps({"simulated": True, "reason": reason}, ensure_ascii=False),
+                    json.dumps(projection, ensure_ascii=False),
                 ),
             )
-            balance_after.append(new_balance)
             return _paper_order(
                 {
                     "id": order.client_order_id,
@@ -1526,8 +1591,8 @@ def _close_position(
     if result.state is not ExecutionState.FILLED:
         print(f"[paper] unified close blocked: {result.error_code or result.state.value}")
         return False
-    if balance_after:
-        account["balance"] = balance_after[-1]
+    if not _reconcile_paper_account(account):
+        return False
     direction = "long" if int(position["side"]) > 0 else "short"
     store.add_alert(
         position["symbol"],
@@ -1732,16 +1797,35 @@ def tick(account_id: int | None = None) -> None:
     with store.advisory_lock("quantdesk-paper-tick", 0) as acquired:
         if not acquired:
             return
-        prices = _prices()
-        if not prices:
-            return
         with _lock:
             now = int(time.time())
+            ready_accounts: list[dict[str, Any]] = []
             for account in _tracked_accounts(account_id):
-                if account["status"] == "active":
-                    _tick_account(account, prices, now)
-                else:
-                    _record_equity(account, prices, _positions(account), now)
+                try:
+                    if _reconcile_paper_account(account):
+                        ready_accounts.append(account)
+                except Exception as exc:
+                    print(
+                        f"[paper] account {account.get('id')} isolated: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            prices = _prices()
+            if not prices:
+                return
+            for account in ready_accounts:
+                try:
+                    if account["status"] == "active":
+                        _tick_account(account, prices, now)
+                    else:
+                        _record_equity(account, prices, _positions(account), now)
+                except Exception as exc:
+                    # One tenant's malformed projection must never stop another
+                    # paper account. The pending fact remains blocked and is
+                    # retried before that account may generate new intents.
+                    print(
+                        f"[paper] account {account.get('id')} isolated: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
 
 def paper_loop() -> None:
