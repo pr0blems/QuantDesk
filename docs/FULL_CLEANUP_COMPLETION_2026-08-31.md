@@ -24,6 +24,7 @@
 - 前端生产 JS/CSS/HTML 哈希清理前后一致。
 - AI Monitor 的历史 settlement version 和不可变预测事实不被重写。
 - legacy 数据仅盘点，不自动迁移或删除。
+- API 优雅关闭上限设为 20 秒，确保 SSE/WebSocket 长连接先由应用收敛，并在 systemd 的 30 秒停止上限前退出。
 
 ## 回退
 

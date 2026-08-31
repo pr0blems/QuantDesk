@@ -416,6 +416,10 @@ def serve() -> int:
         port=settings.app_port,
         proxy_headers=True,
         forwarded_allow_ips="127.0.0.1",
+        # SSE and WebSocket clients may stay connected across a release.  End
+        # the application-level drain before systemd's 30-second stop limit so
+        # normal deployments never require SIGKILL.
+        timeout_graceful_shutdown=20,
     )
     return 0
 

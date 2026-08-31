@@ -13,9 +13,28 @@ class _ProjectionStore:
 
 
 class _Settings:
+    app_host = "127.0.0.1"
+    app_port = 8000
+
     @staticmethod
     def validate_runtime() -> None:
         return None
+
+
+def test_serve_finishes_graceful_drain_before_systemd_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "get_settings", lambda: _Settings())
+    captured: dict[str, object] = {}
+
+    def run(app: str, **kwargs: object) -> None:
+        captured["app"] = app
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli.uvicorn, "run", run)
+
+    assert cli.serve() == 0
+    assert captured["app"] == "quantdesk_v2.main:app"
+    assert captured["timeout_graceful_shutdown"] == 20
+    assert captured["proxy_headers"] is True
 
 
 def test_audit_paper_is_read_only_and_reports_blocked_accounts(monkeypatch, capsys) -> None:
