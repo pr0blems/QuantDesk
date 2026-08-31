@@ -20,16 +20,55 @@ def _require_mysql() -> None:
         raise RuntimeError("QuantDesk migrations require MySQL or MariaDB")
 
 
+def _column(table_name: str, column_name: str) -> dict[str, object] | None:
+    for item in sa.inspect(op.get_bind()).get_columns(table_name):
+        if item["name"] == column_name:
+            return item
+    return None
+
+
+def _constraint_names(table_name: str) -> set[str]:
+    inspector = sa.inspect(op.get_bind())
+    groups = (
+        inspector.get_foreign_keys(table_name),
+        inspector.get_unique_constraints(table_name),
+        inspector.get_check_constraints(table_name),
+    )
+    return {
+        str(item["name"])
+        for group in groups
+        for item in group
+        if item.get("name")
+    }
+
+
+def _index_names(table_name: str) -> set[str]:
+    return {
+        str(item["name"])
+        for item in sa.inspect(op.get_bind()).get_indexes(table_name)
+        if item.get("name")
+    }
+
+
 def upgrade() -> None:
     _require_mysql()
 
-    op.add_column("backtest_runs", sa.Column("public_id", sa.String(36), nullable=True))
-    op.add_column(
-        "backtest_runs", sa.Column("user_strategy_id", sa.BigInteger(), nullable=True)
-    )
-    op.add_column(
-        "backtest_runs", sa.Column("strategy_revision_id", sa.BigInteger(), nullable=True)
-    )
+    # MySQL DDL is not transactional.  Every schema operation is intentionally
+    # resumable so an interrupted production migration can safely continue.
+    if _column("backtest_runs", "public_id") is None:
+        op.add_column(
+            "backtest_runs", sa.Column("public_id", sa.String(36), nullable=True)
+        )
+    if _column("backtest_runs", "user_strategy_id") is None:
+        op.add_column(
+            "backtest_runs",
+            sa.Column("user_strategy_id", sa.BigInteger(), nullable=True),
+        )
+    if _column("backtest_runs", "strategy_revision_id") is None:
+        op.add_column(
+            "backtest_runs",
+            sa.Column("strategy_revision_id", sa.BigInteger(), nullable=True),
+        )
     op.execute("UPDATE backtest_runs SET public_id = UUID() WHERE public_id IS NULL")
     op.execute(
         """
@@ -51,76 +90,82 @@ def upgrade() -> None:
             run_row.strategy_revision_id = deployment_row.strategy_revision_id
         """
     )
-    op.alter_column(
-        "backtest_runs",
-        "public_id",
-        existing_type=sa.String(36),
-        nullable=False,
-    )
-    op.create_unique_constraint(
-        "uq_backtest_runs_public_id", "backtest_runs", ["public_id"]
-    )
-    op.create_unique_constraint(
-        "uq_backtest_runs_id_user_id", "backtest_runs", ["id", "user_id"]
-    )
-    op.create_foreign_key(
-        "fk_backtest_runs_strategy_tenant",
-        "backtest_runs",
-        "user_strategies",
-        ["user_strategy_id", "user_id"],
-        ["id", "user_id"],
-        ondelete="RESTRICT",
-    )
-    op.create_foreign_key(
-        "fk_backtest_runs_revision_tenant",
-        "backtest_runs",
-        "strategy_revisions",
-        ["strategy_revision_id", "user_id"],
-        ["id", "user_id"],
-        ondelete="RESTRICT",
-    )
-    op.create_index(
-        "ix_backtest_runs_revision_created",
-        "backtest_runs",
-        ["strategy_revision_id", "created_at"],
-    )
+    public_id = _column("backtest_runs", "public_id")
+    if public_id is not None and bool(public_id.get("nullable")):
+        op.alter_column(
+            "backtest_runs",
+            "public_id",
+            existing_type=sa.String(36),
+            nullable=False,
+        )
+    run_constraints = _constraint_names("backtest_runs")
+    if "uq_backtest_runs_public_id" not in run_constraints:
+        op.create_unique_constraint(
+            "uq_backtest_runs_public_id", "backtest_runs", ["public_id"]
+        )
+    if "uq_backtest_runs_id_user_id" not in run_constraints:
+        op.create_unique_constraint(
+            "uq_backtest_runs_id_user_id", "backtest_runs", ["id", "user_id"]
+        )
+    if "fk_backtest_runs_strategy_tenant" not in run_constraints:
+        op.create_foreign_key(
+            "fk_backtest_runs_strategy_tenant",
+            "backtest_runs",
+            "user_strategies",
+            ["user_strategy_id", "user_id"],
+            ["id", "user_id"],
+            ondelete="RESTRICT",
+        )
+    if "fk_backtest_runs_revision_tenant" not in run_constraints:
+        op.create_foreign_key(
+            "fk_backtest_runs_revision_tenant",
+            "backtest_runs",
+            "strategy_revisions",
+            ["strategy_revision_id", "user_id"],
+            ["id", "user_id"],
+            ondelete="RESTRICT",
+        )
+    if "ix_backtest_runs_revision_created" not in _index_names("backtest_runs"):
+        op.create_index(
+            "ix_backtest_runs_revision_created",
+            "backtest_runs",
+            ["strategy_revision_id", "created_at"],
+        )
 
-    op.add_column(
-        "strategy_run_manifests",
-        sa.Column("backtest_run_id", sa.BigInteger(), nullable=True),
-    )
-    op.drop_constraint(
-        "ck_strategy_run_manifests_valid_mode",
-        "strategy_run_manifests",
-        type_="check",
-    )
-    op.drop_constraint(
-        "fk_strategy_run_manifests_deployment_tenant",
-        "strategy_run_manifests",
-        type_="foreignkey",
-    )
-    op.drop_constraint(
-        "fk_strategy_run_manifests_revision_tenant",
-        "strategy_run_manifests",
-        type_="foreignkey",
-    )
-    op.drop_constraint(
-        "uq_strategy_run_manifests_deployment",
-        "strategy_run_manifests",
-        type_="unique",
-    )
-    op.alter_column(
-        "strategy_run_manifests",
-        "deployment_id",
-        existing_type=sa.BigInteger(),
-        nullable=True,
-    )
-    op.alter_column(
-        "strategy_run_manifests",
-        "strategy_revision_id",
-        existing_type=sa.BigInteger(),
-        nullable=True,
-    )
+    if _column("strategy_run_manifests", "backtest_run_id") is None:
+        op.add_column(
+            "strategy_run_manifests",
+            sa.Column("backtest_run_id", sa.BigInteger(), nullable=True),
+        )
+    manifest_constraints = _constraint_names("strategy_run_manifests")
+    for name, constraint_type in (
+        ("ck_strategy_run_manifests_valid_mode", "check"),
+        ("fk_strategy_run_manifests_deployment_tenant", "foreignkey"),
+        ("fk_strategy_run_manifests_revision_tenant", "foreignkey"),
+        ("uq_strategy_run_manifests_deployment", "unique"),
+    ):
+        if name in manifest_constraints:
+            op.drop_constraint(
+                name,
+                "strategy_run_manifests",
+                type_=constraint_type,
+            )
+    deployment_id = _column("strategy_run_manifests", "deployment_id")
+    if deployment_id is not None and not bool(deployment_id.get("nullable")):
+        op.alter_column(
+            "strategy_run_manifests",
+            "deployment_id",
+            existing_type=sa.BigInteger(),
+            nullable=True,
+        )
+    revision_id = _column("strategy_run_manifests", "strategy_revision_id")
+    if revision_id is not None and not bool(revision_id.get("nullable")):
+        op.alter_column(
+            "strategy_run_manifests",
+            "strategy_revision_id",
+            existing_type=sa.BigInteger(),
+            nullable=True,
+        )
     op.execute(
         """
         DELETE manifest_row
@@ -185,7 +230,8 @@ def upgrade() -> None:
                    'strategy_key', run_row.strategy_id,
                    'config', run_row.config_json
                ),
-               SHA2(CONCAT('backtest-run:', CAST(run_row.id AS CHAR), ':legacy'), 256),
+               SHA2(CONCAT('backtest-run:', CAST(run_row.id AS CHAR),
+                           CHAR(58), 'legacy'), 256),
                run_row.created_at
         FROM backtest_runs AS run_row
         WHERE NOT EXISTS (
@@ -195,59 +241,69 @@ def upgrade() -> None:
         )
         """
     )
-    op.create_foreign_key(
-        "fk_strategy_run_manifests_deployment_tenant",
-        "strategy_run_manifests",
-        "strategy_deployments",
-        ["deployment_id", "user_id"],
-        ["id", "user_id"],
-        ondelete="CASCADE",
-    )
-    op.create_foreign_key(
-        "fk_strategy_run_manifests_revision_tenant",
-        "strategy_run_manifests",
-        "strategy_revisions",
-        ["strategy_revision_id", "user_id"],
-        ["id", "user_id"],
-        ondelete="RESTRICT",
-    )
-    op.create_foreign_key(
-        "fk_strategy_run_manifests_backtest_tenant",
-        "strategy_run_manifests",
-        "backtest_runs",
-        ["backtest_run_id", "user_id"],
-        ["id", "user_id"],
-        ondelete="CASCADE",
-    )
-    op.create_unique_constraint(
-        "uq_strategy_run_manifests_deployment",
-        "strategy_run_manifests",
-        ["deployment_id"],
-    )
-    op.create_unique_constraint(
-        "uq_strategy_run_manifests_backtest",
-        "strategy_run_manifests",
-        ["backtest_run_id"],
-    )
-    op.create_check_constraint(
-        "ck_strategy_run_manifests_valid_mode",
-        "strategy_run_manifests",
-        "mode IN ('backtest', 'paper', 'shadow', 'live')",
-    )
-    op.create_check_constraint(
-        "ck_strategy_run_manifests_valid_owner",
-        "strategy_run_manifests",
-        "(mode = 'backtest' AND backtest_run_id IS NOT NULL AND deployment_id IS NULL) "
-        "OR (mode IN ('paper', 'shadow', 'live') AND deployment_id IS NOT NULL "
-        "AND backtest_run_id IS NULL)",
-    )
+    manifest_constraints = _constraint_names("strategy_run_manifests")
+    if "fk_strategy_run_manifests_deployment_tenant" not in manifest_constraints:
+        op.create_foreign_key(
+            "fk_strategy_run_manifests_deployment_tenant",
+            "strategy_run_manifests",
+            "strategy_deployments",
+            ["deployment_id", "user_id"],
+            ["id", "user_id"],
+            ondelete="CASCADE",
+        )
+    if "fk_strategy_run_manifests_revision_tenant" not in manifest_constraints:
+        op.create_foreign_key(
+            "fk_strategy_run_manifests_revision_tenant",
+            "strategy_run_manifests",
+            "strategy_revisions",
+            ["strategy_revision_id", "user_id"],
+            ["id", "user_id"],
+            ondelete="RESTRICT",
+        )
+    if "fk_strategy_run_manifests_backtest_tenant" not in manifest_constraints:
+        op.create_foreign_key(
+            "fk_strategy_run_manifests_backtest_tenant",
+            "strategy_run_manifests",
+            "backtest_runs",
+            ["backtest_run_id", "user_id"],
+            ["id", "user_id"],
+            ondelete="CASCADE",
+        )
+    if "uq_strategy_run_manifests_deployment" not in manifest_constraints:
+        op.create_unique_constraint(
+            "uq_strategy_run_manifests_deployment",
+            "strategy_run_manifests",
+            ["deployment_id"],
+        )
+    if "uq_strategy_run_manifests_backtest" not in manifest_constraints:
+        op.create_unique_constraint(
+            "uq_strategy_run_manifests_backtest",
+            "strategy_run_manifests",
+            ["backtest_run_id"],
+        )
+    if "ck_strategy_run_manifests_valid_mode" not in manifest_constraints:
+        op.create_check_constraint(
+            "ck_strategy_run_manifests_valid_mode",
+            "strategy_run_manifests",
+            "mode IN ('backtest', 'paper', 'shadow', 'live')",
+        )
+    if "ck_strategy_run_manifests_valid_owner" not in manifest_constraints:
+        op.create_check_constraint(
+            "ck_strategy_run_manifests_valid_owner",
+            "strategy_run_manifests",
+            "(mode = 'backtest' AND backtest_run_id IS NOT NULL AND deployment_id IS NULL) "
+            "OR (mode IN ('paper', 'shadow', 'live') AND deployment_id IS NOT NULL "
+            "AND backtest_run_id IS NULL)",
+        )
 
     op.execute("DELETE FROM strategy_deployments WHERE mode = 'backtest'")
-    op.drop_constraint(
-        "ck_strategy_deployments_valid_mode",
-        "strategy_deployments",
-        type_="check",
-    )
+    deployment_constraints = _constraint_names("strategy_deployments")
+    if "ck_strategy_deployments_valid_mode" in deployment_constraints:
+        op.drop_constraint(
+            "ck_strategy_deployments_valid_mode",
+            "strategy_deployments",
+            type_="check",
+        )
     op.create_check_constraint(
         "ck_strategy_deployments_valid_mode",
         "strategy_deployments",

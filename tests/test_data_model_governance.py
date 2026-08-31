@@ -89,6 +89,9 @@ def test_governance_migrations_are_linear_and_backfill_facts() -> None:
     assert 'down_revision: str | None = "0077_live_canary_observations"' in governance
     assert "DELETE FROM strategy_deployments WHERE mode = 'backtest'" in governance
     assert "backtest_run_id" in governance
+    assert "def _column(" in governance
+    assert "CHAR(58), 'legacy'" in governance
+    assert "':legacy'" not in governance
     assert 'down_revision: str | None = "0078_data_model_governance"' in positions
     assert "paper_order_executions" in positions
     assert "live_order_intents" in positions
