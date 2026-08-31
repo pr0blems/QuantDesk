@@ -595,7 +595,8 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       }
       const button = event.target.closest("[data-open-contract]");
       if (!button || button.disabled) return;
-      const research = this.q("#opportunity-research");
+      const researchHost = this.q("#opportunity-research");
+      const research = window.quantdeskGetMountedPageController?.(researchHost) || researchHost;
       if (typeof research?.openResearch !== "function") {
         this.showBanner("合约 K 线组件尚未加载，请刷新页面后重试。", "error");
         return;

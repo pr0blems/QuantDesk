@@ -3,6 +3,7 @@ import type { ApiRequestOptions, ApiStreamOptions } from "./api/client";
 export type PageControllerName = "ai-monitor-dashboard" | "backtest-workbench" | "contract-monitor" | "live-dashboard" | "paper-dashboard" | "strategy-center";
 
 export type PageController = {
+  openResearch?: (symbol: string, timeframe: string, context?: unknown) => void;
   pause?: () => void;
   start?: () => void;
 };
@@ -15,6 +16,7 @@ declare global {
     quantdeskOpenMonitorMarketSocket: (symbol: string) => Promise<WebSocket>;
     quantdeskHasPageController: (name: PageControllerName) => boolean;
     quantdeskMountPageController: (name: PageControllerName, host: HTMLElement) => PageController;
+    quantdeskGetMountedPageController: (host: HTMLElement | null) => PageController | null;
     quantdeskUnmountPageController: (host: HTMLElement) => void;
   }
 }

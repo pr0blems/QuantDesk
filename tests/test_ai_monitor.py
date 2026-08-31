@@ -4168,20 +4168,20 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'name="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260831-react1"' in entrypoint
-    assert '"/assets/monitor.js?v=20260831-react1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260831-react2"' in entrypoint
+    assert '"/assets/monitor.js?v=20260831-react2"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
     assert 'href="/assets/ai-monitor.css?v=20260828-event-samples1"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
-    assert "/assets/controller-runtime.js?v=20260831-react1" in react_index
-    assert "/assets/strategies.js?v=20260831-react1" in react_index
+    assert "/assets/controller-runtime.js?v=20260831-react2" in react_index
+    assert "/assets/strategies.js?v=20260831-react2" in react_index
     for asset in (
-        '"/assets/ai-monitor.js?v=20260831-react1"',
-        '"/assets/monitor.js?v=20260831-react1"',
-        '"/assets/paper.js?v=20260831-react1"',
-        '"/assets/live.js?v=20260831-react1"',
-        '"/assets/backtest.js?v=20260831-react1"',
+        '"/assets/ai-monitor.js?v=20260831-react2"',
+        '"/assets/monitor.js?v=20260831-react2"',
+        '"/assets/paper.js?v=20260831-react2"',
+        '"/assets/live.js?v=20260831-react2"',
+        '"/assets/backtest.js?v=20260831-react2"',
     ):
         assert asset in entrypoint
     assert 'view: "opportunities"' in component
@@ -4256,6 +4256,7 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert "this.virtualEntryState(item, this.virtualEntryGate(item)).tone" in component
     assert "当前机会" in component
     assert "历史机会" in component
+    assert "window.quantdeskGetMountedPageController?.(researchHost)" in component
     assert "historyOpportunityRecordCount" in component
     assert 'class="history-total">共 ' in component
     assert 'class="settled">已结算 ' in component

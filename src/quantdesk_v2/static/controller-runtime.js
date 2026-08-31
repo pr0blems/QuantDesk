@@ -40,6 +40,10 @@
     mountedControllers.delete(host);
   }
 
+  function getMountedPageController(host) {
+    return mountedControllers.get(host) || null;
+  }
+
   function registerPageController(name, Controller) {
     if (!name || typeof Controller !== "function") {
       throw new TypeError("页面控制器注册参数无效");
@@ -64,6 +68,7 @@
   global.QuantDeskPageController = QuantDeskPageController;
   global.quantdeskRegisterPageController = registerPageController;
   global.quantdeskMountPageController = mountPageController;
+  global.quantdeskGetMountedPageController = getMountedPageController;
   global.quantdeskUnmountPageController = unmountPageController;
   global.quantdeskHasPageController = (name) => definitions.has(name);
   global.quantdeskPageControllerRegistrationEvent = registrationEvent;
