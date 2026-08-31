@@ -20,12 +20,18 @@ class _Settings:
 
 def test_audit_paper_is_read_only_and_reports_blocked_accounts(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "get_settings", lambda: _Settings())
-    monkeypatch.setattr(
-        "quantdesk_v2.market_store.query",
-        lambda _sql, _params=(): [
+    queries: list[str] = []
+
+    def query(sql, _params=()):
+        queries.append(sql)
+        return [
             {"id": 1, "user_id": 7, "name": "one"},
             {"id": 2, "user_id": 8, "name": "two"},
-        ],
+        ]
+
+    monkeypatch.setattr(
+        "quantdesk_v2.market_store.query",
+        query,
     )
     monkeypatch.setattr(
         "quantdesk_v2.infrastructure.persistence.paper_projections.MySqlPaperProjectionStore",
@@ -41,6 +47,7 @@ def test_audit_paper_is_read_only_and_reports_blocked_accounts(monkeypatch, caps
         "paper_equity_projection_stale"
     ]
     assert payload["accounts"][1]["drift_codes"] == ["paper_balance_drift"]
+    assert "status<>'archived'" in queries[0]
 
 
 def test_audit_paper_reports_missing_requested_account(monkeypatch, capsys) -> None:

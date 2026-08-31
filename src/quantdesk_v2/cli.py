@@ -28,7 +28,8 @@ def audit_paper(account_id: int | None, *, json_output: bool = False) -> int:
     settings.validate_runtime()
     if account_id is None:
         accounts = market_store.query(
-            "SELECT id,user_id,name FROM paper_accounts ORDER BY id"
+            """SELECT id,user_id,name FROM paper_accounts
+               WHERE status<>'archived' ORDER BY id"""
         )
     else:
         accounts = market_store.query(
