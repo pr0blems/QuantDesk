@@ -13,7 +13,7 @@
 
 | 文件/资源 | 当前规模 | 说明 |
 | --- | ---: | --- |
-| `src/quantdesk_v2/ai_monitor.py` | 11,010 行 | 七个 AI Monitor 领域仍有较多兼容实现集中在单体中 |
+| `src/quantdesk_v2/ai_monitor.py` | 10,656 行 | 市场特征、历史消融、候选策略和准入准备已迁出；最终持久化/结算等职责仍待继续下沉 |
 | `src/quantdesk_v2/interfaces/api/ai_monitor.py` | 4,806 行 | 路由、查询装配、实盘跟单和配置职责仍集中 |
 | `src/quantdesk_v2/api.py` | 3,783 行 | 模拟盘、实盘账户和其他旧路由仍待按域拆分 |
 | `src/quantdesk_v2/historical_replay.py` | 1,815 行 | 仍有 1 处跨模块私有函数依赖 |
@@ -50,12 +50,14 @@
 
 ### 本批验证结果
 
-- [x] 定向测试：8 项通过。
-- [x] 全量后端测试：1,048 项通过，106 项按环境条件跳过。
+- [x] 定向测试：市场特征、历史消融、候选策略和准入准备测试全部通过。
+- [x] 全量后端测试：1,050 项通过，106 项按环境条件跳过。
 - [x] Ruff：`src`、`tests`、`scripts` 全部通过。
 - [x] 前端 OpenAPI、ESLint、TypeScript 和 Vite 构建全部通过。
 - [x] `web/`、`src/quantdesk_v2/static/`、`src/quantdesk_v2/react_static/` 无 Git 差异。
 - [x] 未修改数据库结构、策略参数、API 字段或页面资源。
+- [x] 线上提交 `06d1bc7`：数据库 `0079`，API 与 6 个 worker 全部 active，health/ready 正常，重启窗口真实错误 0。
+- [x] 登录态浏览器复验：当前机会和历史机会均可切换并完成加载，历史多 44 / 空 6，未出现加载失败。
 
 ## 3. 待完成工作（按执行顺序）
 
