@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from .infrastructure.live_canary import LiveCanaryService
 from .models import (
     LiveOrderIntent,
     RuntimeIncident,
@@ -274,6 +275,7 @@ def inspect_runtime(engine: Engine, *, live_enabled: bool) -> None:
                 "live-deployments:unapproved-revision",
                 "All active live deployments are bound to approved revisions",
             )
+        LiveCanaryService().sample_running(db)
         db.commit()
 
 

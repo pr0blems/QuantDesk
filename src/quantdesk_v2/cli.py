@@ -290,6 +290,85 @@ def audit_live(account_id: int | None) -> int:
     return 4 if blocked else 0
 
 
+def start_live_canary(
+    account_id: int,
+    *,
+    window_minutes: int,
+    minimum_open_fills: int,
+    confirmed: bool,
+) -> int:
+    """Start observation for an already active account; never enables trading."""
+
+    if not confirmed:
+        print("start-live-canary requires --confirm", file=sys.stderr)
+        return 2
+    from .application.live_canary import LiveCanaryError
+    from .infrastructure.live_canary import LiveCanaryService
+    from .models import LiveTradingAccount
+
+    settings = get_settings()
+    settings.validate_runtime()
+    with SessionLocal() as db:
+        account = db.get(LiveTradingAccount, account_id)
+        if account is None:
+            print(f"live account {account_id} was not found", file=sys.stderr)
+            return 3
+        try:
+            run = LiveCanaryService().start(
+                db,
+                user_id=account.user_id,
+                live_account_id=account.id,
+                window_seconds=window_minutes * 60,
+                minimum_open_fills=minimum_open_fills,
+            )
+        except LiveCanaryError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
+        db.commit()
+        print(
+            json.dumps(
+                LiveCanaryService.snapshot(run),
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+    return 0
+
+
+def audit_live_canary(run_id: str, *, cancel: bool = False, confirmed: bool = False) -> int:
+    """Read one durable canary result, or explicitly cancel its observation."""
+
+    from .application.live_canary import LiveCanaryError
+    from .infrastructure.live_canary import LiveCanaryService
+    from .models import LiveCanaryRun
+
+    settings = get_settings()
+    settings.validate_runtime()
+    with SessionLocal() as db:
+        run = db.scalar(select(LiveCanaryRun).where(LiveCanaryRun.public_id == run_id))
+        if run is None:
+            print(f"live canary {run_id} was not found", file=sys.stderr)
+            return 3
+        if cancel:
+            if not confirmed:
+                print("cancel-live-canary requires --confirm", file=sys.stderr)
+                return 2
+            try:
+                LiveCanaryService.cancel(db, run)
+            except LiveCanaryError as exc:
+                print(str(exc), file=sys.stderr)
+                return 4
+            db.commit()
+        print(
+            json.dumps(
+                LiveCanaryService.snapshot(run),
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        return 0 if run.status in {"running", "passed", "canceled"} else 4
+
+
 def generate_secrets() -> int:
     print(f"JWT_SECRET={secrets.token_urlsafe(48)}")
     print(f"CREDENTIAL_MASTER_KEY={Fernet.generate_key().decode('ascii')}")
@@ -368,6 +447,16 @@ def main() -> int:
     paper_rebuild.add_argument("--confirm", action="store_true")
     live_audit = sub.add_parser("audit-live")
     live_audit.add_argument("--account-id", type=int)
+    live_canary_start = sub.add_parser("start-live-canary")
+    live_canary_start.add_argument("--account-id", type=int, required=True)
+    live_canary_start.add_argument("--window-minutes", type=int, default=60)
+    live_canary_start.add_argument("--minimum-open-fills", type=int, default=1)
+    live_canary_start.add_argument("--confirm", action="store_true")
+    live_canary_audit = sub.add_parser("audit-live-canary")
+    live_canary_audit.add_argument("--run-id", required=True)
+    live_canary_cancel = sub.add_parser("cancel-live-canary")
+    live_canary_cancel.add_argument("--run-id", required=True)
+    live_canary_cancel.add_argument("--confirm", action="store_true")
     args = parser.parse_args()
 
     if args.command == "generate-secrets":
@@ -394,6 +483,21 @@ def main() -> int:
         )
     if args.command == "audit-live":
         return audit_live(args.account_id)
+    if args.command == "start-live-canary":
+        return start_live_canary(
+            args.account_id,
+            window_minutes=args.window_minutes,
+            minimum_open_fills=args.minimum_open_fills,
+            confirmed=args.confirm,
+        )
+    if args.command == "audit-live-canary":
+        return audit_live_canary(args.run_id)
+    if args.command == "cancel-live-canary":
+        return audit_live_canary(
+            args.run_id,
+            cancel=True,
+            confirmed=args.confirm,
+        )
     return 1
 
 

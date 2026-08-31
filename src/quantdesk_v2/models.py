@@ -3674,6 +3674,95 @@ class LiveOrderIntent(Base):
     )
 
 
+class LiveCanaryRun(Base):
+    """Explicit, durable observation window for one live trading account."""
+
+    __tablename__ = "live_canary_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'passed', 'failed', 'canceled')",
+            name="valid_status",
+        ),
+        CheckConstraint("window_seconds >= 900", name="minimum_window"),
+        CheckConstraint("minimum_open_fills >= 0", name="valid_minimum_open_fills"),
+        ForeignKeyConstraint(
+            ["live_account_id", "user_id"],
+            ["live_trading_accounts.id", "live_trading_accounts.user_id"],
+            name="fk_live_canary_runs_account_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("public_id", name="uq_live_canary_runs_public_id"),
+        Index(
+            "ix_live_canary_runs_account_status_due",
+            "live_account_id",
+            "status",
+            "due_at",
+        ),
+        {
+            "comment": "Durable production canary acceptance window; observation only",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    live_account_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="running", nullable=False)
+    window_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    minimum_open_fills: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    violation_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class LiveCanarySample(Base):
+    """Append-only safety metrics sampled during a live canary window."""
+
+    __tablename__ = "live_canary_samples"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id"],
+            ["live_canary_runs.id"],
+            name="fk_live_canary_samples_run",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["live_account_id", "user_id"],
+            ["live_trading_accounts.id", "live_trading_accounts.user_id"],
+            name="fk_live_canary_samples_account_tenant",
+            ondelete="CASCADE",
+        ),
+        Index("ix_live_canary_samples_run_sampled", "run_id", "sampled_at"),
+        {
+            "comment": "Append-only production canary safety observations",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    live_account_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    failure_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
 class Security(Base):
     __tablename__ = "securities"
     __table_args__ = (

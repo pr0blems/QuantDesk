@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import BigInteger, create_engine, func, select
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
@@ -12,6 +13,7 @@ from quantdesk_v2.ai_monitor_read_models import (
     reconcile_ai_monitor_read_models,
     refresh_ai_monitor_read_models,
 )
+from quantdesk_v2.application.ai_monitor import OpportunityProjectionLagging
 from quantdesk_v2.interfaces.api.ai_monitor import _current_opportunity_projection_page
 from quantdesk_v2.models import (
     AiMonitorOpportunity,
@@ -349,6 +351,45 @@ def test_read_models_project_prediction_current_state_and_scores() -> None:
     assert legacy["pagination"]["total"] == 1
     assert legacy["summary"]["exit_reason_counts"] == {"profit_lock": 1}
     assert legacy["filters"]["settlement_version"] == "cost_consistent_exit_v6"
+
+
+def test_current_projection_refuses_source_table_fallback_when_lagging() -> None:
+    db = _projection_session()
+    now = utcnow()
+    db.add(
+        AiMonitorOpportunity(
+            id=501,
+            public_id="opportunity-501",
+            user_id=7,
+            analysis_run_id=51,
+            symbol="NVDA",
+            contract_symbol="NVDAUSDT",
+            direction="short",
+            status="discovered",
+            timeframe="1h",
+            news_score=Decimal("80"),
+            indicator_score=Decimal("85"),
+            combined_score=Decimal("82"),
+            matched_indicator_keys_json=["trend"],
+            news_ids_json=["news-501"],
+            evidence_json={},
+            dedup_key="dedup-501",
+            discovered_at=now,
+            expires_at=now + timedelta(hours=1),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    db.commit()
+
+    with pytest.raises(OpportunityProjectionLagging):
+        _current_opportunity_projection_page(
+            db,
+            user_id=7,
+            limit=20,
+            page=1,
+            now=now,
+        )
 
 
 def test_read_model_migration_follows_latest_revision() -> None:

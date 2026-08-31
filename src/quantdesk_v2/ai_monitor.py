@@ -29,6 +29,14 @@ from .ai_monitor_read_models import (
     read_models_available,
     refresh_ai_monitor_read_models,
 )
+from .application.ai_monitor import (
+    EventGateService,
+    MacroRegimeService,
+    MarketFeatureService,
+    NewsScoringService,
+    OpportunityGenerationService,
+    PredictionSettlementService,
+)
 from .market_microstructure import order_book_gate_snapshot
 from .models import (
     AdminSetting,
@@ -9620,6 +9628,25 @@ def _scan_opportunities(
     symbols_config: Path,
 ) -> dict[str, Any]:
     now = utcnow()
+    news_scoring_service = NewsScoringService(
+        aggregate=aggregate_news_candidates,
+        select_directional=select_directional_candidates_with_technical_context,
+        version="news_scoring_v1",
+    )
+    market_feature_service = MarketFeatureService(
+        latest=latest_realtime_feature_snapshots,
+        normalize=realtime_feature_payload,
+        version=MARKET_FEATURE_VERSION,
+    )
+    macro_regime_service = MacroRegimeService(
+        snapshot=macro_market.default_snapshot,
+        context=macro_market.opportunity_market_context,
+    )
+    event_gate_service = EventGateService(
+        event_gate=market_risk_event_gate_snapshot,
+        stable_gate=stable_gate_summary,
+        version=OPPORTUNITY_DECISION_VERSION,
+    )
     uw_signal_policy = unusual_whales_signal_policy(db)
     uw_thresholds = dict(uw_signal_policy["thresholds"])
     # Resolve the small due set before taking write locks.  The former range
@@ -9697,12 +9724,12 @@ def _scan_opportunities(
         run.user_id,
         now=now,
     )
-    directional_candidates = aggregate_news_candidates(
+    directional_candidates = news_scoring_service.aggregate(
         trigger_news_rows,
         symbol_map,
         minimum_confidence=float(config["minimum_news_confidence"]),
         minimum_mentions=int(config["minimum_news_mentions"]),
-    )
+    ).payload["candidates"]
     # Preserve both news directions until the 15m/1h/4h technical context has
     # been evaluated. Choosing by news score alone discarded valid shorts when
     # a slightly stronger bullish headline existed for the same symbol.
@@ -9832,8 +9859,8 @@ def _scan_opportunities(
                     "evaluated_at": 0,
                 }
         technical_scans[contract_symbol] = contract_scans
-    macro_snapshot = macro_market.default_snapshot(repository, now=now)
-    candidates = select_directional_candidates_with_technical_context(
+    macro_snapshot = macro_regime_service.snapshot(repository, now=now).payload
+    candidates = news_scoring_service.select_directional(
         candidates,
         technical_scans,
         indicator_keys,
@@ -9877,13 +9904,13 @@ def _scan_opportunities(
         key.startswith("prediction_") for key in indicator_keys
     )
     market_flow_inputs = _market_flow_input_maps(db, repository)
-    realtime_features = latest_realtime_feature_snapshots(
+    realtime_features = market_feature_service.latest(
         db,
         [
             *(str(item.get("symbol") or "") for item in candidates),
             *(str(item.get("contract_symbol") or "") for item in candidates),
         ],
-    )
+    ).payload["items"]
     finnhub_signal_quotes = _latest_finnhub_signal_quotes(
         db,
         [str(item.get("symbol") or "") for item in candidates],
@@ -10108,7 +10135,7 @@ def _scan_opportunities(
         company_profile = dict(
             market_flow_inputs.get("profile", {}).get(str(candidate["symbol"]).upper(), {})
         )
-        market_environment = macro_market.opportunity_market_context(
+        market_environment = macro_regime_service.context(
             macro_snapshot,
             direction=str(candidate["direction"]),
             symbol=str(candidate["symbol"]),
@@ -10146,7 +10173,7 @@ def _scan_opportunities(
                 max(0.0, min(100.0, combined_score + direction_score_adjustment)),
                 4,
             )
-        normalized_realtime_feature = realtime_feature_payload(realtime_feature)
+        normalized_realtime_feature = market_feature_service.normalize(realtime_feature)
         market_session = str(
             dict(market_environment.get("market_session") or {}).get("key")
             or dict(normalized_realtime_feature.get("quote") or {}).get("market_session")
@@ -10177,7 +10204,7 @@ def _scan_opportunities(
             for item in nearby_risk_events
             if bool(item.get("blocking_active"))
         ]
-        event_gate = market_risk_event_gate_snapshot(nearby_risk_events)
+        event_gate = event_gate_service.event_gate(nearby_risk_events).payload
         market_quality = signal_market_quality(
             scan,
             market,
@@ -10207,7 +10234,7 @@ def _scan_opportunities(
         # The exchange clock is authoritative.  A stale cash quote may describe
         # its last observed session as regular even after the close.
         market_quality["market_session"] = market_session
-        gate_summary = stable_gate_summary(
+        gate_summary = event_gate_service.stable_gate(
             market_quality,
             market_flow,
             evaluated_at=now,
@@ -10754,13 +10781,23 @@ def execute_opportunity_run(
             run.status = "running"
             run.started_at = utcnow()
             config = config_data(db.get(AiMonitorConfig, run.user_id))
-            summary = _scan_opportunities(db, engine, run, config, symbols_config)
-            summary["read_models"] = refresh_ai_monitor_read_models(
+            stage = OpportunityGenerationService(
+                scan=_scan_opportunities,
+                refresh_projection=refresh_ai_monitor_read_models,
+                version=OPPORTUNITY_DECISION_VERSION,
+            ).execute(
                 db,
-                user_id=run.user_id,
-                prediction_limit=1000,
-                score_limit=5000,
+                engine,
+                run,
+                config,
+                symbols_config,
             )
+            summary = stage.payload
+            summary["pipeline_stage"] = {
+                "stage": stage.stage,
+                "authority": stage.authority.value,
+                "version": stage.version,
+            }
             run.summary_json = summary
             run.status = "partial" if summary["failed_symbols"] else "completed"
             run.completed_at = utcnow()
@@ -10878,18 +10915,17 @@ def recover_stale_runs(db: Session) -> dict[str, int]:
 def _worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     repository = MonitorRepository(engine, symbols_config)
+    settlement_service = PredictionSettlementService(
+        settle=settle_due_predictions,
+        reopen_legacy=reopen_legacy_prediction_settlements,
+        refresh_projection=refresh_ai_monitor_read_models,
+        version=PREDICTION_SETTLEMENT_VERSION,
+    )
     while True:
         try:
             with factory() as db:
                 recover_stale_runs(db)
-                reopen_legacy_prediction_settlements(db)
-                settlement = settle_due_predictions(db, repository)
-                if settlement["completed"] or settlement["unavailable"]:
-                    refresh_ai_monitor_read_models(
-                        db,
-                        prediction_limit=1000,
-                        score_limit=5000,
-                    )
+                settlement_service.execute_cycle(db, repository)
                 db.commit()
                 user_ids = list(
                     db.scalars(

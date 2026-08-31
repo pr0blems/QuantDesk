@@ -24,17 +24,22 @@ from starlette.websockets import WebSocketDisconnect
 
 from ... import ai_monitor, historical_replay, live_engine, macro_ai, news_ai, ws_depth
 from ...ai_model_config import global_ai_model_configured
-from ...ai_monitor_read_models import read_models_available
+from ...application.ai_monitor import (
+    OpportunityProjectionError,
+    OpportunityProjectionService,
+)
 from ...binance_client import BinanceAccountClientError
 from ...database import get_db
 from ...dependencies import bearer, get_current_user, require_admin_write
 from ...finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
+from ...infrastructure.persistence.ai_monitor_projection import (
+    SqlAlchemyOpportunityProjectionReader,
+)
 from ...market_config import TRADFI_UNIVERSE_KEY, tradfi_symbols
 from ...models import (
     AdminSetting,
     AiMonitorConfig,
     AiMonitorOpportunity,
-    AiMonitorOpportunityCurrent,
     AiMonitorPrediction,
     AiMonitorReplayRun,
     AiMonitorRun,
@@ -3603,136 +3608,17 @@ def _current_opportunity_projection_page(
     limit: int,
     page: int,
     now: datetime,
-) -> dict[str, Any] | None:
-    """Return a compact, pre-paged current view when migration 0059 is active.
+) -> dict[str, Any]:
+    """Compatibility façade over the projection-only application service."""
 
-    An empty projection falls back to the source query while active source rows
-    still exist. This makes the API safe during the migration/backfill window.
-    """
-
-    if not read_models_available(db):
-        return None
-    base_conditions = (
-        AiMonitorOpportunityCurrent.user_id == user_id,
-        AiMonitorOpportunityCurrent.expires_at > now,
+    return OpportunityProjectionService(
+        SqlAlchemyOpportunityProjectionReader(db)
+    ).current_page(
+        user_id=user_id,
+        limit=limit,
+        page=page,
+        now=now,
     )
-    total = int(
-        db.scalar(
-            select(func.count())
-            .select_from(AiMonitorOpportunityCurrent)
-            .where(*base_conditions)
-        )
-        or 0
-    )
-    if total == 0:
-        source_active = int(
-            db.scalar(
-                select(func.count())
-                .select_from(AiMonitorOpportunity)
-                .where(
-                    AiMonitorOpportunity.user_id == user_id,
-                    AiMonitorOpportunity.status.in_(("candidate", "discovered")),
-                    AiMonitorOpportunity.expires_at > now,
-                )
-            )
-            or 0
-        )
-        if source_active:
-            return None
-
-    total_pages = max(1, (total + limit - 1) // limit)
-    current_page = min(page, total_pages)
-    projections = list(
-        db.scalars(
-            select(AiMonitorOpportunityCurrent)
-            .where(*base_conditions)
-            .order_by(
-                AiMonitorOpportunityCurrent.discovered_at.desc(),
-                AiMonitorOpportunityCurrent.opportunity_id.desc(),
-            )
-            .offset((current_page - 1) * limit)
-            .limit(limit)
-        ).all()
-    )
-    opportunity_ids = [item.opportunity_id for item in projections]
-    prediction_ids = [
-        item.prediction_id for item in projections if item.prediction_id is not None
-    ]
-    opportunities_by_id = (
-        {
-            item.id: item
-            for item in db.scalars(
-                select(AiMonitorOpportunity).where(
-                    AiMonitorOpportunity.id.in_(opportunity_ids)
-                )
-            ).all()
-        }
-        if opportunity_ids
-        else {}
-    )
-    predictions_by_id = (
-        {
-            item.id: item
-            for item in db.scalars(
-                select(AiMonitorPrediction).where(
-                    AiMonitorPrediction.id.in_(prediction_ids)
-                )
-            ).all()
-        }
-        if prediction_ids
-        else {}
-    )
-    rows = [
-        (
-            opportunities_by_id[item.opportunity_id],
-            predictions_by_id.get(item.prediction_id),
-        )
-        for item in projections
-        if item.opportunity_id in opportunities_by_id
-    ]
-    direction_counts = {
-        str(direction): int(count)
-        for direction, count in db.execute(
-            select(
-                AiMonitorOpportunityCurrent.direction,
-                func.count(AiMonitorOpportunityCurrent.id),
-            )
-            .where(*base_conditions)
-            .group_by(AiMonitorOpportunityCurrent.direction)
-        ).all()
-    }
-    prediction_counts = {
-        str(status): int(count)
-        for status, count in db.execute(
-            select(
-                AiMonitorOpportunityCurrent.prediction_status,
-                func.count(AiMonitorOpportunityCurrent.id),
-            )
-            .where(*base_conditions)
-            .group_by(AiMonitorOpportunityCurrent.prediction_status)
-        ).all()
-        if status is not None
-    }
-    return {
-        "rows": rows,
-        "direction_counts": {
-            "long": direction_counts.get("long", 0),
-            "short": direction_counts.get("short", 0),
-        },
-        "settlement_counts": {
-            "total": total,
-            "pending": prediction_counts.get("pending", 0),
-            "unavailable": prediction_counts.get("unavailable", 0),
-        },
-        "pagination": {
-            "page": current_page,
-            "page_size": limit,
-            "total": total,
-            "total_pages": total_pages,
-            "has_previous": current_page > 1,
-            "has_next": current_page < total_pages,
-        },
-    }
 
 
 def _historical_opportunity_conditions(
@@ -3804,17 +3690,26 @@ def opportunities(
     include_expired: bool = False,
 ) -> dict[str, Any]:
     now = utcnow()
-    projection_page = (
-        _current_opportunity_projection_page(
-            db,
-            user_id=user.id,
-            limit=limit,
-            page=page,
-            now=now,
+    try:
+        projection_page = (
+            _current_opportunity_projection_page(
+                db,
+                user_id=user.id,
+                limit=limit,
+                page=page,
+                now=now,
+            )
+            if scope == "current"
+            else None
         )
-        if scope == "current"
-        else None
-    )
+    except OpportunityProjectionError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "opportunity_projection_not_ready",
+                "message": str(exc),
+            },
+        ) from exc
     if projection_page is not None:
         rows = list(projection_page["rows"])
     elif scope == "history":
@@ -4015,7 +3910,11 @@ def opportunities(
             }
         )
     response["query_mode"] = (
-        "current_read_model" if projection_page is not None else "source_fallback"
+        "current_read_model"
+        if scope == "current"
+        else "historical_source"
+        if scope == "history"
+        else "legacy_source"
     )
     return response
 
