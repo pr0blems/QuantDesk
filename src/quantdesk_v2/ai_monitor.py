@@ -63,6 +63,9 @@ from .infrastructure.persistence.ai_monitor_opportunity_generation import (
     active_candidate_keys as load_active_candidate_keys,
 )
 from .infrastructure.persistence.ai_monitor_opportunity_generation import (
+    candidate_persistence_state as load_candidate_persistence_state,
+)
+from .infrastructure.persistence.ai_monitor_opportunity_generation import (
     consumed_news_ids_by_direction as load_consumed_news_ids_by_direction,
 )
 from .market_microstructure import order_book_gate_snapshot
@@ -9580,60 +9583,25 @@ def _scan_opportunities(
             ]
         )
         dedup_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
-        active_for_symbol = db.scalars(
-            select(AiMonitorOpportunity)
-            .where(
-                AiMonitorOpportunity.user_id == run.user_id,
-                AiMonitorOpportunity.symbol == candidate["symbol"],
-                AiMonitorOpportunity.status.in_(("candidate", "discovered")),
-                AiMonitorOpportunity.expires_at > now,
-            )
-            .order_by(
-                AiMonitorOpportunity.updated_at.desc(),
-                AiMonitorOpportunity.id.desc(),
-            )
-        ).all()
-        existing = next(
-            (item for item in active_for_symbol if item.direction == candidate["direction"]),
-            None,
+        persistence_state = load_candidate_persistence_state(
+            db,
+            user_id=run.user_id,
+            symbol=str(candidate["symbol"]),
+            direction=str(candidate["direction"]),
+            dedup_key=dedup_key,
+            news_ids=news_ids,
+            model_call_audit=model_call_audit,
+            now=now,
         )
-        existing_status = existing.status if existing is not None else None
-        existing_prediction = (
-            db.scalar(
-                select(AiMonitorPrediction).where(
-                    AiMonitorPrediction.opportunity_id == existing.id
-                )
-            )
-            if existing is not None
-            else None
-        )
-        if active_for_symbol and existing is None:
-            for previous in active_for_symbol:
-                previous.status = "expired"
-                previous.expires_at = min(previous.expires_at, now)
-                previous.updated_at = now
-        if existing is None and db.scalar(
-            select(AiMonitorOpportunity.id).where(AiMonitorOpportunity.dedup_key == dedup_key)
-        ):
+        if persistence_state.duplicated:
             duplicated += 1
             continue
-        if existing is None:
-            audit_rows = [model_call_audit[item] for item in news_ids if item in model_call_audit]
-            frozen_batch_ids = sorted({str(item["batch_id"]) for item in audit_rows})
-            frozen_model_call_ids = sorted(
-                {
-                    int(call_id)
-                    for item in audit_rows
-                    for call_id in item.get("call_ids", [])
-                }
-            )
-        else:
-            frozen_batch_ids = list(existing.news_ai_batch_ids_json or [])
-            frozen_model_call_ids = [
-                int(item) for item in (existing.news_ai_model_call_ids_json or [])
-            ]
-        existing_news_ids = set(existing.news_ids_json or []) if existing is not None else set()
-        has_new_material_news = bool(set(news_ids) - existing_news_ids)
+        existing = persistence_state.existing
+        existing_status = persistence_state.existing_status
+        existing_prediction = persistence_state.existing_prediction
+        frozen_batch_ids = persistence_state.frozen_batch_ids
+        frozen_model_call_ids = persistence_state.frozen_model_call_ids
+        has_new_material_news = persistence_state.has_new_material_news
         market = dict(
             market_flow_inputs.get("ticker", {}).get(contract_symbol.upper(), {})
         )
