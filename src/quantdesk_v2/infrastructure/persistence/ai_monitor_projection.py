@@ -8,7 +8,6 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ...ai_monitor_read_models import read_models_available
 from ...application.ai_monitor.opportunity_projection import (
     OpportunityProjectionLagging,
     OpportunityProjectionUnavailable,
@@ -18,6 +17,7 @@ from ...models import (
     AiMonitorOpportunityCurrent,
     AiMonitorPrediction,
 )
+from .ai_monitor_read_models import read_models_available
 
 
 class SqlAlchemyOpportunityProjectionReader:

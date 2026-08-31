@@ -23,11 +23,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import macro_market
 from .ai_model_config import global_ai_model_configured
-from .ai_monitor_read_models import (
-    PREDICTION_FACT_PROJECTION_VERSION,
-    read_models_available,
-    refresh_ai_monitor_read_models,
-)
 from .application.ai_monitor import (
     EventGateService,
     MacroRegimeService,
@@ -173,6 +168,11 @@ from .infrastructure.persistence.ai_monitor_prediction_settlement import (
 )
 from .infrastructure.persistence.ai_monitor_prediction_settlement import (
     settle_due_predictions as persist_due_prediction_settlements,
+)
+from .infrastructure.persistence.ai_monitor_read_models import (
+    PREDICTION_FACT_PROJECTION_VERSION,
+    read_models_available,
+    refresh_ai_monitor_read_models,
 )
 from .market_microstructure import order_book_gate_snapshot
 from .models import (
