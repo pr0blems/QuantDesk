@@ -69,6 +69,7 @@ from .infrastructure.persistence.ai_monitor_opportunity_generation import (
     consumed_news_ids_by_direction as load_consumed_news_ids_by_direction,
 )
 from .infrastructure.persistence.ai_monitor_opportunity_generation import (
+    create_opportunity_prediction,
     persist_candidate_opportunity,
 )
 from .market_microstructure import order_book_gate_snapshot
@@ -10172,43 +10173,33 @@ def _scan_opportunities(
                         "estimated_total_bps": estimated_cost,
                     },
                 }
-                db.add(
-                    AiMonitorPrediction(
-                        public_id=str(uuid.uuid4()),
-                        user_id=run.user_id,
-                        opportunity_id=opportunity.id,
-                        symbol=candidate["symbol"],
-                        contract_symbol=contract_symbol,
-                        direction=candidate["direction"],
-                        timeframe=timeframe,
-                        status="pending" if entry_price > 0 else "unavailable",
-                        confidence_score=Decimal(str(combined_score)),
-                        signal_news_score=Decimal(str(candidate["news_score"])),
-                        signal_indicator_score=Decimal(str(indicator_score)),
-                        estimated_cost_bps=Decimal(str(estimated_cost)),
-                        settlement_version=PREDICTION_SETTLEMENT_VERSION,
-                        readiness_status=str(readiness["status"]),
-                        calibration_sample_count=int(
-                            readiness["calibration"]["sample_count"]
-                        ),
-                        expected_gross_edge_bps=(
-                            Decimal(
-                                str(readiness["calibration"]["mean_gross_edge_bps"])
-                            )
-                            if readiness["calibration"]["mean_gross_edge_bps"] is not None
-                            else None
-                        ),
-                        expected_edge_lower_bound_bps=(
-                            Decimal(str(readiness["calibration"]["lower_bound_bps"]))
-                            if readiness["calibration"]["lower_bound_bps"] is not None
-                            else None
-                        ),
-                        entry_price=Decimal(str(entry_price)) if entry_price > 0 else None,
-                        evidence_json=prediction_evidence,
-                        predicted_at=now,
-                        due_at=due_at,
-                        completed_at=now if entry_price <= 0 else None,
-                    )
+                create_opportunity_prediction(
+                    db,
+                    user_id=run.user_id,
+                    opportunity_id=opportunity.id,
+                    symbol=str(candidate["symbol"]),
+                    contract_symbol=contract_symbol,
+                    direction=str(candidate["direction"]),
+                    timeframe=timeframe,
+                    entry_price=entry_price,
+                    confidence_score=combined_score,
+                    news_score=float(candidate["news_score"]),
+                    indicator_score=indicator_score,
+                    estimated_cost_bps=estimated_cost,
+                    settlement_version=PREDICTION_SETTLEMENT_VERSION,
+                    readiness_status=str(readiness["status"]),
+                    calibration_sample_count=int(
+                        readiness["calibration"]["sample_count"]
+                    ),
+                    expected_gross_edge_bps=readiness["calibration"][
+                        "mean_gross_edge_bps"
+                    ],
+                    expected_edge_lower_bound_bps=readiness["calibration"][
+                        "lower_bound_bps"
+                    ],
+                    evidence=prediction_evidence,
+                    predicted_at=now,
+                    due_at=due_at,
                 )
                 predictions_created += 1
             confirmed += 1

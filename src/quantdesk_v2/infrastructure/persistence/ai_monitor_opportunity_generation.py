@@ -239,3 +239,64 @@ def persist_candidate_opportunity(
     )
     opportunity.updated_at = now
     return opportunity, False
+
+
+def create_opportunity_prediction(
+    db: Session,
+    *,
+    user_id: int,
+    opportunity_id: int,
+    symbol: str,
+    contract_symbol: str,
+    direction: str,
+    timeframe: str,
+    entry_price: float,
+    confidence_score: float,
+    news_score: float,
+    indicator_score: float,
+    estimated_cost_bps: float,
+    settlement_version: str,
+    readiness_status: str,
+    calibration_sample_count: int,
+    expected_gross_edge_bps: float | None,
+    expected_edge_lower_bound_bps: float | None,
+    evidence: Mapping[str, Any],
+    predicted_at: datetime,
+    due_at: datetime,
+) -> AiMonitorPrediction:
+    """Persist one immutable prediction fact for an admitted opportunity."""
+
+    prediction = AiMonitorPrediction(
+        public_id=str(uuid.uuid4()),
+        user_id=user_id,
+        opportunity_id=opportunity_id,
+        symbol=symbol,
+        contract_symbol=contract_symbol,
+        direction=direction,
+        timeframe=timeframe,
+        status="pending" if entry_price > 0 else "unavailable",
+        confidence_score=Decimal(str(confidence_score)),
+        signal_news_score=Decimal(str(news_score)),
+        signal_indicator_score=Decimal(str(indicator_score)),
+        estimated_cost_bps=Decimal(str(estimated_cost_bps)),
+        settlement_version=settlement_version,
+        readiness_status=readiness_status,
+        calibration_sample_count=calibration_sample_count,
+        expected_gross_edge_bps=(
+            Decimal(str(expected_gross_edge_bps))
+            if expected_gross_edge_bps is not None
+            else None
+        ),
+        expected_edge_lower_bound_bps=(
+            Decimal(str(expected_edge_lower_bound_bps))
+            if expected_edge_lower_bound_bps is not None
+            else None
+        ),
+        entry_price=Decimal(str(entry_price)) if entry_price > 0 else None,
+        evidence_json=dict(evidence),
+        predicted_at=predicted_at,
+        due_at=due_at,
+        completed_at=predicted_at if entry_price <= 0 else None,
+    )
+    db.add(prediction)
+    return prediction
