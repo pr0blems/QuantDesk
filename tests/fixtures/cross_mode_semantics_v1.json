@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "timeframe": "1h",
+  "cases": [
+    {
+      "name": "long_entry_and_hold",
+      "candles": [[0, 100, 101, 99, 100], [3600, 100, 101, 99, 100], [7200, 101, 102, 100, 101]],
+      "signals": [1, 0, 0],
+      "stop_loss_pct": 20,
+      "take_profit_pct": 20,
+      "max_holding_bars": 0,
+      "expected_exits": ["end_of_data"]
+    },
+    {
+      "name": "short_entry_and_hold",
+      "candles": [[0, 100, 101, 99, 100], [3600, 100, 101, 99, 100], [7200, 99, 100, 98, 99]],
+      "signals": [-1, 0, 0],
+      "stop_loss_pct": 20,
+      "take_profit_pct": 20,
+      "max_holding_bars": 0,
+      "expected_exits": ["end_of_data"]
+    },
+    {
+      "name": "hold_only",
+      "candles": [[0, 100, 101, 99, 100], [3600, 100, 101, 99, 100], [7200, 100, 101, 99, 100]],
+      "signals": [0, 0, 0],
+      "stop_loss_pct": 5,
+      "take_profit_pct": 5,
+      "max_holding_bars": 0,
+      "expected_exits": []
+    },
+    {
+      "name": "initial_stop_loss",
+      "candles": [[0, 100, 101, 99, 100], [3600, 100, 102, 94, 96], [7200, 96, 97, 95, 96]],
+      "signals": [1, 0, 0],
+      "stop_loss_pct": 5,
+      "take_profit_pct": 20,
+      "max_holding_bars": 0,
+      "expected_exits": ["stop_loss"]
+    },
+    {
+      "name": "initial_take_profit",
+      "candles": [[0, 100, 101, 99, 100], [3600, 100, 106, 99, 105], [7200, 105, 106, 104, 105]],
+      "signals": [1, 0, 0],
+      "stop_loss_pct": 20,
+      "take_profit_pct": 5,
+      "max_holding_bars": 0,
+      "expected_exits": ["take_profit"]
+    },
+    {
+      "name": "strategy_reversal",
+      "candles": [[0, 100, 101, 99, 100], [3600, 100, 101, 99, 100], [7200, 99, 100, 98, 99]],
+      "signals": [1, -1, 0],
+      "stop_loss_pct": 20,
+      "take_profit_pct": 20,
+      "max_holding_bars": 0,
+      "expected_exits": ["strategy_reversal", "end_of_data"]
+    },
+    {
+      "name": "signal_expired_before_next_bar",
+      "candles": [[0, 100, 101, 99, 100], [7200, 100, 101, 99, 100], [10800, 100, 101, 99, 100]],
+      "signals": [1, 0, 0],
+      "stop_loss_pct": 20,
+      "take_profit_pct": 20,
+      "max_holding_bars": 0,
+      "expected_exits": []
+    },
+    {
+      "name": "maximum_holding_period",
+      "candles": [[0, 100, 101, 99, 100], [3600, 100, 101, 99, 100], [7200, 100, 101, 99, 100]],
+      "signals": [1, 0, 0],
+      "stop_loss_pct": 20,
+      "take_profit_pct": 20,
+      "max_holding_bars": 1,
+      "expected_exits": ["max_holding_bars"]
+    }
+  ]
+}

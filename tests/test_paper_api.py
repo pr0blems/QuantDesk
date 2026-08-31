@@ -232,6 +232,7 @@ def test_paper_endpoints_are_account_scoped_and_tenant_isolated(
         assert adjusted.json()["config"]["leverage"] == 20
         assert adjusted.json()["config"]["risk_max_leverage"] == 20
         assert adjusted.json()["config"]["max_positions"] == 20
+        assert adjusted.json()["config"]["signal_mode"] == "strategy_event_v2"
 
         archived = client.patch(
             f"/api/v2/paper/accounts/{public_account_id}",

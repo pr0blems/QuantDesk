@@ -22,6 +22,14 @@ from . import macro_market
 from . import market_store as store
 from .ai_monitor import PREDICTION_SETTLEMENT_VERSION
 from .application.execution_service import deterministic_client_order_id
+from .application.live_recovery import (
+    LiveAccountRecoveryService,
+    LiveOrderReconciliationService,
+    LiveOrderStatePending,
+    LiveOrderStateUnknown,
+    LivePositionSyncService,
+    ProtectionRecoveryService,
+)
 from .application.protection import ProtectionInstallationError, ProtectionService
 from .application.risk import RiskPolicy
 from .application.strategy_execution import (
@@ -43,7 +51,7 @@ from .domain.execution import (
     OrderIntent,
 )
 from .domain.exit_policy import DEFAULT_EXIT_POLICY
-from .domain.protection import ProtectionCoverage, ProtectionPlan
+from .domain.protection import ProtectionPlan
 from .domain.trading import OrderSide, PositionSide
 from .infrastructure.binance_broker import BinanceBroker
 from .infrastructure.live_execution import LiveExecutionRuntime
@@ -1054,114 +1062,66 @@ def _clear_account_backoff(account_id: int) -> None:
 def _reconcile_intents(
     account: dict[str, Any], api_key: str, api_secret: str, *, force: bool = False
 ) -> bool:
-    """Resolve local non-terminal intents against Binance's current/order APIs.
-
-    The open-order snapshot validates all active protective orders in two requests.
-    Only orders absent from that snapshot need an individual terminal-state query.
-    """
+    """Resolve non-terminal intents through the application reconciliation service."""
     if _account_service is None or _trading_client is None:
         raise RuntimeError("live engine is not configured")
     if not _reconciliation_due(int(account["id"]), force=force):
         return False
-    rows = store.query(
-        """SELECT id,user_id,symbol,action,status,client_order_id
-           FROM live_order_intents
-           WHERE user_id=? AND live_account_id=?
-             AND status IN ('created','submitted','unknown')
-           ORDER BY id""",
-        (account["user_id"], account["id"]),
-    )
-    if not rows:
-        _finish_reconciliation(int(account["id"]), successful=True)
-        return False
-    try:
-        current_orders = _account_service.open_orders(
-            api_key,
-            api_secret,
+    service = LiveOrderReconciliationService(
+        load_intents=lambda user_id, account_id: store.query(
+            """SELECT id,user_id,symbol,action,status,client_order_id
+               FROM live_order_intents
+               WHERE user_id=? AND live_account_id=?
+                 AND status IN ('created','submitted','unknown')
+               ORDER BY id""",
+            (user_id, account_id),
+        ),
+        load_open_orders=lambda key, secret: _account_service.open_orders(
+            key,
+            secret,
             account_type="UM_FUTURE",
             force_refresh=True,
+        ),
+        query_market_order=lambda key, secret, symbol, client_id: (
+            _trading_client.query_order(
+                key,
+                secret,
+                symbol=symbol,
+                client_order_id=client_id,
+            )
+        ),
+        query_protection_order=lambda key, secret, client_id: (
+            _trading_client.query_algo_order(
+                key, secret, client_order_id=client_id
+            )
+        ),
+        update_intent=_update_intent,
+        normalize_open_order=_normalized_open_order_response,
+        classify_status=_exchange_intent_status,
+        is_order_not_found=lambda exc: (
+            isinstance(exc, BinanceAccountClientError) and exc.code in {-2011, -2013}
+        ),
+    )
+    try:
+        outcome = service.reconcile(
+            user_id=int(account["user_id"]),
+            account_id=int(account["id"]),
+            api_key=api_key,
+            api_secret=api_secret,
         )
+    except LiveOrderStatePending:
+        _finish_reconciliation(int(account["id"]), successful=False)
+        raise BinanceAccountClientError("order_state_pending") from None
+    except LiveOrderStateUnknown:
+        _finish_reconciliation(int(account["id"]), successful=False)
+        raise BinanceAccountClientError("invalid_response") from None
     except Exception:
         # Keep the account fenced during a bounded retry interval. This avoids
         # hammering the two high-weight all-symbol endpoints during an outage.
         _finish_reconciliation(int(account["id"]), successful=False)
         raise
-    current_by_client_id = {
-        str(order.get("client_order_id") or ""): order
-        for order in current_orders
-        if str(order.get("client_order_id") or "")
-    }
-    market_state_changed = False
-    pending_market = False
-    for raw_row in rows:
-        row = dict(raw_row)
-        client_order_id = str(row["client_order_id"])
-        current = current_by_client_id.get(client_order_id)
-        if current is not None:
-            response = _normalized_open_order_response(current)
-            _update_intent(
-                int(row["id"]),
-                int(row["user_id"]),
-                status="submitted",
-                response=response,
-            )
-            if row["action"] in {"open", "close"}:
-                # A MARKET order should be terminal before strategy evaluation
-                # resumes. Keep the account fenced instead of issuing another
-                # entry/close while Binance still reports it as open.
-                pending_market = True
-            continue
-        try:
-            if row["action"] in {"stop", "take_profit"}:
-                response = _trading_client.query_algo_order(
-                    api_key, api_secret, client_order_id=client_order_id
-                )
-            else:
-                response = _trading_client.query_order(
-                    api_key,
-                    api_secret,
-                    symbol=str(row["symbol"]),
-                    client_order_id=client_order_id,
-                )
-        except BinanceAccountClientError as exc:
-            if exc.code in {-2011, -2013}:
-                _update_intent(
-                    int(row["id"]),
-                    int(row["user_id"]),
-                    status="canceled",
-                    error_code="exchange_order_not_found",
-                )
-                if row["action"] in {"open", "close"}:
-                    market_state_changed = True
-                continue
-            _finish_reconciliation(int(account["id"]), successful=False)
-            raise
-        status = _exchange_intent_status(response)
-        _update_intent(
-            int(row["id"]),
-            int(row["user_id"]),
-            status=status,
-            response=response,
-            error_code="unrecognized_exchange_status" if status == "unknown" else None,
-        )
-        if row["action"] in {"open", "close"}:
-            if status == "submitted":
-                pending_market = True
-            else:
-                market_state_changed = True
-        elif row["action"] in {"stop", "take_profit"} and status == "filled":
-            # A triggered protection changes/removes the exchange position.
-            # The caller fetched its snapshot before reconciliation, so force
-            # a fresh account read before any close/open decision is made.
-            market_state_changed = True
-        if status == "unknown":
-            _finish_reconciliation(int(account["id"]), successful=False)
-            raise BinanceAccountClientError("invalid_response")
-    if pending_market:
-        _finish_reconciliation(int(account["id"]), successful=False)
-        raise BinanceAccountClientError("order_state_pending")
     _finish_reconciliation(int(account["id"]), successful=True)
-    return market_state_changed
+    return outcome.market_state_changed
 
 
 def _live_timeframe(account: dict[str, Any], entry_basis: dict[str, Any] | None) -> str:
@@ -1642,16 +1602,7 @@ def _managed_positions(account: dict[str, Any]) -> dict[tuple[str, str], dict[st
            ORDER BY id DESC""",
         (account["user_id"], account["id"]),
     )
-    latest: dict[tuple[str, str], dict[str, Any]] = {}
-    for raw_row in rows:
-        row = dict(raw_row)
-        key = (
-            str(row["symbol"]).upper(),
-            str(row.get("position_side") or "BOTH").upper(),
-        )
-        if key not in latest:
-            latest[key] = row
-    return {key: row for key, row in latest.items() if row["action"] == "open"}
+    return LivePositionSyncService.managed_positions(rows)
 
 
 def _managed_open(
@@ -1692,22 +1643,7 @@ def _protection_counts(
            ORDER BY id""",
         (account["user_id"], account["id"]),
     )
-    actions: dict[tuple[str, str], set[str]] = {}
-    for row in rows:
-        key = (
-            str(row["symbol"]).upper(),
-            str(row.get("position_side") or "BOTH").upper(),
-        )
-        opened = managed.get(key)
-        # Stale protection from an earlier generation must never protect a
-        # newly reopened position with the same symbol/side.
-        if opened is None or int(row["id"]) <= int(opened["id"]):
-            continue
-        actions.setdefault(key, set()).add(str(row["action"]))
-    return {
-        key: len(ProtectionCoverage.from_actions(value).actions)
-        for key, value in actions.items()
-    }
+    return ProtectionRecoveryService.coverage_counts(rows, managed)
 
 
 def _cancel_orphan_protections(
@@ -1730,13 +1666,8 @@ def _cancel_orphan_protections(
              AND action IN ('stop','take_profit') AND status='submitted'""",
         (account["user_id"], account["id"]),
     )
-    for row in rows:
-        key = (
-            str(row["symbol"]).upper(),
-            str(row.get("position_side") or "BOTH").upper(),
-        )
-        if key not in managed and key not in occupied:
-            _cancel_protection(account, api_key, api_secret, *key)
+    for key in ProtectionRecoveryService.orphan_keys(rows, managed, occupied):
+        _cancel_protection(account, api_key, api_secret, *key)
 
 
 def _failed_close_keys(
@@ -1751,16 +1682,7 @@ def _failed_close_keys(
            ORDER BY id DESC""",
         (account["user_id"], account["id"]),
     )
-    failed: set[tuple[str, str]] = set()
-    for row in rows:
-        key = (
-            str(row["symbol"]).upper(),
-            str(row.get("position_side") or "BOTH").upper(),
-        )
-        opened = managed.get(key)
-        if opened is not None and int(row["id"]) > int(opened["id"]):
-            failed.add(key)
-    return failed
+    return ProtectionRecoveryService.failed_close_keys(rows, managed)
 
 
 def _current_stop_prices(
@@ -3520,7 +3442,7 @@ def _tick_account(account: dict[str, Any]) -> None:
 
 
 def _recover_account(account: dict[str, Any]) -> None:
-    """Resolve uncertain writes and fail-close any recovered naked position."""
+    """Orchestrate application recovery actions for one physical account."""
     if _account_service is None:
         raise RuntimeError("live engine is not configured")
     api_key, api_secret = _credentials(account)
@@ -3535,38 +3457,34 @@ def _recover_account(account: dict[str, Any]) -> None:
     _cancel_orphan_protections(account, api_key, api_secret, managed, set(positions))
     protection_counts = _protection_counts(account, managed)
     failed_close_keys = _failed_close_keys(account, managed)
-    for key, opened in managed.items():
+    recovery_actions = LiveAccountRecoveryService().plan(
+        exchange_positions=positions,
+        managed_positions=managed,
+        protection_counts=protection_counts,
+        failed_close_keys=failed_close_keys,
+        grandfathered_keys={
+            key for key, opened in managed.items() if _is_grandfathered_open(opened)
+        },
+    )
+    for action in recovery_actions:
+        key = action.key
+        opened = managed[key]
         symbol, position_side = key
         position = positions.get(key)
-        if position is None:
+        if action.kind == "record_close":
             _cancel_protection(account, api_key, api_secret, symbol, position_side)
             _record_reconciled_close(account, opened)
             continue
-        if key in failed_close_keys:
-            _close_position(
-                account,
-                api_key,
-                api_secret,
-                position,
-                "recovery_close_retry",
-            )
-            _fail_account(account, "recovery_close_retry")
-            continue
-        if _is_grandfathered_open(opened):
-            continue
-        if protection_counts.get(key, 0) == 2:
-            continue
-        # Old open intents do not persist the ATR basis needed to reconstruct
-        # exactly the same protection prices. Guessing new levels is unsafe;
-        # close the recovered exposure with a risk-reducing market order.
+        if action.kind != "close_and_fail" or position is None:
+            raise RuntimeError("live account recovery plan is invalid")
         _close_position(
             account,
             api_key,
             api_secret,
             position,
-            "recovery_protection_missing",
+            action.reason,
         )
-        _fail_account(account, "recovery_protection_missing")
+        _fail_account(account, action.reason)
     review_warnings = _risk_review_warnings(positions, managed, protection_counts)
     if review_warnings:
         _persist_risk_review(account, review_warnings)

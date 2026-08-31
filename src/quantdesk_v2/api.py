@@ -2493,12 +2493,10 @@ def create_paper_account(
         "stop_loss_pct": risk.get("stop_loss_pct", 3),
         "take_profit_pct": risk.get("take_profit_pct", 5),
         "max_holding_bars": risk.get("max_holding_bars", 12),
-        "signal_mode": (
-            "strategy_event_v2"
-            if len(strategies) > 1
-            or primary_strategy.strategy_kind in {"full_strategy", "source_strategy"}
-            else "legacy_score_v1"
-        ),
+        # Every new paper deployment uses the immutable strategy-event path.
+        # ``legacy_score_v1`` remains readable only for historical records and
+        # is never selected by a production mutation endpoint after 0076.
+        "signal_mode": "strategy_event_v2",
         "strategy_combination_mode": "all",
     }
     for key in ("leverage", "max_positions", "position_size_pct", "margin_cap"):
@@ -2678,12 +2676,7 @@ def update_paper_account_strategy(
             "stop_loss_pct": risk.get("stop_loss_pct", config.get("stop_loss_pct", 3)),
             "take_profit_pct": risk.get("take_profit_pct", config.get("take_profit_pct", 5)),
             "max_holding_bars": risk.get("max_holding_bars", config.get("max_holding_bars", 12)),
-            "signal_mode": (
-                "strategy_event_v2"
-                if len(strategies) > 1
-                or primary_strategy.strategy_kind in {"full_strategy", "source_strategy"}
-                else "legacy_score_v1"
-            ),
+            "signal_mode": "strategy_event_v2",
             "strategy_combination_mode": "all",
         }
     )

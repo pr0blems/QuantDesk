@@ -383,82 +383,22 @@ def test_combined_strategy_freshness_requires_every_component() -> None:
     assert not paper._signal_is_fresh(account, recent_bar, evidence, now, policy)
 
 
-def test_legacy_paper_score_mode_restores_persistent_threshold_signal(
+def test_legacy_paper_config_is_forced_through_strategy_event_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     account = _account()
-    account["config_json"]["signal_mode"] = paper.LEGACY_PAPER_SIGNAL_MODE
-    rows = [
-        {
-            "open_time": index * 4 * 3_600,
-            "open": 100,
-            "high": 102,
-            "low": 99,
-            "close": 100 + index / 10,
-            "volume": 10,
-        }
-        for index in range(160)
-    ]
-    candles = [
-        paper.StrategyCandle(
-            ts=item["open_time"],
-            open=item["open"],
-            high=item["high"],
-            low=item["low"],
-            close=item["close"],
-            volume=item["volume"],
-        )
-        for item in rows
-    ]
+    account["config_json"]["signal_mode"] = "legacy_score_v1"
+    expected = (1, 2.0, ["统一策略"], 1_700_000_000, {"source": "strategy_event_v2"})
     monkeypatch.setattr(
-        paper.store,
-        "query",
-        lambda sql, params=(): [{"score": 74, "detail": "[]", "open_time": rows[-1]["open_time"]}],
-    )
-    monkeypatch.setattr(paper, "_candles", lambda symbol, timeframe: (candles, rows))
-
-    direction, atr, basis, signal_time, evidence = paper._paper_strategy_signal(
-        account, "TESTUSDT", 125
+        paper,
+        "_strategy_signal",
+        lambda *_args, **_kwargs: expected,
     )
 
-    assert direction == 1
-    assert atr is not None
-    assert signal_time == rows[-1]["open_time"]
-    assert evidence["signal_mode"] == paper.LEGACY_PAPER_SIGNAL_MODE
-    assert evidence["score"] == 74
-    assert any("4h 评分：+74" in item for item in basis)
+    result = paper._paper_strategy_signal(account, "TESTUSDT", 125)
 
-
-def test_legacy_paper_signal_remains_valid_until_a_new_score_replaces_it() -> None:
-    account = _account()
-    account["config_json"]["signal_mode"] = paper.LEGACY_PAPER_SIGNAL_MODE
-    policy = paper._paper_risk_policy(account)
-    bar_open = 1_700_000_000
-
-    assert not paper._paper_signal_is_fresh(
-        account, bar_open, {}, bar_open + 4 * 3_600 - 1, policy
-    )
-    assert paper._paper_signal_is_fresh(
-        account, bar_open, {}, bar_open + 4 * 3_600, policy
-    )
-    assert paper._paper_signal_is_fresh(
-        account, bar_open, {}, bar_open + 24 * 3_600, policy
-    )
-
-
-def test_legacy_paper_signal_uses_configured_trigger_timeframe() -> None:
-    account = _account()
-    account["config_json"]["signal_mode"] = paper.LEGACY_PAPER_SIGNAL_MODE
-    account["config_json"]["timeframe"] = "1h"
-    policy = paper._paper_risk_policy(account)
-    bar_open = 1_700_000_000
-
-    assert not paper._paper_signal_is_fresh(
-        account, bar_open, {}, bar_open + 3_600 - 1, policy
-    )
-    assert paper._paper_signal_is_fresh(
-        account, bar_open, {}, bar_open + 3_600, policy
-    )
+    assert paper._paper_signal_mode(account) == paper.STRATEGY_EVENT_SIGNAL_MODE
+    assert result == expected
 
 
 def test_paper_ticker_freshness_tolerates_database_clock_drift() -> None:

@@ -14,7 +14,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from quantdesk_v2.strategy_evaluator import (
-    StrategyCandle,
     StrategyEvaluationError,
     resolve_legacy_strategy_timeframe,
     resolve_strategy_timing_policy,
@@ -29,7 +28,6 @@ from quantdesk_v2.strategy_source_runtime import (
     validate_source,
 )
 
-from . import indicators as ind
 from . import market_store as store
 from .application.paper_reconciliation import PaperExecutionReconciliationService
 from .application.risk import RiskPolicy
@@ -42,7 +40,6 @@ from .application.strategy_execution import (
     record_strategy_decision,
     strategy_snapshots,
 )
-from .application.strategy_signals import build_legacy_signal_evidence
 from .domain.execution import (
     ExecutionMode,
     ExecutionState,
@@ -97,10 +94,7 @@ DEFAULT_MAX_HOLDING_BARS = 12
 ATR_STOP_MULTIPLIER = 1.5
 ATR_TAKE_PROFIT_MULTIPLIER = 2.5
 FUNDING_INTERVAL_SECONDS = 8 * 60 * 60
-LEGACY_PAPER_SIGNAL_MODE = "legacy_score_v1"
 STRATEGY_EVENT_SIGNAL_MODE = "strategy_event_v2"
-LEGACY_ENTRY_SCORE = 60.0
-LEGACY_TREND_MA_PERIOD = 150
 PAPER_MAX_FUTURE_TICKER_SKEW_SECONDS = 15
 _lock = threading.RLock()
 _paper_execution_safety: dict[int, ExecutionSafetyController] = {}
@@ -601,23 +595,9 @@ def _paper_risk_policy(
 
 
 def _paper_signal_mode(account: dict[str, Any]) -> str:
-    """Select the paper-only compatibility boundary for entry signals.
+    """Return the only production paper signal mode after migration 0076."""
 
-    Full strategies keep their versioned event evaluator.  Built-in strategies
-    use the original QuantDesk paper semantics only when the account migration
-    or account-creation API explicitly persists that compatibility mode.
-    """
-
-    snapshots = _strategy_snapshots(account)
-    if len(snapshots) > 1:
-        return STRATEGY_EVENT_SIGNAL_MODE
-    snapshot = snapshots[0] if snapshots else {}
-    if snapshot.get("strategy_kind") in {"full_strategy", "source_strategy"}:
-        return STRATEGY_EVENT_SIGNAL_MODE
-    raw = account.get("config_json") or {}
-    configured = str(raw.get("signal_mode") or "").strip()
-    if configured == LEGACY_PAPER_SIGNAL_MODE:
-        return configured
+    del account
     return STRATEGY_EVENT_SIGNAL_MODE
 
 
@@ -781,42 +761,6 @@ def _signal_is_fresh(
     )
 
 
-def _paper_signal_is_fresh(
-    account: dict[str, Any],
-    signal_time: int,
-    signal_evidence: dict[str, Any] | None,
-    now: int,
-    policy: Any,
-) -> bool:
-    """Validate paper signals without weakening live-trading freshness.
-
-    The original score is a state attached to the latest closed trigger bar, not
-    a one-shot crossing. The legacy engine deliberately keeps that latest state
-    until a newer closed score replaces it; ticker freshness and portfolio risk
-    are still enforced independently before any order can be created.
-    """
-
-    if _paper_signal_mode(account) != LEGACY_PAPER_SIGNAL_MODE:
-        return _signal_is_fresh(account, signal_time, signal_evidence, now, policy)
-    try:
-        opened = _epoch_seconds(signal_time)
-        snapshot = (_strategy_snapshots(account) or [{}])[0]
-        timing_policy = resolve_strategy_timing_policy(
-            snapshot,
-            account.get("config_json")
-            if isinstance(account.get("config_json"), dict)
-            else None,
-            evidence=signal_evidence,
-            default_max_holding_bars=DEFAULT_MAX_HOLDING_BARS,
-        )
-        return (
-            opened is not None
-            and now >= opened + timing_policy.timeframe_seconds
-        )
-    except (StrategyEvaluationError, TypeError, ValueError):
-        return False
-
-
 def _accrue_estimated_funding(
     account: dict[str, Any],
     position: dict[str, Any],
@@ -969,111 +913,6 @@ def _set_balance(account: dict[str, Any], balance: float) -> None:
     account["balance"] = safe_balance
 
 
-def _candles(
-    symbol: str, timeframe: str
-) -> tuple[list[StrategyCandle], list[dict[str, Any]]]:
-    rows = store.get_klines(symbol, timeframe, 600)
-    candles = [
-        StrategyCandle(
-            ts=int(row["open_time"]),
-            open=float(row["open"]),
-            high=float(row["high"]),
-            low=float(row["low"]),
-            close=float(row["close"]),
-            volume=float(row["volume"]),
-        )
-        for row in rows
-    ]
-    return candles, rows
-
-
-def _legacy_score_signal(
-    account: dict[str, Any], symbol: str, price: float | None = None
-) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
-    """Reproduce the original paper account's persistent 4h score signal.
-
-    The compatibility path intentionally reads the shared score table and uses
-    the historical ``abs(score) >= 60`` plus MA150 trend filter.  Position
-    sizing and all portfolio guards still run through the current risk engine.
-    """
-
-    score_rows = store.query(
-        """SELECT score,detail,open_time FROM scores
-           WHERE symbol=? AND tf='4h' ORDER BY open_time DESC LIMIT 1""",
-        (symbol,),
-    )
-    if not score_rows:
-        return 0, None, [], None, {"signal_mode": LEGACY_PAPER_SIGNAL_MODE}
-    row = score_rows[0]
-    try:
-        score = float(row["score"])
-        signal_time = int(row["open_time"])
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return 0, None, [], None, {"signal_mode": LEGACY_PAPER_SIGNAL_MODE}
-    if not math.isfinite(score):
-        return 0, None, [], None, {"signal_mode": LEGACY_PAPER_SIGNAL_MODE}
-
-    candles, rows = _candles(symbol, "4h")
-    if len(candles) < LEGACY_TREND_MA_PERIOD:
-        return 0, None, [], signal_time, {
-            "signal_mode": LEGACY_PAPER_SIGNAL_MODE,
-            "score": score,
-            "threshold": LEGACY_ENTRY_SCORE,
-            "reason_codes": ["INSUFFICIENT_MA150_HISTORY"],
-        }
-    closes = [item.close for item in candles]
-    ma150 = sum(closes[-LEGACY_TREND_MA_PERIOD:]) / LEGACY_TREND_MA_PERIOD
-    observed_price = float(price) if price is not None else closes[-1]
-    atr = None
-    if len(rows) > 15:
-        atr = ind.atr(
-            [float(item["high"]) for item in rows],
-            [float(item["low"]) for item in rows],
-            [float(item["close"]) for item in rows],
-        )
-
-    threshold_passed = abs(score) >= LEGACY_ENTRY_SCORE
-    side = 1 if score > 0 else -1 if score < 0 else 0
-    trend_passed = side != 0 and (
-        (side > 0 and observed_price >= ma150)
-        or (side < 0 and observed_price <= ma150)
-    )
-    direction = side if threshold_passed and trend_passed else 0
-    reason_codes = []
-    if threshold_passed:
-        reason_codes.append("LEGACY_SCORE_THRESHOLD")
-    if trend_passed:
-        reason_codes.append("MA150_TREND_FILTER")
-    evidence = {
-        "signal_mode": LEGACY_PAPER_SIGNAL_MODE,
-        "engine_key": LEGACY_PAPER_SIGNAL_MODE,
-        "score": score,
-        "threshold": LEGACY_ENTRY_SCORE,
-        "reason_codes": reason_codes,
-        "indicators": {
-            "price": observed_price,
-            "ma150": ma150,
-            "atr": atr,
-        },
-    }
-    basis = [
-        f"策略：{account.get('strategy_snapshot_json', {}).get('name') or '老版评分策略'}",
-        f"4h 评分：{score:+g} / 阈值：±{LEGACY_ENTRY_SCORE:g}",
-        f"MA150：{ma150:.8g}",
-    ]
-    return direction, atr, basis, signal_time, evidence
-
-
-def _engine_signal_evidence(
-    engine_key: str,
-    candles: list[StrategyCandle],
-    parameters: dict[str, Any],
-) -> dict[str, Any]:
-    """Compatibility alias for the public legacy evidence builder."""
-
-    return build_legacy_signal_evidence(engine_key, candles, parameters)
-
-
 def _strategy_signal(
     account: dict[str, Any], symbol: str, snapshot: dict[str, Any] | None = None
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
@@ -1095,8 +934,7 @@ def _strategy_signal(
 def _paper_strategy_signal(
     account: dict[str, Any], symbol: str, price: float | None = None
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
-    if _paper_signal_mode(account) == LEGACY_PAPER_SIGNAL_MODE:
-        return _legacy_score_signal(account, symbol, price)
+    del price
     snapshots = _strategy_snapshots(account)
     if len(snapshots) <= 1:
         return _strategy_signal(account, symbol, snapshots[0] if snapshots else None)
@@ -1687,7 +1525,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 )
             strategy_reversal = bool(
                 signal_time is not None
-                and _paper_signal_is_fresh(
+                and _signal_is_fresh(
                     account, signal_time, signal_evidence, now, policy
                 )
                 and direction == -side
@@ -1740,17 +1578,15 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             if (
                 direction not in {-1, 1}
                 or signal_time is None
-                or not _paper_signal_is_fresh(
+                or not _signal_is_fresh(
                     account, signal_time, signal_evidence, now, policy
                 )
             ):
                 continue
-            signal_mode = _paper_signal_mode(account)
             state_key = f"paper:{account['id']}:signal:{symbol}"
             consumption_value = _signal_consumption_value(signal_time, signal_evidence)
             if (
-                signal_mode == STRATEGY_EVENT_SIGNAL_MODE
-                and store.user_state_get(account["user_id"], state_key)
+                store.user_state_get(account["user_id"], state_key)
                 == consumption_value
             ):
                 continue
@@ -1766,10 +1602,9 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 signal_time,
                 signal_evidence,
             ):
-                if signal_mode == STRATEGY_EVENT_SIGNAL_MODE:
-                    store.user_state_set(
-                        account["user_id"], state_key, consumption_value
-                    )
+                store.user_state_set(
+                    account["user_id"], state_key, consumption_value
+                )
                 positions = _positions(account)
                 occupied_symbols = {
                     str(position["symbol"]).upper() for position in positions
@@ -2068,13 +1903,9 @@ def api_data(
         },
         "rules": {
             "tiers": (
-                "老版兼容：4h 评分达到 ±60，并通过 MA150 趋势过滤"
-                if signal_mode == LEGACY_PAPER_SIGNAL_MODE
-                else (
-                    f"组合策略（全部满足才开仓）：{' + '.join(strategy_names)}"
-                    if len(strategies) > 1
-                    else f"绑定策略：{strategy.get('name') or strategy.get('engine_key')}"
-                )
+                f"组合策略（全部满足才开仓）：{' + '.join(strategy_names)}"
+                if len(strategies) > 1
+                else f"绑定策略：{strategy.get('name') or strategy.get('engine_key')}"
             ),
             "exits": "1.5×ATR 止损 / 2.5×ATR 止盈 / 策略反转 / 最大持仓周期 / 强平",
             "costs": (

@@ -115,33 +115,39 @@ def replay_mode_semantics(
 
     for candle, envelope in zip(candles, decisions, strict=True):
         if pending_direction in {-1, 1} and pending_reference is not None:
-            if position is not None and position["direction"] != pending_direction:
-                selected = exit_policy.decision_for_reason(
-                    "strategy_reversal", candle.open, observed_at=candle.ts
-                )
-                if selected is not None:
-                    exits.append(
-                        _exit_envelope(
-                            reference=pending_reference,
-                            candle=candle,
-                            exit_decision=selected,
-                        )
+            observed_at = datetime.fromtimestamp(int(candle.ts), tz=UTC)
+            pending_is_valid = (
+                pending_reference.valid_until is None
+                or observed_at <= pending_reference.valid_until
+            )
+            if pending_is_valid:
+                if position is not None and position["direction"] != pending_direction:
+                    selected = exit_policy.decision_for_reason(
+                        "strategy_reversal", candle.open, observed_at=candle.ts
                     )
-                position = None
-            if position is None:
-                levels = exit_policy.resolve_levels(
-                    candle.open,
-                    pending_direction,
-                    stop_loss_pct=stop_loss_pct,
-                    take_profit_pct=take_profit_pct,
-                )
-                position = {
-                    "direction": pending_direction,
-                    "holding_bars": 0,
-                    "stop": levels.stop if levels is not None else None,
-                    "target": levels.target if levels is not None else None,
-                    "reference": pending_reference,
-                }
+                    if selected is not None:
+                        exits.append(
+                            _exit_envelope(
+                                reference=pending_reference,
+                                candle=candle,
+                                exit_decision=selected,
+                            )
+                        )
+                    position = None
+                if position is None:
+                    levels = exit_policy.resolve_levels(
+                        candle.open,
+                        pending_direction,
+                        stop_loss_pct=stop_loss_pct,
+                        take_profit_pct=take_profit_pct,
+                    )
+                    position = {
+                        "direction": pending_direction,
+                        "holding_bars": 0,
+                        "stop": levels.stop if levels is not None else None,
+                        "target": levels.target if levels is not None else None,
+                        "reference": pending_reference,
+                    }
 
         if position is not None:
             position["holding_bars"] += 1

@@ -523,6 +523,7 @@ class BacktestRepository:
         }
         signals: list[int] = []
         risk_proposals: list[dict[str, Any] | None] = []
+        signal_valid_until: list[int | None] = []
         decision_counts: dict[str, int] = {}
         for trigger in trigger_candles:
             decision_at = trigger.ts + int(_timeframe_seconds(trigger_timeframe) or 0)
@@ -541,6 +542,7 @@ class BacktestRepository:
             direction = {"LONG_ENTRY": 1, "SHORT_ENTRY": -1}.get(decision.decision, 0)
             signals.append(direction)
             risk_proposals.append(decision.risk_proposal if direction else None)
+            signal_valid_until.append(decision.valid_until)
             decision_counts[decision.decision] = decision_counts.get(decision.decision, 0) + 1
 
         result = _run_engine(
@@ -548,6 +550,7 @@ class BacktestRepository:
             validated,
             signals=signals,
             risk_proposals=risk_proposals,
+            signal_valid_until=signal_valid_until,
         )
         quality = dict(quality_by_timeframe[trigger_timeframe])
         quality.update(
@@ -710,6 +713,7 @@ class BacktestRepository:
             validated,
             signals=signals,
             risk_proposals=risk_proposals,
+            signal_valid_until=[decision.valid_until for decision in decisions],
         )
         quality = dict(quality_by_timeframe[metadata.trigger_timeframe])
         quality.update(
@@ -1162,6 +1166,7 @@ def _run_engine(
     *,
     signals: list[int] | None = None,
     risk_proposals: list[dict[str, Any] | None] | None = None,
+    signal_valid_until: list[int | None] | None = None,
 ) -> dict[str, Any]:
     if signals is None:
         envelopes = DEFAULT_STRATEGY_EVALUATOR.evaluate_envelopes(
@@ -1172,10 +1177,16 @@ def _run_engine(
             timeframe=config["timeframe"],
         )
         signals = [item.direction for item in envelopes]
+        signal_valid_until = [
+            int(item.valid_until.timestamp()) if item.valid_until is not None else None
+            for item in envelopes
+        ]
     if len(signals) != len(candles):
         raise BacktestUnavailable("strategy signal count does not match trigger candles")
     if risk_proposals is not None and len(risk_proposals) != len(candles):
         raise BacktestUnavailable("strategy risk proposal count does not match trigger candles")
+    if signal_valid_until is not None and len(signal_valid_until) != len(candles):
+        raise BacktestUnavailable("strategy signal validity count does not match trigger candles")
     initial_capital = config["initial_capital"]
     balance = initial_capital
     fee_rate = config["fee_bps"] / 10_000
@@ -1183,6 +1194,7 @@ def _run_engine(
     position: dict[str, Any] | None = None
     pending_signal = 0
     pending_risk: dict[str, Any] | None = None
+    pending_valid_until: int | None = None
     trades: list[dict[str, Any]] = []
     total_fees = 0.0
     exposed_bars = 0
@@ -1309,7 +1321,10 @@ def _run_engine(
             if liquidation_gap:
                 close_position(candle, candle.open, "liquidation")
 
-        if pending_signal in {-1, 1}:
+        pending_is_valid = (
+            pending_valid_until is None or candle.ts <= pending_valid_until
+        )
+        if pending_signal in {-1, 1} and pending_is_valid:
             if position is not None and position["direction"] != pending_signal:
                 close_position(candle, candle.open, "strategy_reversal")
             if position is None:
@@ -1381,6 +1396,9 @@ def _run_engine(
         )
         pending_signal = signals[index]
         pending_risk = risk_proposals[index] if risk_proposals is not None else None
+        pending_valid_until = (
+            signal_valid_until[index] if signal_valid_until is not None else None
+        )
 
     final_equity = balance
     net_profit = final_equity - initial_capital

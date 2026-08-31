@@ -6,6 +6,8 @@ import json
 import math
 import uuid
 from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from ...application.paper_reconciliation import PaperProjectionOutcome
@@ -13,6 +15,33 @@ from ...application.paper_reconciliation import PaperProjectionOutcome
 
 class PaperProjectionError(RuntimeError):
     """A durable paper fill cannot be projected safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperHistoryAudit:
+    """Dry-run result for facts on both sides of the balance checkpoint."""
+
+    user_id: int
+    paper_account_id: int
+    baseline_execution_id: int | None
+    applied_count: int
+    checkpointed_count: int
+    replayable_count: int
+    incomplete_after_checkpoint: tuple[int, ...]
+    malformed_execution_ids: tuple[int, ...]
+    missing_ledger_execution_ids: tuple[int, ...]
+    balance_consistent: bool
+
+    @property
+    def rebuild_safe(self) -> bool:
+        return (
+            not self.incomplete_after_checkpoint
+            and not self.malformed_execution_ids
+            and self.balance_consistent
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        return {**asdict(self), "rebuild_safe": self.rebuild_safe}
 
 
 class _Transaction(Protocol):
@@ -195,6 +224,202 @@ class MySqlPaperProjectionStore:
         ):
             warning_codes.append("paper_equity_projection_stale")
         return remaining, tuple(drift_codes), tuple(warning_codes)
+
+    def audit_applied_history(
+        self, *, user_id: int, paper_account_id: int
+    ) -> PaperHistoryAudit:
+        """Dry-run historical facts without fabricating pre-checkpoint detail."""
+
+        report, _ = self._history_ledger_plan(
+            self._backend,
+            user_id=user_id,
+            paper_account_id=paper_account_id,
+            lock=False,
+        )
+        return report
+
+    def rebuild_missing_history_ledger(
+        self, *, user_id: int, paper_account_id: int
+    ) -> tuple[PaperHistoryAudit, int]:
+        """Restore only derivable post-checkpoint ledger rows in one transaction."""
+
+        with self._backend.transaction() as transaction:
+            report, missing = self._history_ledger_plan(
+                transaction,
+                user_id=user_id,
+                paper_account_id=paper_account_id,
+                lock=True,
+            )
+            if not report.rebuild_safe:
+                raise PaperProjectionError(
+                    "paper history is not safe for controlled ledger reconstruction"
+                )
+            rebuilt = 0
+            for execution_id, entry_type, amount, balance_after in missing:
+                inserted = transaction.execute(
+                    """INSERT INTO paper_account_ledger_entries(
+                           public_id,paper_account_id,user_id,source_execution_id,
+                           entry_type,amount,balance_after
+                       ) VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        str(uuid.uuid4()),
+                        paper_account_id,
+                        user_id,
+                        execution_id,
+                        entry_type,
+                        amount,
+                        balance_after,
+                    ),
+                )
+                if inserted != 1:
+                    raise PaperProjectionError(
+                        "paper history ledger reconstruction lost its insert"
+                    )
+                rebuilt += 1
+        return report, rebuilt
+
+    @staticmethod
+    def _history_ledger_plan(
+        reader: _Backend | _Transaction,
+        *,
+        user_id: int,
+        paper_account_id: int,
+        lock: bool,
+    ) -> tuple[PaperHistoryAudit, list[tuple[int, str, float, float]]]:
+        checkpoint_sql = (
+            """SELECT a.balance,c.baseline_balance,c.baseline_execution_id,
+                      c.expected_balance,c.last_execution_id
+               FROM paper_accounts a
+               JOIN paper_account_balance_checkpoints c
+                 ON c.paper_account_id=a.id AND c.user_id=a.user_id
+               WHERE a.id=? AND a.user_id=? FOR UPDATE"""
+            if lock
+            else """SELECT a.balance,c.baseline_balance,c.baseline_execution_id,
+                           c.expected_balance,c.last_execution_id
+                    FROM paper_accounts a
+                    JOIN paper_account_balance_checkpoints c
+                      ON c.paper_account_id=a.id AND c.user_id=a.user_id
+                    WHERE a.id=? AND a.user_id=?"""
+        )
+        checkpoint_rows = reader.query(
+            checkpoint_sql,
+            (paper_account_id, user_id),
+        )
+        if not checkpoint_rows:
+            raise PaperProjectionError("paper balance checkpoint is unavailable")
+        checkpoint = checkpoint_rows[0]
+        baseline_id = (
+            int(checkpoint["baseline_execution_id"])
+            if checkpoint.get("baseline_execution_id") is not None
+            else None
+        )
+        baseline_cutoff = baseline_id or 0
+        facts_sql = (
+            """SELECT id,action,projection_version,projection_json
+               FROM paper_order_executions
+               WHERE user_id=? AND paper_account_id=? AND status='FILLED'
+                 AND projection_status='applied'
+               ORDER BY id FOR UPDATE"""
+            if lock
+            else """SELECT id,action,projection_version,projection_json
+                    FROM paper_order_executions
+                    WHERE user_id=? AND paper_account_id=? AND status='FILLED'
+                      AND projection_status='applied'
+                    ORDER BY id"""
+        )
+        facts = reader.query(
+            facts_sql,
+            (user_id, paper_account_id),
+        )
+        ledger_sql = (
+            """SELECT source_execution_id,entry_type,amount,balance_after
+               FROM paper_account_ledger_entries
+               WHERE user_id=? AND paper_account_id=?
+                 AND source_execution_id>?
+               ORDER BY source_execution_id FOR UPDATE"""
+            if lock
+            else """SELECT source_execution_id,entry_type,amount,balance_after
+                    FROM paper_account_ledger_entries
+                    WHERE user_id=? AND paper_account_id=?
+                      AND source_execution_id>?
+                    ORDER BY source_execution_id"""
+        )
+        ledger_rows = reader.query(
+            ledger_sql,
+            (user_id, paper_account_id, baseline_cutoff),
+        )
+        ledgers = {int(row["source_execution_id"]): row for row in ledger_rows}
+        balance = _money(checkpoint["baseline_balance"], "baseline_balance")
+        malformed: list[int] = []
+        incomplete: list[int] = []
+        missing: list[tuple[int, str, float, float]] = []
+        checkpointed_count = 0
+        replayable_count = 0
+        last_post_checkpoint_id = baseline_cutoff
+        for raw_fact in facts:
+            fact = dict(raw_fact)
+            execution_id = int(fact["id"])
+            if execution_id <= baseline_cutoff:
+                checkpointed_count += 1
+                continue
+            last_post_checkpoint_id = execution_id
+            if fact.get("projection_json") is None:
+                incomplete.append(execution_id)
+                continue
+            try:
+                payload = _projection_payload(fact)
+                action = str(fact.get("action") or "")
+                if action == "open":
+                    amount = -_money(payload.get("balance_debit"), "balance_debit")
+                    entry_type = "open_debit"
+                elif action == "close":
+                    amount = _money(payload.get("balance_credit"), "balance_credit")
+                    entry_type = "close_credit"
+                else:
+                    raise PaperProjectionError("paper execution action is invalid")
+                balance = _round_money(balance + amount)
+                if balance < 0:
+                    raise PaperProjectionError("paper history balance became negative")
+                ledger = ledgers.get(execution_id)
+                if ledger is None:
+                    missing.append(
+                        (execution_id, entry_type, float(amount), float(balance))
+                    )
+                elif (
+                    str(ledger.get("entry_type")) != entry_type
+                    or abs(_money(ledger.get("amount"), "amount") - amount)
+                    > Decimal("0.00000001")
+                    or abs(
+                        _money(ledger.get("balance_after"), "balance_after")
+                        - balance
+                    )
+                    > Decimal("0.00000001")
+                ):
+                    raise PaperProjectionError("paper history ledger differs from fact")
+                replayable_count += 1
+            except PaperProjectionError:
+                malformed.append(execution_id)
+        actual = _money(checkpoint["balance"], "balance")
+        expected = _money(checkpoint["expected_balance"], "expected_balance")
+        checkpoint_last = int(checkpoint.get("last_execution_id") or baseline_cutoff)
+        balance_consistent = (
+            abs(actual - expected) <= Decimal("0.00000001")
+            and abs(balance - expected) <= Decimal("0.00000001")
+            and checkpoint_last == last_post_checkpoint_id
+        )
+        report = PaperHistoryAudit(
+            user_id=user_id,
+            paper_account_id=paper_account_id,
+            baseline_execution_id=baseline_id,
+            applied_count=len(facts),
+            checkpointed_count=checkpointed_count,
+            replayable_count=replayable_count,
+            incomplete_after_checkpoint=tuple(incomplete),
+            malformed_execution_ids=tuple(malformed),
+            missing_ledger_execution_ids=tuple(item[0] for item in missing),
+            balance_consistent=balance_consistent,
+        )
+        return report, missing
 
     def record_reconciliation(
         self,
@@ -452,6 +677,22 @@ def _projection_payload(execution: dict[str, Any]) -> dict[str, Any]:
     if payload.get("schema_version") != 1:
         raise PaperProjectionError("paper projection schema is unsupported")
     return payload
+
+
+def _money(value: Any, name: str) -> Decimal:
+    if isinstance(value, bool):
+        raise PaperProjectionError(f"{name} must be numeric")
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise PaperProjectionError(f"{name} must be numeric") from exc
+    if not number.is_finite():
+        raise PaperProjectionError(f"{name} must be finite")
+    return number
+
+
+def _round_money(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.00000001"))
 
 
 def _object(value: Any, name: str) -> dict[str, Any]:

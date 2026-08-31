@@ -347,3 +347,95 @@ def test_reconciliation_status_persists_warning_without_blocking() -> None:
 
     assert backend.status_write is not None
     assert backend.status_write[2:6] == ("warning", 0, 0, 1)
+
+
+class _HistoryBackend:
+    def __init__(self, *, incomplete: bool = False) -> None:
+        self.checkpoint = {
+            "balance": 950,
+            "baseline_balance": 1_000,
+            "baseline_execution_id": 10,
+            "expected_balance": 950,
+            "last_execution_id": 11,
+        }
+        self.facts = [
+            {
+                "id": 10,
+                "action": "open",
+                "projection_version": "paper_projection_v1",
+                "projection_json": None,
+            },
+            {
+                "id": 11,
+                "action": "open",
+                "projection_version": "paper_projection_v1",
+                "projection_json": (
+                    None
+                    if incomplete
+                    else {
+                        "schema_version": 1,
+                        "action": "open",
+                        "balance_debit": 50,
+                    }
+                ),
+            },
+        ]
+        self.ledgers: dict[int, dict[str, Any]] = {}
+
+    @contextmanager
+    def transaction(self):
+        yield self
+
+    def query(self, sql: str, params=()):
+        if "JOIN paper_account_balance_checkpoints" in sql:
+            return [dict(self.checkpoint)]
+        if "FROM paper_order_executions" in sql:
+            return [dict(item) for item in self.facts]
+        if "FROM paper_account_ledger_entries" in sql:
+            return [dict(item) for _, item in sorted(self.ledgers.items())]
+        raise AssertionError(f"unexpected history query: {sql}")
+
+    def execute(self, sql: str, params=()):
+        if "INSERT INTO paper_account_ledger_entries" not in sql:
+            raise AssertionError(f"unexpected history write: {sql}")
+        values = tuple(params)
+        execution_id = int(values[3])
+        self.ledgers[execution_id] = {
+            "source_execution_id": execution_id,
+            "entry_type": values[4],
+            "amount": values[5],
+            "balance_after": values[6],
+        }
+        return 1
+
+
+def test_history_audit_preserves_checkpointed_facts_and_rebuilds_safe_ledger() -> None:
+    backend = _HistoryBackend()
+    store = MySqlPaperProjectionStore(backend)
+
+    dry_run = store.audit_applied_history(user_id=7, paper_account_id=11)
+
+    assert dry_run.checkpointed_count == 1
+    assert dry_run.replayable_count == 1
+    assert dry_run.missing_ledger_execution_ids == (11,)
+    assert dry_run.rebuild_safe
+
+    report, rebuilt = store.rebuild_missing_history_ledger(
+        user_id=7, paper_account_id=11
+    )
+    after = store.audit_applied_history(user_id=7, paper_account_id=11)
+
+    assert report.rebuild_safe
+    assert rebuilt == 1
+    assert after.missing_ledger_execution_ids == ()
+
+
+def test_history_rebuild_refuses_incomplete_post_checkpoint_fact() -> None:
+    store = MySqlPaperProjectionStore(_HistoryBackend(incomplete=True))
+
+    report = store.audit_applied_history(user_id=7, paper_account_id=11)
+
+    assert report.incomplete_after_checkpoint == (11,)
+    assert not report.rebuild_safe
+    with pytest.raises(PaperProjectionError, match="not safe"):
+        store.rebuild_missing_history_ledger(user_id=7, paper_account_id=11)
