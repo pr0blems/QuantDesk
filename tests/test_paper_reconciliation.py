@@ -21,6 +21,7 @@ class _ServiceStore:
         self.pending = [101, 102]
         self.failed: list[tuple[int, int, int, str]] = []
         self.projected: list[tuple[int, int, int]] = []
+        self.reconciliations: list[dict[str, Any]] = []
 
     def pending_execution_ids(self, *, user_id: int, paper_account_id: int, limit: int):
         assert (user_id, paper_account_id, limit) == (7, 11, 100)
@@ -40,7 +41,10 @@ class _ServiceStore:
 
     def audit_account(self, *, user_id: int, paper_account_id: int):
         assert (user_id, paper_account_id) == (7, 11)
-        return len(self.pending), ()
+        return len(self.pending), (), ("paper_equity_projection_stale",)
+
+    def record_reconciliation(self, **values) -> None:
+        self.reconciliations.append(values)
 
 
 def test_reconciliation_is_tenant_scoped_and_blocks_only_failed_account() -> None:
@@ -57,6 +61,8 @@ def test_reconciliation_is_tenant_scoped_and_blocks_only_failed_account() -> Non
     assert store.projected == [(7, 11, 101), (7, 11, 102)]
     assert store.failed[0][:3] == (7, 11, 102)
     assert "broken projection" in store.failed[0][3]
+    assert result.warning_codes == ("paper_equity_projection_stale",)
+    assert store.reconciliations[0]["ready"] is False
 
 
 class _OpenBackend:
@@ -96,7 +102,9 @@ class _OpenBackend:
             ),
         }
         self.balance = 10_000.0
+        self.expected_balance = 10_000.0
         self.position_source: int | None = None
+        self.ledger_source: int | None = None
         self.writes: list[tuple[str, tuple[Any, ...]]] = []
 
     @contextmanager
@@ -111,6 +119,10 @@ class _OpenBackend:
             return [dict(self.fact)]
         if "paper_positions WHERE source_execution_id" in sql:
             return [{"id": 1}] if self.position_source == values[0] else []
+        if "paper_account_ledger_entries WHERE source_execution_id" in sql:
+            return [{"id": 2}] if self.ledger_source == values[0] else []
+        if "SELECT expected_balance FROM paper_account_balance_checkpoints" in sql:
+            return [{"expected_balance": self.expected_balance}]
         if "SELECT balance FROM paper_accounts" in sql:
             return [{"balance": self.balance}]
         if "WHERE paper_account_id=? AND user_id=? AND symbol=?" in sql:
@@ -124,6 +136,10 @@ class _OpenBackend:
             self.position_source = int(values[-1])
         elif "UPDATE paper_accounts SET balance" in sql:
             self.balance = float(values[0])
+        elif "UPDATE paper_account_balance_checkpoints" in sql:
+            self.expected_balance = float(values[0])
+        elif "INSERT INTO paper_account_ledger_entries" in sql:
+            self.ledger_source = int(values[3])
         elif "UPDATE paper_order_executions" in sql and "projection_status='applied'" in sql:
             self.fact["projection_status"] = "applied"
         return 1
@@ -139,6 +155,7 @@ def test_open_fill_projection_is_idempotent_and_updates_balance_once() -> None:
     assert first.state == "applied"
     assert second.state == "already_applied"
     assert backend.position_source == 101
+    assert backend.ledger_source == 101
     assert backend.balance == pytest.approx(9_949)
     assert sum("INSERT INTO paper_positions" in sql for sql, _ in backend.writes) == 1
     assert sum("UPDATE paper_accounts SET balance" in sql for sql, _ in backend.writes) == 1
@@ -153,6 +170,21 @@ def test_projection_rejects_cross_tenant_execution_scope() -> None:
 
     assert backend.position_source is None
     assert backend.balance == 10_000
+
+
+def test_open_projection_blocks_when_account_balance_differs_from_checkpoint() -> None:
+    backend = _OpenBackend()
+    backend.balance = 9_999
+    store = MySqlPaperProjectionStore(backend)
+
+    with pytest.raises(PaperProjectionError, match="balance drift"):
+        store.project_execution(user_id=7, paper_account_id=11, execution_id=101)
+
+    assert backend.position_source == 101
+    # The fake transaction has no rollback implementation; in MySQL the
+    # position insert and all subsequent writes roll back together.
+    assert backend.ledger_source is None
+    assert backend.balance == 9_999
 
 
 class _CloseBackend:
@@ -198,7 +230,9 @@ class _CloseBackend:
             "balance": 9_949,
         }
         self.trade_source: int | None = None
+        self.ledger_source: int | None = None
         self.balance = 9_949.0
+        self.expected_balance = 9_949.0
         self.writes: list[tuple[str, tuple[Any, ...]]] = []
 
     @contextmanager
@@ -211,7 +245,13 @@ class _CloseBackend:
             return [dict(self.fact)] if values == (202, 7, 11) else []
         if "paper_trades WHERE source_execution_id" in sql:
             return [{"id": 41}] if self.trade_source == values[0] else []
-        if "SELECT p.*,a.balance" in sql:
+        if "paper_account_ledger_entries WHERE source_execution_id" in sql:
+            return [{"id": 42}] if self.ledger_source == values[0] else []
+        if "SELECT expected_balance FROM paper_account_balance_checkpoints" in sql:
+            return [{"expected_balance": self.expected_balance}]
+        if "SELECT balance FROM paper_accounts" in sql:
+            return [{"balance": self.balance}]
+        if "SELECT p.* FROM paper_positions" in sql:
             return [dict(self.position)] if self.position is not None else []
         raise AssertionError(f"unexpected query: {sql}")
 
@@ -224,6 +264,10 @@ class _CloseBackend:
             self.trade_source = int(values[-1])
         elif "UPDATE paper_accounts SET balance" in sql:
             self.balance = float(values[0])
+        elif "UPDATE paper_account_balance_checkpoints" in sql:
+            self.expected_balance = float(values[0])
+        elif "INSERT INTO paper_account_ledger_entries" in sql:
+            self.ledger_source = int(values[3])
         elif "UPDATE paper_order_executions" in sql and "projection_status='applied'" in sql:
             self.fact["projection_status"] = "applied"
         return 1
@@ -240,6 +284,66 @@ def test_close_fill_projection_removes_position_and_credits_balance_once() -> No
     assert second.state == "already_applied"
     assert backend.position is None
     assert backend.trade_source == 202
+    assert backend.ledger_source == 202
     assert backend.balance == pytest.approx(10_003)
     assert sum("INSERT INTO paper_trades" in sql for sql, _ in backend.writes) == 1
     assert sum("UPDATE paper_accounts SET balance" in sql for sql, _ in backend.writes) == 1
+
+
+class _AuditBackend:
+    def __init__(self, *, balance_drift: bool = False, equity_stale: bool = False) -> None:
+        self.balance_drift = balance_drift
+        self.equity_stale = equity_stale
+        self.status_write: tuple[Any, ...] | None = None
+
+    def query(self, sql: str, params=()):
+        if "COUNT(*) AS pending_count" in sql:
+            return [{"pending_count": 0}]
+        if "ABS(a.balance-c.expected_balance)" in sql:
+            return [{"balance": 99, "expected_balance": 100}] if self.balance_drift else []
+        if "FROM paper_positions p" in sql:
+            return []
+        if "FROM paper_trades t" in sql:
+            return []
+        if "SELECT e.id FROM paper_order_executions e" in sql:
+            return []
+        if "FROM paper_account_ledger_entries l" in sql:
+            return []
+        if "MAX(ts) AS latest_ts" in sql:
+            return [{"id": 11}] if self.equity_stale else []
+        raise AssertionError(f"unexpected audit query: {sql}")
+
+    def execute(self, sql: str, params=()):
+        if "INSERT INTO paper_account_reconciliation_status" not in sql:
+            raise AssertionError(f"unexpected audit write: {sql}")
+        self.status_write = tuple(params)
+        return 1
+
+
+def test_audit_distinguishes_blocking_balance_drift_from_equity_warning() -> None:
+    drift_store = MySqlPaperProjectionStore(_AuditBackend(balance_drift=True))
+    warning_store = MySqlPaperProjectionStore(_AuditBackend(equity_stale=True))
+
+    drift = drift_store.audit_account(user_id=7, paper_account_id=11)
+    warning = warning_store.audit_account(user_id=7, paper_account_id=11)
+
+    assert drift == (0, ("paper_balance_drift",), ())
+    assert warning == (0, (), ("paper_equity_projection_stale",))
+
+
+def test_reconciliation_status_persists_warning_without_blocking() -> None:
+    backend = _AuditBackend(equity_stale=True)
+    store = MySqlPaperProjectionStore(backend)
+
+    store.record_reconciliation(
+        user_id=7,
+        paper_account_id=11,
+        pending_count=0,
+        drift_codes=(),
+        warning_codes=("paper_equity_projection_stale",),
+        errors=(),
+        ready=True,
+    )
+
+    assert backend.status_write is not None
+    assert backend.status_write[2:6] == ("warning", 0, 0, 1)

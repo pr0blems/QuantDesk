@@ -1846,32 +1846,51 @@ def paper_loop() -> None:
 def reset(user_id: int, account_id: int) -> None:
     with _lock:
         _account(user_id, account_id)
-        store.execute(
-            "DELETE FROM paper_positions WHERE paper_account_id=? AND user_id=?",
-            (account_id, user_id),
-        )
-        store.execute(
-            "DELETE FROM paper_trades WHERE paper_account_id=? AND user_id=?",
-            (account_id, user_id),
-        )
-        store.execute(
-            "DELETE FROM paper_order_executions WHERE paper_account_id=? AND user_id=?",
-            (account_id, user_id),
-        )
-        store.execute(
-            "DELETE FROM paper_equity WHERE paper_account_id=? AND user_id=?",
-            (account_id, user_id),
-        )
-        store.execute(
-            "DELETE FROM user_states WHERE user_id=? AND k LIKE ?",
-            (user_id, f"paper:{account_id}:%"),
-        )
-        store.execute(
-            """UPDATE paper_accounts SET balance=initial_balance,started_at=CURRENT_TIMESTAMP,
-                      last_tick_at=NULL,updated_at=CURRENT_TIMESTAMP
-               WHERE id=? AND user_id=?""",
-            (account_id, user_id),
-        )
+        with store.transaction() as transaction:
+            transaction.execute(
+                "DELETE FROM paper_positions WHERE paper_account_id=? AND user_id=?",
+                (account_id, user_id),
+            )
+            transaction.execute(
+                "DELETE FROM paper_trades WHERE paper_account_id=? AND user_id=?",
+                (account_id, user_id),
+            )
+            transaction.execute(
+                "DELETE FROM paper_order_executions WHERE paper_account_id=? AND user_id=?",
+                (account_id, user_id),
+            )
+            transaction.execute(
+                """UPDATE paper_account_balance_checkpoints c
+                   JOIN paper_accounts a
+                     ON a.id=c.paper_account_id AND a.user_id=c.user_id
+                   SET c.baseline_balance=a.initial_balance,
+                       c.baseline_execution_id=NULL,
+                       c.expected_balance=a.initial_balance,
+                       c.last_execution_id=NULL,
+                       c.updated_at=UTC_TIMESTAMP(6)
+                   WHERE c.paper_account_id=? AND c.user_id=?""",
+                (account_id, user_id),
+            )
+            transaction.execute(
+                """DELETE FROM paper_account_reconciliation_status
+                   WHERE paper_account_id=? AND user_id=?""",
+                (account_id, user_id),
+            )
+            transaction.execute(
+                "DELETE FROM paper_equity WHERE paper_account_id=? AND user_id=?",
+                (account_id, user_id),
+            )
+            transaction.execute(
+                "DELETE FROM user_states WHERE user_id=? AND k LIKE ?",
+                (user_id, f"paper:{account_id}:%"),
+            )
+            transaction.execute(
+                """UPDATE paper_accounts
+                   SET balance=initial_balance,started_at=CURRENT_TIMESTAMP,
+                       last_tick_at=NULL,updated_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND user_id=?""",
+                (account_id, user_id),
+            )
 
 
 def api_data(

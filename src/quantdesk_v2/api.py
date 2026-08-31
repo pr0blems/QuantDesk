@@ -2523,6 +2523,19 @@ def create_paper_account(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="paper account name already exists") from exc
+    db.execute(
+        text(
+            """INSERT INTO paper_account_balance_checkpoints(
+                   paper_account_id,user_id,baseline_balance,baseline_execution_id,
+                   expected_balance,last_execution_id
+               ) VALUES(:account_id,:user_id,:balance,NULL,:balance,NULL)"""
+        ),
+        {
+            "account_id": account.id,
+            "user_id": user.id,
+            "balance": account.balance,
+        },
+    )
     for strategy, revision in zip(strategies, revisions, strict=True):
         deployment = StrategyDeployment(
             public_id=str(uuid.uuid4()),

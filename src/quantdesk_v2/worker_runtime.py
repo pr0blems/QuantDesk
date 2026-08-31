@@ -29,6 +29,65 @@ WorkerType = Literal["market", "shadow", "paper", "live", "ai", "ops"]
 _HEARTBEAT_SECONDS = 5.0
 
 
+def _paper_heartbeat_details(engine: Engine) -> tuple[str, dict[str, object]]:
+    """Summarize durable paper projection health without mutating account state."""
+
+    with engine.connect() as connection:
+        reconciliation = connection.execute(
+            text(
+                """SELECT COUNT(*) AS account_count,
+                          COALESCE(SUM(status='blocked'),0) AS blocked_count,
+                          COALESCE(SUM(status='warning'),0) AS warning_count,
+                          COALESCE(SUM(pending_count),0) AS pending_count,
+                          COALESCE(SUM(drift_count),0) AS drift_count,
+                          MAX(last_success_at) AS last_success_at
+                   FROM paper_account_reconciliation_status"""
+            )
+        ).mappings().one()
+        queue = connection.execute(
+            text(
+                """SELECT COALESCE(SUM(projection_status='pending'),0) AS pending_count,
+                          COALESCE(SUM(projection_status='failed'),0) AS failed_count
+                   FROM paper_order_executions
+                   WHERE status='FILLED' AND projection_status IN ('pending','failed')"""
+            )
+        ).mappings().one()
+    blocked = int(reconciliation["blocked_count"] or 0)
+    drift = int(reconciliation["drift_count"] or 0)
+    pending = int(queue["pending_count"] or 0)
+    failed = int(queue["failed_count"] or 0)
+    last_success = reconciliation["last_success_at"]
+    reconciliation_state = "blocked" if blocked or drift or failed else "warning" if int(
+        reconciliation["warning_count"] or 0
+    ) else "healthy"
+    details: dict[str, object] = {
+        "paper_reconciliation": {
+            "state": reconciliation_state,
+            "account_count": int(reconciliation["account_count"] or 0),
+            "blocked_count": blocked,
+            "warning_count": int(reconciliation["warning_count"] or 0),
+            "pending_count": pending,
+            "failed_count": failed,
+            "drift_count": drift,
+            "last_success_at": (
+                last_success.isoformat() if isinstance(last_success, datetime) else None
+            ),
+        }
+    }
+    # The worker process remains healthy while individual accounts are isolated.
+    # Consumers must inspect reconciliation.state instead of treating one tenant's
+    # drift as a global paper-runtime outage.
+    return "running", details
+
+
+def _worker_heartbeat_state(
+    engine: Engine, worker_type: WorkerType
+) -> tuple[str, dict[str, object] | None]:
+    if worker_type == "paper":
+        return _paper_heartbeat_details(engine)
+    return "running", None
+
+
 def _instance_key(worker_type: WorkerType) -> tuple[str, str]:
     host = socket.gethostname().strip()[:128] or "unknown-host"
     configured = os.environ.get("QUANTDESK_WORKER_INSTANCE", "").strip()
@@ -89,11 +148,13 @@ def _heartbeat_loop(
 ) -> None:
     while not stop_event.wait(_HEARTBEAT_SECONDS):
         try:
+            status, details = _worker_heartbeat_state(engine, worker_type)
             _write_heartbeat(
                 engine,
                 worker_type,
-                status="running",
+                status=status,
                 started_at=started_at,
+                details=details,
             )
         except Exception as exc:
             print(

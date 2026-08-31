@@ -28,6 +28,7 @@ class PaperReconciliationResult:
     failed: int
     remaining: int
     drift_codes: tuple[str, ...] = ()
+    warning_codes: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
 
     @property
@@ -55,7 +56,19 @@ class PaperProjectionStore(Protocol):
 
     def audit_account(
         self, *, user_id: int, paper_account_id: int
-    ) -> tuple[int, tuple[str, ...]]: ...
+    ) -> tuple[int, tuple[str, ...], tuple[str, ...]]: ...
+
+    def record_reconciliation(
+        self,
+        *,
+        user_id: int,
+        paper_account_id: int,
+        pending_count: int,
+        drift_codes: tuple[str, ...],
+        warning_codes: tuple[str, ...],
+        errors: tuple[str, ...],
+        ready: bool,
+    ) -> None: ...
 
 
 class PaperExecutionReconciliationService:
@@ -102,11 +115,11 @@ class PaperExecutionReconciliationService:
                 applied += 1
             else:
                 already_applied += 1
-        remaining, drift_codes = self._store.audit_account(
+        remaining, drift_codes, warning_codes = self._store.audit_account(
             user_id=user_id,
             paper_account_id=paper_account_id,
         )
-        return PaperReconciliationResult(
+        result = PaperReconciliationResult(
             user_id=user_id,
             paper_account_id=paper_account_id,
             discovered=len(pending),
@@ -115,5 +128,16 @@ class PaperExecutionReconciliationService:
             failed=len(errors),
             remaining=remaining,
             drift_codes=drift_codes,
+            warning_codes=warning_codes,
             errors=tuple(errors),
         )
+        self._store.record_reconciliation(
+            user_id=user_id,
+            paper_account_id=paper_account_id,
+            pending_count=remaining,
+            drift_codes=drift_codes,
+            warning_codes=warning_codes,
+            errors=result.errors,
+            ready=result.ready,
+        )
+        return result

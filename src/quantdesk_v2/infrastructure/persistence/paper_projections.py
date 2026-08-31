@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import uuid
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -107,7 +108,7 @@ class MySqlPaperProjectionStore:
 
     def audit_account(
         self, *, user_id: int, paper_account_id: int
-    ) -> tuple[int, tuple[str, ...]]:
+    ) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
         counts = self._backend.query(
             """SELECT COUNT(*) AS pending_count FROM paper_order_executions
                WHERE user_id=? AND paper_account_id=? AND status='FILLED'
@@ -116,6 +117,20 @@ class MySqlPaperProjectionStore:
         )
         remaining = int(counts[0]["pending_count"]) if counts else 0
         drift_codes: list[str] = []
+        warning_codes: list[str] = []
+        balance_drift = self._backend.query(
+            """SELECT a.balance,c.expected_balance
+               FROM paper_accounts a
+               LEFT JOIN paper_account_balance_checkpoints c
+                 ON c.paper_account_id=a.id AND c.user_id=a.user_id
+               WHERE a.id=? AND a.user_id=?
+                 AND (c.paper_account_id IS NULL
+                      OR ABS(a.balance-c.expected_balance)>0.00000001)
+               LIMIT 1""",
+            (paper_account_id, user_id),
+        )
+        if balance_drift:
+            drift_codes.append("paper_balance_drift")
         if self._backend.query(
             """SELECT p.id FROM paper_positions p
                LEFT JOIN paper_order_executions e
@@ -152,7 +167,81 @@ class MySqlPaperProjectionStore:
             (user_id, paper_account_id),
         ):
             drift_codes.append("paper_close_projection_missing")
-        return remaining, tuple(drift_codes)
+        if self._backend.query(
+            """SELECT l.id FROM paper_account_ledger_entries l
+               LEFT JOIN paper_order_executions e
+                 ON e.id=l.source_execution_id AND e.user_id=l.user_id
+                AND e.paper_account_id=l.paper_account_id
+               WHERE l.user_id=? AND l.paper_account_id=?
+                 AND (e.id IS NULL OR e.status<>'FILLED'
+                      OR e.projection_status<>'applied')
+               LIMIT 1""",
+            (user_id, paper_account_id),
+        ):
+            drift_codes.append("paper_balance_ledger_source_drift")
+        if self._backend.query(
+            """SELECT a.id FROM paper_accounts a
+               LEFT JOIN (
+                   SELECT paper_account_id,user_id,MAX(ts) AS latest_ts
+                   FROM paper_equity
+                   WHERE paper_account_id=? AND user_id=?
+                   GROUP BY paper_account_id,user_id
+               ) e ON e.paper_account_id=a.id AND e.user_id=a.user_id
+               WHERE a.id=? AND a.user_id=? AND a.last_tick_at IS NOT NULL
+                 AND (e.latest_ts IS NULL
+                      OR e.latest_ts<UNIX_TIMESTAMP(a.last_tick_at)-120)
+               LIMIT 1""",
+            (paper_account_id, user_id, paper_account_id, user_id),
+        ):
+            warning_codes.append("paper_equity_projection_stale")
+        return remaining, tuple(drift_codes), tuple(warning_codes)
+
+    def record_reconciliation(
+        self,
+        *,
+        user_id: int,
+        paper_account_id: int,
+        pending_count: int,
+        drift_codes: tuple[str, ...],
+        warning_codes: tuple[str, ...],
+        errors: tuple[str, ...],
+        ready: bool,
+    ) -> None:
+        status = "healthy" if ready and not warning_codes else "warning" if ready else "blocked"
+        details = json.dumps(
+            {
+                "drift_codes": list(drift_codes),
+                "warning_codes": list(warning_codes),
+                "errors": list(errors),
+            },
+            ensure_ascii=False,
+        )
+        self._backend.execute(
+            """INSERT INTO paper_account_reconciliation_status(
+                   paper_account_id,user_id,status,pending_count,drift_count,warning_count,
+                   details_json,last_success_at,last_error_at,checked_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,
+                        IF(?=1,UTC_TIMESTAMP(6),NULL),
+                        IF(?=1,NULL,UTC_TIMESTAMP(6)),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
+               ON DUPLICATE KEY UPDATE
+                   status=VALUES(status),pending_count=VALUES(pending_count),
+                   drift_count=VALUES(drift_count),warning_count=VALUES(warning_count),
+                   details_json=VALUES(details_json),
+                   last_success_at=IF(VALUES(status)<>'blocked',UTC_TIMESTAMP(6),last_success_at),
+                   last_error_at=IF(VALUES(status)='blocked',UTC_TIMESTAMP(6),last_error_at),
+                   checked_at=UTC_TIMESTAMP(6),updated_at=UTC_TIMESTAMP(6)""",
+            (
+                paper_account_id,
+                user_id,
+                status,
+                pending_count,
+                len(drift_codes),
+                len(warning_codes),
+                details,
+                1 if ready else 0,
+                1 if ready else 0,
+            ),
+        )
 
     @staticmethod
     def _project_open(
@@ -165,67 +254,51 @@ class MySqlPaperProjectionStore:
             "SELECT id FROM paper_positions WHERE source_execution_id=? LIMIT 1",
             (execution_id,),
         )
-        if existing:
-            return
         position = _object(payload.get("position"), "position")
-        account_rows = transaction.query(
-            """SELECT balance FROM paper_accounts
-               WHERE id=? AND user_id=? FOR UPDATE""",
-            (execution["paper_account_id"], execution["user_id"]),
-        )
-        if not account_rows:
-            raise PaperProjectionError("paper account is unavailable")
         debit = _finite_number(payload.get("balance_debit"), "balance_debit", minimum=0)
-        balance = _finite_number(account_rows[0]["balance"], "balance", minimum=0)
-        if balance + 1e-8 < debit:
-            raise PaperProjectionError("paper account has insufficient margin")
-        collision = transaction.query(
-            """SELECT id FROM paper_positions
-               WHERE paper_account_id=? AND user_id=? AND symbol=? FOR UPDATE""",
-            (
-                execution["paper_account_id"],
-                execution["user_id"],
-                execution["symbol"],
-            ),
-        )
-        if collision:
-            raise PaperProjectionError("paper symbol already has an open position")
-        inserted = transaction.execute(
-            """INSERT INTO paper_positions(
+        if not existing:
+            collision = transaction.query(
+                """SELECT id FROM paper_positions
+                   WHERE paper_account_id=? AND user_id=? AND symbol=? FOR UPDATE""",
+                (
+                    execution["paper_account_id"],
+                    execution["user_id"],
+                    execution["symbol"],
+                ),
+            )
+            if collision:
+                raise PaperProjectionError("paper symbol already has an open position")
+            inserted = transaction.execute(
+                """INSERT INTO paper_positions(
                paper_account_id,user_id,symbol,side,qty,avg_entry,margin,leverage,stop,target,
                adds,opened_ts,last_add_ts,open_score,basis,funding_acc,liq_price,funding_ts,
                atr_entry,peak_price,tp_done,source_execution_id
                ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,0,?,?,?,?,0,?)""",
-            (
-                execution["paper_account_id"], execution["user_id"], execution["symbol"],
-                _direction(position.get("side")),
-                _positive(position.get("qty"), "qty"),
-                _positive(position.get("avg_entry"), "avg_entry"),
-                _positive(position.get("margin"), "margin"),
-                _positive_integer(position.get("leverage"), "leverage"),
-                _optional_number(position.get("stop"), "stop"),
-                _optional_number(position.get("target"), "target"),
-                _positive_integer(position.get("opened_ts"), "opened_ts"),
-                _optional_integer(position.get("last_add_ts"), "last_add_ts"),
-                _optional_integer(position.get("open_score"), "open_score"),
-                json.dumps(_object(position.get("basis"), "basis"), ensure_ascii=False),
-                _optional_number(position.get("liq_price"), "liq_price"),
-                _positive_integer(position.get("funding_ts"), "funding_ts"),
-                _optional_number(position.get("atr_entry"), "atr_entry"),
-                _positive(position.get("peak_price"), "peak_price"),
-                execution_id,
-            ),
+                (
+                    execution["paper_account_id"], execution["user_id"], execution["symbol"],
+                    _direction(position.get("side")),
+                    _positive(position.get("qty"), "qty"),
+                    _positive(position.get("avg_entry"), "avg_entry"),
+                    _positive(position.get("margin"), "margin"),
+                    _positive_integer(position.get("leverage"), "leverage"),
+                    _optional_number(position.get("stop"), "stop"),
+                    _optional_number(position.get("target"), "target"),
+                    _positive_integer(position.get("opened_ts"), "opened_ts"),
+                    _optional_integer(position.get("last_add_ts"), "last_add_ts"),
+                    _optional_integer(position.get("open_score"), "open_score"),
+                    json.dumps(_object(position.get("basis"), "basis"), ensure_ascii=False),
+                    _optional_number(position.get("liq_price"), "liq_price"),
+                    _positive_integer(position.get("funding_ts"), "funding_ts"),
+                    _optional_number(position.get("atr_entry"), "atr_entry"),
+                    _positive(position.get("peak_price"), "peak_price"),
+                    execution_id,
+                ),
+            )
+            if inserted != 1:
+                raise PaperProjectionError("paper position projection was not inserted")
+        MySqlPaperProjectionStore._apply_balance_delta(
+            transaction, execution, -debit, "open_debit"
         )
-        if inserted != 1:
-            raise PaperProjectionError("paper position projection was not inserted")
-        new_balance = max(round(balance - debit, 8), 0.0)
-        updated = transaction.execute(
-            """UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP
-               WHERE id=? AND user_id=?""",
-            (new_balance, execution["paper_account_id"], execution["user_id"]),
-        )
-        if updated != 1:
-            raise PaperProjectionError("paper balance projection was not updated")
 
     @staticmethod
     def _project_close(
@@ -238,70 +311,132 @@ class MySqlPaperProjectionStore:
             "SELECT id FROM paper_trades WHERE source_execution_id=? LIMIT 1",
             (execution_id,),
         )
-        if existing:
-            return
         trade = _object(payload.get("trade"), "trade")
         position_id = _positive_integer(payload.get("position_id"), "position_id")
-        ownership = transaction.query(
-            """SELECT p.*,a.balance FROM paper_positions p
-               JOIN paper_accounts a ON a.id=p.paper_account_id AND a.user_id=p.user_id
-               WHERE p.id=? AND p.paper_account_id=? AND p.user_id=? FOR UPDATE""",
-            (position_id, execution["paper_account_id"], execution["user_id"]),
-        )
-        if not ownership:
-            raise PaperProjectionError("position to reduce is unavailable")
-        current = ownership[0]
-        if (
-            str(current["symbol"]) != str(execution["symbol"])
-            or int(current["side"]) != _direction(trade.get("side"))
-            or int(current["opened_ts"]) != _positive_integer(trade.get("opened_ts"), "opened_ts")
-        ):
-            raise PaperProjectionError("position identity differs from close projection")
-        deleted = transaction.execute(
-            "DELETE FROM paper_positions WHERE id=? AND paper_account_id=? AND user_id=?",
-            (position_id, execution["paper_account_id"], execution["user_id"]),
-        )
-        if deleted != 1:
-            raise PaperProjectionError("paper position ownership changed concurrently")
-        inserted = transaction.execute(
-            """INSERT INTO paper_trades(
+        if not existing:
+            ownership = transaction.query(
+                """SELECT p.* FROM paper_positions p
+                   WHERE p.id=? AND p.paper_account_id=? AND p.user_id=? FOR UPDATE""",
+                (position_id, execution["paper_account_id"], execution["user_id"]),
+            )
+            if not ownership:
+                raise PaperProjectionError("position to reduce is unavailable")
+            current = ownership[0]
+            if (
+                str(current["symbol"]) != str(execution["symbol"])
+                or int(current["side"]) != _direction(trade.get("side"))
+                or int(current["opened_ts"])
+                != _positive_integer(trade.get("opened_ts"), "opened_ts")
+            ):
+                raise PaperProjectionError("position identity differs from close projection")
+            deleted = transaction.execute(
+                "DELETE FROM paper_positions WHERE id=? AND paper_account_id=? AND user_id=?",
+                (position_id, execution["paper_account_id"], execution["user_id"]),
+            )
+            if deleted != 1:
+                raise PaperProjectionError("paper position ownership changed concurrently")
+            inserted = transaction.execute(
+                """INSERT INTO paper_trades(
                paper_account_id,user_id,symbol,side,qty,entry_price,exit_price,margin,pnl,
                fee,funding,reason,open_score,opened_ts,closed_ts,entry_basis_json,
                source_execution_id
                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                execution["paper_account_id"], execution["user_id"], execution["symbol"],
-                _direction(trade.get("side")),
-                _positive(trade.get("qty"), "qty"),
-                _positive(trade.get("entry_price"), "entry_price"),
-                _positive(trade.get("exit_price"), "exit_price"),
-                _positive(trade.get("margin"), "margin"),
-                _finite_number(trade.get("pnl"), "pnl"),
-                _finite_number(trade.get("fee"), "fee", minimum=0),
-                _finite_number(trade.get("funding"), "funding"),
-                str(trade.get("reason") or "")[:2_000],
-                _optional_integer(trade.get("open_score"), "open_score"),
-                _positive_integer(trade.get("opened_ts"), "opened_ts"),
-                _positive_integer(trade.get("closed_ts"), "closed_ts"),
-                json.dumps(_object(trade.get("entry_basis"), "entry_basis"), ensure_ascii=False),
-                execution_id,
-            ),
-        )
-        if inserted != 1:
-            raise PaperProjectionError("paper trade projection was not inserted")
+                (
+                    execution["paper_account_id"], execution["user_id"], execution["symbol"],
+                    _direction(trade.get("side")),
+                    _positive(trade.get("qty"), "qty"),
+                    _positive(trade.get("entry_price"), "entry_price"),
+                    _positive(trade.get("exit_price"), "exit_price"),
+                    _positive(trade.get("margin"), "margin"),
+                    _finite_number(trade.get("pnl"), "pnl"),
+                    _finite_number(trade.get("fee"), "fee", minimum=0),
+                    _finite_number(trade.get("funding"), "funding"),
+                    str(trade.get("reason") or "")[:2_000],
+                    _optional_integer(trade.get("open_score"), "open_score"),
+                    _positive_integer(trade.get("opened_ts"), "opened_ts"),
+                    _positive_integer(trade.get("closed_ts"), "closed_ts"),
+                    json.dumps(
+                        _object(trade.get("entry_basis"), "entry_basis"),
+                        ensure_ascii=False,
+                    ),
+                    execution_id,
+                ),
+            )
+            if inserted != 1:
+                raise PaperProjectionError("paper trade projection was not inserted")
         returned = _finite_number(payload.get("balance_credit"), "balance_credit", minimum=0)
-        balance = _finite_number(current["balance"], "balance", minimum=0)
-        updated = transaction.execute(
+        MySqlPaperProjectionStore._apply_balance_delta(
+            transaction, execution, returned, "close_credit"
+        )
+
+    @staticmethod
+    def _apply_balance_delta(
+        transaction: _Transaction,
+        execution: dict[str, Any],
+        delta: float,
+        entry_type: str,
+    ) -> None:
+        execution_id = int(execution["id"])
+        if transaction.query(
+            "SELECT id FROM paper_account_ledger_entries WHERE source_execution_id=? LIMIT 1",
+            (execution_id,),
+        ):
+            return
+        checkpoint_rows = transaction.query(
+            """SELECT expected_balance FROM paper_account_balance_checkpoints
+               WHERE paper_account_id=? AND user_id=? FOR UPDATE""",
+            (execution["paper_account_id"], execution["user_id"]),
+        )
+        account_rows = transaction.query(
+            """SELECT balance FROM paper_accounts
+               WHERE id=? AND user_id=? FOR UPDATE""",
+            (execution["paper_account_id"], execution["user_id"]),
+        )
+        if not checkpoint_rows or not account_rows:
+            raise PaperProjectionError("paper balance checkpoint is unavailable")
+        expected = _finite_number(
+            checkpoint_rows[0]["expected_balance"], "expected_balance", minimum=0
+        )
+        actual = _finite_number(account_rows[0]["balance"], "balance", minimum=0)
+        if abs(actual - expected) > 1e-8:
+            raise PaperProjectionError("paper balance drift requires review")
+        balance_after = round(expected + delta, 8)
+        if balance_after < 0:
+            raise PaperProjectionError("paper account has insufficient margin")
+        if transaction.execute(
             """UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP
                WHERE id=? AND user_id=?""",
+            (balance_after, execution["paper_account_id"], execution["user_id"]),
+        ) != 1:
+            raise PaperProjectionError("paper balance projection was not updated")
+        if transaction.execute(
+            """UPDATE paper_account_balance_checkpoints
+               SET expected_balance=?,last_execution_id=?,updated_at=UTC_TIMESTAMP(6)
+               WHERE paper_account_id=? AND user_id=?""",
             (
-                max(round(balance + returned, 8), 0.0),
+                balance_after,
+                execution_id,
                 execution["paper_account_id"],
                 execution["user_id"],
             ),
-        )
-        if updated != 1:
-            raise PaperProjectionError("paper balance projection was not updated")
+        ) != 1:
+            raise PaperProjectionError("paper balance checkpoint was not updated")
+        if transaction.execute(
+            """INSERT INTO paper_account_ledger_entries(
+                   public_id,paper_account_id,user_id,source_execution_id,
+                   entry_type,amount,balance_after
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                str(uuid.uuid4()),
+                execution["paper_account_id"],
+                execution["user_id"],
+                execution_id,
+                entry_type,
+                delta,
+                balance_after,
+            ),
+        ) != 1:
+            raise PaperProjectionError("paper balance ledger entry was not inserted")
 
 
 def _projection_payload(execution: dict[str, Any]) -> dict[str, Any]:
