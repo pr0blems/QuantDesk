@@ -4144,7 +4144,7 @@ def test_opportunity_fundamentals_endpoint_reads_existing_research_tables() -> N
     assert '"financial_metrics_complete"' not in endpoint
 
 
-def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
+def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     entrypoint = (ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
     legacy_index = (ROOT / "src/quantdesk_v2/static/index.html").read_text(encoding="utf-8")
@@ -4154,9 +4154,9 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     stylesheet = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(encoding="utf-8")
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
-    assert 'tag="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260829-market-tide-history1"' in entrypoint
-    assert '"/assets/monitor.js?v=20260826-research-ws1"' in entrypoint
+    assert 'name="ai-monitor-dashboard"' in app
+    assert '"/assets/ai-monitor.js?v=20260831-react1"' in entrypoint
+    assert '"/assets/monitor.js?v=20260831-react1"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
     assert legacy_index.index('data-panel-target="monitor"') < legacy_index.index(
@@ -4165,7 +4165,7 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
     assert 'href="/ai-monitor" data-panel-target="ai-monitor"' in legacy_index
     assert 'data-panel="ai-monitor"' in legacy_index
     assert '<ai-monitor-dashboard id="ai-monitor-dashboard"></ai-monitor-dashboard>' in legacy_index
-    assert 'src="/assets/ai-monitor.js?v=20260829-market-tide-history1"' in legacy_index
+    assert 'src="/assets/ai-monitor.js?v=20260831-react1"' in legacy_index
     assert 'href="/assets/ai-monitor.css?v=20260828-event-samples1"' in component
     assert '"ai-monitor": "/ai-monitor"' in legacy_app
     assert 'selected === "ai-monitor" && typeof aiMonitor.start === "function"' in legacy_app
@@ -4176,9 +4176,10 @@ def test_ai_monitor_frontend_is_registered_beside_contract_monitor() -> None:
         "/assets/style.css?v=20260810-font1_6x-1",
         "/assets/strategies.css?v=20260825-strategyi18n1",
         "/assets/terminal.css?v=20260810-font1_6x-1",
-        "/assets/paper.js?v=20260809-paper-combo-1",
-        "/assets/live.js?v=20260809-font1_6x-1",
-        "/assets/backtest.js?v=20260809-font1_6x-1",
+        "/assets/controller-runtime.js?v=20260831-react1",
+        "/assets/paper.js?v=20260831-react1",
+        "/assets/live.js?v=20260831-react1",
+        "/assets/backtest.js?v=20260831-react1",
         "/assets/app.js?v=20260826-market-ws1",
     ):
         assert asset in legacy_index

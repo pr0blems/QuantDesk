@@ -1,7 +1,6 @@
-class PaperDashboard extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: "open" });
+class PaperDashboard extends window.QuantDeskPageController {
+  constructor(host) {
+    super(host, { shadow: true });
     this.running = false;
     this.loading = false;
     this.timer = null;
@@ -1018,4 +1017,4 @@ class PaperDashboard extends HTMLElement {
   }
 }
 
-if (!customElements.get("paper-dashboard")) customElements.define("paper-dashboard", PaperDashboard);
+window.quantdeskRegisterPageController("paper-dashboard", PaperDashboard);

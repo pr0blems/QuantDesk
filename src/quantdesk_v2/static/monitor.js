@@ -1,7 +1,6 @@
-class ContractMonitor extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: "open" });
+class ContractMonitor extends window.QuantDeskPageController {
+  constructor(host) {
+    super(host, { shadow: true });
     this.state = {
       overview: [],
       activeMarket: "binance",
@@ -3635,4 +3634,4 @@ class ContractMonitor extends HTMLElement {
   }
 }
 
-customElements.define("contract-monitor", ContractMonitor);
+window.quantdeskRegisterPageController("contract-monitor", ContractMonitor);

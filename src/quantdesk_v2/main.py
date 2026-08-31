@@ -376,6 +376,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
         def index() -> FileResponse:
+            react_index = runtime_settings.react_static_dir / "index.html"
+            if react_index.is_file():
+                return FileResponse(react_index)
             return FileResponse(runtime_settings.static_dir / "index.html")
 
         def admin_index() -> RedirectResponse:
@@ -436,8 +439,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
     if runtime_settings.react_static_dir.is_dir():
-        # The React application uses hash routing and is intentionally exposed
-        # under a canary path while the existing frontend remains the default.
+        # The same immutable React build serves both the canonical routes and
+        # /next rollback/canary assets. If the build is absent, index() falls
+        # back to the preserved static shell without affecting API routes.
         app.mount(
             "/next",
             StaticFiles(directory=runtime_settings.react_static_dir, html=True),

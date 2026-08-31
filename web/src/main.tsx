@@ -29,11 +29,11 @@ window.quantdeskOpenAiMonitorSocket = openAiMonitorWebSocket;
 window.quantdeskOpenMonitorMarketSocket = openMonitorMarketWebSocket;
 
 for (const source of [
-  "/assets/monitor.js?v=20260826-research-ws1",
-  "/assets/ai-monitor.js?v=20260829-market-tide-history1",
-  "/assets/paper.js?v=20260809-paper-combo-1",
-  "/assets/live.js?v=20260809-font1_6x-1",
-  "/assets/backtest.js?v=20260809-font1_6x-1",
+  "/assets/monitor.js?v=20260831-react1",
+  "/assets/ai-monitor.js?v=20260831-react1",
+  "/assets/paper.js?v=20260831-react1",
+  "/assets/live.js?v=20260831-react1",
+  "/assets/backtest.js?v=20260831-react1",
 ]) {
   const script = document.createElement("script");
   script.src = source;

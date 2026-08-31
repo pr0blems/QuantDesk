@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { onAuthenticationLost } from "./api/client";
 import { authApi } from "./api/quantdesk";
 import type { CurrentUser } from "./api/types";
-import { LegacyPanel } from "./pages/LegacyPanel";
+import { PageControllerPanel } from "./pages/PageControllerPanel";
 import { LoginPage } from "./pages/LoginPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -27,11 +27,17 @@ const navigation: Array<{ badge?: string; icon: string; key: PageKey; label: str
   { key: "settings", icon: "设", label: "系统设置" },
 ];
 
-function pageFromHash(): PageKey {
-  const candidate = window.location.hash.replace(/^#\/?/, "").split("/")[0] || "overview";
+function pageFromLocation(): PageKey {
+  const hashCandidate = window.location.hash.replace(/^#\/?/, "").split("/")[0];
+  const pathCandidate = window.location.pathname.replace(/^\/next\/?/, "").replace(/^\//, "").split("/")[0];
+  const candidate = hashCandidate || pathCandidate || "overview";
   if (candidate === "backtests") return "backtest";
   if (candidate === "orders") return "live";
   return candidate in pageTitles ? candidate as PageKey : "overview";
+}
+
+function pagePath(page: PageKey): string {
+  return page === "overview" ? "/overview" : `/${page}`;
 }
 
 function AppBoot() {
@@ -39,16 +45,20 @@ function AppBoot() {
 }
 
 function Workspace({ user, onLogout }: { user: CurrentUser; onLogout: () => Promise<void> }) {
-  const [page, setPage] = useState<PageKey>(pageFromHash);
+  const [page, setPage] = useState<PageKey>(pageFromLocation);
   const [menuOpen, setMenuOpen] = useState(false);
   const [light, setLight] = useState(() => document.documentElement.dataset.theme === "light");
   const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
-    if (!window.location.hash) window.history.replaceState(null, "", "#/overview");
-    const sync = () => { setPage(pageFromHash()); setMenuOpen(false); };
+    if (window.location.pathname === "/" && !window.location.hash) window.history.replaceState(null, "", "/overview");
+    const sync = () => { setPage(pageFromLocation()); setMenuOpen(false); };
     window.addEventListener("hashchange", sync);
-    return () => window.removeEventListener("hashchange", sync);
+    window.addEventListener("popstate", sync);
+    return () => {
+      window.removeEventListener("hashchange", sync);
+      window.removeEventListener("popstate", sync);
+    };
   }, []);
   useEffect(() => { document.title = `${pageTitles[page]} · QuantDesk`; }, [page]);
 
@@ -61,7 +71,18 @@ function Workspace({ user, onLogout }: { user: CurrentUser; onLogout: () => Prom
 
   async function logout(): Promise<void> {
     setLoggingOut(true);
-    try { await onLogout(); } finally { setLoggingOut(false); }
+    try {
+      await onLogout();
+      window.history.replaceState(null, "", "/login");
+    } finally { setLoggingOut(false); }
+  }
+
+  function navigate(event: React.MouseEvent<HTMLAnchorElement>, nextPage: PageKey): void {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    window.history.pushState(null, "", pagePath(nextPage));
+    setPage(nextPage);
+    setMenuOpen(false);
   }
 
   return <section className="app-shell">
@@ -70,9 +91,9 @@ function Workspace({ user, onLogout }: { user: CurrentUser; onLogout: () => Prom
       <div className="sidebar-brand"><span>Q</span><div><strong>QUANTDESK</strong><small>NG · BINANCE</small></div></div>
       <nav className="side-nav">
         <p>交易工作区</p>
-        {navigation.slice(0, 7).map((item) => <a className={`nav-item${page === item.key ? " active" : ""}`} href={`#/${item.key}`} aria-current={page === item.key ? "page" : undefined} key={item.key}><span>{item.icon}</span>{item.label}{item.badge ? <i>{item.badge}</i> : null}</a>)}
+        {navigation.slice(0, 7).map((item) => <a className={`nav-item${page === item.key ? " active" : ""}`} href={pagePath(item.key)} aria-current={page === item.key ? "page" : undefined} key={item.key} onClick={(event) => navigate(event, item.key)}><span>{item.icon}</span>{item.label}{item.badge ? <i>{item.badge}</i> : null}</a>)}
         <p>安全与管理</p>
-        {navigation.slice(7).map((item) => <a className={`nav-item${page === item.key ? " active" : ""}`} href={`#/${item.key}`} aria-current={page === item.key ? "page" : undefined} key={item.key}><span>{item.icon}</span>{item.label}{item.badge ? <i>{item.badge}</i> : null}</a>)}
+        {navigation.slice(7).map((item) => <a className={`nav-item${page === item.key ? " active" : ""}`} href={pagePath(item.key)} aria-current={page === item.key ? "page" : undefined} key={item.key} onClick={(event) => navigate(event, item.key)}><span>{item.icon}</span>{item.label}{item.badge ? <i>{item.badge}</i> : null}</a>)}
         {user.is_admin ? <a className="nav-item" href="/next/admin/#overview"><span>管</span>管理后台</a> : null}
       </nav>
       <div className="sidebar-account"><div className="avatar">{user.username.slice(0, 2)}</div><div><strong>{user.username}</strong><small>当前账户</small></div><button className="theme-toggle" type="button" title={light ? "切换深色主题" : "切换浅色主题"} aria-label={light ? "切换深色主题" : "切换浅色主题"} aria-pressed={light} onClick={toggleTheme}><span aria-hidden="true">{light ? "◐" : "☼"}</span><b>{light ? "深色" : "浅色"}</b></button><button type="button" title="退出登录" aria-label="退出登录" disabled={loggingOut} onClick={() => void logout()}>{loggingOut ? "退出中" : "退出"}</button></div>
@@ -80,12 +101,12 @@ function Workspace({ user, onLogout }: { user: CurrentUser; onLogout: () => Prom
     <div className="workspace">
       <header className="mobile-bar"><button className="menu-toggle" type="button" aria-label="打开功能菜单" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>菜单</button><strong>{pageTitles[page]}</strong><span className="status-dot" title="服务状态" /></header>
       <main className={`workspace-content${page === "monitor" ? " monitor-mode" : page === "ai-monitor" ? " ai-monitor-mode" : ""}`}>
-        <section className={`workspace-panel${page === "monitor" ? "" : " hidden"}`}><LegacyPanel active={page === "monitor"} tag="contract-monitor" /></section>
-        <section className={`workspace-panel${page === "ai-monitor" ? "" : " hidden"}`}><LegacyPanel active={page === "ai-monitor"} tag="ai-monitor-dashboard" /></section>
-        <section className={`workspace-panel${page === "paper" ? "" : " hidden"}`}><LegacyPanel active={page === "paper"} tag="paper-dashboard" /></section>
-        <section className={`workspace-panel${page === "live" ? "" : " hidden"}`}><LegacyPanel active={page === "live"} tag="live-dashboard" /></section>
-        <section className={`workspace-panel${page === "strategies" ? "" : " hidden"}`}><LegacyPanel active={page === "strategies"} tag="strategy-center" /></section>
-        <section className={`workspace-panel${page === "backtest" ? "" : " hidden"}`}><LegacyPanel active={page === "backtest"} tag="backtest-workbench" /></section>
+        <section className={`workspace-panel${page === "monitor" ? "" : " hidden"}`}><PageControllerPanel active={page === "monitor"} name="contract-monitor" /></section>
+        <section className={`workspace-panel${page === "ai-monitor" ? "" : " hidden"}`}><PageControllerPanel active={page === "ai-monitor"} name="ai-monitor-dashboard" /></section>
+        <section className={`workspace-panel${page === "paper" ? "" : " hidden"}`}><PageControllerPanel active={page === "paper"} name="paper-dashboard" /></section>
+        <section className={`workspace-panel${page === "live" ? "" : " hidden"}`}><PageControllerPanel active={page === "live"} name="live-dashboard" /></section>
+        <section className={`workspace-panel${page === "strategies" ? "" : " hidden"}`}><PageControllerPanel active={page === "strategies"} name="strategy-center" /></section>
+        <section className={`workspace-panel${page === "backtest" ? "" : " hidden"}`}><PageControllerPanel active={page === "backtest"} name="backtest-workbench" /></section>
         {page === "overview" ? <section className="workspace-panel"><OverviewPage user={user} /></section> : null}
         {page === "settings" ? <section className="workspace-panel"><SettingsPage user={user} /></section> : null}
       </main>
@@ -102,6 +123,9 @@ export function App() {
     return () => { active = false; };
   }, []);
   if (auth.status === "booting") return <AppBoot />;
-  if (auth.status === "anonymous") return <LoginPage onAuthenticated={(user) => setAuth({ status: "authenticated", user })} />;
+  if (auth.status === "anonymous") return <LoginPage onAuthenticated={(user) => {
+    if (window.location.pathname === "/login" || window.location.pathname === "/") window.history.replaceState(null, "", "/overview");
+    setAuth({ status: "authenticated", user });
+  }} />;
   return <Workspace user={auth.user} onLogout={async () => { try { await authApi.logout(); } finally { setAuth({ status: "anonymous" }); } }} />;
 }

@@ -1,21 +1,21 @@
 import type { ApiRequestOptions, ApiStreamOptions } from "./api/client";
 
+export type PageControllerName = "ai-monitor-dashboard" | "backtest-workbench" | "contract-monitor" | "live-dashboard" | "paper-dashboard" | "strategy-center";
+
+export type PageController = {
+  pause?: () => void;
+  start?: () => void;
+};
+
 declare global {
   interface Window {
     quantdeskApi: (path: string, options?: ApiRequestOptions) => Promise<unknown>;
     quantdeskApiStream: (path: string, options?: ApiStreamOptions) => Promise<Response>;
     quantdeskOpenAiMonitorSocket: () => Promise<WebSocket>;
     quantdeskOpenMonitorMarketSocket: (symbol: string) => Promise<WebSocket>;
-  }
-
-  namespace JSX {
-    interface IntrinsicElements {
-      "backtest-workbench": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-      "contract-monitor": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-      "live-dashboard": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-      "paper-dashboard": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-      "strategy-center": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-    }
+    quantdeskHasPageController: (name: PageControllerName) => boolean;
+    quantdeskMountPageController: (name: PageControllerName, host: HTMLElement) => PageController;
+    quantdeskUnmountPageController: (host: HTMLElement) => void;
   }
 }
 

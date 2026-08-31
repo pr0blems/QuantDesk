@@ -115,24 +115,25 @@ def test_legacy_strategy_center_exposes_complete_strategy_workflow() -> None:
     assert "AI 只生成符合当前 PARAMETERS 范围的候选参数" in script
 
 
-def test_react_canary_loads_the_current_strategy_component_asset() -> None:
+def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
     entrypoint = (ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "src/quantdesk_v2/static/strategies.css").read_text(
         encoding="utf-8"
     )
 
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
-    legacy_panel = (ROOT / "web/src/pages/LegacyPanel.tsx").read_text(encoding="utf-8")
+    controller_panel = (ROOT / "web/src/pages/PageControllerPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260826-strategy-suite2" in index
-    assert index.index("/assets/strategies.js?v=20260826-strategy-suite2") < index.index("/src/main.tsx")
+    assert "/assets/controller-runtime.js?v=20260831-react1" in index
+    assert "/assets/strategies.js?v=20260831-react1" in index
+    assert index.index("/assets/controller-runtime.js?v=20260831-react1") < index.index("/assets/strategies.js?v=20260831-react1")
+    assert index.index("/assets/strategies.js?v=20260831-react1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
-    assert "window.customElements.get(tag)" in legacy_panel
-    assert "document.createElement(tag)" in legacy_panel
-    assert "host.replaceChildren(element)" in legacy_panel
-    assert 'import { createElement' not in legacy_panel
-    assert "return createElement(tag" not in legacy_panel
-    assert "功能组件加载失败" in legacy_panel
+    assert "window.quantdeskMountPageController(name, host)" in controller_panel
+    assert "document.createElement" not in controller_panel
+    assert "customElements" not in controller_panel
+    assert "window.quantdeskUnmountPageController(host)" in controller_panel
+    assert "功能组件加载失败" in controller_panel
     assert ".strategy-card-actions" in stylesheet
     assert ".strategy-detail-dialog" in stylesheet
     assert ".strategy-revision-row" in stylesheet
@@ -157,12 +158,13 @@ def test_react_canary_loads_the_current_strategy_component_asset() -> None:
 def test_legacy_shell_busts_the_current_strategy_asset_cache() -> None:
     index = (ROOT / "src/quantdesk_v2/static/index.html").read_text(encoding="utf-8")
 
-    assert "/assets/strategies.js?v=20260826-strategy-suite2" in index
+    assert "/assets/controller-runtime.js?v=20260831-react1" in index
+    assert "/assets/strategies.js?v=20260831-react1" in index
 
 
-def test_strategy_custom_element_initializes_after_construction() -> None:
+def test_strategy_controller_initializes_after_mount() -> None:
     script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
-    constructor = script.split("constructor() {", 1)[1].split("connectedCallback() {", 1)[0]
+    constructor = script.split("constructor(host) {", 1)[1].split("connectedCallback() {", 1)[0]
     connected = script.split("connectedCallback() {", 1)[1].split("renderShell() {", 1)[0]
 
     assert "this.renderShell()" not in constructor
@@ -171,15 +173,19 @@ def test_strategy_custom_element_initializes_after_construction() -> None:
     assert "this.bindEvents()" in connected
 
 
-def test_paper_strategy_editor_preserves_an_unavailable_current_strategy() -> None:
-    page = (ROOT / "web/src/pages/PaperPage.tsx").read_text(encoding="utf-8")
+def test_controller_runtime_keeps_legacy_rollback_but_react_mounts_directly() -> None:
+    runtime = (ROOT / "src/quantdesk_v2/static/controller-runtime.js").read_text(encoding="utf-8")
+    app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
 
-    assert "const selectedStrategyIds = selected" in page
-    assert "const unavailableStrategyIds = selectedStrategyIds.filter(" in page
-    assert "defaultValue={selectedStrategyIds}" in page
-    assert "unavailableStrategyIds.map" in page
-    assert "<option key={strategyId} value={strategyId} disabled>" in page
-    assert "当前绑定（已归档或不可用）" in page
-    assert page.index("unavailableStrategyIds.map") < page.index(
-        "activeStrategies.map", page.index("defaultValue={selectedStrategyIds}")
-    )
+    assert "function mountPageController(name, host)" in runtime
+    assert "function unmountPageController(host)" in runtime
+    assert "class QuantDeskControllerElement extends HTMLElement" in runtime
+    assert "global.quantdeskMountPageController = mountPageController" in runtime
+    assert "LegacyPanel" not in app
+    assert app.count("<PageControllerPanel") == 6
+
+
+def test_unused_alternate_react_pages_are_removed() -> None:
+    page_dir = ROOT / "web/src/pages"
+    for name in ("MonitorPage.tsx", "PaperPage.tsx", "LivePage.tsx", "StrategiesPage.tsx", "BacktestsPage.tsx"):
+        assert not (page_dir / name).exists()

@@ -23,7 +23,7 @@ def _settings() -> Settings:
     )
 
 
-def test_react_build_is_exposed_only_under_the_canary_mount(
+def test_react_build_serves_canonical_routes_and_keeps_canary_assets(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -42,9 +42,15 @@ def test_react_build_is_exposed_only_under_the_canary_mount(
     )
 
     with TestClient(create_app(_settings())) as client:
+        root = client.get("/")
+        opportunity = client.get("/ai-monitor")
         index = client.get("/next/")
         asset = client.get("/next/assets/app.js")
 
+    assert root.status_code == 200
+    assert root.text == index.text
+    assert opportunity.status_code == 200
+    assert opportunity.text == index.text
     assert index.status_code == 200
     assert 'id="root"' in index.text
     assert asset.status_code == 200

@@ -1,7 +1,6 @@
-class AiMonitorDashboard extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: "open" });
+class AiMonitorDashboard extends window.QuantDeskPageController {
+  constructor(host) {
+    super(host, { shadow: true });
     this.state = {
       view: "opportunities",
       overview: null,
@@ -5851,6 +5850,4 @@ class AiMonitorDashboard extends HTMLElement {
   }
 }
 
-if (!window.customElements.get("ai-monitor-dashboard")) {
-  window.customElements.define("ai-monitor-dashboard", AiMonitorDashboard);
-}
+window.quantdeskRegisterPageController("ai-monitor-dashboard", AiMonitorDashboard);

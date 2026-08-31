@@ -1,6 +1,6 @@
-class StrategyCenter extends HTMLElement {
-  constructor() {
-    super();
+class StrategyCenter extends window.QuantDeskPageController {
+  constructor(host) {
+    super(host);
     this.initialized = false;
     this.started = false;
     this.loading = false;
@@ -3666,4 +3666,4 @@ class StrategyCenter extends HTMLElement {
   }
 }
 
-if (!customElements.get("strategy-center")) customElements.define("strategy-center", StrategyCenter);
+window.quantdeskRegisterPageController("strategy-center", StrategyCenter);

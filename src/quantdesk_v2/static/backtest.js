@@ -1,7 +1,6 @@
-class BacktestWorkbench extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: "open" });
+class BacktestWorkbench extends window.QuantDeskPageController {
+  constructor(host) {
+    super(host, { shadow: true });
     this.started = false;
     this.loading = false;
     this.runningBacktest = false;
@@ -966,4 +965,4 @@ class BacktestWorkbench extends HTMLElement {
   }
 }
 
-if (!customElements.get("backtest-workbench")) customElements.define("backtest-workbench", BacktestWorkbench);
+window.quantdeskRegisterPageController("backtest-workbench", BacktestWorkbench);

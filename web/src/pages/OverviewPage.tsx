@@ -60,6 +60,7 @@ export function OverviewPage({ user }: { user: CurrentUser }) {
   const [viewMonth, setViewMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [paper, setPaper] = useState<DashboardPerformance | null>(null);
   const [binance, setBinance] = useState<BinancePerformance | null>(null);
+  const [selectedAssetCode, setSelectedAssetCode] = useState("");
   const [accountPayload, setAccountPayload] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
 
@@ -79,11 +80,16 @@ export function OverviewPage({ user }: { user: CurrentUser }) {
   const configured = booleanValue(account.configured ?? user.binance_credentials_configured);
   const connected = booleanValue(account.connected);
   const tradeEnabled = booleanValue(account.can_trade ?? account.trade_permission_requested);
-  const asset = binance?.assets[0] ?? null;
+  const asset = binance?.assets.find((item) => item.asset === selectedAssetCode) ?? binance?.assets[0] ?? null;
   const currentMonth = monthKey(new Date());
   const canNext = monthKey(viewMonth) < currentMonth;
   const paperRows = useMemo(() => (paper?.calendar.days ?? []).map((day) => ({ date: day.date, pnl: day.pnl, trades: day.trades })), [paper]);
   const binanceRows = useMemo(() => (asset?.days ?? []).map((day) => ({ date: day.date, pnl: day.net_income, realized_records: day.realized_records })), [asset]);
+
+  useEffect(() => {
+    if (!binance?.assets.length) { setSelectedAssetCode(""); return; }
+    if (!binance.assets.some((item) => item.asset === selectedAssetCode)) setSelectedAssetCode(binance.assets[0]!.asset);
+  }, [binance, selectedAssetCode]);
 
   function shiftMonth(delta: number): void {
     setViewMonth((current) => new Date(current.getFullYear(), current.getMonth() + delta, 1));
@@ -107,7 +113,7 @@ export function OverviewPage({ user }: { user: CurrentUser }) {
         </section>
 
         <section className="performance-side binance-performance" aria-busy={loading}>
-          <header className="performance-side-heading"><div><span className="side-kicker live">LIVE ACCOUNT</span><h3>Binance 实盘收益</h3><p>仅展示当前登录用户已授权账户的真实收益流水</p></div><span className="performance-source live">{!binance?.configured ? "未配置" : binance.connected ? `${asset?.asset ?? "实盘"} · 已连接` : "连接异常"}</span></header>
+          <header className="performance-side-heading"><div><span className="side-kicker live">LIVE ACCOUNT</span><h3>Binance 实盘收益</h3><p>仅展示当前登录用户已授权账户的真实收益流水</p></div><div className="performance-side-tools">{(binance?.assets.length ?? 0) > 1 ? <label className="performance-asset-picker"><span>结算资产</span><select aria-label="选择 Binance 收益结算资产" value={asset?.asset ?? ""} onChange={(event) => setSelectedAssetCode(event.target.value)}>{binance?.assets.map((item) => <option value={item.asset} key={item.asset}>{item.asset}</option>)}</select></label> : null}<span className="performance-source live">{!binance?.configured ? "未配置" : binance.connected ? `${asset?.asset ?? "实盘"} · 已连接` : "连接异常"}</span></div></header>
           <div className="performance-metrics"><article className={`performance-metric live-primary${loading ? " loading" : ""}`}><span>当月已结算净收益</span><strong className={tone(asset?.net_income)}>{money(asset?.net_income, asset?.asset)}</strong><small>{asset ? `资金费 ${money(asset.funding_fee, asset.asset)} · 手续费 ${money(asset.commission, asset.asset)}` : "尚未连接实盘账户"}</small></article><article className={`performance-metric${loading ? " loading" : ""}`}><span>已实现盈亏</span><strong className={tone(asset?.realized_pnl)}>{money(asset?.realized_pnl, asset?.asset)}</strong><small>{asset?.current_unrealized_pnl == null ? "来自 Binance 收益流水" : `未实现 ${money(asset.current_unrealized_pnl, asset.asset)}`}</small></article><article className={`performance-metric${loading ? " loading" : ""}`}><span>已实现记录胜率</span><strong className={tone((asset?.win_rate_pct ?? 50) - 50)}>{asset?.realized_records ? percent(asset.win_rate_pct) : "--"}</strong><small>{asset?.realized_records ? `${asset.wins} 胜 / ${asset.losses} 负 · ${asset.realized_records} 条已实现记录` : "暂无实盘收益记录"}</small></article><article className={`performance-metric${loading ? " loading" : ""}`}><span>已实现记录盈亏比</span><strong className="flat">{asset?.profit_factor == null ? "--" : `${asset.profit_factor.toFixed(2)} : 1`}</strong><small>盈利记录 / 亏损记录</small></article></div>
           {!binance?.configured ? <div className="binance-performance-callout warning" role="status"><div><strong>尚未配置 Binance API</strong><p>配置当前用户的 Binance API 凭据后，才能读取真实收益流水。</p></div><button type="button" onClick={() => { window.location.hash = "#/settings"; }}>配置 API 凭据</button></div> : null}
           <article className="returns-calendar-card"><header className="calendar-heading"><div><h3>Binance 收益日历</h3><p>{asset ? `仅汇总 ${asset.asset}，不跨资产换算` : "按浏览器本地时区汇总账户收益事件"}</p></div></header><div className="returns-calendar" role="grid"><ReturnsCalendar rows={binanceRows} currency={asset?.asset ?? "USDT"} emptyText={binance?.configured ? "本月暂无 Binance 收益流水。" : "实盘未配置；虚拟盘数据不会用于填充此区域。"} eventName="条记录" /></div><footer className="calendar-footer"><div className="calendar-legend"><span className="profit">盈利</span><span className="loss">亏损</span><span className="flat">无流水</span></div><div className="month-summary"><span>当月已结算净收益</span><strong className={tone(asset?.net_income)}>{money(asset?.net_income, asset?.asset)}</strong><small>{binanceRows.length} 个收益日</small></div></footer></article>

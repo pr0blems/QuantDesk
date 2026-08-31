@@ -1,7 +1,6 @@
-class LiveDashboard extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: "open" });
+class LiveDashboard extends window.QuantDeskPageController {
+  constructor(host) {
+    super(host, { shadow: true });
     this.accounts = [];
     this.selectedAccountId = null;
     this.catalog = [];
@@ -570,4 +569,4 @@ class LiveDashboard extends HTMLElement {
   escape(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]); }
 }
 
-if (!customElements.get("live-dashboard")) customElements.define("live-dashboard", LiveDashboard);
+window.quantdeskRegisterPageController("live-dashboard", LiveDashboard);
