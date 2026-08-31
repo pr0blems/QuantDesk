@@ -1,5 +1,6 @@
 """Application services for the governed AI Monitor pipeline."""
 
+from .ablation import classify_ablation_signal_state
 from .contracts import AiMonitorAuthority, AiMonitorStageResult
 from .event_gate import EventGateService
 from .macro_regime import MacroRegimeService
@@ -17,6 +18,7 @@ from .prediction_settlement import PredictionSettlementService
 __all__ = [
     "AiMonitorAuthority",
     "AiMonitorStageResult",
+    "classify_ablation_signal_state",
     "EventGateService",
     "MacroRegimeService",
     "MarketFeatureService",

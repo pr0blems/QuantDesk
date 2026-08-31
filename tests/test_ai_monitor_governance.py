@@ -108,3 +108,12 @@ def test_market_feature_production_paths_do_not_call_ai_monitor_private_storage(
     assert "ai_monitor.realtime_feature_payload" not in api_source
     assert "market_flow_inputs = load_market_flow_input_maps" in orchestration_source
     assert "repository._query" not in persistence_source
+
+
+def test_historical_replay_uses_no_private_ai_monitor_symbols() -> None:
+    replay_source = (
+        ROOT / "src/quantdesk_v2/historical_replay.py"
+    ).read_text(encoding="utf-8")
+
+    assert "ai_monitor._" not in replay_source
+    assert "classify_ablation_signal_state" in replay_source

@@ -23,6 +23,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import ai_monitor
+from .application.ai_monitor import classify_ablation_signal_state
 from .models import (
     AiMonitorConfig,
     AiMonitorReplayDatasetManifest,
@@ -337,7 +338,7 @@ def replay_frozen_market_signal(item: Mapping[str, Any]) -> dict[str, Any]:
         "recomputed_score": recomputed_score.get("score"),
         "recorded_score": recorded_score,
         "replayed_gate": replayed_gate,
-        "variant_states": ai_monitor._ablation_signal_state(replay_item),
+        "variant_states": classify_ablation_signal_state(replay_item),
         "timestamps": {
             "feature_captured_at": feature_at,
             "snapshot_captured_at": snapshot_at,
