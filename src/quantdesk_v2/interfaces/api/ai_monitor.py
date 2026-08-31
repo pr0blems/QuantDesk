@@ -16,13 +16,13 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response, StreamingResponse
 from starlette.websockets import WebSocketDisconnect
 
-from ... import ai_monitor, historical_replay, live_engine, macro_ai, news_ai, ws_depth
+from ... import ai_monitor, live_engine, macro_ai, news_ai, ws_depth
 from ...ai_model_config import global_ai_model_configured
 from ...application.ai_monitor import (
     OpportunityProjectionError,
@@ -46,9 +46,7 @@ from ...models import (
     AiMonitorConfig,
     AiMonitorOpportunity,
     AiMonitorPrediction,
-    AiMonitorReplayRun,
     AiMonitorRun,
-    AuditLog,
     CompanyProfile,
     LiveOrderIntent,
     LiveTradingAccount,
@@ -77,17 +75,22 @@ from ...schemas import (
     AiMonitorLiveCopyConfigUpdate,
     AiMonitorLiveCopyUpdate,
     AiMonitorManualFollowRequest,
-    AiMonitorNewsAnalyzeRequest,
     AiMonitorNewsSystemPromptUpdate,
-    AiMonitorReplayRequest,
-    AiMonitorRunRequest,
     AiMonitorScorePolicyUpdate,
     AiMonitorUnusualWhalesUsageUpdate,
 )
 from ...security import CredentialCipher, SecurityError, decode_access_token
 from ...strategy_artifacts import add_run_manifest, record_revision_artifact
+from .ai_monitor_runs import router as run_router
+from .ai_monitor_support import (
+    add_ai_monitor_audit,
+    require_expected_user,
+    run_out,
+    utc_out,
+)
 
 router = APIRouter(prefix="/ai-monitor")
+router.include_router(run_router)
 
 _STREAM_POLL_SECONDS = 2.0
 _STREAM_HEARTBEAT_SECONDS = 15.0
@@ -142,10 +145,7 @@ _MANUAL_FOLLOW_MESSAGES = {
 
 
 def _utc_out(value: datetime | None) -> datetime | None:
-    """Attach the UTC offset stripped by MySQL's timezone-naive DateTime columns."""
-    if value is None:
-        return None
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return utc_out(value)
 
 
 def _finite_price(value: Any) -> float | None:
@@ -492,18 +492,7 @@ def _local_date_utc_window(
 
 
 def _require_expected_user(request: Request, user: User) -> None:
-    expected = request.headers.get("X-QuantDesk-User-ID", "").strip()
-    if not expected:
-        raise HTTPException(status_code=428, detail="expected user identity is required")
-    try:
-        expected_user_id = int(expected)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="expected user identity is invalid") from None
-    if expected_user_id != user.id:
-        raise HTTPException(
-            status_code=409,
-            detail="authenticated user changed; sign in again before updating AI monitor",
-        )
+    require_expected_user(request, user)
 
 
 def _get_stream_user_id(
@@ -760,16 +749,7 @@ def _audit(
     resource_id: str,
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    db.add(
-        AuditLog(
-            user_id=user_id,
-            action=action,
-            resource_type="ai_monitor",
-            resource_id=resource_id,
-            ip_address=request.client.host[:45] if request.client else None,
-            metadata_json=metadata,
-        )
-    )
+    add_ai_monitor_audit(db, request, user_id, action, resource_id, metadata)
 
 
 def _config_out(config: AiMonitorConfig | None) -> dict[str, Any]:
@@ -1443,29 +1423,7 @@ def _live_copy_out(
 
 
 def _run_out(run: AiMonitorRun, batch: NewsAiBatch | None = None) -> dict[str, Any]:
-    summary = dict(run.summary_json or {})
-    if batch is not None:
-        summary.setdefault("market_sentiment", batch.market_sentiment)
-        summary.setdefault(
-            "market_confidence",
-            float(batch.market_confidence) if batch.market_confidence is not None else None,
-        )
-        summary.setdefault("market_summary", batch.market_summary)
-        summary.setdefault("model_name", batch.model_name)
-    return {
-        "id": run.public_id,
-        "run_type": run.run_type,
-        "status": run.status,
-        "input_count": int(run.input_count),
-        "matched_count": int(run.matched_count),
-        "summary": summary,
-        "error_message": run.error_message,
-        "news_batch_id": run.news_batch_id,
-        "started_at": _utc_out(run.started_at),
-        "completed_at": _utc_out(run.completed_at),
-        "created_at": _utc_out(run.created_at),
-        "updated_at": _utc_out(run.updated_at),
-    }
+    return run_out(run, batch)
 
 
 def _news_out(item: News) -> dict[str, Any]:
@@ -4603,204 +4561,3 @@ def opportunity_readiness(
     return ai_monitor.strategy_readiness_report(db, user.id, current_config)
 
 
-@router.get("/replays")
-def list_historical_replays(
-    db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
-    limit: int = Query(default=20, ge=1, le=100),
-) -> dict[str, Any]:
-    runs = db.scalars(
-        select(AiMonitorReplayRun)
-        .where(AiMonitorReplayRun.user_id == user.id)
-        .order_by(AiMonitorReplayRun.created_at.desc(), AiMonitorReplayRun.id.desc())
-        .limit(limit)
-    ).all()
-    return {
-        "items": [historical_replay.replay_run_out(item) for item in runs],
-        "readiness": historical_replay.replay_readiness_report(db, user.id),
-    }
-
-
-@router.get("/replays/{replay_id}")
-def historical_replay_detail(
-    replay_id: str,
-    db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
-) -> dict[str, Any]:
-    run = db.scalar(
-        select(AiMonitorReplayRun).where(
-            AiMonitorReplayRun.public_id == replay_id,
-            AiMonitorReplayRun.user_id == user.id,
-        )
-    )
-    if run is None:
-        raise HTTPException(status_code=404, detail="历史回放任务不存在")
-    return {
-        **historical_replay.replay_run_out(run),
-        "readiness": historical_replay.replay_readiness_report(
-            db, user.id, run_id=run.id
-        ),
-    }
-
-
-@router.post("/replays", status_code=202)
-def create_historical_replay(
-    payload: AiMonitorReplayRequest,
-    background_tasks: BackgroundTasks,
-    request: Request,
-    db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
-) -> dict[str, Any]:
-    _require_expected_user(request, user)
-    active = db.scalar(
-        select(AiMonitorReplayRun.id).where(
-            AiMonitorReplayRun.user_id == user.id,
-            AiMonitorReplayRun.status.in_(("pending", "running")),
-        )
-    )
-    if active is not None:
-        raise HTTPException(status_code=409, detail="已有历史回放正在执行")
-    repository = MonitorRepository(
-        request.app.state.database_engine,
-        request.app.state.settings.monitor_symbols_config,
-    )
-    try:
-        run = historical_replay.create_replay_run(
-            db,
-            repository,
-            user.id,
-            days=payload.days,
-            timeframe=payload.timeframe,
-            symbols=payload.symbols,
-        )
-        _audit(
-            db,
-            request,
-            user.id,
-            "ai_monitor.replay.create",
-            run.public_id,
-            {
-                "days": payload.days,
-                "timeframe": payload.timeframe,
-                "symbol_count": run.total_symbols,
-            },
-        )
-        db.commit()
-    except historical_replay.HistoricalReplayError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="已有历史回放正在执行") from None
-    except SQLAlchemyError:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="历史回放任务暂时无法创建") from None
-    background_tasks.add_task(
-        historical_replay.execute_replay_run,
-        request.app.state.database_engine,
-        run.public_id,
-        request.app.state.settings.monitor_symbols_config,
-    )
-    return historical_replay.replay_run_out(run)
-
-
-@router.post("/news/analyze", status_code=202)
-def analyze_single_news(
-    payload: AiMonitorNewsAnalyzeRequest,
-    background_tasks: BackgroundTasks,
-    request: Request,
-    db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
-) -> dict[str, Any]:
-    """Analyze one explicitly selected news record with the user's default AI model."""
-
-    _require_expected_user(request, user)
-    if db.get(News, payload.news_id) is None:
-        raise HTTPException(status_code=404, detail="新闻不存在或已被删除")
-    try:
-        run = ai_monitor.create_single_news_run(db, user.id, payload.news_id)
-        _audit(
-            db,
-            request,
-            user.id,
-            "ai_monitor.news.analyze",
-            payload.news_id,
-            {"run_id": run.public_id, "mode": "single"},
-        )
-        db.commit()
-    except ai_monitor.AiMonitorError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(
-            status_code=409, detail="新闻分析任务状态刚刚发生变化，请重试"
-        ) from None
-    except SQLAlchemyError:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="AI 监控数据库暂时不可用，请稍后重试") from None
-    background_tasks.add_task(
-        ai_monitor.execute_news_run,
-        request.app.state.database_engine,
-        run.public_id,
-        request.app.state.settings.credential_master_key.get_secret_value(),
-        [payload.news_id],
-        request.app.state.settings.monitor_symbols_config,
-        True,
-    )
-    return _run_out(run)
-
-
-@router.post("/runs", status_code=202)
-def create_run(
-    payload: AiMonitorRunRequest,
-    background_tasks: BackgroundTasks,
-    request: Request,
-    db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
-) -> dict[str, Any]:
-    _require_expected_user(request, user)
-    try:
-        run = ai_monitor.create_run(db, user.id, payload.run_type)
-        _audit(
-            db,
-            request,
-            user.id,
-            "ai_monitor.run.create",
-            run.public_id,
-            {"run_type": payload.run_type},
-        )
-        db.commit()
-    except ai_monitor.AiMonitorError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="任务状态刚刚发生变化，请刷新后重试",
-        ) from None
-    except SQLAlchemyError:
-        db.rollback()
-        raise HTTPException(
-            status_code=503,
-            detail="AI 监控数据库暂时不可用，请稍后重试",
-        ) from None
-    if payload.run_type == "news":
-        background_tasks.add_task(
-            ai_monitor.execute_news_run,
-            request.app.state.database_engine,
-            run.public_id,
-            request.app.state.settings.credential_master_key.get_secret_value(),
-            None,
-            request.app.state.settings.monitor_symbols_config,
-            True,
-        )
-    else:
-        background_tasks.add_task(
-            ai_monitor.execute_opportunity_run,
-            request.app.state.database_engine,
-            run.public_id,
-            request.app.state.settings.monitor_symbols_config,
-        )
-    return _run_out(run)

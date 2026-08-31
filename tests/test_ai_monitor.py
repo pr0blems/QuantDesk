@@ -644,7 +644,9 @@ def test_news_monitor_persists_batch_before_foreign_key_run() -> None:
 
 
 def test_ai_monitor_run_endpoint_rolls_back_database_failures() -> None:
-    source = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
+    source = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor_runs.py").read_text(
+        encoding="utf-8"
+    )
     endpoint = source[source.index('@router.post("/runs"') :]
 
     assert "except IntegrityError:" in endpoint
@@ -654,7 +656,9 @@ def test_ai_monitor_run_endpoint_rolls_back_database_failures() -> None:
 
 
 def test_single_news_analysis_targets_only_the_selected_record() -> None:
-    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor_runs.py").read_text(
+        encoding="utf-8"
+    )
     monitor = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
     analyzer = (ROOT / "src/quantdesk_v2/news_ai.py").read_text(encoding="utf-8")
     payload = AiMonitorNewsAnalyzeRequest(news_id="news-selected")

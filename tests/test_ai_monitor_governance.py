@@ -284,6 +284,25 @@ def test_read_model_projection_is_owned_by_the_persistence_boundary() -> None:
     assert "from ...ai_monitor_read_models" not in reader_source
 
 
+def test_ai_monitor_run_routes_are_split_from_the_query_router() -> None:
+    query_source = (
+        ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    run_source = (
+        ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor_runs.py"
+    ).read_text(encoding="utf-8")
+
+    for route in (
+        '@router.get("/replays")',
+        '@router.post("/replays", status_code=202)',
+        '@router.post("/news/analyze", status_code=202)',
+        '@router.post("/runs", status_code=202)',
+    ):
+        assert route not in query_source
+        assert route in run_source
+    assert "router.include_router(run_router)" in query_source
+
+
 def test_historical_replay_uses_no_private_ai_monitor_symbols() -> None:
     replay_source = (
         ROOT / "src/quantdesk_v2/historical_replay.py"
