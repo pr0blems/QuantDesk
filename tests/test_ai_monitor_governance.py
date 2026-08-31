@@ -224,6 +224,39 @@ def test_event_visibility_logic_and_queries_have_owned_boundaries() -> None:
         assert f"def {name}(" in persistence_source
 
 
+def test_prediction_settlement_policy_and_persistence_have_owned_boundaries() -> None:
+    orchestration_source = (
+        ROOT / "src/quantdesk_v2/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    policy_source = (
+        ROOT / "src/quantdesk_v2/application/ai_monitor/prediction_settlement.py"
+    ).read_text(encoding="utf-8")
+    persistence_source = (
+        ROOT
+        / "src/quantdesk_v2/infrastructure/persistence/ai_monitor_prediction_settlement.py"
+    ).read_text(encoding="utf-8")
+
+    for name in (
+        "prediction_outcome",
+        "prediction_cost_breakdown",
+        "prediction_path_metrics",
+        "prediction_price_barrier_exit",
+        "prediction_adaptive_path_exit",
+        "prediction_score_exit_signal",
+        "prediction_score_exit_price",
+        "virtual_risk_plan_snapshot",
+    ):
+        assert f"def {name}(" not in orchestration_source
+        assert f"def {name}(" in policy_source
+    for name in (
+        "settle_due_predictions",
+        "reopen_legacy_prediction_settlements",
+        "backfill_prediction_path_metrics",
+    ):
+        assert f"def {name}(" not in orchestration_source
+        assert f"def {name}(" in persistence_source
+
+
 def test_historical_replay_uses_no_private_ai_monitor_symbols() -> None:
     replay_source = (
         ROOT / "src/quantdesk_v2/historical_replay.py"

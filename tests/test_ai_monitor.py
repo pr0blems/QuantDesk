@@ -3572,7 +3572,7 @@ def test_prediction_surfaces_only_expose_the_current_settlement_policy() -> None
     ]
     historical_analytics = analytics_source[
         analytics_source.index("def historical_opportunity_analytics(") : analytics_source.index(
-            "def settle_due_predictions("
+            "settle_due_predictions = persist_due_prediction_settlements"
         )
     ]
     overview = api_source[
