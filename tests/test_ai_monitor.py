@@ -17,7 +17,6 @@ from quantdesk_v2.ai_monitor import (
     _take_ingested_news,
     adaptive_exit_precedes,
     aggregate_news_candidates,
-    annotate_event_cluster_selection,
     append_score_history,
     backfill_prediction_event_contexts,
     backfill_prediction_path_metrics,
@@ -25,8 +24,6 @@ from quantdesk_v2.ai_monitor import (
     edge_calibration_summary,
     effective_opportunity_score_weights,
     enqueue_news_analysis,
-    filter_monitored_candidates,
-    fresh_candidate_news_ids,
     historical_closed_settlement_price,
     historical_settlement_price,
     indicator_catalog,
@@ -65,12 +62,17 @@ from quantdesk_v2.ai_monitor import (
     settlement_exit_subreason,
     signal_readiness_snapshot,
     stable_gate_summary,
-    strongest_candidate_per_symbol,
     summarize_historical_opportunities,
     virtual_entry_gate_snapshot,
     virtual_position_snapshot,
     virtual_risk_plan_snapshot,
     weighted_opportunity_score,
+)
+from quantdesk_v2.application.ai_monitor import (
+    annotate_event_cluster_selection,
+    filter_monitored_candidates,
+    fresh_candidate_news_ids,
+    strongest_candidate_per_symbol,
 )
 from quantdesk_v2.interfaces.api.ai_monitor import (
     _ai_monitor_revisions,

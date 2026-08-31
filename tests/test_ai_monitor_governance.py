@@ -123,6 +123,32 @@ def test_ai_monitor_no_longer_defines_market_feature_compatibility_facades() -> 
     assert "load_market_flow_input_maps" in orchestration_source
 
 
+def test_opportunity_candidate_policies_live_in_the_application_boundary() -> None:
+    orchestration_source = (
+        ROOT / "src/quantdesk_v2/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    opportunity_source = (
+        ROOT / "src/quantdesk_v2/application/ai_monitor/opportunity_generation.py"
+    ).read_text(encoding="utf-8")
+    news_source = (
+        ROOT / "src/quantdesk_v2/application/ai_monitor/news_scoring.py"
+    ).read_text(encoding="utf-8")
+
+    for name in (
+        "filter_monitored_candidates",
+        "annotate_event_cluster_selection",
+        "fresh_candidate_news_ids",
+        "strongest_candidate_per_symbol",
+        "news_event_bursts",
+    ):
+        assert f"def {name}(" not in orchestration_source
+    assert "def filter_monitored_candidates(" in opportunity_source
+    assert "def annotate_event_cluster_selection(" in opportunity_source
+    assert "def fresh_candidate_news_ids(" in opportunity_source
+    assert "def strongest_candidate_per_symbol(" in opportunity_source
+    assert "def news_event_bursts(" in news_source
+
+
 def test_historical_replay_uses_no_private_ai_monitor_symbols() -> None:
     replay_source = (
         ROOT / "src/quantdesk_v2/historical_replay.py"

@@ -39,6 +39,18 @@ from .application.ai_monitor import (
     classify_ablation_signal_state,
 )
 from .application.ai_monitor import (
+    annotate_event_cluster_selection as mark_event_cluster_selection,
+)
+from .application.ai_monitor import (
+    filter_monitored_candidates as apply_monitor_symbol_allowlist,
+)
+from .application.ai_monitor import (
+    fresh_candidate_news_ids as resolve_fresh_candidate_news_ids,
+)
+from .application.ai_monitor import (
+    news_event_bursts as cluster_news_event_bursts,
+)
+from .application.ai_monitor import (
     realtime_feature_payload as normalize_realtime_feature_payload,
 )
 from .infrastructure.persistence.ai_monitor_market_features import (
@@ -131,10 +143,6 @@ MARKET_RISK_EVENT_LOOKAHEAD_HOURS = 48
 UNUSUAL_WHALES_SIGNAL_SETTING_KEY = "market_data:unusual_whales:v1"
 UNUSUAL_WHALES_SIGNAL_POLICY_VERSION = "uw_signal_policy_v2"
 FINNHUB_SIGNAL_QUOTE_MAX_AGE_SECONDS = 15 * 60
-NEWS_EVENT_BURST_SECONDS = 2 * 60
-NEWS_EVENT_BURST_MAX_SPAN_SECONDS = 10 * 60
-
-
 def prediction_soft_exit_policy(
     timeframe: str,
     *,
@@ -1936,21 +1944,6 @@ def monitor_symbol_catalog(repository: MonitorRepository) -> list[dict[str, str]
             symbol = "BRK.B"
         items.append({"symbol": symbol, "contract_symbol": contract})
     return sorted(items, key=lambda item: (item["symbol"], item["contract_symbol"]))
-
-
-def filter_monitored_candidates(
-    candidates: Sequence[dict[str, Any]], monitor_symbols: Sequence[str]
-) -> list[dict[str, Any]]:
-    """Apply the user's contract-symbol allowlist; an empty list means all."""
-
-    allowed = {str(symbol).strip().upper() for symbol in monitor_symbols if str(symbol).strip()}
-    if not allowed:
-        return [candidate for candidate in candidates if candidate.get("contract_symbol")]
-    return [
-        candidate
-        for candidate in candidates
-        if str(candidate.get("contract_symbol") or "").upper() in allowed
-    ]
 
 
 def prediction_outcome(
@@ -8558,51 +8551,6 @@ def backfill_prediction_path_metrics(
     return {"scanned": len(items), "completed": completed, "unavailable": unavailable}
 
 
-def news_event_bursts(
-    news_items: Sequence[Mapping[str, Any]],
-    *,
-    maximum_gap_seconds: int = NEWS_EVENT_BURST_SECONDS,
-    maximum_span_seconds: int = NEWS_EVENT_BURST_MAX_SPAN_SECONDS,
-) -> list[list[Mapping[str, Any]]]:
-    """Cluster same-source/category wire updates without mutating source records."""
-
-    grouped: dict[str, list[Mapping[str, Any]]] = {}
-    for index, item in enumerate(news_items):
-        source = str(item.get("source") or "").strip().casefold()
-        category = str(item.get("category") or "").strip().casefold()
-        item_id = str(item.get("id") or index).strip()
-        group_key = f"{source}|{category}" if source else f"id:{item_id}"
-        grouped.setdefault(group_key, []).append(item)
-
-    bursts: list[list[Mapping[str, Any]]] = []
-    for items in grouped.values():
-        ordered = sorted(
-            items,
-            key=lambda item: (int(item.get("ts") or 0), str(item.get("id") or "")),
-        )
-        current: list[Mapping[str, Any]] = []
-        previous_ts = 0
-        first_ts = 0
-        for item in ordered:
-            item_ts = int(item.get("ts") or 0)
-            if current and (
-                previous_ts <= 0
-                or item_ts <= 0
-                or item_ts - previous_ts > max(0, int(maximum_gap_seconds))
-                or item_ts - first_ts > max(0, int(maximum_span_seconds))
-            ):
-                bursts.append(current)
-                current = []
-                first_ts = 0
-            if not current:
-                first_ts = item_ts
-            current.append(item)
-            previous_ts = item_ts
-        if current:
-            bursts.append(current)
-    return bursts
-
-
 def aggregate_news_candidates(
     news_rows: Sequence[Any],
     symbol_map: Mapping[str, str],
@@ -8677,7 +8625,7 @@ def aggregate_news_candidates(
         if len(unique_news) < minimum_mentions:
             continue
         candidate.pop("scores")
-        event_bursts = news_event_bursts(candidate["news"])
+        event_bursts = cluster_news_event_bursts(candidate["news"])
         event_scores: list[float] = []
         for burst in event_bursts:
             burst_scores = [float(item.get("score") or 0) for item in burst]
@@ -8732,112 +8680,6 @@ def news_actionability_snapshot(news_item: Mapping[str, Any]) -> dict[str, Any]:
         "reason_code": "CLOSING_RECAP_NOT_A_CATALYST" if matched_pattern else None,
         "matched_pattern": matched_pattern,
     }
-
-
-def annotate_event_cluster_selection(
-    candidates: Sequence[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Allow one strongest candidate per shared news event and direction.
-
-    A broad story can mention several correlated stocks.  Counting every symbol
-    as an independent signal creates concentrated, misleading samples.  The
-    strongest candidate remains eligible; the others are still persisted as
-    blocked candidates with an auditable cluster owner.
-    """
-
-    claimed: dict[tuple[str, str], str] = {}
-    for candidate in sorted(
-        candidates,
-        key=lambda item: float(item.get("news_score") or 0),
-        reverse=True,
-    ):
-        trigger = dict(candidate.get("news_trigger") or {})
-        direction = str(candidate.get("direction") or "long")
-        symbol = str(candidate.get("symbol") or "")
-        news_ids = sorted(
-            str(item)
-            for item in trigger.get("actionable_new_news_ids") or []
-            if str(item)
-        )
-        owners = sorted(
-            {
-                claimed[(direction, news_id)]
-                for news_id in news_ids
-                if (direction, news_id) in claimed
-            }
-        )
-        selected = not owners
-        if selected:
-            for news_id in news_ids:
-                claimed[(direction, news_id)] = symbol
-        cluster_seed = f"{direction}|{','.join(news_ids)}"
-        if not news_ids:
-            cluster_seed = f"{direction}:{symbol}:no-new-event"
-        trigger["event_cluster"] = {
-            "version": "shared_news_event_v1",
-            "cluster_id": hashlib.sha256(cluster_seed.encode("utf-8")).hexdigest()[:16],
-            "selected": selected,
-            "selected_symbol": symbol if selected else owners[0],
-            "shared_news_ids": news_ids,
-            "reason_code": None if selected else "CORRELATED_EVENT_ALREADY_SELECTED",
-        }
-        candidate["news_trigger"] = trigger
-    return list(candidates)
-
-
-def fresh_candidate_news_ids(
-    candidate_news_ids: Sequence[str] | set[str],
-    *,
-    direction: str,
-    consumed_by_direction: Mapping[str, set[str]],
-    news_items: Sequence[Mapping[str, Any]] | None = None,
-) -> list[str]:
-    """Return fresh event news, suppressing follow-ups from a consumed wire burst."""
-
-    normalized = {str(item).strip() for item in candidate_news_ids if str(item).strip()}
-    consumed = {
-        str(item).strip()
-        for item in consumed_by_direction.get(str(direction), set())
-        if str(item).strip()
-    }
-    for burst in news_event_bursts(list(news_items or [])):
-        burst_ids = {
-            str(item.get("id") or "").strip()
-            for item in burst
-            if str(item.get("id") or "").strip()
-        }
-        if burst_ids.intersection(consumed):
-            consumed.update(burst_ids)
-    return sorted(normalized - consumed)
-
-
-def strongest_candidate_per_symbol(
-    candidates: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    """Keep one directional signal per instrument, choosing its strongest news side."""
-
-    strongest: dict[str, dict[str, Any]] = {}
-    strengths: dict[str, tuple[float, int, int]] = {}
-    for raw_candidate in candidates:
-        candidate = dict(raw_candidate)
-        key = str(candidate.get("contract_symbol") or candidate.get("symbol") or "").upper()
-        if not key:
-            continue
-        news = list(candidate.get("news") or [])
-        latest_news = max((int(item.get("ts") or 0) for item in news), default=0)
-        strength = (
-            float(candidate.get("news_score") or 0),
-            len(news),
-            latest_news,
-        )
-        if key not in strengths or strength > strengths[key]:
-            strongest[key] = candidate
-            strengths[key] = strength
-    return sorted(
-        strongest.values(),
-        key=lambda item: float(item.get("news_score") or 0),
-        reverse=True,
-    )
 
 
 def multi_timeframe_technical_snapshot(
@@ -9517,7 +9359,7 @@ def _scan_opportunities(
     all_candidates = [dict(item) for item in directional_candidates]
     unmapped_candidates = [item for item in all_candidates if not item.get("contract_symbol")]
     monitor_symbols = list(config.get("monitor_symbols") or [])
-    candidates = filter_monitored_candidates(all_candidates, monitor_symbols)
+    candidates = apply_monitor_symbol_allowlist(all_candidates, monitor_symbols)
     # A news event is consumed once per user and direction, not once per symbol.
     # The event-cluster gate chooses the strongest related symbol in the first
     # scan.  Keeping consumption symbol-scoped allowed the next scan to reuse
@@ -9561,7 +9403,7 @@ def _scan_opportunities(
             str(item.get("id") or "") for item in candidate.get("news", [])
         } - {""}
         key = (str(candidate["symbol"]), str(candidate["direction"]))
-        new_news_ids = fresh_candidate_news_ids(
+        new_news_ids = resolve_fresh_candidate_news_ids(
             candidate_news_ids,
             direction=str(candidate["direction"]),
             consumed_by_direction=consumed_news_ids_by_direction,
@@ -9615,7 +9457,7 @@ def _scan_opportunities(
             reused_news_skipped += 1
             continue
         eligible_candidates.append(candidate)
-    candidates = annotate_event_cluster_selection(eligible_candidates)
+    candidates = mark_event_cluster_selection(eligible_candidates)
     indicator_keys = list(config["indicator_keys"])
     timeframe = str(config["timeframe"])
     technical_scans: dict[str, dict[str, dict[str, Any]]] = {}

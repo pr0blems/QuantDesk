@@ -5,8 +5,14 @@ from .contracts import AiMonitorAuthority, AiMonitorStageResult
 from .event_gate import EventGateService
 from .macro_regime import MacroRegimeService
 from .market_features import MarketFeatureService, realtime_feature_payload
-from .news_scoring import NewsScoringService
-from .opportunity_generation import OpportunityGenerationService
+from .news_scoring import NewsScoringService, news_event_bursts
+from .opportunity_generation import (
+    OpportunityGenerationService,
+    annotate_event_cluster_selection,
+    filter_monitored_candidates,
+    fresh_candidate_news_ids,
+    strongest_candidate_per_symbol,
+)
 from .opportunity_projection import (
     OpportunityProjectionError,
     OpportunityProjectionLagging,
@@ -24,10 +30,15 @@ __all__ = [
     "MarketFeatureService",
     "NewsScoringService",
     "OpportunityGenerationService",
+    "annotate_event_cluster_selection",
+    "filter_monitored_candidates",
+    "fresh_candidate_news_ids",
+    "news_event_bursts",
     "OpportunityProjectionError",
     "OpportunityProjectionLagging",
     "OpportunityProjectionService",
     "OpportunityProjectionUnavailable",
     "PredictionSettlementService",
     "realtime_feature_payload",
+    "strongest_candidate_per_symbol",
 ]
