@@ -7,7 +7,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_paper_mutation_endpoints_cannot_persist_legacy_signal_mode() -> None:
-    source = (ROOT / "src/quantdesk_v2/api.py").read_text(encoding="utf-8")
+    source = (
+        ROOT / "src/quantdesk_v2/interfaces/api/trading_accounts.py"
+    ).read_text(encoding="utf-8")
     tree = ast.parse(source)
     endpoint_names = {"create_paper_account", "update_paper_account_strategy"}
     endpoints = []
