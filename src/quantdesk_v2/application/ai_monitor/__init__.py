@@ -11,6 +11,7 @@ from .opportunity_generation import (
     annotate_event_cluster_selection,
     filter_monitored_candidates,
     fresh_candidate_news_ids,
+    prepare_candidate_news_triggers,
     strongest_candidate_per_symbol,
 )
 from .opportunity_projection import (
@@ -39,6 +40,7 @@ __all__ = [
     "OpportunityProjectionService",
     "OpportunityProjectionUnavailable",
     "PredictionSettlementService",
+    "prepare_candidate_news_triggers",
     "realtime_feature_payload",
     "strongest_candidate_per_symbol",
 ]

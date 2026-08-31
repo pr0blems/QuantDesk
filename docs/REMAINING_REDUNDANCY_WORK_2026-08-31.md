@@ -80,7 +80,8 @@
 
 - [ ] 将候选生成、去重、新闻消费窗口和准入编排从 `ai_monitor.py` 迁入 `opportunity_generation` 应用服务。
   - [x] 迁移监控品种过滤、同事件候选去重、已消费新闻窗口和单品种最强候选选择。
-  - [ ] 迁移候选持久化、准入决策编排与机会 Projection 写入。
+  - [x] 迁移候选新鲜度/可行动性准入准备，并将已消费新闻与活动候选查询移入 persistence adapter。
+  - [ ] 迁移候选持久化、最终准入决策编排与机会 Projection 写入。
 - [ ] 将 SQL 查询放入 persistence adapter，应用层只接收确定性输入。
 - [ ] 保留现有 decision/version、方向、多空数量和机会状态语义。
 - [ ] 先保留薄门面；调用方全部切换后再删除旧实现。

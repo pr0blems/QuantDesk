@@ -45,10 +45,10 @@ from .application.ai_monitor import (
     filter_monitored_candidates as apply_monitor_symbol_allowlist,
 )
 from .application.ai_monitor import (
-    fresh_candidate_news_ids as resolve_fresh_candidate_news_ids,
+    news_event_bursts as cluster_news_event_bursts,
 )
 from .application.ai_monitor import (
-    news_event_bursts as cluster_news_event_bursts,
+    prepare_candidate_news_triggers as prepare_candidate_admission,
 )
 from .application.ai_monitor import (
     realtime_feature_payload as normalize_realtime_feature_payload,
@@ -58,6 +58,12 @@ from .infrastructure.persistence.ai_monitor_market_features import (
 )
 from .infrastructure.persistence.ai_monitor_market_features import (
     load_market_flow_input_maps,
+)
+from .infrastructure.persistence.ai_monitor_opportunity_generation import (
+    active_candidate_keys as load_active_candidate_keys,
+)
+from .infrastructure.persistence.ai_monitor_opportunity_generation import (
+    consumed_news_ids_by_direction as load_consumed_news_ids_by_direction,
 )
 from .market_microstructure import order_book_gate_snapshot
 from .models import (
@@ -9364,99 +9370,28 @@ def _scan_opportunities(
     # The event-cluster gate chooses the strongest related symbol in the first
     # scan.  Keeping consumption symbol-scoped allowed the next scan to reuse
     # the same story for another correlated stock and inflated hit-rate samples.
-    consumed_news_ids_by_direction: dict[str, set[str]] = {}
-    consumed_rows = db.execute(
-        select(
-            AiMonitorOpportunity.symbol,
-            AiMonitorOpportunity.direction,
-            AiMonitorOpportunity.news_ids_json,
-        )
-        .join(
-            AiMonitorPrediction,
-            AiMonitorPrediction.opportunity_id == AiMonitorOpportunity.id,
-        )
-        .where(
-            AiMonitorOpportunity.user_id == run.user_id,
-            AiMonitorPrediction.predicted_at
-            >= now - timedelta(hours=int(config["news_lookback_hours"])),
-        )
-    ).all()
-    for _symbol, direction, row_news_ids in consumed_rows:
-        consumed_news_ids_by_direction.setdefault(str(direction), set()).update(
-            str(news_id) for news_id in (row_news_ids or []) if str(news_id)
-        )
-    active_candidate_keys = {
-        (str(symbol), str(direction))
-        for symbol, direction in db.execute(
-            select(AiMonitorOpportunity.symbol, AiMonitorOpportunity.direction).where(
-                AiMonitorOpportunity.user_id == run.user_id,
-                AiMonitorOpportunity.status.in_(("candidate", "discovered")),
-                AiMonitorOpportunity.expires_at > now,
-            )
-        ).all()
-    }
+    consumed_news_ids_by_direction = load_consumed_news_ids_by_direction(
+        db,
+        user_id=run.user_id,
+        predicted_since=now
+        - timedelta(hours=int(config["news_lookback_hours"])),
+    )
+    active_candidate_keys = load_active_candidate_keys(
+        db,
+        user_id=run.user_id,
+        now=now,
+    )
     require_new_news = bool(config.get("require_new_news_trigger", True))
-    eligible_candidates: list[dict[str, Any]] = []
-    reused_news_skipped = 0
-    for candidate in candidates:
-        candidate_news_ids = {
-            str(item.get("id") or "") for item in candidate.get("news", [])
-        } - {""}
-        key = (str(candidate["symbol"]), str(candidate["direction"]))
-        new_news_ids = resolve_fresh_candidate_news_ids(
-            candidate_news_ids,
-            direction=str(candidate["direction"]),
-            consumed_by_direction=consumed_news_ids_by_direction,
-            news_items=list(candidate.get("news", [])),
-        )
-        actionability_by_id = {
-            str(item.get("id") or ""): news_actionability_snapshot(item)
-            for item in candidate.get("news", [])
-            if str(item.get("id") or "") in new_news_ids
-        }
-        actionable_new_news_ids = sorted(
-            news_id
-            for news_id, actionability in actionability_by_id.items()
-            if bool(actionability.get("actionable"))
-        )
-        non_actionable_news_ids = sorted(
-            news_id
-            for news_id, actionability in actionability_by_id.items()
-            if not bool(actionability.get("actionable"))
-        )
-        newest_news_ts = max(
-            (int(item.get("ts") or 0) for item in candidate.get("news", [])),
-            default=0,
-        )
-        candidate["news_trigger"] = {
-            "version": "fresh_actionable_news_v2",
-            "required": require_new_news,
-            "memory_window_hours": int(config["news_lookback_hours"]),
-            "trigger_window_hours": trigger_window_hours,
-            "has_new_news": bool(new_news_ids),
-            "new_news_ids": new_news_ids,
-            "has_actionable_new_news": bool(actionable_new_news_ids),
-            "actionable_new_news_ids": actionable_new_news_ids,
-            "non_actionable_news_ids": non_actionable_news_ids,
-            "non_actionable_reasons": sorted(
-                {
-                    str(actionability.get("reason_code"))
-                    for actionability in actionability_by_id.values()
-                    if actionability.get("reason_code")
-                }
-            ),
-            "actionability": actionability_by_id,
-            "reused_news_count": len(candidate_news_ids) - len(new_news_ids),
-            "newest_news_age_minutes": (
-                round((int(now.replace(tzinfo=UTC).timestamp()) - newest_news_ts) / 60, 2)
-                if newest_news_ts
-                else None
-            ),
-        }
-        if require_new_news and not new_news_ids and key not in active_candidate_keys:
-            reused_news_skipped += 1
-            continue
-        eligible_candidates.append(candidate)
+    eligible_candidates, reused_news_skipped = prepare_candidate_admission(
+        candidates,
+        consumed_by_direction=consumed_news_ids_by_direction,
+        active_candidate_keys=active_candidate_keys,
+        require_new_news=require_new_news,
+        memory_window_hours=int(config["news_lookback_hours"]),
+        trigger_window_hours=trigger_window_hours,
+        now=now,
+        actionability=news_actionability_snapshot,
+    )
     candidates = mark_event_cluster_selection(eligible_candidates)
     indicator_keys = list(config["indicator_keys"])
     timeframe = str(config["timeframe"])

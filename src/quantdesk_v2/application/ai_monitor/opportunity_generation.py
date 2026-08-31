@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,87 @@ def fresh_candidate_news_ids(
         if burst_ids.intersection(consumed):
             consumed.update(burst_ids)
     return sorted(normalized - consumed)
+
+
+def prepare_candidate_news_triggers(
+    candidates: Sequence[dict[str, Any]],
+    *,
+    consumed_by_direction: Mapping[str, set[str]],
+    active_candidate_keys: set[tuple[str, str]],
+    require_new_news: bool,
+    memory_window_hours: int,
+    trigger_window_hours: int,
+    now: datetime,
+    actionability: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Freeze deterministic fresh-news admission evidence for each candidate."""
+
+    eligible_candidates: list[dict[str, Any]] = []
+    reused_news_skipped = 0
+    for candidate in candidates:
+        news_items = list(candidate.get("news", []))
+        candidate_news_ids = {
+            str(item.get("id") or "") for item in news_items
+        } - {""}
+        key = (str(candidate["symbol"]), str(candidate["direction"]))
+        new_news_ids = fresh_candidate_news_ids(
+            candidate_news_ids,
+            direction=str(candidate["direction"]),
+            consumed_by_direction=consumed_by_direction,
+            news_items=news_items,
+        )
+        actionability_by_id = {
+            str(item.get("id") or ""): dict(actionability(item))
+            for item in news_items
+            if str(item.get("id") or "") in new_news_ids
+        }
+        actionable_new_news_ids = sorted(
+            news_id
+            for news_id, snapshot in actionability_by_id.items()
+            if bool(snapshot.get("actionable"))
+        )
+        non_actionable_news_ids = sorted(
+            news_id
+            for news_id, snapshot in actionability_by_id.items()
+            if not bool(snapshot.get("actionable"))
+        )
+        newest_news_ts = max(
+            (int(item.get("ts") or 0) for item in news_items),
+            default=0,
+        )
+        candidate["news_trigger"] = {
+            "version": "fresh_actionable_news_v2",
+            "required": require_new_news,
+            "memory_window_hours": memory_window_hours,
+            "trigger_window_hours": trigger_window_hours,
+            "has_new_news": bool(new_news_ids),
+            "new_news_ids": new_news_ids,
+            "has_actionable_new_news": bool(actionable_new_news_ids),
+            "actionable_new_news_ids": actionable_new_news_ids,
+            "non_actionable_news_ids": non_actionable_news_ids,
+            "non_actionable_reasons": sorted(
+                {
+                    str(snapshot.get("reason_code"))
+                    for snapshot in actionability_by_id.values()
+                    if snapshot.get("reason_code")
+                }
+            ),
+            "actionability": actionability_by_id,
+            "reused_news_count": len(candidate_news_ids) - len(new_news_ids),
+            "newest_news_age_minutes": (
+                round(
+                    (int(now.replace(tzinfo=UTC).timestamp()) - newest_news_ts) / 60,
+                    2,
+                )
+                if newest_news_ts
+                else None
+            ),
+        }
+        if require_new_news and not new_news_ids and key not in active_candidate_keys:
+            reused_news_skipped += 1
+            continue
+        eligible_candidates.append(candidate)
+    return eligible_candidates, reused_news_skipped
 
 
 def strongest_candidate_per_symbol(

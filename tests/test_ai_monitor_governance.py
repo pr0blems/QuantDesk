@@ -149,6 +149,22 @@ def test_opportunity_candidate_policies_live_in_the_application_boundary() -> No
     assert "def news_event_bursts(" in news_source
 
 
+def test_opportunity_admission_queries_live_in_the_persistence_boundary() -> None:
+    orchestration_source = (
+        ROOT / "src/quantdesk_v2/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    persistence_source = (
+        ROOT
+        / "src/quantdesk_v2/infrastructure/persistence/ai_monitor_opportunity_generation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "load_consumed_news_ids_by_direction(" in orchestration_source
+    assert "load_active_candidate_keys(" in orchestration_source
+    assert "consumed_rows = db.execute(" not in orchestration_source
+    assert "def consumed_news_ids_by_direction(" in persistence_source
+    assert "def active_candidate_keys(" in persistence_source
+
+
 def test_historical_replay_uses_no_private_ai_monitor_symbols() -> None:
     replay_source = (
         ROOT / "src/quantdesk_v2/historical_replay.py"
