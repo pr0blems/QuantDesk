@@ -69,7 +69,8 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       opportunityStatusCounts: { all: 0, candidate: 0, ready: 0, triggered: 0, blocked: 0, data_error: 0 },
       opportunityDirectionCounts: { long: 0, short: 0 },
       historyOpportunityDirectionCounts: { long: 0, short: 0 },
-      historyOpportunitySettlementCounts: { total: 0, pending: 0, unavailable: 0 },
+      historyOpportunityRecordCount: 0,
+      historyOpportunitySettlementCounts: { total: 0, completed: 0, pending: 0, unavailable: 0 },
       opportunityRequestId: 0,
       opportunitiesLoading: false,
       opportunityLoadingTab: "",
@@ -2870,10 +2871,12 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       this.state.historyOpportunityDirectionCounts = countDirections(historyItems);
       this.state.historyOpportunitySettlementCounts = historyItems.reduce((counts, item) => {
         counts.total += 1;
+        if (item.prediction_status === "completed") counts.completed += 1;
         if (item.prediction_status === "pending") counts.pending += 1;
         if (item.prediction_status === "unavailable") counts.unavailable += 1;
         return counts;
-      }, { total: 0, pending: 0, unavailable: 0 });
+      }, { total: 0, completed: 0, pending: 0, unavailable: 0 });
+      this.state.historyOpportunityRecordCount = this.state.historyOpportunitySettlementCounts.total;
       this.state.opportunityStatusCounts = uniqueCurrentItems.reduce((counts, item) => {
         const status = this.virtualEntryState(item, this.virtualEntryGate(item)).tone;
         counts.all += 1;
@@ -2949,9 +2952,12 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       if (historySummary.settlement_counts) {
         this.state.historyOpportunitySettlementCounts = historySummary.settlement_counts;
       }
-      if (tab === "history") {
-        this.state.historyOpportunitySettlementCounts = data.settlement_counts || { total: 0, pending: 0, unavailable: 0 };
-      }
+      this.state.historyOpportunityRecordCount = Number(
+        historySummary.total
+        ?? historySummary.settlement_counts?.total
+        ?? this.state.historyOpportunityRecordCount
+        ?? 0,
+      );
       this.state.opportunityStatusCounts = sorted.reduce((counts, item) => {
         const status = this.virtualEntryState(item, this.virtualEntryGate(item)).tone;
         counts.all += 1;
@@ -2989,11 +2995,22 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     groups.forEach(([selector, counts, label]) => {
       const target = this.q(selector);
       if (!target) return;
-      const settlementPrefix = selector === "#history-direction-counts"
-        ? `<b class="pending">未完成 ${this.number(this.state.historyOpportunitySettlementCounts.total)}</b><i>·</i>`
+      const isHistory = selector === "#history-direction-counts";
+      const settlement = this.state.historyOpportunitySettlementCounts || {};
+      const historyTotal = Number(this.state.historyOpportunityRecordCount || 0);
+      const completed = Number(settlement.completed || 0);
+      const pending = Number(settlement.pending || 0);
+      const unavailable = Number(settlement.unavailable || 0);
+      const settlementPrefix = isHistory
+        ? `<b class="history-total">共 ${this.number(historyTotal)}</b><i>·</i><b class="settled">已结算 ${this.number(completed)}</b>${pending ? `<i>·</i><b class="pending">待结算 ${this.number(pending)}</b>` : ""}${unavailable ? `<i>·</i><b class="unavailable">无结果 ${this.number(unavailable)}</b>` : ""}<i>·</i>`
         : "";
       target.innerHTML = `${settlementPrefix}<b class="long">多 ${this.number(counts.long)}</b><i>/</i><b class="short">空 ${this.number(counts.short)}</b>`;
-      target.setAttribute("aria-label", `${label}：做多 ${counts.long} 次，做空 ${counts.short} 次`);
+      target.setAttribute(
+        "aria-label",
+        isHistory
+          ? `${label}：共 ${historyTotal} 条虚拟预测记录，已结算 ${completed} 条，待结算 ${pending} 条，无结果 ${unavailable} 条，做多 ${counts.long} 条，做空 ${counts.short} 条；不是交易订单`
+          : `${label}：做多 ${counts.long} 次，做空 ${counts.short} 次`,
+      );
     });
   }
 

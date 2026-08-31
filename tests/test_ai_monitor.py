@@ -4256,6 +4256,10 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert "this.virtualEntryState(item, this.virtualEntryGate(item)).tone" in component
     assert "当前机会" in component
     assert "历史机会" in component
+    assert "historyOpportunityRecordCount" in component
+    assert 'class="history-total">共 ' in component
+    assert 'class="settled">已结算 ' in component
+    assert "不是交易订单" in component
     assert (
         'this.state.updateStreamStatus = this.state.lastSuccessfulRefreshAt ? "polling" : "connecting";'
         in component

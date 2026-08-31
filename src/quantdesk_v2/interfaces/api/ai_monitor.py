@@ -3631,12 +3631,15 @@ def _historical_opportunity_summary(
             direction_counts[str(direction)] += normalized_count
         if str(status) in prediction_counts:
             prediction_counts[str(status)] += normalized_count
-    pending_total = prediction_counts["pending"] + prediction_counts["unavailable"]
+    total = sum(direction_counts.values())
     return {
-        "total": sum(direction_counts.values()),
+        "total": total,
         "direction_counts": direction_counts,
         "settlement_counts": {
-            "total": pending_total,
+            # ``total`` is the number of historical prediction records.  Older
+            # responses overloaded it with pending + unavailable, which made
+            # the UI show "0 unfinished" beside non-zero long/short totals.
+            "total": total,
             **prediction_counts,
         },
     }

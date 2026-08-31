@@ -792,9 +792,12 @@ button:disabled { cursor: wait; opacity: .55; }
 .opportunity-tabs button.active small { color: var(--ai-brand); }
 .opportunity-tabs .direction-counts { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
 .opportunity-tabs .direction-counts b { font-size: 12px; font-weight: 750; }
+.opportunity-tabs .direction-counts .history-total { color: var(--ai-text); }
+.opportunity-tabs .direction-counts .settled { color: var(--ai-muted); }
 .opportunity-tabs .direction-counts .long { color: var(--ai-green); }
 .opportunity-tabs .direction-counts .short { color: var(--ai-red); }
 .opportunity-tabs .direction-counts .pending { color: var(--ai-gold); }
+.opportunity-tabs .direction-counts .unavailable { color: var(--ai-dim); }
 .opportunity-tabs .direction-counts i { color: var(--ai-dim); font-style: normal; }
 .opportunity-status-tabs { min-height: 34px; display: flex; align-items: stretch; gap: 4px; padding: 4px 12px; overflow-x: auto; border-bottom: 1px solid var(--ai-line); background: #0d100d; }
 .opportunity-status-tabs button { min-width: 96px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 4px 10px; border: 1px solid var(--ai-line); color: var(--ai-muted); background: #111411; white-space: nowrap; }
