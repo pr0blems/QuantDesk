@@ -2,7 +2,12 @@
 
 from .ablation import classify_ablation_signal_state
 from .contracts import AiMonitorAuthority, AiMonitorStageResult
-from .event_gate import EventGateService
+from .event_gate import (
+    EventGateService,
+    market_risk_event_gate_snapshot,
+    market_risk_event_snapshot,
+    utc_event_iso,
+)
 from .macro_regime import MacroRegimeService
 from .market_features import MarketFeatureService, realtime_feature_payload
 from .news_scoring import (
@@ -39,6 +44,8 @@ __all__ = [
     "AiMonitorStageResult",
     "classify_ablation_signal_state",
     "EventGateService",
+    "market_risk_event_gate_snapshot",
+    "market_risk_event_snapshot",
     "MacroRegimeService",
     "MarketFeatureService",
     "NewsScoringService",
@@ -64,4 +71,5 @@ __all__ = [
     "resolved_news_event_cluster_id",
     "select_directional_candidates_with_technical_context",
     "strongest_candidate_per_symbol",
+    "utc_event_iso",
 ]

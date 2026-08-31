@@ -197,6 +197,33 @@ def test_opportunity_admission_queries_live_in_the_persistence_boundary() -> Non
     assert "def create_opportunity_prediction(" in persistence_source
 
 
+def test_event_visibility_logic_and_queries_have_owned_boundaries() -> None:
+    orchestration_source = (
+        ROOT / "src/quantdesk_v2/ai_monitor.py"
+    ).read_text(encoding="utf-8")
+    application_source = (
+        ROOT / "src/quantdesk_v2/application/ai_monitor/event_gate.py"
+    ).read_text(encoding="utf-8")
+    persistence_source = (
+        ROOT
+        / "src/quantdesk_v2/infrastructure/persistence/ai_monitor_event_gate.py"
+    ).read_text(encoding="utf-8")
+
+    for name in (
+        "market_risk_event_snapshot",
+        "market_risk_event_gate_snapshot",
+    ):
+        assert f"def {name}(" not in orchestration_source
+        assert f"def {name}(" in application_source
+    for name in (
+        "market_risk_event_contexts",
+        "active_market_risk_events",
+        "backfill_prediction_event_contexts",
+    ):
+        assert f"def {name}(" not in orchestration_source
+        assert f"def {name}(" in persistence_source
+
+
 def test_historical_replay_uses_no_private_ai_monitor_symbols() -> None:
     replay_source = (
         ROOT / "src/quantdesk_v2/historical_replay.py"
