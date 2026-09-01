@@ -40,6 +40,7 @@ from .macro_market import (
 from .models import AdminSetting
 from .news import _unusual_whales_api_key
 from .strategy_routes import router as strategy_router
+from .tiger_news import TigerNewsClient, TigerNewsService
 from .tiger_quotes import (
     TigerDepthClient,
     TigerQuoteClient,
@@ -300,6 +301,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
         cache_seconds=runtime_settings.tiger_quote_cache_seconds,
         stale_seconds=min(120, runtime_settings.tiger_quote_stale_seconds),
+    )
+    app.state.tiger_news_service = TigerNewsService(
+        TigerNewsClient(
+            runtime_settings.tiger_news_base_url,
+            runtime_settings.tiger_quote_authorization.get_secret_value(),
+            timeout_seconds=runtime_settings.tiger_quote_timeout_seconds,
+        ),
+        cache_seconds=runtime_settings.tiger_news_cache_seconds,
     )
     initial_uw_runtime_config = _unusual_whales_runtime_config(database_engine)
     initial_uw_enabled = bool(initial_uw_runtime_config.get("enabled", True))

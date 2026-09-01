@@ -85,7 +85,7 @@ class ContractMonitor extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260810-forecast-2">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260901-tiger-news">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -201,6 +201,7 @@ class ContractMonitor extends window.QuantDeskPageController {
             <button type="button" data-modal-section="#modal-strategy-section">策略机会</button>
             <button type="button" data-modal-section="#modal-report-section">研判报告</button>
             <button type="button" data-modal-section="#modal-factor-section">评分因子</button>
+            <button type="button" data-modal-section="#modal-news-section">新闻列表</button>
           </nav>
 
           <section id="modal-trend" class="research-section research-trend">
@@ -266,6 +267,14 @@ class ContractMonitor extends window.QuantDeskPageController {
           <section id="modal-factor-section" class="research-section">
             <div class="research-section-head"><div><strong>评分因子</strong><span>当前图表周期的因子贡献</span></div></div>
             <div id="factors" class="factors"></div>
+          </section>
+          <section id="modal-news-section" class="research-section research-news-section">
+            <div class="research-section-head">
+              <div><strong>新闻列表</strong><span id="research-news-caption">老虎证券三路新闻接口聚合</span></div>
+            </div>
+            <div id="research-news-list" class="research-news-list" aria-live="polite">
+              <div class="research-news-state">打开标的后加载相关新闻…</div>
+            </div>
           </section>
         </div>
       </div>
@@ -2504,9 +2513,11 @@ class ContractMonitor extends window.QuantDeskPageController {
     this.q("#prediction-feature-caption").textContent = "最新预测快照：-- · 正在读取 8 项";
     this.q("#prediction-feature-list").innerHTML = '<span class="strategy-indicator-loading">预测因子读取中…</span>';
     this.q("#strategy-indicator-detail").innerHTML = "";
+    this.q("#research-news-caption").textContent = "老虎证券三路新闻接口聚合 · 正在读取";
+    this.q("#research-news-list").innerHTML = '<div class="research-news-state">正在加载相关新闻…</div>';
     try {
       const encoded = encodeURIComponent(symbol);
-      const [klines, scores, report, opportunities, indicatorScan] = await Promise.all([
+      const [klines, scores, report, opportunities, indicatorScan, researchNews] = await Promise.all([
         this.api(`/klines?symbol=${encoded}&tf=${timeframe}&limit=300`),
         this.api(`/score?symbol=${encoded}`),
         this.api(`/report?symbol=${encoded}`),
@@ -2518,6 +2529,11 @@ class ContractMonitor extends window.QuantDeskPageController {
           items: [],
           prediction_features: { count: 8, items: [] },
           error: error.message || "策略指标加载失败",
+        })),
+        this.api(`/tiger-news?symbol=${encoded}&limit=30`).catch((error) => ({
+          available: false,
+          items: [],
+          error_category: error.message || "upstream",
         })),
       ]);
       const opportunityItems = Array.isArray(opportunities.items) ? opportunities.items : [];
@@ -2531,10 +2547,71 @@ class ContractMonitor extends window.QuantDeskPageController {
       this.renderScoreSummary(scores, report);
       this.renderReport(report);
       this.renderFactors(scores[timeframe]);
+      this.renderResearchNews(researchNews);
     } catch (error) {
       this.q("#modal-ohlc").innerHTML = '<span class="down">当前周期行情加载失败</span>';
       this.q("#report").innerHTML = `<div class="error-banner">${this.escape(error.message || "详情加载失败")}</div>`;
     }
+  }
+
+  renderResearchNews(payload) {
+    const caption = this.q("#research-news-caption");
+    const list = this.q("#research-news-list");
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const sourceCount = Math.max(0, Number(payload?.source_count) || 0);
+    const fetchedAt = payload?.fetched_at ? new Date(payload.fetched_at) : null;
+    const fetchedLabel = fetchedAt && Number.isFinite(fetchedAt.getTime())
+      ? fetchedAt.toLocaleString("zh-CN", { hour12: false })
+      : "--";
+    if (!payload?.available) {
+      const messages = {
+        not_configured: "老虎证券新闻凭据尚未配置",
+        authentication: "老虎证券新闻认证已失效",
+        rate_limit: "老虎证券新闻请求过于频繁，请稍后重试",
+        invalid_symbol: "当前标的不支持新闻查询",
+      };
+      caption.textContent = "老虎证券新闻暂不可用";
+      list.innerHTML = `<div class="research-news-state error">${this.escape(messages[payload?.error_category] || "老虎证券新闻读取失败，请稍后重试")}</div>`;
+      return;
+    }
+    const staleLabel = payload.stale ? " · 最近有效快照" : "";
+    const partialLabel = payload.partial ? " · 部分接口可用" : "";
+    caption.textContent = `老虎证券 ${sourceCount}/3 路接口 · ${items.length} 条 · 更新 ${fetchedLabel}${staleLabel}${partialLabel}`;
+    if (!items.length) {
+      list.innerHTML = '<div class="research-news-state">当前标的暂无相关新闻</div>';
+      return;
+    }
+    list.innerHTML = items.map((item) => {
+      const sentiment = String(item.sentiment || "").trim();
+      const sentimentClass = /positive|bull|利好|正面/i.test(sentiment)
+        ? "positive"
+        : /negative|bear|利空|负面/i.test(sentiment)
+        ? "negative"
+        : "neutral";
+      const sentimentLabel = sentiment || "未标注情绪";
+      const labels = Array.isArray(item.labels)
+        ? item.labels.slice(0, 4).map((label) => `<span>${this.escape(label)}</span>`).join("")
+        : "";
+      const title = item.url
+        ? `<a href="${this.safeUrl(item.url)}" target="_blank" rel="noopener noreferrer">${this.escape(item.title)}</a>`
+        : `<strong>${this.escape(item.title)}</strong>`;
+      const originalTitle = item.original_title
+        ? `<small class="research-news-original">${this.escape(item.original_title)}</small>`
+        : "";
+      return `<article class="research-news-card">
+        <div class="research-news-main">
+          <div class="research-news-tags"><span class="kind">${this.escape(item.kind || "资讯")}</span>${labels}</div>
+          <h3>${title}</h3>
+          ${originalTitle}
+          <p>${this.escape(item.summary || "该条新闻暂无摘要。")}</p>
+        </div>
+        <footer>
+          <strong>${this.escape(item.source || "老虎证券资讯")}</strong>
+          <time>${this.escape(item.published_at || "时间未知")}</time>
+          <span class="sentiment ${sentimentClass}">${this.escape(sentimentLabel)}</span>
+        </footer>
+      </article>`;
+    }).join("");
   }
 
   renderStrategyIndicators(scan) {

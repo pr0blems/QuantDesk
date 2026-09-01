@@ -79,9 +79,11 @@ class Settings(BaseSettings):
     tiger_quote_authorization: SecretStr = SecretStr("")
     tiger_quote_base_url: str = "https://hq2.skytigris.cn"
     tiger_depth_base_url: str = "https://hq-depth.skytigris.cn"
+    tiger_news_base_url: str = "https://stock-news.laohu8.com"
     tiger_quote_timeout_seconds: float = 5.0
     tiger_quote_cache_seconds: float = 2.0
     tiger_quote_stale_seconds: int = 900
+    tiger_news_cache_seconds: float = 60.0
 
     # News-source rows contain the endpoint and polling policy, never this secret.
     unusual_whales_api_key: SecretStr = SecretStr("")
@@ -277,6 +279,26 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "TIGER_DEPTH_BASE_URL must be the approved Tiger Level-2 HTTPS origin"
             )
+        news = urlparse(self.tiger_news_base_url)
+        try:
+            news_port = news.port
+        except ValueError:
+            news_port = -1
+        if (
+            news.scheme.lower() != "https"
+            or news.hostname != "stock-news.laohu8.com"
+            or news.username is not None
+            or news.password is not None
+            or news_port not in (None, 443)
+            or news.path not in ("", "/")
+            or news.query
+            or news.fragment
+        ):
+            raise RuntimeError(
+                "TIGER_NEWS_BASE_URL must be the approved Tiger news HTTPS origin"
+            )
+        if not 10 <= self.tiger_news_cache_seconds <= 600:
+            raise RuntimeError("TIGER_NEWS_CACHE_SECONDS must be between 10 and 600")
 
     @staticmethod
     def _validate_binance_origin(name: str, value: str, allowed_hosts: set[str]) -> None:

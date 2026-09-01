@@ -68,6 +68,19 @@ def monitor_news(
     return _repository(request).news(limit)
 
 
+@router.get("/monitor/tiger-news")
+def monitor_tiger_news(
+    request: Request,
+    _: Annotated[User, Depends(get_current_user)],
+    symbol: str,
+    limit: int = Query(default=30, ge=1, le=50),
+) -> dict[str, Any]:
+    service = getattr(request.app.state, "tiger_news_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="老虎证券新闻服务尚未初始化")
+    return service.latest(symbol, limit=limit)
+
+
 @router.get("/monitor/klines")
 def monitor_klines(
     request: Request,

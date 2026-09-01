@@ -35,6 +35,8 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
         'id="score-summary"',
         'id="report"',
         'id="factors"',
+        'data-modal-section="#modal-news-section"',
+        'id="research-news-list"',
         'data-opportunity-action="shadow"',
     ):
         assert marker in script
@@ -45,6 +47,9 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
     assert "limit=1&include_ignored=true" in script
     assert "include_expired=true" not in script
     assert "renderStrategyIndicators(indicatorScan)" in script
+    assert "this.api(`/tiger-news?symbol=${encoded}&limit=30`)" in script
+    assert "renderResearchNews(researchNews)" in script
+    assert "老虎证券三路新闻接口聚合" in script
     assert "featureScan.bullish_count" in script
     assert 'bullish: "偏多"' in script
     assert 'bearish: "偏空"' in script
@@ -91,6 +96,8 @@ def test_monitor_research_modal_is_responsive_and_supports_light_theme() -> None
     assert ".chart-stage { position: relative" in stylesheet
     assert ".chart-tooltip { width: 206px" in stylesheet
     assert ".chart-overlay-toolbar" in stylesheet
+    assert ".research-news-card" in stylesheet
+    assert ".research-news-tags .kind" in stylesheet
     assert ".chart-signal-note" in stylesheet
     assert ".legend-line.projection" in stylesheet
     assert ".chart-projection-note" in stylesheet
