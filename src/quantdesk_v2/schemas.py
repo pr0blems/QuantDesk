@@ -1269,7 +1269,7 @@ class StrategyCreateRequest(BaseModel):
         max_length=64,
         pattern=r"^[a-z][a-z0-9_]{0,63}$",
     )
-    parameters: dict[str, int | float] | None = Field(default=None, max_length=32)
+    parameters: dict[str, int | float] | None = Field(default=None, max_length=64)
     risk_defaults: dict[str, int | float] | None = Field(default=None, max_length=16)
     indicators: list[StrategyIndicatorSelection] | None = Field(
         default=None, min_length=2, max_length=8
@@ -1316,7 +1316,7 @@ class StrategyUpdateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=600)
     category: str = Field(min_length=1, max_length=32)
-    parameters: dict[str, int | float] = Field(max_length=32)
+    parameters: dict[str, int | float] = Field(max_length=64)
     risk_defaults: dict[str, int | float] = Field(max_length=16)
 
     @field_validator("parameters")
@@ -1421,7 +1421,7 @@ class StrategyAiProposed(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=600)
     category: str = Field(min_length=1, max_length=32)
-    parameters: dict[str, int | float] = Field(max_length=32)
+    parameters: dict[str, int | float] = Field(max_length=64)
     risk_defaults: dict[str, int | float] = Field(max_length=16)
 
     @field_validator("parameters")

@@ -10,24 +10,32 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from quantdesk_v2.models import (
+    AiMonitorConfig,
     StrategyRevision,
     StrategyTemplate,
     User,
     UserStrategy,
 )
 from quantdesk_v2.strategy_catalog import (
+    AI_MONITOR_STRATEGY_TEMPLATE_KEY,
     SYSTEM_STRATEGY_DEFINITIONS,
     StrategyParameterError,
+    ai_monitor_strategy_parameters,
+    apply_ai_monitor_strategy_parameters,
     ensure_system_templates,
     ensure_user_default_strategies,
     get_user_strategy,
+    is_ai_monitor_strategy,
     list_user_strategies,
     serialize_strategy_catalog,
     strategy_snapshot,
+    validate_ai_monitor_strategy_parameters,
     validate_strategy_parameters,
 )
 
 EXPECTED_NAMES = [
+    "AI 机会决策策略",
+    "多周期趋势回踩延续",
     "趋势突破",
     "MA 金叉",
     "MACD 金叉放量",
@@ -97,14 +105,14 @@ def test_strategy_models_are_commented_json_backed_and_tenant_scoped() -> None:
 def test_system_catalog_has_full_strategy_and_all_builtin_defaults(session: Session) -> None:
     templates = ensure_system_templates(session)
 
-    assert len(SYSTEM_STRATEGY_DEFINITIONS) == 20
+    assert len(SYSTEM_STRATEGY_DEFINITIONS) == 21
     assert sum(item["template_kind"] == "strategy" for item in SYSTEM_STRATEGY_DEFINITIONS) == 1
     assert (
         sum(
             item["template_kind"] == "builtin_strategy"
             for item in SYSTEM_STRATEGY_DEFINITIONS
         )
-        == 19
+        == 20
     )
     assert [template.name for template in templates] == EXPECTED_NAMES
     assert {template.engine_key for template in templates} == {
@@ -115,10 +123,16 @@ def test_system_catalog_has_full_strategy_and_all_builtin_defaults(session: Sess
         "bollinger_reversion",
     }
     for template in templates:
-        assert (
-            validate_strategy_parameters(template.engine_key, template.parameters_json)
-            == template.parameters_json
-        )
+        if template.template_key == AI_MONITOR_STRATEGY_TEMPLATE_KEY:
+            assert (
+                validate_ai_monitor_strategy_parameters(template.parameters_json)
+                == template.parameters_json
+            )
+        else:
+            assert (
+                validate_strategy_parameters(template.engine_key, template.parameters_json)
+                == template.parameters_json
+            )
 
     paper_template = next(
         template for template in templates if template.template_key == "paper_multifactor_atr_v1"
@@ -134,8 +148,8 @@ def test_system_catalog_has_full_strategy_and_all_builtin_defaults(session: Sess
     }
     assert "2.5×ATR 固定止盈" in paper_template.description
 
-    assert len(ensure_system_templates(session)) == 20
-    assert session.scalar(select(func.count()).select_from(StrategyTemplate)) == 20
+    assert len(ensure_system_templates(session)) == 21
+    assert session.scalar(select(func.count()).select_from(StrategyTemplate)) == 21
 
 
 def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
@@ -150,16 +164,16 @@ def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
     first = ensure_user_default_strategies(session, user.id)
     second = ensure_user_default_strategies(session, user.id)
 
-    assert len(first) == len(second) == 20
+    assert len(first) == len(second) == 21
     assert [strategy.name for strategy in first] == EXPECTED_NAMES
-    assert len({strategy.source_template_id for strategy in first}) == 20
+    assert len({strategy.source_template_id for strategy in first}) == 21
     assert all(uuid.UUID(strategy.public_id).version == 4 for strategy in first)
     assert all(strategy.created_via == "system_default" for strategy in first)
     assert (
         session.scalar(
             select(func.count()).select_from(UserStrategy).where(UserStrategy.user_id == user.id)
         )
-        == 20
+        == 21
     )
     assert (
         session.scalar(
@@ -167,9 +181,61 @@ def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
             .select_from(StrategyRevision)
             .where(StrategyRevision.user_id == user.id)
         )
-        == 20
+        == 21
     )
     assert all(strategy.revisions[0].snapshot_json["name"] == strategy.name for strategy in first)
+
+
+def test_ai_monitor_strategy_is_visible_versioned_and_uses_real_config(
+    session: Session,
+) -> None:
+    user = _user(session, "ai-monitor-strategy-user")
+    strategies = ensure_user_default_strategies(session, user.id)
+    managed = next(item for item in strategies if is_ai_monitor_strategy(item))
+
+    assert managed.status == "active"
+    assert managed.lifecycle_status == "published"
+    assert managed.spec_json["decision_version"] == "actionable_entry_v11"
+    assert managed.parameters_json == ai_monitor_strategy_parameters(None)
+    assert managed.revisions[0].lifecycle_status == "published"
+
+    edited = dict(managed.parameters_json)
+    edited["monitor_enabled"] = 1
+    edited["timeframe_minutes"] = 240
+    edited["minimum_combined_score"] = 82
+    for key in list(edited):
+        if key.startswith("indicator_"):
+            edited[key] = 0
+    edited["indicator_prediction_trend"] = 1
+    apply_ai_monitor_strategy_parameters(session, user.id, edited)
+
+    config = session.get(AiMonitorConfig, user.id)
+    assert config is not None
+    assert config.enabled is True
+    assert config.timeframe == "4h"
+    assert float(config.minimum_combined_score) == pytest.approx(82)
+    assert config.indicator_keys_json == ["prediction_trend"]
+
+    refreshed = ensure_user_default_strategies(session, user.id)
+    managed = next(item for item in refreshed if is_ai_monitor_strategy(item))
+    assert managed.version == 2
+    assert managed.parameters_json["timeframe_minutes"] == 240
+    assert managed.parameters_json["minimum_combined_score"] == 82
+    assert [revision.version for revision in managed.revisions] == [1, 2]
+
+
+def test_ai_monitor_strategy_rejects_invalid_cross_field_parameters() -> None:
+    parameters = ai_monitor_strategy_parameters(None)
+    parameters["news_score_weight"] = 50
+    with pytest.raises(StrategyParameterError, match="权重合计"):
+        validate_ai_monitor_strategy_parameters(parameters)
+
+    parameters = ai_monitor_strategy_parameters(None)
+    for key in list(parameters):
+        if key.startswith("indicator_"):
+            parameters[key] = 0
+    with pytest.raises(StrategyParameterError, match="至少启用一个"):
+        validate_ai_monitor_strategy_parameters(parameters)
 
 
 def test_user_strategy_queries_do_not_cross_tenants(session: Session) -> None:
@@ -178,8 +244,8 @@ def test_user_strategy_queries_do_not_cross_tenants(session: Session) -> None:
     alice_strategies = ensure_user_default_strategies(session, alice.id)
     bob_strategies = ensure_user_default_strategies(session, bob.id)
 
-    assert len(list_user_strategies(session, alice.id)) == 20
-    assert len(list_user_strategies(session, bob.id)) == 20
+    assert len(list_user_strategies(session, alice.id)) == 21
+    assert len(list_user_strategies(session, bob.id)) == 21
     assert {item.public_id for item in alice_strategies}.isdisjoint(
         {item.public_id for item in bob_strategies}
     )
@@ -187,9 +253,9 @@ def test_user_strategy_queries_do_not_cross_tenants(session: Session) -> None:
 
     alice_strategies[0].status = "archived"
     session.flush()
-    assert len(list_user_strategies(session, alice.id)) == 18
-    assert len(list_user_strategies(session, alice.id, include_archived=True)) == 20
-    assert len(list_user_strategies(session, bob.id)) == 20
+    assert len(list_user_strategies(session, alice.id)) == 20
+    assert len(list_user_strategies(session, alice.id, include_archived=True)) == 21
+    assert len(list_user_strategies(session, bob.id)) == 21
 
 
 def test_revision_relationship_and_catalog_serialization(session: Session) -> None:
@@ -241,7 +307,7 @@ def test_strategy_migration_follows_quantity_precision_revision() -> None:
     assert module.revision == "0006_strategy_tables"
     assert module.down_revision == "0005_backtest_qty_precision"
     assert len(module.SEED_TEMPLATES) == 18
-    assert [item[1] for item in module.SEED_TEMPLATES] == EXPECTED_NAMES[:-1]
+    assert [item[1] for item in module.SEED_TEMPLATES] == EXPECTED_NAMES[2:-1]
 
 
 def test_paper_strategy_migration_follows_strategy_tables_revision() -> None:

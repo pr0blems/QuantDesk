@@ -62,11 +62,14 @@ from .strategy_artifacts import record_revision_artifact
 from .strategy_catalog import (
     DEFAULT_RISK,
     StrategyParameterError,
+    apply_ai_monitor_strategy_parameters,
     ensure_system_templates,
     ensure_user_default_strategies,
     get_user_strategy,
+    is_ai_monitor_strategy,
     serialize_user_strategy,
     strategy_snapshot,
+    validate_ai_monitor_strategy_parameters,
     validate_strategy_parameters,
 )
 from .strategy_lifecycle import (
@@ -541,7 +544,11 @@ def _apply_edit(
         )
     try:
         current_spec = strategy.spec_json if isinstance(strategy.spec_json, dict) else {}
-        if strategy.strategy_kind == "source_strategy" or current_spec.get("strategy_type") == "indicator_composite":
+        if is_ai_monitor_strategy(strategy):
+            parameters = validate_ai_monitor_strategy_parameters(
+                editable["parameters"]
+            )
+        elif strategy.strategy_kind == "source_strategy" or current_spec.get("strategy_type") == "indicator_composite":
             parameters = _normalize_schema_parameters(
                 strategy.parameter_schema_json,
                 editable["parameters"],
@@ -573,7 +580,9 @@ def _apply_edit(
             raise HTTPException(status_code=422, detail=str(exc)) from None
         strategy.spec_schema_version = int(strategy.spec_json["schema_version"])
         strategy.spec_hash = strategy_spec_hash(strategy.spec_json)
-    strategy.lifecycle_status = "draft"
+    strategy.lifecycle_status = (
+        "published" if is_ai_monitor_strategy(strategy) else "draft"
+    )
     strategy.version += 1
     strategy.updated_at = utcnow()
     _record_revision(db, strategy, source=source, summary=summary)
@@ -1081,7 +1090,9 @@ def _restore_revision_as_new_draft(
     strategy.parameter_schema_json = copy.deepcopy(snapshot["parameter_schema"])
     strategy.parameters_json = copy.deepcopy(snapshot["parameters"])
     strategy.risk_defaults_json = copy.deepcopy(snapshot["risk_defaults"])
-    strategy.lifecycle_status = "draft"
+    strategy.lifecycle_status = (
+        "published" if is_ai_monitor_strategy(strategy) else "draft"
+    )
     strategy.version += 1
     strategy.updated_at = utcnow()
     _record_revision(
@@ -1767,6 +1778,8 @@ def rollback_strategy_revision(
     previous_version = strategy.version
     previous_status = strategy.lifecycle_status
     _restore_revision_as_new_draft(db, strategy, target, reason=payload.reason)
+    if is_ai_monitor_strategy(strategy):
+        apply_ai_monitor_strategy_parameters(db, user.id, strategy.parameters_json)
     pending_reviews = db.scalars(
         select(StrategyPromotionReview)
         .where(
@@ -2135,6 +2148,8 @@ def update_strategy(
         source="manual",
         summary="手工修改策略配置",
     )
+    if is_ai_monitor_strategy(strategy):
+        apply_ai_monitor_strategy_parameters(db, user.id, strategy.parameters_json)
     _audit(
         db,
         request,
@@ -2420,6 +2435,8 @@ def apply_ai_strategy_edit(
         source="ai",
         summary="确认应用 AI 语义修改预览",
     )
+    if is_ai_monitor_strategy(strategy):
+        apply_ai_monitor_strategy_parameters(db, user.id, strategy.parameters_json)
     _audit(
         db,
         request,
@@ -2442,6 +2459,11 @@ def archive_strategy(
     strategy = _locked_user_strategy(db, user.id, public_id)
     if strategy is None:
         raise HTTPException(status_code=404, detail="未找到该策略")
+    if is_ai_monitor_strategy(strategy):
+        raise HTTPException(
+            status_code=409,
+            detail="AI 机会决策策略是当前运行策略，不能归档；可将自动监控参数设为 0 暂停。",
+        )
     if strategy.status != "archived":
         strategy.status = "archived"
         strategy.lifecycle_status = "retired"

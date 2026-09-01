@@ -80,6 +80,7 @@ from ...schemas import (
 )
 from ...security import CredentialCipher, SecurityError, decode_access_token
 from ...strategy_artifacts import add_run_manifest, record_revision_artifact
+from ...strategy_catalog import ensure_user_default_strategies
 from ...tiger_quotes import (
     TigerDepthClient,
     TigerUsDepthService,
@@ -3424,6 +3425,8 @@ def update_config(
     config.news_score_weight = Decimal(str(payload.news_score_weight))
     config.technical_score_weight = Decimal(str(payload.technical_score_weight))
     config.market_flow_score_weight = Decimal(str(payload.market_flow_score_weight))
+    db.flush()
+    ensure_user_default_strategies(db, user.id)
     _audit(
         db,
         request,
