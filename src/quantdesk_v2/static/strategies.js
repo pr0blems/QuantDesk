@@ -2946,7 +2946,8 @@ class StrategyCenter extends window.QuantDeskPageController {
     this.showNotice("");
     try {
       const result = await this.api(`/${encodeURIComponent(item.public_id)}/validate`, { method: "POST", body: "{}" });
-      if (["draft", "published"].includes(item.lifecycle_status)) {
+      const revisionWorkflow = ["python_source", "strategy_dsl"].includes(item.management_mode);
+      if (revisionWorkflow && ["draft", "published"].includes(item.lifecycle_status)) {
         const promoted = await this.promoteLifecycle(item, "validated");
         item = promoted.item;
         this.renderCards();
