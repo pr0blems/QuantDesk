@@ -8,6 +8,7 @@ STYLES = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(encoding="u
 def test_opportunity_card_has_distinct_summary_details_and_actions() -> None:
     for marker in (
         'class="opportunity-identity"',
+        'class="opportunity-symbol-row"',
         'class="opportunity-symbol-line"',
         'class="opportunity-badges"',
         'class="opportunity-quotes"',
@@ -55,12 +56,18 @@ def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert ".opportunity-item:is(.has-position, .has-candidate-summary):not(.is-expanded) > .opportunity-signal" in STYLES
     assert ".opportunity-item > .virtual-position" in STYLES
     assert ".opportunity-list .opportunity-item > header > .opportunity-identity" in STYLES
+    assert ".opportunity-symbol-row" in STYLES
     assert ".virtual-position.direction-long .virtual-position-title" in STYLES
     assert ".virtual-position.direction-short .virtual-position-title" in STYLES
     assert ".virtual-position-action .ai-conclusion-trigger" in STYLES
     assert ".virtual-position-action .opportunity-detail-toggle" in STYLES
     assert ".opportunity-quotes .provider-quote-badge b" in STYLES
     assert ".provider-quote-badge.tiger" in STYLES
+    symbol_row = SCRIPT.index('class="opportunity-symbol-row"')
+    symbol_line = SCRIPT.index('class="opportunity-symbol-line"', symbol_row)
+    quotes = SCRIPT.index('class="opportunity-quotes"', symbol_line)
+    badges = SCRIPT.index('class="opportunity-badges"', quotes)
+    assert symbol_row < symbol_line < quotes < badges
     assert ".opportunity-item > .opportunity-card-footer" in STYLES
     assert "@container (max-width: 680px)" in STYLES
     assert "@container (max-width: 520px)" in STYLES

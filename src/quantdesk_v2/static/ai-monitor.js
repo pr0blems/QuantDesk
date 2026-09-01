@@ -151,7 +151,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-tiger-quotes">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-quote-header-layout">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -4532,9 +4532,8 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       return `<article class="opportunity-item ${this.escape(item.status)} state-${this.escape(entryState.tone)} ${expanded ? "is-expanded" : ""} ${triggeredPosition ? "has-position" : candidateSummaryVisible ? "has-candidate-summary" : "has-signal"} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}" data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:${historicalTab ? "history" : "current"}" data-details-expanded="${expanded}">
         <header data-patch-key="header">
           <div class="opportunity-identity">
-            <div class="opportunity-symbol-line">${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small></div>
+            <div class="opportunity-symbol-row"><div class="opportunity-symbol-line">${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small></div><div class="opportunity-quotes">${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${tigerSpotControl}</div></div>
             <div class="opportunity-badges"><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="direction-badge ${directionClass}">${directionLabel}</span>${triggerBadge}</div>
-            <div class="opportunity-quotes">${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${tigerSpotControl}</div>
           </div>
           <div class="opportunity-top-metrics">${marketDepthControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></div>
         </header>

@@ -2106,9 +2106,9 @@ td.negative { color: var(--ai-red); }
   box-shadow: 0 16px 38px rgba(0, 0, 0, .28), 0 0 0 1px rgba(173, 156, 255, .05);
 }
 .opportunity-item > header {
-  min-height: 142px;
+  min-height: 120px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(330px, 380px);
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 290px);
   align-items: stretch;
   gap: 16px;
   padding: 20px;
@@ -2116,7 +2116,8 @@ td.negative { color: var(--ai-red); }
   border-radius: 10px 10px 0 0;
   background: #101813;
 }
-.opportunity-list .opportunity-item > header > .opportunity-identity { min-width: 0; display: grid; align-content: center; align-items: start; gap: 10px; }
+.opportunity-list .opportunity-item > header > .opportunity-identity { min-width: 0; display: grid; align-content: center; align-items: start; gap: 9px; }
+.opportunity-symbol-row { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 9px 16px; }
 .opportunity-symbol-line { min-width: 0; display: flex; align-items: baseline; gap: 9px; }
 .opportunity-symbol-line .opportunity-symbol { font-size: 31px; line-height: 1; letter-spacing: -.025em; }
 .opportunity-symbol-line > small { color: var(--ai-dim); font: 700 11px/1.2 Consolas, monospace; }
@@ -2124,19 +2125,19 @@ td.negative { color: var(--ai-red); }
 .opportunity-badges :where(.direction, .direction-badge, .lifecycle-badge, .readiness-badge, .quality-badge) { min-height: 23px; padding: 3px 7px; border: 1px solid #304039; border-radius: 4px; font-size: 10px; font-weight: 750; }
 .opportunity-badges .direction-badge.long { border-color: rgba(91, 214, 170, .62); color: var(--ai-green); background: rgba(91, 214, 170, .045); }
 .opportunity-badges .direction-badge.short { border-color: rgba(255, 120, 136, .62); color: var(--ai-red); background: rgba(255, 120, 136, .045); }
-.opportunity-quotes .provider-quote-badge { min-height: 29px; gap: 5px; padding: 4px 7px; border-color: transparent; background: rgba(255, 255, 255, .018); }
-.opportunity-quotes .provider-quote-badge i { padding: 2px 4px; font-size: 10px; }
-.opportunity-quotes .provider-quote-badge b { font-size: 14px; line-height: 1; }
-.opportunity-quotes .provider-quote-badge small { font-size: 10px; line-height: 1; }
-.opportunity-top-metrics { min-width: 0; height: 96px; align-self: center; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.opportunity-quotes .provider-quote-badge { min-height: 36px; gap: 6px; padding: 6px 9px; border-color: transparent; background: rgba(255, 255, 255, .018); }
+.opportunity-quotes .provider-quote-badge i { padding: 3px 5px; font-size: 10px; }
+.opportunity-quotes .provider-quote-badge b { font-size: 16px; line-height: 1; }
+.opportunity-quotes .provider-quote-badge small { font-size: 11px; line-height: 1; }
+.opportunity-top-metrics { min-width: 0; height: 78px; align-self: center; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .opportunity-top-metrics .market-depth-control,
 .opportunity-top-metrics .opportunity-score {
   width: 100%;
   min-width: 0;
-  min-height: 96px;
+  min-height: 78px;
   align-self: stretch;
   align-content: center;
-  padding: 14px 16px;
+  padding: 10px 11px;
   border: 1px solid #24322a;
   border-left: 4px solid #5dc4d8;
   border-radius: 8px;
@@ -2147,13 +2148,13 @@ td.negative { color: var(--ai-red); }
 .opportunity-top-metrics .market-depth-control:focus-visible,
 .opportunity-top-metrics .opportunity-score:hover,
 .opportunity-top-metrics .opportunity-score:focus-visible { border-color: rgba(173, 156, 255, .58); background: #17211a; }
-.opportunity-top-metrics .market-depth-control > span { font-size: 11px; }
-.opportunity-top-metrics .market-depth-control > strong { font-size: 25px; }
-.opportunity-top-metrics .market-depth-control > small { max-width: none; font-size: 10px; }
+.opportunity-top-metrics .market-depth-control > span { font-size: 10px; }
+.opportunity-top-metrics .market-depth-control > strong { font-size: 21px; }
+.opportunity-top-metrics .market-depth-control > small { max-width: none; font-size: 9px; }
 .opportunity-top-metrics .opportunity-score { justify-items: start; border-left-color: var(--ai-brand); text-align: left; }
 .opportunity-top-metrics .opportunity-score .score-current { gap: 6px; }
-.opportunity-top-metrics .opportunity-score b { font-size: 27px; }
-.opportunity-top-metrics .opportunity-score > span:not(.score-current) { font-size: 10px; }
+.opportunity-top-metrics .opportunity-score b { font-size: 23px; }
+.opportunity-top-metrics .opportunity-score > span:not(.score-current) { font-size: 9px; }
 .opportunity-top-metrics :where(.market-depth-control, .opportunity-score) > em { top: 7px; right: 8px; border-radius: 4px; }
 
 .opportunity-item > .virtual-position {
@@ -2270,15 +2271,15 @@ td.negative { color: var(--ai-red); }
 }
 
 @container (max-width: 860px) {
-  .opportunity-item > header { grid-template-columns: minmax(0, 1fr) minmax(280px, 330px); padding: 16px; }
+  .opportunity-item > header { grid-template-columns: minmax(0, 1fr) minmax(240px, 270px); padding: 16px; }
   .opportunity-feature-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @container (max-width: 680px) {
   .opportunity-item > header { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  .opportunity-top-metrics { min-height: 82px; }
+  .opportunity-top-metrics { min-height: 76px; }
   .opportunity-top-metrics .market-depth-control,
-  .opportunity-top-metrics .opportunity-score { min-height: 82px; }
+  .opportunity-top-metrics .opportunity-score { min-height: 76px; }
   .virtual-position-head { flex-direction: column; align-items: stretch; }
   .virtual-position-action { width: 100%; min-width: 0; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid #34443a; }
   .virtual-position-action > button { flex: 1; min-width: 0; }
@@ -2290,6 +2291,8 @@ td.negative { color: var(--ai-red); }
 }
 
 @container (max-width: 520px) {
+  .opportunity-symbol-row { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .opportunity-quotes { width: 100%; }
   .virtual-position-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
