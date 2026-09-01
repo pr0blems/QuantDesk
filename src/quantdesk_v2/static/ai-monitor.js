@@ -151,7 +151,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-macro-header1">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-decision-policy1">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -161,6 +161,9 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
           </div>
           <div class="ai-head-actions">
             <span id="ai-clock" class="ai-clock"></span>
+            <button id="decision-strategy-button" class="decision-strategy-trigger" type="button" aria-haspopup="dialog">
+              <span>决策策略</span><strong>读取中</strong>
+            </button>
             <span id="scheduler-state" class="status-badge idle">读取中</span>
             <button id="live-copy-toggle" class="live-copy-toggle loading" type="button" aria-pressed="false" aria-busy="true">
               <span class="live-copy-toggle-track" aria-hidden="true"><i></i></span>
@@ -228,6 +231,16 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
               <button type="button" data-manual-follow-close aria-label="关闭立即跟买确认">×</button>
             </header>
             <div id="manual-follow-body" class="live-copy-body"><div class="live-copy-loading">正在读取当前信号与实盘配置…</div></div>
+          </section>
+        </div>
+        <div id="decision-strategy-modal" class="live-copy-modal hidden" aria-hidden="true">
+          <button class="live-copy-backdrop" type="button" data-decision-strategy-close aria-label="关闭当前决策策略"></button>
+          <section class="live-copy-dialog decision-strategy-dialog" role="dialog" aria-modal="true" aria-labelledby="decision-strategy-title" tabindex="-1">
+            <header>
+              <div><span>CURRENT DECISION POLICY</span><h2 id="decision-strategy-title">当前决策策略</h2><p>查看当前执行版本与真实准入参数。保存后从下一轮机会扫描开始生效，历史机会保留生成时快照。</p></div>
+              <button type="button" data-decision-strategy-close aria-label="关闭当前决策策略">×</button>
+            </header>
+            <div id="decision-strategy-body" class="decision-strategy-body"><div class="live-copy-loading">正在读取当前决策策略…</div></div>
           </section>
         </div>
         <section id="macro-market-panel" class="macro-market-panel" aria-label="美股宏观大盘环境">
@@ -498,16 +511,24 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     });
     this.q("#live-copy-config-button").addEventListener("click", () => this.openLiveCopyConfigModal());
     this.q("#live-copy-history-button").addEventListener("click", () => this.openLiveCopyHistoryModal());
+    this.q("#decision-strategy-button").addEventListener("click", () => this.openDecisionStrategyModal());
     this.qa("[data-live-copy-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyModal()));
     this.qa("[data-live-copy-config-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyConfigModal()));
     this.qa("[data-live-copy-history-close]").forEach((button) => button.addEventListener("click", () => this.closeLiveCopyHistoryModal()));
     this.qa("[data-manual-follow-close]").forEach((button) => button.addEventListener("click", () => this.closeManualFollowModal()));
+    this.qa("[data-decision-strategy-close]").forEach((button) => button.addEventListener("click", () => this.closeDecisionStrategyModal()));
     this.q("#live-copy-body").addEventListener("submit", (event) => this.submitLiveCopy(event));
     this.q("#live-copy-config-body").addEventListener("submit", (event) => this.submitLiveCopyConfig(event));
     this.q("#live-copy-history-body").addEventListener("click", (event) => {
       if (event.target.closest("[data-live-copy-history-refresh]")) void this.loadLiveCopyHistory();
     });
     this.q("#manual-follow-body").addEventListener("submit", (event) => this.submitManualFollow(event));
+    this.q("#decision-strategy-body").addEventListener("submit", (event) => this.submitDecisionStrategy(event));
+    this.q("#decision-strategy-body").addEventListener("click", (event) => {
+      if (!event.target.closest("[data-open-decision-advanced]")) return;
+      this.closeDecisionStrategyModal();
+      this.openConfig("indicators");
+    });
     this.q("#live-copy-config-body").addEventListener("change", (event) => {
       if (!event.target.closest('[name="position_size_basis"]')) return;
       this.syncLiveCopyPositionSizing(event.target.closest("form"));
@@ -1103,6 +1124,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     const state = this.q("#scheduler-state");
     state.textContent = config.enabled ? "自动监控中" : "自动监控已暂停";
     state.className = `status-badge ${config.enabled ? "running" : "idle"}`;
+    this.renderDecisionStrategyTrigger();
     this.renderLiveCopyToggle();
     this.renderUnusualWhalesToggle();
     this.renderFinnhubToggle();
@@ -1185,6 +1207,146 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     const modal = this.q("#live-copy-config-modal");
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
+  }
+
+  decisionStrategyVersions() {
+    const overview = this.state.overview || {};
+    const health = overview.data_health || overview.market_data_health || overview.realtime_health || {};
+    const versions = health.versions || overview.versions || {};
+    return {
+      decision: this.firstValue(versions.decision, health.decision_version, "兼容模式"),
+      feature: this.firstValue(versions.feature, health.feature_version, "--"),
+      weights: this.firstValue(versions.weights, health.weights_version, "--"),
+    };
+  }
+
+  renderDecisionStrategyTrigger() {
+    const button = this.q("#decision-strategy-button");
+    if (!button) return;
+    const versions = this.decisionStrategyVersions();
+    button.innerHTML = `<span>决策策略</span><strong>${this.escape(versions.decision)}</strong>`;
+    button.title = `点击查看和修改当前策略参数；特征 ${versions.feature}；权重 ${versions.weights}`;
+  }
+
+  openDecisionStrategyModal() {
+    const modal = this.q("#decision-strategy-modal");
+    this.renderDecisionStrategyModal();
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    modal.querySelector(".decision-strategy-dialog")?.focus();
+  }
+
+  closeDecisionStrategyModal() {
+    const modal = this.q("#decision-strategy-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  renderDecisionStrategyModal(statusMessage = "") {
+    const target = this.q("#decision-strategy-body");
+    const config = this.state.config;
+    if (!target) return;
+    if (!config) {
+      target.innerHTML = '<div class="live-copy-loading">当前配置尚未加载，请稍后重试。</div>';
+      return;
+    }
+    const versions = this.decisionStrategyVersions();
+    const indicatorCount = Array.isArray(config.indicator_keys) ? config.indicator_keys.length : 0;
+    target.innerHTML = `
+      <section class="decision-version-summary">
+        <article><span>决策版本</span><strong>${this.escape(versions.decision)}</strong><small>决定候选方向、准入门槛与触发结果</small></article>
+        <article><span>特征版本</span><strong>${this.escape(versions.feature)}</strong><small>生成新闻、技术、资金与宏观特征</small></article>
+        <article><span>权重版本</span><strong>${this.escape(versions.weights)}</strong><small>六域组合评分规则</small></article>
+      </section>
+      <section class="decision-policy-flow" aria-label="当前决策流程">
+        <span><i>01</i><b>新事件筛选</b><small>先确认新新闻与股票关联</small></span>
+        <span><i>02</i><b>方向研判</b><small>新闻、技术与宏观证据决定多空</small></span>
+        <span><i>03</i><b>组合评分</b><small>六域权重合成可解释评分</small></span>
+        <span><i>04</i><b>质量准入</b><small>行情、特征与成本门槛最终放行</small></span>
+      </section>
+      <form id="decision-strategy-form" class="decision-strategy-form">
+        <div class="decision-parameter-head"><div><strong>可调决策参数</strong><small>这些字段直接来自当前用户配置，并由机会扫描运行时读取。</small></div><button type="button" data-open-decision-advanced>管理指标组合（${indicatorCount} 项）</button></div>
+        <div class="decision-parameter-grid">
+          <label><span>技术确认周期</span><select name="timeframe" required><option value="15m"${config.timeframe === "15m" ? " selected" : ""}>15 分钟</option><option value="1h"${config.timeframe === "1h" ? " selected" : ""}>1 小时</option><option value="4h"${config.timeframe === "4h" ? " selected" : ""}>4 小时</option></select><small>采用对应周期最新已收盘 K 线</small></label>
+          <label><span>预测最大持有</span><div><input name="prediction_max_holding_bars" type="number" min="1" max="24" step="1" value="${Number(config.prediction_max_holding_bars ?? 4)}" required><em>根 K 线</em></div><small>用于预测到期与退出时间上限</small></label>
+          <label><span>最低新闻置信度</span><div><input name="minimum_news_confidence" type="number" min="0" max="100" step="1" value="${Math.round(Number(config.minimum_news_confidence ?? 0.6) * 100)}" required><em>%</em></div><small>置信度与股票相关度的准入门槛</small></label>
+          <label><span>最少关联新闻</span><div><input name="minimum_news_mentions" type="number" min="1" max="20" step="1" value="${Number(config.minimum_news_mentions ?? 1)}" required><em>条</em></div><small>同一股票进入技术确认前的新闻数量</small></label>
+          <label><span>最低技术强度</span><div><input name="minimum_indicator_score" type="number" min="0" max="100" step="1" value="${Number(config.minimum_indicator_score ?? 65)}" required><em>分</em></div><small>已选指标按策略组确认后的最低强度</small></label>
+          <label><span>最低组合评分</span><div><input name="minimum_combined_score" type="number" min="75" max="100" step="1" value="${Number(config.minimum_combined_score ?? 75)}" required><em>分</em></div><small>安全下限 75 分，宏观环境可继续加门槛</small></label>
+          <label><span>最大行情延迟</span><div><input name="maximum_market_age_seconds" type="number" min="5" max="3600" step="1" value="${Number(config.maximum_market_age_seconds ?? 120)}" required><em>秒</em></div><small>超过后仅保留研究信号</small></label>
+          <label><span>最低特征质量</span><div><input name="minimum_feature_quality" type="number" min="0" max="100" step="1" value="${Math.round(Number(config.minimum_feature_quality ?? 0.7) * 100)}" required><em>%</em></div><small>预测因子可参与决策的质量门槛</small></label>
+          <label><span>最低资金流质量</span><div><input name="minimum_market_flow_quality" type="number" min="0" max="100" step="1" value="${Math.round(Number(config.minimum_market_flow_quality ?? 0.5) * 100)}" required><em>%</em></div><small>资金盘口证据启用时的最低覆盖</small></label>
+          <label><span>校准样本门槛</span><div><input name="minimum_calibration_samples" type="number" min="30" max="5000" step="10" value="${Number(config.minimum_calibration_samples ?? 1000)}" required><em>条</em></div><small>低于门槛时不放大校准结论</small></label>
+          <label><span>成本安全边际</span><div><input name="live_safety_margin_bps" type="number" min="0" max="500" step="0.5" value="${Number(config.live_safety_margin_bps ?? 10)}" required><em>bps</em></div><small>毛优势必须额外覆盖的成本缓冲</small></label>
+        </div>
+        <p class="decision-strategy-status ${statusMessage ? "success" : ""}" role="status">${this.escape(statusMessage || `当前配置${config.persisted ? "已持久化" : "使用安全默认值"}；修改不会回写历史机会。`)}</p>
+        <footer><button type="button" data-decision-strategy-close>取消</button><button class="primary-action" type="submit">保存并应用</button></footer>
+      </form>`;
+    target.querySelectorAll("[data-decision-strategy-close]").forEach((button) => button.addEventListener("click", () => this.closeDecisionStrategyModal()));
+  }
+
+  decisionConfigPayload(overrides = {}) {
+    const config = this.state.config || {};
+    return {
+      enabled: Boolean(config.enabled),
+      news_interval_minutes: Number(config.news_interval_minutes ?? 15),
+      opportunity_interval_minutes: Number(config.opportunity_interval_minutes ?? 15),
+      news_lookback_hours: Number(config.news_lookback_hours ?? 168),
+      timeframe: String(overrides.timeframe ?? config.timeframe ?? "1h"),
+      prediction_max_holding_bars: Number(overrides.prediction_max_holding_bars ?? config.prediction_max_holding_bars ?? 4),
+      indicator_keys: Array.isArray(config.indicator_keys) && config.indicator_keys.length ? config.indicator_keys : ["moving_average_bull"],
+      monitor_symbols: Array.isArray(config.monitor_symbols) ? config.monitor_symbols : [],
+      minimum_news_confidence: Number(overrides.minimum_news_confidence ?? config.minimum_news_confidence ?? 0.6),
+      minimum_news_mentions: Number(overrides.minimum_news_mentions ?? config.minimum_news_mentions ?? 1),
+      minimum_indicator_score: Number(overrides.minimum_indicator_score ?? config.minimum_indicator_score ?? 65),
+      minimum_combined_score: Number(overrides.minimum_combined_score ?? config.minimum_combined_score ?? 75),
+      maximum_market_age_seconds: Number(overrides.maximum_market_age_seconds ?? config.maximum_market_age_seconds ?? 120),
+      minimum_feature_quality: Number(overrides.minimum_feature_quality ?? config.minimum_feature_quality ?? 0.7),
+      minimum_market_flow_quality: Number(overrides.minimum_market_flow_quality ?? config.minimum_market_flow_quality ?? 0.5),
+      minimum_calibration_samples: Number(overrides.minimum_calibration_samples ?? config.minimum_calibration_samples ?? 1000),
+      live_safety_margin_bps: Number(overrides.live_safety_margin_bps ?? config.live_safety_margin_bps ?? 10),
+      news_score_weight: Number(config.news_score_weight ?? 45),
+      technical_score_weight: Number(config.technical_score_weight ?? 35),
+      market_flow_score_weight: Number(config.market_flow_score_weight ?? 20),
+    };
+  }
+
+  async submitDecisionStrategy(event) {
+    event.preventDefault();
+    const form = event.target.closest("form");
+    if (!form || !form.reportValidity()) return;
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    submit.textContent = "保存中…";
+    const values = new FormData(form);
+    try {
+      const payload = this.decisionConfigPayload({
+        timeframe: values.get("timeframe"),
+        prediction_max_holding_bars: Number(values.get("prediction_max_holding_bars")),
+        minimum_news_confidence: Number(values.get("minimum_news_confidence")) / 100,
+        minimum_news_mentions: Number(values.get("minimum_news_mentions")),
+        minimum_indicator_score: Number(values.get("minimum_indicator_score")),
+        minimum_combined_score: Number(values.get("minimum_combined_score")),
+        maximum_market_age_seconds: Number(values.get("maximum_market_age_seconds")),
+        minimum_feature_quality: Number(values.get("minimum_feature_quality")) / 100,
+        minimum_market_flow_quality: Number(values.get("minimum_market_flow_quality")) / 100,
+        minimum_calibration_samples: Number(values.get("minimum_calibration_samples")),
+        live_safety_margin_bps: Number(values.get("live_safety_margin_bps")),
+      });
+      this.state.config = await this.api("/config", { method: "PUT", body: JSON.stringify(payload) });
+      this.renderConfig();
+      await this.loadOverviewOnly();
+      this.renderDecisionStrategyModal("参数已保存；下一轮机会扫描将使用这组配置。");
+      this.showBanner("当前决策策略参数已保存并生效。", "success");
+    } catch (error) {
+      const status = form.querySelector(".decision-strategy-status");
+      if (status) {
+        status.className = "decision-strategy-status error";
+        status.textContent = error.message || "决策策略参数保存失败";
+      }
+      submit.disabled = false;
+      submit.textContent = "保存并应用";
+    }
   }
 
   openLiveCopyHistoryModal() {
@@ -2025,13 +2187,11 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       : "数据源离线";
     const quoteTone = quoteCoverage >= 90 && (!Number.isFinite(quoteAgeMs) || quoteAgeMs <= 2000) ? "healthy" : quoteCoverage > 0 ? "degraded" : "neutral";
     const featureTone = moduleCoverage >= 80 ? "healthy" : moduleCoverage > 0 ? "degraded" : "neutral";
-    const versions = health.versions || overview.versions || {};
     this.patchStablePanel(target, `<header data-patch-key="health-heading"><span>DATA HEALTH</span><strong>触发数据状态</strong><small>异常只阻断新触发，不会清空已展示机会。</small></header>
       <div class="signal-health-grid" data-patch-key="health-grid">
         <article class="${pipelineTone}"><span>传输状态</span><b><i></i>${this.escape(pipelineLabel)}</b><small>${transportUpdatedAt ? `最后刷新 ${this.formatDate(transportUpdatedAt)}` : "等待首次数据"}</small></article>
         <article class="${quoteTone}"><span>Quote 行情质量</span><b>${quoteCoverage.toFixed(0)}% 覆盖</b><small>${Number.isFinite(quoteAgeMs) ? `最新延迟 ${Math.round(quoteAgeMs)} ms` : "按机会数据覆盖估算"}</small></article>
         <article class="${featureTone}"><span>增强特征覆盖</span><b>${moduleCoverage.toFixed(0)}%</b><small>期权流 ${moduleCounts.optionFlow}/${sampleCount} · GEX ${moduleCounts.gex}/${sampleCount} · 机构 ${moduleCounts.institutional}/${sampleCount}</small></article>
-        <article class="neutral"><span>决策版本</span><b>${this.escape(this.firstValue(versions.decision, health.decision_version, "兼容模式"))}</b><small>特征 ${this.escape(this.firstValue(versions.feature, health.feature_version, "--"))} · 权重 ${this.escape(this.firstValue(versions.weights, health.weights_version, "--"))}</small></article>
       </div>`);
   }
 
