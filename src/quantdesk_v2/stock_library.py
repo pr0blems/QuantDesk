@@ -5,7 +5,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .finnhub import FinnhubClient
@@ -30,44 +29,60 @@ def normalize_contract_symbol(source_symbol: str) -> str:
 
 
 def import_tradfi_equities(db: Session, config_path: Path) -> dict[str, int]:
+    """Import a legacy JSON snapshot through the canonical universe synchronizer."""
+
     payload = json.loads(config_path.expanduser().resolve().read_text(encoding="utf-8"))
-    created = updated = review_required = 0
+    rows = []
     for item in payload.get("symbols", []):
-        if not isinstance(item, dict) or item.get("underlyingType") != "EQUITY":
+        if not isinstance(item, dict):
             continue
-        source_symbol = str(item.get("symbol") or "").strip().upper()
-        symbol = normalize_contract_symbol(source_symbol)
-        if not source_symbol or not symbol:
-            continue
-        security_type = "ETF" if symbol in ETF_SYMBOLS else "UNKNOWN" if symbol in NON_STANDARD_SYMBOLS else "COMMON_STOCK"
-        verification = "REVIEW_REQUIRED" if security_type == "UNKNOWN" else "AUTO_VERIFIED"
-        security = db.scalar(select(Security).where(Security.exchange == "US", Security.symbol == symbol))
-        if security is None:
-            security = Security(symbol=symbol, exchange="US", finnhub_symbol=FINNHUB_SYMBOL_ALIASES.get(symbol, symbol), security_type=security_type, verification_status=verification)
-            db.add(security)
-            db.flush()
-            created += 1
-        else:
-            security.security_type = security_type
-            security.verification_status = verification
-            security.finnhub_symbol = FINNHUB_SYMBOL_ALIASES.get(symbol, symbol)
-            updated += 1
-        mapping = db.scalar(select(SecuritySymbolMapping).where(SecuritySymbolMapping.source == "binance_tradfi", SecuritySymbolMapping.source_symbol == source_symbol))
-        if mapping is None:
-            db.add(SecuritySymbolMapping(security_id=security.id, source="binance_tradfi", source_symbol=source_symbol, normalized_symbol=symbol, mapping_status="REVIEW_REQUIRED" if verification == "REVIEW_REQUIRED" else "AUTO", mapping_method="strip_quote_suffix"))
-        if verification == "REVIEW_REQUIRED":
-            review_required += 1
-    db.commit()
-    return {"created": created, "updated": updated, "review_required": review_required}
+        row = dict(item)
+        row.setdefault("contractType", "TRADIFI_PERPETUAL")
+        row.setdefault("status", "TRADING")
+        row.setdefault("quoteAsset", "USDT")
+        rows.append(row)
+    from .tradfi_universe import sync_tradfi_contracts
+
+    return sync_tradfi_contracts(
+        db,
+        {"symbols": rows},
+        preapproved_symbols=(str(row.get("symbol") or "") for row in rows),
+    ).summary
 
 
-def security_out(security: Security, profile: Any = None, analysis: Any = None) -> dict[str, Any]:
+def _mapping_out(mapping: SecuritySymbolMapping) -> dict[str, Any]:
+    return {
+        "source": mapping.source,
+        "source_symbol": mapping.source_symbol,
+        "normalized_symbol": mapping.normalized_symbol,
+        "mapping_status": mapping.mapping_status,
+        "source_status": mapping.source_status,
+        "contract_type": mapping.contract_type,
+        "underlying_type": mapping.underlying_type,
+        "onboard_date_ms": mapping.onboard_date_ms,
+        "monitor_enabled": mapping.monitor_enabled,
+        "strategy_enabled": mapping.strategy_enabled,
+        "live_trading_enabled": mapping.live_trading_enabled,
+        "last_seen_at": mapping.last_seen_at,
+    }
+
+
+def security_out(
+    security: Security,
+    profile: Any = None,
+    analysis: Any = None,
+    mappings: list[SecuritySymbolMapping] | tuple[SecuritySymbolMapping, ...] = (),
+) -> dict[str, Any]:
     return {
         "id": security.id, "symbol": security.symbol, "exchange": security.exchange,
         "security_type": security.security_type, "company_name": security.company_name,
         "company_name_zh": security.company_name_zh,
         "country": security.country, "cik": security.cik, "is_active": security.is_active,
         "verification_status": security.verification_status, "updated_at": security.updated_at,
+        "profile_sync_supported": bool(
+            security.exchange == "US" and security.finnhub_symbol
+        ),
+        "mappings": [_mapping_out(mapping) for mapping in mappings],
         "profile": None if profile is None else {"legal_name": profile.legal_name, "industry": profile.industry, "industry_zh": profile.industry_zh, "sector": profile.sector, "sector_zh": profile.sector_zh, "website": profile.website, "market_cap": float(profile.market_cap) if profile.market_cap is not None else None, "source": profile.source, "source_updated_at": profile.source_updated_at},
         "analysis": None if analysis is None else {"analysis_version": analysis.analysis_version, "as_of_date": analysis.as_of_date, "overall_score": float(analysis.overall_score) if analysis.overall_score is not None else None, "confidence_score": float(analysis.confidence_score) if analysis.confidence_score is not None else None, "business_summary": analysis.business_summary, "risk_analysis": analysis.risk_analysis, "evidence": analysis.evidence_json},
     }

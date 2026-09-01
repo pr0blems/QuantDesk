@@ -5,7 +5,7 @@ const VIEWS = {
   overview: ["OPERATIONS / 01", "运行总览"],
   collectors: ["OPERATIONS / 02", "采集器"],
   "market-data": ["OPERATIONS / 03", "市场数据与信号门控"],
-  "stock-library": ["US EQUITIES / 04", "美股资料库"],
+  "stock-library": ["TRADFI MASTER / 04", "证券资料库"],
   alerts: ["SIGNALS / 05", "提醒事件"],
   rules: ["SIGNALS / 06", "信号规则"],
   sources: ["INTELLIGENCE / 07", "舆情来源"],
@@ -319,28 +319,38 @@ async function loadOverview() {
 async function loadStockLibrary() {
   const data = await api(`/stock-library?${formQuery($("#stock-library-filter"))}`);
   $("#stock-library-total").textContent = `${data.total} 个标的`;
-  $("#stock-library-status").textContent = `已核验 ${data.verified} · 待复核 ${data.review_required}`;
+  const binance = data.binance || {};
+  $("#stock-library-status").textContent = `Binance 在交易 ${binance.trading || 0}/${binance.total || 0} · 已核验 ${data.verified} · 待复核 ${data.review_required} · 待补充 ${data.pending || 0}`;
   $("#stock-library-table").innerHTML = data.items.length ? data.items.map((item) => {
     const profile = item.profile || {};
     const analysis = item.analysis || {};
+    const mapping = (item.mappings || []).find((row) => row.source === "binance_tradfi") || {};
     const marketCap = profile.market_cap == null
       ? (item.security_type === "ETF" ? "基金规模待补充" : item.security_type === "PRE_IPO" ? "未上市" : "市值待补充")
       : compactNumber(profile.market_cap * 1000000);
     const isBaseline = analysis.analysis_version === "baseline-v1";
     const score = analysis.overall_score == null ? (isBaseline ? "" : "财务分析待生成") : `${Number(analysis.overall_score).toFixed(1)} 分`;
-    const verifyClass = item.verification_status === "REVIEW_REQUIRED" ? "warning" : "active";
+    const verified = ["VERIFIED", "AUTO_VERIFIED"].includes(item.verification_status);
+    const verifyClass = item.verification_status === "REVIEW_REQUIRED" ? "warning" : verified ? "active" : "pending";
+    const verifyLabel = item.verification_status === "REVIEW_REQUIRED" ? "需要复核" : verified ? "已核验" : "待补充";
     const chineseName = item.company_name_zh || profile.legal_name || item.company_name || "待同步";
     const englishName = item.company_name_zh ? (profile.legal_name || item.company_name || "") : "";
     const chineseIndustry = [profile.sector_zh, profile.industry_zh].filter(Boolean).join(" · ");
     const englishIndustry = [profile.sector, profile.industry].filter(Boolean).join(" · ");
     const analysisSummary = analysis.business_summary || (profile.source ? "基础资料已同步，等待生成分析摘要" : "基础资料尚未同步");
-    return `<tr><td><strong>${escapeHtml(item.symbol)}</strong><small>${escapeHtml(item.exchange)}</small></td><td><strong>${escapeHtml(chineseName)}</strong><small>${escapeHtml(chineseIndustry || "暂无中文行业资料")}</small>${englishName ? `<small>${escapeHtml(englishName)}${englishIndustry ? ` · ${escapeHtml(englishIndustry)}` : ""}</small>` : ""}</td><td><span class="pill">${escapeHtml(item.security_type)}</span></td><td><span class="pill ${verifyClass}">${item.verification_status === "REVIEW_REQUIRED" ? "需要复核" : "已核验"}</span></td><td>${marketCap}</td><td>${score ? `<strong>${escapeHtml(score)}</strong>` : ""}<small>${escapeHtml(analysisSummary)}</small></td><td>${formatTime(item.updated_at)}</td><td><button data-stock-sync="${escapeHtml(item.symbol)}">同步资料</button></td></tr>`;
-  }).join("") : '<tr><td class="empty" colspan="8">资料库为空，请点击“导入当前美股”。</td></tr>';
+    const contract = mapping.source_symbol || "未关联合约";
+    const sourceStatus = mapping.source_status || "UNKNOWN";
+    const gate = mapping.live_trading_enabled ? "监控 / 策略 / 实盘" : mapping.strategy_enabled ? "监控 / 策略" : mapping.monitor_enabled ? "仅监控" : "已停用";
+    const syncAction = item.profile_sync_supported
+      ? `<button data-stock-sync="${escapeHtml(item.symbol)}">同步资料</button>`
+      : '<span class="pill">无需 Finnhub</span>';
+    return `<tr><td><strong>${escapeHtml(item.symbol)}</strong><small>${escapeHtml(item.exchange)} · ${escapeHtml(contract)}</small></td><td><strong>${escapeHtml(chineseName)}</strong><small>${escapeHtml(chineseIndustry || "暂无中文行业资料")}</small>${englishName ? `<small>${escapeHtml(englishName)}${englishIndustry ? ` · ${escapeHtml(englishIndustry)}` : ""}</small>` : ""}</td><td><span class="pill">${escapeHtml(item.security_type)}</span><small>${escapeHtml(mapping.underlying_type || "-")} · ${escapeHtml(gate)}</small></td><td><span class="pill ${verifyClass}">${verifyLabel}</span><small>Binance ${escapeHtml(sourceStatus)}</small></td><td>${marketCap}</td><td>${score ? `<strong>${escapeHtml(score)}</strong>` : ""}<small>${escapeHtml(analysisSummary)}</small></td><td>${formatTime(item.updated_at)}</td><td>${syncAction}</td></tr>`;
+  }).join("") : '<tr><td class="empty" colspan="8">资料库为空，请点击“同步 Binance 合约”。</td></tr>';
 }
 
 async function importStockLibrary() {
   const result = await api("/stock-library/import", { method: "POST", body: "{}" });
-  toast(`导入完成：新增 ${result.created}，更新 ${result.updated}，待复核 ${result.review_required}`);
+  toast(`同步完成：Binance ${result.remote_trading}/${result.remote_total}，新合约 ${result.new_contracts}，新增主数据 ${result.created}，待补资料 ${result.pending_profiles}`);
   await loadStockLibrary();
 }
 

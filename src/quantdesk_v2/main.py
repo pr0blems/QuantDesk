@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import __version__
+from . import __version__, market_config
 from .admin import UNUSUAL_WHALES_MARKET_DATA_KEY
 from .admin import router as admin_router
 from .api import router
@@ -208,6 +208,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 def create_app(settings: Settings | None = None) -> FastAPI:
     runtime_settings = settings or get_settings()
     database_engine = build_engine(runtime_settings) if settings is not None else engine
+    market_config.configure_engine(database_engine)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -274,7 +275,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.unusual_whales_runtime = UnusualWhalesRuntime(
         database_engine,
         _unusual_whales_api_key,
-        _monitor_symbols(runtime_settings.monitor_symbols_config),
+        tuple(market_config.tradfi_symbols())
+        or _monitor_symbols(runtime_settings.monitor_symbols_config),
         channel_flags=DEFAULT_CHANNEL_FLAGS,
         websocket_enabled=(
             initial_uw_enabled

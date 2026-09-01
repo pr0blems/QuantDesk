@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
-from sqlalchemy import func, select, text, update
+from sqlalchemy import case, func, or_, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -37,6 +37,7 @@ from .models import (
     Security,
     SecurityFundamentalAnalysis,
     SecurityResearchSource,
+    SecuritySymbolMapping,
     User,
     UserSession,
     utcnow,
@@ -54,8 +55,14 @@ from .schemas import (
     MessageOut,
 )
 from .security import CredentialCipher, SecurityError, api_key_fingerprint
-from .stock_library import import_tradfi_equities, security_out, sync_company_profile
+from .stock_library import security_out, sync_company_profile
 from .strategy_ai import StrategyAiError, _chat_http_transport
+from .tradfi_universe import (
+    BINANCE_TRADFI_SOURCE,
+    BINANCE_TRADFI_STATUS_KEY,
+    sync_missing_company_profiles,
+    sync_tradfi_universe,
+)
 
 router = APIRouter(prefix="/api/v2/admin", tags=["admin"])
 COLLECTOR_NAMES = {"price", "ticker", "depth", "kline", "news", "social", "paper"}
@@ -1039,25 +1046,88 @@ def stock_library(
     if query:
         needle = f"%{query.strip()}%"
         statement = statement.where(
-            Security.symbol.like(needle) | Security.company_name.like(needle)
+            or_(
+                Security.symbol.like(needle),
+                Security.company_name.like(needle),
+                Security.company_name_zh.like(needle),
+                Security.id.in_(
+                    select(SecuritySymbolMapping.security_id).where(
+                        SecuritySymbolMapping.source_symbol.like(needle)
+                    )
+                ),
+            )
         )
     if security_type:
         statement = statement.where(Security.security_type == security_type)
-    rows = db.scalars(statement.limit(500)).all()
-    items = []
-    for row in rows:
-        profile = db.get(CompanyProfile, row.id)
-        analysis = db.scalar(
+    rows = list(db.scalars(statement.limit(500)).all())
+    security_ids = [int(row.id) for row in rows]
+    profiles = {
+        int(row.security_id): row
+        for row in db.scalars(
+            select(CompanyProfile).where(CompanyProfile.security_id.in_(security_ids))
+        ).all()
+    } if security_ids else {}
+    analyses: dict[int, SecurityFundamentalAnalysis] = {}
+    if security_ids:
+        for row in db.scalars(
             select(SecurityFundamentalAnalysis)
-            .where(SecurityFundamentalAnalysis.security_id == row.id)
-            .order_by(SecurityFundamentalAnalysis.as_of_date.desc())
-            .limit(1)
+            .where(SecurityFundamentalAnalysis.security_id.in_(security_ids))
+            .order_by(
+                SecurityFundamentalAnalysis.security_id,
+                SecurityFundamentalAnalysis.as_of_date.desc(),
+            )
+        ).all():
+            analyses.setdefault(int(row.security_id), row)
+    mappings: dict[int, list[SecuritySymbolMapping]] = {}
+    if security_ids:
+        for row in db.scalars(
+            select(SecuritySymbolMapping)
+            .where(SecuritySymbolMapping.security_id.in_(security_ids))
+            .order_by(SecuritySymbolMapping.source, SecuritySymbolMapping.source_symbol)
+        ).all():
+            mappings.setdefault(int(row.security_id), []).append(row)
+    items = [
+        security_out(
+            row,
+            profiles.get(int(row.id)),
+            analyses.get(int(row.id)),
+            mappings.get(int(row.id), ()),
         )
-        items.append(security_out(row, profile, analysis))
+        for row in rows
+    ]
+    binance_counts = db.execute(
+        select(
+            func.count(SecuritySymbolMapping.id),
+            func.sum(
+                case((SecuritySymbolMapping.source_status == "TRADING", 1), else_=0)
+            ),
+            func.sum(
+                case((SecuritySymbolMapping.monitor_enabled.is_(True), 1), else_=0)
+            ),
+            func.sum(
+                case(
+                    (SecuritySymbolMapping.mapping_status == "REVIEW_REQUIRED", 1),
+                    else_=0,
+                )
+            ),
+        ).where(SecuritySymbolMapping.source == BINANCE_TRADFI_SOURCE)
+    ).one()
+    sync_state = db.get(AdminSetting, BINANCE_TRADFI_STATUS_KEY)
+    verified_statuses = {"VERIFIED", "AUTO_VERIFIED"}
     return {
         "total": len(items),
-        "verified": sum(item["verification_status"] != "REVIEW_REQUIRED" for item in items),
+        "verified": sum(
+            item["verification_status"] in verified_statuses for item in items
+        ),
         "review_required": sum(item["verification_status"] == "REVIEW_REQUIRED" for item in items),
+        "pending": sum(item["verification_status"] not in verified_statuses | {"REVIEW_REQUIRED"} for item in items),
+        "binance": {
+            "total": int(binance_counts[0] or 0),
+            "trading": int(binance_counts[1] or 0),
+            "monitor_enabled": int(binance_counts[2] or 0),
+            "review_required": int(binance_counts[3] or 0),
+            "last_sync": sync_state.value_json if sync_state is not None else None,
+        },
         "items": items,
     }
 
@@ -1068,12 +1138,28 @@ def stock_library_detail(
     db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ) -> dict[str, Any]:
-    security = db.scalar(select(Security).where(Security.symbol == symbol.strip().upper()))
+    normalized = symbol.strip().upper()
+    security = db.scalar(select(Security).where(Security.symbol == normalized))
+    if security is None:
+        mapping = db.scalar(
+            select(SecuritySymbolMapping).where(
+                SecuritySymbolMapping.source == BINANCE_TRADFI_SOURCE,
+                SecuritySymbolMapping.source_symbol == normalized
+            )
+        )
+        security = db.get(Security, mapping.security_id) if mapping is not None else None
     if security is None:
         raise HTTPException(status_code=404, detail="security not found")
     profile = db.get(CompanyProfile, security.id)
     analysis = db.scalar(select(SecurityFundamentalAnalysis).where(SecurityFundamentalAnalysis.security_id == security.id).order_by(SecurityFundamentalAnalysis.as_of_date.desc()).limit(1))
-    result = security_out(security, profile, analysis)
+    symbol_mappings = list(
+        db.scalars(
+            select(SecuritySymbolMapping).where(
+                SecuritySymbolMapping.security_id == security.id
+            )
+        ).all()
+    )
+    result = security_out(security, profile, analysis, symbol_mappings)
     result["research_sources"] = [
         {"source_type": row.source_type, "title": row.title, "url": row.url, "publisher": row.publisher, "published_at": row.published_at, "content_summary": row.content_summary}
         for row in db.scalars(select(SecurityResearchSource).where(SecurityResearchSource.security_id == security.id).order_by(SecurityResearchSource.retrieved_at.desc()).limit(100)).all()
@@ -1084,10 +1170,26 @@ def stock_library_detail(
 @router.post("/stock-library/import", status_code=202)
 def import_stock_library(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin_write),
 ) -> dict[str, Any]:
-    result = import_tradfi_equities(db, request.app.state.settings.monitor_symbols_config)
+    try:
+        synced = sync_tradfi_universe(request.app.state.database_engine)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Binance TradFi universe sync failed: {type(exc).__name__}",
+        ) from exc
+    result = synced.summary
+    config_loader.refresh_symbols(force=True)
+    if synced.profile_security_ids:
+        background_tasks.add_task(
+            sync_missing_company_profiles,
+            request.app.state.database_engine,
+            request.app.state.finnhub_client,
+            synced.profile_security_ids,
+        )
     _audit(db, request, admin.id, "admin.stock_library.import", "stock_library", "tradfi", result)
     db.commit()
     return result
@@ -1103,6 +1205,11 @@ def sync_stock_library_profile(
     security = db.scalar(select(Security).where(Security.symbol == symbol.strip().upper()))
     if security is None:
         raise HTTPException(status_code=404, detail="security not found")
+    if security.exchange != "US" or not security.finnhub_symbol:
+        raise HTTPException(
+            status_code=409,
+            detail="This security does not have a supported Finnhub US symbol mapping",
+        )
     try:
         profile = sync_company_profile(db, request.app.state.finnhub_client, security)
     except Exception as exc:
@@ -1110,7 +1217,14 @@ def sync_stock_library_profile(
         raise HTTPException(status_code=502, detail=f"Finnhub profile sync failed: {category}") from exc
     _audit(db, request, admin.id, "admin.stock_library.sync", "security", security.symbol, {"source": "finnhub"})
     db.commit()
-    return security_out(security, profile)
+    mappings = list(
+        db.scalars(
+            select(SecuritySymbolMapping).where(
+                SecuritySymbolMapping.security_id == security.id
+            )
+        ).all()
+    )
+    return security_out(security, profile, mappings=mappings)
 
 
 @router.get("/symbols")
@@ -1152,7 +1266,7 @@ def symbols(
     }
     needle = (query or "").strip().upper()
     items = []
-    for metadata in config_loader.symbols_meta.get("symbols", []):
+    for metadata in config_loader.tradfi_metadata():
         symbol = str(metadata.get("symbol") or "")
         if not symbol or (needle and needle not in symbol):
             continue

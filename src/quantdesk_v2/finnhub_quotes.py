@@ -83,7 +83,7 @@ class FinnhubUsQuoteService:
     ) -> None:
         self.client = client
         configured_symbols = _load_us_symbols(symbols_config)
-        supplements = tuple(
+        self._supplemental_symbols = tuple(
             dict.fromkeys(
                 normalized
                 for value in supplemental_symbols
@@ -91,9 +91,7 @@ class FinnhubUsQuoteService:
                 and SYMBOL_PATTERN.fullmatch(normalized)
             )
         )
-        self.symbols = tuple(
-            dict.fromkeys((*configured_symbols, *supplements))
-        )
+        self.symbols = self._ordered_symbols(configured_symbols)
         self.symbol_set = set(self.symbols)
         self.poll_seconds = poll_seconds
         self.stale_seconds = stale_seconds
@@ -117,6 +115,39 @@ class FinnhubUsQuoteService:
         self._stream_connected = False
         self._stream_error: str | None = None
         self._threads: list[Thread] = []
+
+    def _ordered_symbols(self, values: Iterable[str]) -> tuple[str, ...]:
+        normalized = tuple(
+            dict.fromkeys(
+                symbol
+                for value in (*tuple(values), *self._supplemental_symbols)
+                if (symbol := self.normalize_symbol(value))
+                and SYMBOL_PATTERN.fullmatch(symbol)
+            )
+        )
+        priority = [symbol for symbol in PRIORITY_SYMBOLS if symbol in normalized]
+        return tuple(priority + [symbol for symbol in normalized if symbol not in priority])
+
+    def replace_configured_symbols(self, values: Iterable[str]) -> bool:
+        """Apply a database-backed US universe and restart subscriptions if needed."""
+
+        updated = self._ordered_symbols(values)
+        if updated == self.symbols:
+            return False
+        was_started = self._started
+        if was_started:
+            self.stop()
+        with self._lock:
+            self.symbols = updated
+            self.symbol_set = set(updated)
+            self._errors = {
+                symbol: error
+                for symbol, error in self._errors.items()
+                if symbol in self.symbol_set
+            }
+        if was_started:
+            self.start()
+        return True
 
     def start(self) -> None:
         if self._started or not self.client.configured or not self.symbols:

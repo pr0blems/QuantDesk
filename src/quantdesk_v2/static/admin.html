@@ -53,7 +53,7 @@
         <button class="nav-item" data-view-target="collectors"><span>02</span>采集器</button>
         <button class="nav-item" data-view-target="market-data"><span>03</span>市场数据与门控</button>
         <p>内容与信号</p>
-        <button class="nav-item" data-view-target="stock-library"><span>04</span>美股资料库</button>
+        <button class="nav-item" data-view-target="stock-library"><span>04</span>证券资料库</button>
         <button class="nav-item" data-view-target="alerts"><span>05</span>提醒事件</button>
         <button class="nav-item" data-view-target="rules"><span>06</span>信号规则</button>
         <button class="nav-item" data-view-target="sources"><span>07</span>舆情来源</button>
@@ -176,15 +176,15 @@
         <section class="view hidden" data-view="stock-library">
           <div class="section-intro">
             <div>
-              <p class="eyebrow">US EQUITY INTELLIGENCE</p>
-              <h2>美股资料库</h2>
-              <p>集中管理美股证券主数据、公司基础资料、财务指标、研究来源与基础面分析。</p>
+              <p class="eyebrow">BINANCE TRADFI SECURITY MASTER</p>
+              <h2>证券资料库</h2>
+              <p>同步 Binance 股票币合约，并关联证券主数据、公司基础资料、财务指标与研究分析。新合约默认仅监控，不会直接进入策略或实盘。</p>
             </div>
-            <div class="intro-actions"><span id="stock-library-total" class="counter">0 个标的</span><button id="stock-library-import" class="primary" type="button">导入当前美股</button></div>
+            <div class="intro-actions"><span id="stock-library-total" class="counter">0 个标的</span><button id="stock-library-import" class="primary" type="button">同步 Binance 合约</button></div>
           </div>
           <form id="stock-library-filter" class="filter-bar compact">
             <label>搜索标的<input name="query" placeholder="代码或公司名称"></label>
-            <label>证券类型<select name="security_type"><option value="">全部类型</option><option value="COMMON_STOCK">普通股 / ADR</option><option value="ETF">ETF</option><option value="UNKNOWN">待核验</option></select></label>
+            <label>证券类型<select name="security_type"><option value="">全部类型</option><option value="COMMON_STOCK">普通股 / ADR</option><option value="ETF">ETF</option><option value="PRE_IPO">未上市股权</option><option value="COMMODITY">商品</option><option value="UNKNOWN">待核验</option></select></label>
             <button class="primary" type="submit">搜索</button>
           </form>
           <article class="panel"><div class="panel-head"><div><span>STOCK RESEARCH DATABASE</span><h3>证券主数据与基础面状态</h3></div><span id="stock-library-status">尚未导入</span></div><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称 / 行业</th><th>类型</th><th>核验状态</th><th>市值 / 基金规模</th><th>基础面分析</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="stock-library-table"></tbody></table></div></article>
@@ -336,6 +336,6 @@
     </form>
   </dialog>
   <dialog id="confirm-dialog"><form method="dialog"><span class="dialog-mark">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p><div><button value="cancel">取消</button><button id="confirm-accept" class="danger" value="confirm">确认执行</button></div></form></dialog>
-  <script src="/assets/admin.js?v=20260816-3" defer></script>
+  <script src="/assets/admin.js?v=20260831-1" defer></script>
 </body>
 </html>

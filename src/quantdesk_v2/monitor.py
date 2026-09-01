@@ -388,9 +388,40 @@ class MonitorRepository:
             config = json.loads(self.symbols_config.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise MonitorUnavailable("contract monitor symbols config is invalid") from exc
-        self.symbols_meta = config.get("symbols", [])
-        self.symbols = [item["symbol"] for item in self.symbols_meta if item.get("symbol")]
-        self.symbol_set = set(self.symbols)
+        self._fallback_symbols_meta = list(config.get("symbols", []))
+        self._next_symbols_refresh = 0.0
+        self.symbols_meta: list[dict[str, Any]] = []
+        self.symbols: list[str] = []
+        self.symbol_set: set[str] = set()
+        self.refresh_symbols(force=True)
+
+    def refresh_symbols(self, *, force: bool = False) -> bool:
+        """Refresh a long-lived repository after the market worker discovers symbols."""
+
+        now = time.monotonic()
+        if not force and now < self._next_symbols_refresh:
+            return False
+        self._next_symbols_refresh = now + 60.0
+        from .market_config import load_persisted_tradfi_metadata
+
+        persisted = load_persisted_tradfi_metadata(self.engine)
+        selected = (
+            [
+                item
+                for item in persisted
+                if str(item.get("status") or "").upper() == "TRADING"
+                and bool(item.get("monitorEnabled"))
+            ]
+            if persisted
+            else list(self._fallback_symbols_meta)
+        )
+        symbols = [item["symbol"] for item in selected if item.get("symbol")]
+        if symbols == self.symbols:
+            return False
+        self.symbols_meta = selected
+        self.symbols = symbols
+        self.symbol_set = set(symbols)
+        return True
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         try:

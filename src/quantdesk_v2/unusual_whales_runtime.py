@@ -296,6 +296,7 @@ class UnusualWhalesRuntime:
         market_open_only: bool = True,
     ) -> None:
         self.engine = engine
+        self._channel_flags = dict(channel_flags or {})
         self.symbols = tuple(str(item).strip().upper() for item in symbols if str(item).strip())
         self._symbol_keys = frozenset(
             key for item in self.symbols if (key := _symbol_key(item))
@@ -397,6 +398,29 @@ class UnusualWhalesRuntime:
             self.on_event,
             channels=tuple(sorted(self._requested_subscriptions)),
         )
+
+    def replace_symbols(self, symbols: Iterable[str]) -> bool:
+        """Refresh filtering and symbol-scoped subscriptions without a restart."""
+
+        updated = tuple(
+            dict.fromkeys(
+                str(item).strip().upper() for item in symbols if str(item).strip()
+            )
+        )
+        if updated == self.symbols:
+            return False
+        with self._lock:
+            self.symbols = updated
+            self._symbol_keys = frozenset(
+                key for item in updated if (key := _symbol_key(item))
+            )
+            channel_flags = dict(self._channel_flags)
+        self.apply_config(
+            channel_flags,
+            websocket_enabled=self.websocket_enabled,
+            rest_enabled=self.rest_enabled,
+        )
+        return True
 
     def start(self) -> None:
         with self._lock:
@@ -730,6 +754,7 @@ class UnusualWhalesRuntime:
     ) -> None:
         """Apply subscriptions immediately; reconnect will restore the same set."""
 
+        self._channel_flags = dict(channel_flags)
         requested = set(stream_subscriptions(channel_flags, self.symbols))
         with self._lock:
             self._requested_subscriptions = requested

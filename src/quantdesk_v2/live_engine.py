@@ -70,7 +70,7 @@ from .live_risk import (
     tighten_policy_with_strategy,
     total_open_risk,
 )
-from .market_config import tradfi_symbols
+from .market_config import tradfi_live_symbols
 from .market_microstructure import order_book_gate_snapshot
 from .security import CredentialCipher, SecurityError
 from .strategy_evaluator import (
@@ -162,7 +162,7 @@ def _json_object(value: Any) -> dict[str, Any]:
 
 def _strategy_universe(config: dict[str, Any]) -> list[str]:
     """Return the server-owned paper universe, narrowed only by live preflight."""
-    universe = tradfi_symbols()
+    universe = tradfi_live_symbols()
     eligible = config.get("eligible_symbols")
     if not isinstance(eligible, list):
         return universe
@@ -1156,7 +1156,7 @@ def _live_execution_runtime(
         max_notional_to_equity=Decimal(
             str(max(1, min(int(config.get("risk_max_leverage", config.get("leverage", 1))), 20)))
         ),
-        allowed_symbols=symbols or frozenset(tradfi_symbols()),
+        allowed_symbols=symbols or frozenset(tradfi_live_symbols()),
     )
     return LiveExecutionRuntime(
         account_client=_account_service.client,
@@ -3251,9 +3251,20 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
     market_state_changed = _reconcile_intents(account, api_key, api_secret)
     if market_state_changed:
         snapshot = _account_service.account(api_key, api_secret, force_refresh=True)
-    symbols = _strategy_universe(config)
     positions = {_position_key(item): item for item in snapshot.positions}
     managed = _managed_positions(account)
+    # A contract removed from the entry universe must remain managed until its
+    # existing position is reconciled and safely closed. Never orphan exits or
+    # exchange-native protection merely because Binance stopped listing it.
+    entry_symbols = _strategy_universe(config)
+    symbols = list(
+        dict.fromkeys(
+            (
+                *entry_symbols,
+                *(symbol for symbol, _position_side in managed),
+            )
+        )
+    )
     _cancel_orphan_protections(account, api_key, api_secret, managed, set(positions))
     protection_counts = _protection_counts(account, managed)
     stop_prices = _current_stop_prices(account, managed)
@@ -3433,7 +3444,7 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
     }
     occupied_symbols = {key[0] for key in positions}
     if allow_new_entries and position_count < max_positions:
-        for symbol in symbols:
+        for symbol in entry_symbols:
             if symbol in occupied_symbols:
                 continue
             ticker = prices.get(symbol)

@@ -21,7 +21,7 @@ from ...binance_client import BinanceAccountClientError
 from ...binance_rate_limit import REST_RATE_LIMITER
 from ...database import get_db
 from ...dependencies import get_current_user
-from ...market_config import TRADFI_UNIVERSE_KEY, tradfi_symbols
+from ...market_config import TRADFI_UNIVERSE_KEY, tradfi_live_symbols
 from ...models import (
     LiveOrderIntent,
     LiveTradingAccount,
@@ -769,7 +769,7 @@ def list_live_accounts(
         != "ai_monitor"
     ]
     enabled = request.app.state.settings.binance_live_trading_enabled
-    universe = tradfi_symbols()
+    universe = tradfi_live_symbols()
     return {
         "items": [_live_account_out(account, enabled=enabled) for account in accounts],
         "system_enabled": enabled,
@@ -830,7 +830,7 @@ def create_live_account(
                 "required_statuses": sorted(LIVE_ELIGIBLE_STATUSES),
             },
         )
-    universe = tradfi_symbols()
+    universe = tradfi_live_symbols()
     if not universe:
         raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
     risk = dict(strategy.risk_defaults_json or {})
@@ -934,7 +934,7 @@ def arm_live_account(
     encrypted_key = user.binance_api_key_encrypted or ""
     encrypted_secret = user.binance_api_secret_encrypted or ""
     credential_version = user.binance_key_version
-    symbols = tradfi_symbols()
+    symbols = tradfi_live_symbols()
     if not symbols:
         raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
     db.rollback()
@@ -1173,7 +1173,7 @@ def update_live_account_strategy(
                 "required_statuses": sorted(LIVE_ELIGIBLE_STATUSES),
             },
         )
-    universe = tradfi_symbols()
+    universe = tradfi_live_symbols()
     if not universe:
         raise HTTPException(status_code=503, detail="TradFi trading universe is unavailable")
 
@@ -1421,4 +1421,3 @@ def live_trading_dashboard(
         "open_orders": [],
         "order_intents": intent_items,
     }
-

@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from . import market_data_client as bc
 from . import market_store as store
 from . import signals
-from .market_config import settings, tradfi_symbols
+from .market_config import settings, symbols_version, tradfi_symbols
 
 TF_MS = {"15m": 15 * 60 * 1000, "1h": 60 * 60 * 1000, "4h": 4 * 60 * 60 * 1000}
 
@@ -533,17 +533,39 @@ def depth_loop() -> None:
     from . import ws_depth
 
     global _depth_symbols
-    symbols = tradfi_symbols()
-    _depth_symbols = set(symbols)
     group_size = max(1, min(int(settings.get("depth_stream_group_size", 50)), 50))
     snapshot_limit = int(settings.get("depth_snapshot_limit", 500))
     if snapshot_limit not in {100, 500, 1_000}:
         snapshot_limit = 500
     while True:
+        symbols = tradfi_symbols()
+        _depth_symbols = set(symbols)
+        if not symbols:
+            time.sleep(15)
+            continue
+        active_version = symbols_version()
+        stream_stop = threading.Event()
+
+        def watch_universe(
+            stop: threading.Event = stream_stop,
+            version: int = active_version,
+        ) -> None:
+            while not stop.wait(5):
+                if symbols_version() != version:
+                    stop.set()
+                    return
+
+        watcher = threading.Thread(
+            target=watch_universe,
+            daemon=True,
+            name="depth-universe-watch",
+        )
+        watcher.start()
         try:
             ws_depth.ws_depth_loop(
                 symbols,
                 queue_depth_metric,
+                stop_event=stream_stop,
                 should_pause=_depth_paused,
                 group_size=group_size,
                 snapshot_limit=snapshot_limit,
@@ -552,6 +574,9 @@ def depth_loop() -> None:
             log_err("depth websocket", exc)
             store.collector_report("depth", success=False, error=str(exc))
             time.sleep(15)
+        finally:
+            stream_stop.set()
+            watcher.join(timeout=1)
 
 
 def kline_after_depth_loop() -> None:
@@ -789,11 +814,19 @@ def _run_kline_batch(symbols, tf, last_closed_open, limit, batch_size):
 
 
 def kline_loop():
-    syms = tradfi_symbols()
     tfs = settings.get("timeframes", ["15m", "1h", "4h"])
     limit = max(5, min(int(settings.get("kline_limit", 300)), 1_500))
     batch_size = max(1, min(int(settings.get("kline_batch_size", 20)), 50))
     while True:
+        syms = tradfi_symbols()
+        if not syms:
+            store.collector_report(
+                "kline",
+                success=False,
+                error="TradFi universe is empty",
+            )
+            time.sleep(30)
+            continue
         retry_after = bc.public_rest_retry_after()
         if retry_after > 0:
             _persist_public_rest_circuit()

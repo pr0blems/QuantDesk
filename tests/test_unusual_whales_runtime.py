@@ -85,6 +85,19 @@ def test_stream_subscriptions_maps_flow_alerts_and_ticker_net_flow() -> None:
     assert "net_flow" not in subscriptions
 
 
+def test_runtime_replaces_symbol_scoped_subscriptions_without_restart() -> None:
+    flags = {key: False for key in DEFAULT_CHANNEL_FLAGS}
+    flags["net_flow"] = True
+    runtime = _runtime(channel_flags=flags)
+
+    assert runtime.replace_symbols(("NVDAUSDT",)) is True
+    assert runtime.symbols == ("NVDAUSDT",)
+    subscriptions = set(runtime.stream.health_snapshot()["subscriptions"])
+    assert "net_flow:NVDA" in subscriptions
+    assert "net_flow:AAPL" not in subscriptions
+    assert runtime.replace_symbols(("NVDAUSDT",)) is False
+
+
 def test_contract_validation_supports_base_channels_and_aliases() -> None:
     accepted, missing = validate_stream_subscriptions(
         ("price:AAPL", "net_flow:AAPL", "flow-alerts", "gex"),

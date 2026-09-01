@@ -208,6 +208,21 @@ def test_us_quote_service_merges_supplemental_market_context_symbols(monkeypatch
     assert service.symbol_set == {"AAPL", "TLT", "SHY"}
 
 
+def test_us_quote_service_replaces_database_backed_symbols(monkeypatch) -> None:
+    monkeypatch.setattr(finnhub_quotes, "_load_us_symbols", lambda _path: ("AAPL",))
+    service = FinnhubUsQuoteService(
+        FinnhubClient("https://finnhub.io", "secret", transport=lambda *_: response(429, {})),
+        Path("unused.json"),
+        supplemental_symbols=("TLT",),
+        websocket_enabled=False,
+    )
+
+    assert service.replace_configured_symbols(("MSFT", "NVDAUSDT")) is True
+    assert service.symbols == ("MSFT", "NVDA", "TLT")
+    assert service.symbol_set == {"MSFT", "NVDA", "TLT"}
+    assert service.replace_configured_symbols(("MSFT", "NVDAUSDT")) is False
+
+
 def test_rest_quote_does_not_replace_equal_or_newer_stream_trade(monkeypatch) -> None:
     monkeypatch.setattr(finnhub_quotes, "_load_us_symbols", lambda _path: ("AAPL",))
     service = FinnhubUsQuoteService(

@@ -3911,7 +3911,12 @@ class Security(Base):
 
 class SecuritySymbolMapping(Base):
     __tablename__ = "security_symbol_mappings"
-    __table_args__ = (UniqueConstraint("source", "source_symbol", name="uq_security_mapping_source_symbol"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "source", "source_symbol", name="uq_security_mapping_source_symbol"
+        ),
+        Index("ix_security_mappings_source_status", "source", "source_status"),
+    )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
     security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False)
@@ -3921,7 +3926,26 @@ class SecuritySymbolMapping(Base):
     mapping_status: Mapped[str] = mapped_column(String(32), default="AUTO", nullable=False)
     mapping_method: Mapped[str | None] = mapped_column(String(64))
     notes: Mapped[str | None] = mapped_column(Text)
+    source_status: Mapped[str] = mapped_column(
+        String(32), default="UNKNOWN", nullable=False
+    )
+    contract_type: Mapped[str | None] = mapped_column(String(32))
+    underlying_type: Mapped[str | None] = mapped_column(String(32))
+    onboard_date_ms: Mapped[int | None] = mapped_column(BigInteger)
+    monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    strategy_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    live_trading_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    source_metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
 
 
 class CompanyProfile(Base):

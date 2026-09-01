@@ -205,7 +205,13 @@ def _release_singleton(connection: Connection, worker_type: WorkerType) -> None:
 
 
 def _start_market(app, settings: Settings) -> Callable[[], None]:
-    from . import battle, market_engine, market_store, underlying_quotes
+    from . import battle, market_config, market_engine, market_store, underlying_quotes
+    from .tradfi_universe import (
+        TradfiSyncResult,
+        start_tradfi_sync_loop,
+        sync_missing_company_profiles,
+        sync_tradfi_universe,
+    )
 
     engine = app.state.database_engine
     market_store.configure_engine(engine)
@@ -223,12 +229,60 @@ def _start_market(app, settings: Settings) -> Callable[[], None]:
     app.state.finnhub_us_quote_service.set_enabled(
         bool(_finnhub_runtime_config(engine).get("enabled", True))
     )
+
+    def apply_universe(result: TradfiSyncResult | None = None) -> None:
+        market_config.refresh_symbols(force=True)
+        app.state.unusual_whales_runtime.replace_symbols(
+            market_config.tradfi_symbols()
+        )
+        us_symbols = [
+            str(row.get("normalizedSymbol") or "")
+            for row in market_config.tradfi_metadata()
+            if row.get("underlyingType") == "EQUITY"
+            and row.get("normalizedSymbol")
+        ]
+        app.state.finnhub_us_quote_service.replace_configured_symbols(us_symbols)
+        if result is not None and result.profile_security_ids:
+            threading.Thread(
+                target=sync_missing_company_profiles,
+                args=(
+                    engine,
+                    app.state.finnhub_client,
+                    result.profile_security_ids,
+                ),
+                daemon=True,
+                name="tradfi-company-profiles",
+            ).start()
+
+    apply_universe()
     app.state.finnhub_us_quote_service.start()
+
+    def initial_sync() -> None:
+        try:
+            apply_universe(sync_tradfi_universe(engine))
+        except Exception as exc:
+            print(
+                f"[tradfi-universe] initial sync failed: {type(exc).__name__}: "
+                f"{str(exc)[:120]}",
+                file=sys.stderr,
+            )
+
+    threading.Thread(
+        target=initial_sync,
+        daemon=True,
+        name="tradfi-universe-initial-sync",
+    ).start()
+    tradfi_sync_stop = start_tradfi_sync_loop(
+        engine,
+        interval_seconds=settings.tradfi_universe_sync_seconds,
+        on_updated=apply_universe,
+    )
     market_engine.start()
     battle.start()
     underlying_quotes.start()
 
     def stop() -> None:
+        tradfi_sync_stop.set()
         app.state.unusual_whales_runtime.stop()
         app.state.finnhub_us_quote_service.stop()
         underlying_quotes.stop()

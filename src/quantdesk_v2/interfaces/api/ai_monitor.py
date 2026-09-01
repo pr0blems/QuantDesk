@@ -40,7 +40,7 @@ from ...infrastructure.persistence.ai_monitor_market_features import (
 from ...infrastructure.persistence.ai_monitor_projection import (
     SqlAlchemyOpportunityProjectionReader,
 )
-from ...market_config import TRADFI_UNIVERSE_KEY, tradfi_symbols
+from ...market_config import TRADFI_UNIVERSE_KEY, tradfi_live_symbols
 from ...models import (
     AdminSetting,
     AiMonitorConfig,
@@ -877,7 +877,7 @@ def _ai_monitor_live_config(*, enabled: bool) -> dict[str, Any]:
         **_AI_MONITOR_LIVE_RISK_DEFAULTS,
         "execution_scope": _AI_MONITOR_LIVE_SCOPE,
         "signal_source": _AI_MONITOR_LIVE_SCOPE,
-        "symbols": tradfi_symbols(),
+        "symbols": tradfi_live_symbols(),
         "universe_key": TRADFI_UNIVERSE_KEY,
         "ai_monitor_live_copy_enabled": enabled,
         "ai_monitor_live_signal_max_age_seconds": 300,
@@ -1006,7 +1006,7 @@ def _ensure_ai_monitor_live_account(
             status="paused",
             universe_override_json={
                 "universe_key": TRADFI_UNIVERSE_KEY,
-                "symbols": tradfi_symbols(),
+                "symbols": tradfi_live_symbols(),
             },
             risk_override_json=dict(_AI_MONITOR_LIVE_RISK_DEFAULTS),
             runtime_state_json={"execution_scope": _AI_MONITOR_LIVE_SCOPE},
@@ -1369,7 +1369,7 @@ def _live_copy_out(
         blockers.append("尚未配置 Binance API 凭据")
     if not trade_permission_requested:
         blockers.append("Binance API 未申请 TRADE 权限")
-    if not tradfi_symbols():
+    if not tradfi_live_symbols():
         blockers.append("Binance TradFi 交易品种池为空")
     if unresolved_order_count > 0:
         blockers.append("存在状态未知的 Binance 订单，需先完成对账")
@@ -2990,7 +2990,7 @@ def update_live_copy_status(
             raise HTTPException(status_code=409, detail="请先配置 Binance API 凭据")
         if not _binance_trade_permission_requested(locked_user):
             raise HTTPException(status_code=409, detail="Binance API 未申请 TRADE 权限")
-        if not tradfi_symbols():
+        if not tradfi_live_symbols():
             raise HTTPException(status_code=503, detail="Binance TradFi 交易品种池为空")
         _require_strategy_live_readiness(db, user.id)
         account, deployment = _ensure_ai_monitor_live_account(db, locked_user)

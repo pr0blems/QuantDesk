@@ -79,7 +79,7 @@ from .live_risk import (
     tighten_policy_with_strategy,
     total_open_risk,
 )
-from .market_config import tradfi_symbols
+from .market_config import tradfi_strategy_symbols as tradfi_symbols
 
 DEFAULT_INITIAL_BALANCE = 10_000.0
 DEFAULT_LEVERAGE = 20

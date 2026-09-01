@@ -1825,6 +1825,7 @@ def _news_model_call_audit_index(
 def contract_symbol_map(repository: MonitorRepository) -> dict[str, str]:
     """Map normalized US tickers to the configured Binance TradFi contracts."""
 
+    repository.refresh_symbols()
     result: dict[str, str] = {}
     for item in repository.symbols_meta:
         contract = str(item.get("symbol") or "").strip().upper()
@@ -1843,6 +1844,7 @@ def contract_symbol_map(repository: MonitorRepository) -> dict[str, str]:
 def monitor_symbol_catalog(repository: MonitorRepository) -> list[dict[str, str]]:
     """Return the equity contracts that can be selected for AI monitoring."""
 
+    repository.refresh_symbols()
     items: list[dict[str, str]] = []
     for metadata in repository.symbols_meta:
         contract = str(metadata.get("symbol") or "").strip().upper()
@@ -8104,6 +8106,7 @@ def _worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
     )
     while True:
         try:
+            repository.refresh_symbols()
             with factory() as db:
                 recover_stale_runs(db)
                 settlement_service.execute_cycle(db, repository)

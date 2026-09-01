@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     finnhub_quote_poll_seconds: float = 2.0
     finnhub_quote_stale_seconds: int = 600
     finnhub_websocket_enabled: bool = True
+    tradfi_universe_sync_seconds: int = 3600
 
     # News-source rows contain the endpoint and polling policy, never this secret.
     unusual_whales_api_key: SecretStr = SecretStr("")
@@ -162,6 +163,10 @@ class Settings(BaseSettings):
         if not 10 <= self.binance_live_trading_interval_seconds <= 300:
             raise RuntimeError(
                 "BINANCE_LIVE_TRADING_INTERVAL_SECONDS must be between 10 and 300"
+            )
+        if not 300 <= self.tradfi_universe_sync_seconds <= 86_400:
+            raise RuntimeError(
+                "TRADFI_UNIVERSE_SYNC_SECONDS must be between 300 and 86400"
             )
 
     def _validate_openai_settings(self) -> None:
