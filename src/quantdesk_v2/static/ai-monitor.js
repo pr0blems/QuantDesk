@@ -151,7 +151,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260828-event-samples1">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-macro-header1">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -2261,19 +2261,19 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       }),
     };
     this.patchStablePanel(target, `<header class="macro-market-heading" data-patch-key="macro-heading">
-      <div><span>US MARKET REGIME</span><strong>宏观大盘环境</strong><small>${this.escape(data.source_note || "指数、波动率、市场宽度和事件风险")}</small></div>
+      <div class="macro-market-title"><span>US MARKET REGIME</span><strong>宏观大盘环境</strong></div>
+      <aside class="macro-risk-stack macro-risk-heading" aria-label="市场风险概览">
+        <div class="macro-vix ${vixTone}" tabindex="0" aria-describedby="macro-risk-impact-vix"><span>VIX 恐慌指数</span><b>${numberOrDash(vix.value, 2)}</b><small>${vix.available ? `${percent(vix.change_percent)} · 真实指数` : "暂不可用"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.vix}</div>
+        <div class="macro-breadth ${breadth.available ? "available" : "unavailable"}" tabindex="0" aria-describedby="macro-risk-impact-breadth"><span>市场涨跌家数</span><b>${this.number(breadth.advancers)} <i>/</i> ${this.number(breadth.decliners)}</b><small>上涨 / 下跌 · A/D ${breadthRatio}${breadth.available ? "" : " · 样本不足"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.breadth}</div>
+        <div class="macro-tide ${tideTone}" tabindex="0" aria-describedby="macro-risk-impact-tide"><span>Market Tide</span><b>${tide.available ? tideLabel : "暂不可用"}</b><small>${tide.available ? `净量 ${this.number(tide.net_volume)} · ${sessionActive ? "5m 实时潮汐" : "最近交易日潮汐"}` : providers.unusual_whales_enabled === false ? "Unusual Whales 已关闭" : providers.unusual_whales_configured ? "已配置，等待上游数据" : "未配置 Unusual Whales"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.tide}</div>
+        <div class="macro-event ${eventTone}" tabindex="0" aria-describedby="macro-risk-impact-event"><span>宏观事件风险</span><b>${nextEvent ? this.escape(nextEvent.event_type) : "正常"}</b><small>${nextEvent ? `${eventCountdown} · ${this.escape(nextEvent.title)}` : "未来 24 小时无已登记重大事件"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.event}</div>
+      </aside>
       <div class="macro-session ${this.escape(sessionKey)} ${sessionActive ? "live" : ""}"><span><i></i>${this.escape(session.label || "休市")}</span><b>${sessionActive ? "实时波动" : session.realtime_expected ? "等待实时确认" : "行情静止"}</b><small>美东 ${this.escape(String(session.local_time || "").slice(11, 19) || "--")} · 更新 ${capturedLabel}</small></div>
       <button class="macro-regime ${this.escape(sentiment.key || "neutral")}" type="button" data-open-macro-impact aria-label="查看宏观因素判断"><span>环境结论</span><b>${this.escape(entryPolicy.label || sentiment.label || "数据不足")}</b><small>门槛调整 ${Number(entryPolicy.threshold_delta || 0) >= 0 ? "+" : ""}${numberOrDash(entryPolicy.threshold_delta, 0)} · 多/空仓位上限 ${numberOrDash(Number(entryPolicy.long_position_multiplier) * 100, 0)}%/${numberOrDash(Number(entryPolicy.short_position_multiplier) * 100, 0)}% · 点击查看依据</small></button>
       <div class="macro-countdown ${this.escape(sessionKey)}" data-market-countdown data-target-at="${this.escape(session.countdown_target_at || "")}" data-target-label="${this.escape(session.countdown_label || "交易时段倒计时")}"><span data-market-countdown-state>${this.escape(session.countdown_label || "交易时段倒计时")}</span><b data-market-countdown-value>--:--:--</b><small>${countdownEt} ET · 本地 ${countdownLocal}</small></div>
     </header>
     <div class="macro-market-body" data-patch-key="macro-body">
       <div class="macro-index-grid">${indexCards || '<div class="macro-empty">大盘实时行情暂不可用，个股评分不会应用宏观调整。</div>'}</div>
-      <aside class="macro-risk-stack">
-        <div class="macro-vix ${vixTone}" tabindex="0" aria-describedby="macro-risk-impact-vix"><span>VIX 恐慌指数</span><b>${numberOrDash(vix.value, 2)}</b><small>${vix.available ? `${percent(vix.change_percent)} · 真实指数` : "暂不可用"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.vix}</div>
-        <div class="macro-breadth ${breadth.available ? "available" : "unavailable"}" tabindex="0" aria-describedby="macro-risk-impact-breadth"><span>市场涨跌家数</span><b>${this.number(breadth.advancers)} <i>/</i> ${this.number(breadth.decliners)}</b><small>上涨 / 下跌 · A/D ${breadthRatio}${breadth.available ? "" : " · 样本不足"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.breadth}</div>
-        <div class="macro-tide ${tideTone}" tabindex="0" aria-describedby="macro-risk-impact-tide"><span>Market Tide</span><b>${tide.available ? tideLabel : "暂不可用"}</b><small>${tide.available ? `净量 ${this.number(tide.net_volume)} · ${sessionActive ? "5m 实时潮汐" : "最近交易日潮汐"}` : providers.unusual_whales_enabled === false ? "Unusual Whales 已关闭" : providers.unusual_whales_configured ? "已配置，等待上游数据" : "未配置 Unusual Whales"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.tide}</div>
-        <div class="macro-event ${eventTone}" tabindex="0" aria-describedby="macro-risk-impact-event"><span>宏观事件风险</span><b>${nextEvent ? this.escape(nextEvent.event_type) : "正常"}</b><small>${nextEvent ? `${eventCountdown} · ${this.escape(nextEvent.title)}` : "未来 24 小时无已登记重大事件"}</small><i class="macro-card-help" aria-hidden="true">?</i>${riskTooltips.event}</div>
-      </aside>
     </div>
     <footer class="macro-market-footer" data-patch-key="macro-footer"><div><span>板块热度</span>${sectorPills || "<small>暂无板块行情</small>"}</div><div><span>利率 / 美元代理</span>${assetPills || "<small>暂无宏观资产行情</small>"}</div></footer>`);
     this.tickMarketCountdown();

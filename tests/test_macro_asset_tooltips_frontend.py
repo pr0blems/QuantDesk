@@ -51,6 +51,28 @@ def test_macro_index_and_risk_cards_explain_market_impact_and_data_basis() -> No
     assert 'aria-describedby="macro-risk-impact-vix"' in script
 
 
+def test_macro_risk_summary_is_rendered_in_the_header_without_source_note() -> None:
+    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+        encoding="utf-8"
+    )
+    styles = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(
+        encoding="utf-8"
+    )
+
+    heading = script.index('<header class="macro-market-heading"')
+    risk_summary = script.index(
+        '<aside class="macro-risk-stack macro-risk-heading"', heading
+    )
+    session = script.index('<div class="macro-session', heading)
+    body = script.index('<div class="macro-market-body"', heading)
+
+    assert heading < risk_summary < session < body
+    assert script.count('class="macro-risk-stack macro-risk-heading"') == 1
+    assert "data.source_note" not in script[heading:body]
+    assert ".macro-risk-heading {" in styles
+    assert "grid-template-columns: repeat(4, minmax(105px, 1fr))" in styles
+
+
 def test_macro_index_and_risk_tooltips_support_hover_and_keyboard_focus() -> None:
     styles = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(
         encoding="utf-8"
