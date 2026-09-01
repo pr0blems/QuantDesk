@@ -256,9 +256,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
             <div id="macro-impact-body" class="macro-impact-body"><div class="live-copy-loading">正在整理当前宏观判断…</div></div>
           </section>
         </div>
-        <section id="signal-health-strip" class="signal-health-strip" aria-label="实时数据健康与风险状态" aria-live="polite">
-          <div class="signal-health-loading"><span>DATA PIPELINE</span><strong>正在检查行情与信号数据覆盖…</strong></div>
-        </section>
         <div class="ai-layout">
           <nav class="ai-module-nav" aria-label="发现机会菜单">
             <button class="ai-nav-root active" type="button" data-ai-view="opportunities"><span>◆</span><strong>发现机会</strong><small>机会总览</small></button>

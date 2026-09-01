@@ -30,7 +30,7 @@ window.quantdeskOpenMonitorMarketSocket = openMonitorMarketWebSocket;
 
 for (const source of [
   "/assets/monitor.js?v=20260831-react3",
-  "/assets/ai-monitor.js?v=20260901-decision-policy1",
+  "/assets/ai-monitor.js?v=20260901-health-strip-remove1",
   "/assets/paper.js?v=20260831-react3",
   "/assets/live.js?v=20260831-react3",
   "/assets/backtest.js?v=20260831-react3",
