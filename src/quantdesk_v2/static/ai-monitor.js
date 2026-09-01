@@ -151,7 +151,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-decision-policy1">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-macro-tooltip-layer1">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>

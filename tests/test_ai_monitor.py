@@ -4195,16 +4195,16 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'name="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260901-health-strip-remove1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260901-macro-tooltip-layer1"' in entrypoint
     assert '"/assets/monitor.js?v=20260831-react3"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
-    assert 'href="/assets/ai-monitor.css?v=20260901-decision-policy1"' in component
+    assert 'href="/assets/ai-monitor.css?v=20260901-macro-tooltip-layer1"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
     assert "/assets/controller-runtime.js?v=20260831-react3" in react_index
     assert "/assets/strategies.js?v=20260831-react3" in react_index
     for asset in (
-        '"/assets/ai-monitor.js?v=20260901-health-strip-remove1"',
+        '"/assets/ai-monitor.js?v=20260901-macro-tooltip-layer1"',
         '"/assets/monitor.js?v=20260831-react3"',
         '"/assets/paper.js?v=20260831-react3"',
         '"/assets/live.js?v=20260831-react3"',

@@ -402,7 +402,7 @@ button:disabled { cursor: wait; opacity: .55; }
 .macro-tide.negative b { color: var(--ai-red); }
 .macro-tide.flat b { color: var(--ai-gold); }
 .macro-breadth b i { color: var(--ai-dim); font-style: normal; }
-.macro-market-footer { position: relative; z-index: 8; min-height: 38px; display: grid; grid-template-columns: 1.1fr .9fr; gap: 1px; overflow: visible; background: var(--ai-line); }
+.macro-market-footer { position: relative; z-index: 40; min-height: 38px; display: grid; grid-template-columns: 1.1fr .9fr; gap: 1px; overflow: visible; background: var(--ai-line); }
 .macro-market-footer > div { min-width: 0; display: flex; align-items: center; gap: 5px; padding: 5px 9px; overflow: hidden; background: #10130f; }
 .macro-market-footer > div:last-child { position: relative; overflow: visible; }
 .macro-market-footer > div > span:first-child { flex: 0 0 auto; margin-right: 3px; color: var(--ai-muted); font-size: 11px; font-weight: 700; }

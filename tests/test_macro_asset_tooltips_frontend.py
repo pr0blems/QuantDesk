@@ -26,6 +26,7 @@ def test_macro_asset_tooltip_supports_hover_focus_and_visible_overflow() -> None
     assert ".macro-asset:focus-visible .macro-asset-tooltip" in styles
     assert "grid-template-columns: minmax(0, 1fr)" in styles
     assert ".macro-asset-tooltip > * { grid-column: 1; }" in styles
+    assert ".macro-market-footer { position: relative; z-index: 40;" in styles
     assert ".macro-market-footer > div:last-child { position: relative; overflow: visible; }" in styles
     assert "pointer-events: none" in styles
 
