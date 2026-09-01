@@ -4248,7 +4248,7 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert 'href="/assets/ai-monitor.css?v=20260902-live-change"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
     assert "/assets/controller-runtime.js?v=20260831-react3" in react_index
-    assert "/assets/strategies.js?v=20260902-unified3" in react_index
+    assert "/assets/strategies.js?v=20260902-groups1" in react_index
     for asset in (
         '"/assets/ai-monitor.js?v=20260902-live-change"',
         '"/assets/monitor.js?v=20260901-research-pages"',

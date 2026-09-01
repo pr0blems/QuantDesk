@@ -125,9 +125,9 @@ def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
     controller_panel = (ROOT / "web/src/pages/PageControllerPanel.tsx").read_text(encoding="utf-8")
 
     assert "/assets/controller-runtime.js?v=20260831-react3" in index
-    assert "/assets/strategies.js?v=20260902-unified3" in index
-    assert index.index("/assets/controller-runtime.js?v=20260831-react3") < index.index("/assets/strategies.js?v=20260902-unified3")
-    assert index.index("/assets/strategies.js?v=20260902-unified3") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260902-groups1" in index
+    assert index.index("/assets/controller-runtime.js?v=20260831-react3") < index.index("/assets/strategies.js?v=20260902-groups1")
+    assert index.index("/assets/strategies.js?v=20260902-groups1") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.quantdeskMountPageController(name, host)" in controller_panel
     assert "document.createElement" not in controller_panel
@@ -149,6 +149,8 @@ def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
     assert ".strategy-source-composition-block" in stylesheet
     assert ".strategy-ai-conversation" in stylesheet
     assert ".strategy-ai-process-step" in stylesheet
+    assert ".strategy-parameter-group" in stylesheet
+    assert ".strategy-switch-input:checked" in stylesheet
     assert '#strategy-basic-block > label:last-child' in stylesheet
     assert 'display: none' not in stylesheet.split(
         '#strategy-basic-block > label:last-child', 1
@@ -159,7 +161,17 @@ def test_react_shell_loads_the_current_strategy_controller() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
 
     assert "/assets/controller-runtime.js?v=20260831-react3" in index
-    assert "/assets/strategies.js?v=20260902-unified3" in index
+    assert "/assets/strategies.js?v=20260902-groups1" in index
+
+
+def test_grouped_binary_parameters_render_as_switches_and_preserve_integer_contract() -> None:
+    script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
+
+    assert 'definition.control === "switch" && type === "integer"' in script
+    assert 'input.dataset.binaryInteger = "true"' in script
+    assert 'state.textContent = input.checked ? "已开启" : "已关闭"' in script
+    assert 'output[key] = input.checked ? 1 : 0' in script
+    assert '"技术指标开关": "开启的指标参与当前 AI 机会决策"' in script
 
 
 def test_strategy_controller_initializes_after_mount() -> None:

@@ -200,21 +200,21 @@ AI_MONITOR_INDICATOR_LABELS: tuple[tuple[str, str], ...] = (
 
 def _ai_monitor_parameter_schema() -> list[dict[str, Any]]:
     schema: list[dict[str, Any]] = [
-        {"key": "monitor_enabled", "label": "自动监控", "type": "integer", "default": 0, "min": 0, "max": 1},
-        {"key": "timeframe_minutes", "label": "决策周期（分钟）", "type": "integer", "default": 60, "min": 15, "max": 240},
-        {"key": "prediction_max_holding_bars", "label": "最大持有 K 线", "type": "integer", "default": 4, "min": 1, "max": 24},
-        {"key": "minimum_news_confidence", "label": "最低新闻置信度", "type": "number", "default": 0.6, "min": 0, "max": 1, "step": 0.01},
-        {"key": "minimum_news_mentions", "label": "最低新闻数量", "type": "integer", "default": 1, "min": 1, "max": 20},
-        {"key": "minimum_indicator_score", "label": "最低技术评分", "type": "number", "default": 65, "min": 0, "max": 100, "step": 0.1},
-        {"key": "minimum_combined_score", "label": "最低组合评分", "type": "number", "default": 75, "min": 75, "max": 100, "step": 0.1},
-        {"key": "maximum_market_age_seconds", "label": "最大行情延迟（秒）", "type": "integer", "default": 120, "min": 5, "max": 3600},
-        {"key": "minimum_feature_quality", "label": "最低特征质量", "type": "number", "default": 0.7, "min": 0, "max": 1, "step": 0.01},
-        {"key": "minimum_market_flow_quality", "label": "最低盘口质量", "type": "number", "default": 0.5, "min": 0, "max": 1, "step": 0.01},
-        {"key": "minimum_calibration_samples", "label": "最低校准样本数", "type": "integer", "default": 1000, "min": 30, "max": 5000},
-        {"key": "live_safety_margin_bps", "label": "成本安全边际（bp）", "type": "number", "default": 10, "min": 0, "max": 500, "step": 0.1},
-        {"key": "news_score_weight", "label": "新闻评分权重（%）", "type": "number", "default": 45, "min": 0, "max": 100, "step": 0.1},
-        {"key": "technical_score_weight", "label": "技术评分权重（%）", "type": "number", "default": 35, "min": 0, "max": 100, "step": 0.1},
-        {"key": "market_flow_score_weight", "label": "盘口评分权重（%）", "type": "number", "default": 20, "min": 0, "max": 100, "step": 0.1},
+        {"key": "monitor_enabled", "label": "自动监控", "type": "integer", "default": 0, "min": 0, "max": 1, "group": "运行设置", "control": "switch", "help": "开启后，AI Monitor 将按决策周期自动生成机会。"},
+        {"key": "timeframe_minutes", "label": "决策周期（分钟）", "type": "integer", "default": 60, "min": 15, "max": 240, "group": "运行设置"},
+        {"key": "prediction_max_holding_bars", "label": "最大持有 K 线", "type": "integer", "default": 4, "min": 1, "max": 24, "group": "运行设置"},
+        {"key": "minimum_news_confidence", "label": "最低新闻置信度", "type": "number", "default": 0.6, "min": 0, "max": 1, "step": 0.01, "group": "准入门槛"},
+        {"key": "minimum_news_mentions", "label": "最低新闻数量", "type": "integer", "default": 1, "min": 1, "max": 20, "group": "准入门槛"},
+        {"key": "minimum_indicator_score", "label": "最低技术评分", "type": "number", "default": 65, "min": 0, "max": 100, "step": 0.1, "group": "准入门槛"},
+        {"key": "minimum_combined_score", "label": "最低组合评分", "type": "number", "default": 75, "min": 75, "max": 100, "step": 0.1, "group": "准入门槛"},
+        {"key": "maximum_market_age_seconds", "label": "最大行情延迟（秒）", "type": "integer", "default": 120, "min": 5, "max": 3600, "group": "数据质量与成本"},
+        {"key": "minimum_feature_quality", "label": "最低特征质量", "type": "number", "default": 0.7, "min": 0, "max": 1, "step": 0.01, "group": "数据质量与成本"},
+        {"key": "minimum_market_flow_quality", "label": "最低盘口质量", "type": "number", "default": 0.5, "min": 0, "max": 1, "step": 0.01, "group": "数据质量与成本"},
+        {"key": "minimum_calibration_samples", "label": "最低校准样本数", "type": "integer", "default": 1000, "min": 30, "max": 5000, "group": "数据质量与成本"},
+        {"key": "live_safety_margin_bps", "label": "成本安全边际（bp）", "type": "number", "default": 10, "min": 0, "max": 500, "step": 0.1, "group": "数据质量与成本"},
+        {"key": "news_score_weight", "label": "新闻评分权重（%）", "type": "number", "default": 45, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
+        {"key": "technical_score_weight", "label": "技术评分权重（%）", "type": "number", "default": 35, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
+        {"key": "market_flow_score_weight", "label": "盘口评分权重（%）", "type": "number", "default": 20, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
     ]
     schema.extend(
         {
@@ -224,6 +224,8 @@ def _ai_monitor_parameter_schema() -> list[dict[str, Any]]:
             "default": int(key in AI_MONITOR_DEFAULT_INDICATOR_KEYS),
             "min": 0,
             "max": 1,
+            "group": "技术指标开关",
+            "control": "switch",
         }
         for key, label in AI_MONITOR_INDICATOR_LABELS
     )

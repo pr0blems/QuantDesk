@@ -2675,7 +2675,36 @@ class StrategyCenter extends window.QuantDeskPageController {
     const container = this.querySelector("#strategy-parameter-fields");
     const fields = Array.isArray(schema) ? schema : [];
     block.classList.toggle("hidden", !fields.length);
-    container.replaceChildren(...fields.map((definition) => this.configField(definition, values?.[definition.key], "parameter")));
+    const hasGroups = fields.some((definition) => String(definition?.group || "").trim());
+    container.classList.toggle("grouped", hasGroups);
+    if (!hasGroups) {
+      container.replaceChildren(...fields.map((definition) => this.configField(definition, values?.[definition.key], "parameter")));
+      return;
+    }
+    const groups = new Map();
+    fields.forEach((definition) => {
+      const name = String(definition?.group || "其他参数").trim() || "其他参数";
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(definition);
+    });
+    const descriptions = {
+      "运行设置": "控制监控启停、决策周期与信号持有时间",
+      "准入门槛": "决定候选信号进入策略判断的最低条件",
+      "数据质量与成本": "限制过期、低质量或无法覆盖交易成本的数据",
+      "评分权重": "三项权重保存时必须合计为 100%",
+      "技术指标开关": "开启的指标参与当前 AI 机会决策",
+    };
+    container.replaceChildren(...Array.from(groups, ([name, definitions], index) => {
+      const section = this.node("section", "strategy-parameter-group");
+      const header = this.node("header", "strategy-parameter-group-head");
+      const title = this.node("div");
+      title.append(this.node("span", "strategy-parameter-group-index", String(index + 1).padStart(2, "0")), this.node("strong", "", name));
+      header.append(title, this.node("small", "", descriptions[name] || `${definitions.length} 个参数`));
+      const grid = this.node("div", "strategy-field-grid two");
+      grid.append(...definitions.map((definition) => this.configField(definition, values?.[definition.key], "parameter")));
+      section.append(header, grid);
+      return section;
+    }));
   }
 
   renderRiskFields(values) {
@@ -2704,8 +2733,17 @@ class StrategyCenter extends window.QuantDeskPageController {
     const label = this.node("label");
     label.append(this.node("span", "strategy-field-label", definition.label || this.humanizeKey(key)));
     const type = String(definition.type || "number").toLowerCase();
+    const switchInteger = definition.control === "switch" && type === "integer"
+      && Number(definition.min) === 0 && Number(definition.max) === 1;
     let input;
-    if (Array.isArray(definition.options)) {
+    if (switchInteger) {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.className = "strategy-switch-input";
+      input.dataset.binaryInteger = "true";
+      input.setAttribute("role", "switch");
+      input.setAttribute("aria-label", definition.label || this.humanizeKey(key));
+    } else if (Array.isArray(definition.options)) {
       input = document.createElement("select");
       definition.options.forEach((option) => {
         const value = typeof option === "object" ? option.value : option;
@@ -2729,7 +2767,8 @@ class StrategyCenter extends window.QuantDeskPageController {
     input.dataset.configGroup = group;
     input.dataset.configType = type;
     const value = currentValue !== undefined ? currentValue : definition.default;
-    if (["boolean", "bool"].includes(type)) input.value = value === false || value === "false" || value === 0 ? "false" : "true";
+    if (switchInteger) input.checked = Number(value) === 1;
+    else if (["boolean", "bool"].includes(type)) input.value = value === false || value === "false" || value === 0 ? "false" : "true";
     else if (value !== undefined && value !== null) input.value = String(value);
     if (type !== "integer" && input instanceof HTMLInputElement && input.type === "number" && input.validity.stepMismatch) {
       // 兼容旧版 AI 源码里“min=0.1、step=1、default=1”这类自相矛盾的参数定义。
@@ -2737,8 +2776,23 @@ class StrategyCenter extends window.QuantDeskPageController {
       input.dataset.declaredStep = input.step;
       input.step = "any";
     }
-    if (definition.help) label.append(input, this.node("small", "strategy-field-help", definition.help));
-    else label.append(input);
+    if (switchInteger) {
+      label.classList.add("strategy-switch-field");
+      const control = this.node("span", "strategy-switch-control");
+      const visual = this.node("span", "strategy-switch-visual");
+      visual.append(this.node("span", "strategy-switch-knob"));
+      const state = this.node("strong", "strategy-switch-state");
+      const updateState = () => {
+        state.textContent = input.checked ? "已开启" : "已关闭";
+        input.setAttribute("aria-checked", String(input.checked));
+        label.classList.toggle("enabled", input.checked);
+      };
+      input.addEventListener("change", updateState);
+      updateState();
+      control.append(input, visual, state);
+      label.append(control);
+    } else label.append(input);
+    if (definition.help) label.append(this.node("small", "strategy-field-help", definition.help));
     return label;
   }
 
@@ -2796,7 +2850,8 @@ class StrategyCenter extends window.QuantDeskPageController {
     this.querySelectorAll(`[data-config-group="${group}"]`).forEach((input) => {
       const key = input.dataset.configKey;
       const type = input.dataset.configType;
-      if (["number", "integer", "float"].includes(type)) {
+      if (input.dataset.binaryInteger === "true") output[key] = input.checked ? 1 : 0;
+      else if (["number", "integer", "float"].includes(type)) {
         const number = Number(input.value);
         if (Number.isFinite(number)) output[key] = type === "integer" ? Math.trunc(number) : number;
       } else if (["boolean", "bool"].includes(type)) output[key] = input.value === "true";

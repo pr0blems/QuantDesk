@@ -208,6 +208,17 @@ def test_ai_monitor_strategy_is_visible_versioned_and_uses_real_config(
     assert managed.spec_json["decision_version"] == "actionable_entry_v11"
     assert managed.parameters_json == ai_monitor_strategy_parameters(None)
     assert managed.revisions[0].lifecycle_status == "published"
+    schema_by_key = {
+        item["key"]: item for item in managed.parameter_schema_json
+    }
+    assert schema_by_key["monitor_enabled"]["group"] == "运行设置"
+    assert schema_by_key["monitor_enabled"]["control"] == "switch"
+    assert schema_by_key["news_score_weight"]["group"] == "评分权重"
+    assert all(
+        item["group"] == "技术指标开关" and item["control"] == "switch"
+        for item in managed.parameter_schema_json
+        if item["key"].startswith("indicator_")
+    )
 
     edited = dict(managed.parameters_json)
     edited["monitor_enabled"] = 1
