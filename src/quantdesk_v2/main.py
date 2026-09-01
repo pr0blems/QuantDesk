@@ -75,6 +75,15 @@ _SENSITIVE_VALIDATION_MARKERS = (
 )
 
 
+def _admin_frontend_redirect() -> RedirectResponse:
+    """Redirect legacy admin URLs without ever leaking a loopback origin."""
+
+    # A loopback URL is resolved on the visitor's computer, not on this server.
+    # Local Vite users already enter through port 5173 directly, so the backend
+    # redirect must remain same-origin in development, test and production.
+    return RedirectResponse(url="/next/admin/#overview", status_code=308)
+
+
 def _monitor_symbols(path: Path) -> tuple[str, ...]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -386,12 +395,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="frontend build is unavailable",
             )
 
-        def admin_index() -> RedirectResponse:
-            target = "/next/admin/#overview"
-            if runtime_settings.app_env.lower() != "production":
-                target = "http://127.0.0.1:5173/next/admin/#overview"
-            return RedirectResponse(url=target, status_code=308)
-
         app.add_api_route(
             "/",
             index,
@@ -411,7 +414,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for admin_route in ("/admin", "/admin/login"):
             app.add_api_route(
                 admin_route,
-                admin_index,
+                _admin_frontend_redirect,
                 methods=["GET"],
                 include_in_schema=False,
                 name=f"admin_{admin_route.removeprefix('/').replace('/', '_')}",

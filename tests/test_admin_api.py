@@ -267,9 +267,9 @@ def test_admin_frontend_assets_and_route(mysql_test_engine: Engine) -> None:
         user_page = client.get("/monitor")
 
     assert page.status_code == 308
-    assert page.headers["location"] == "http://127.0.0.1:5173/next/admin/#overview"
+    assert page.headers["location"] == "/next/admin/#overview"
     assert login_page.status_code == 308
-    assert login_page.headers["location"] == "http://127.0.0.1:5173/next/admin/#overview"
+    assert login_page.headers["location"] == "/next/admin/#overview"
     assert user_page.status_code == 200
 
 
