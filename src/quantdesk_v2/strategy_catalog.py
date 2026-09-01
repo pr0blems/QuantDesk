@@ -341,6 +341,18 @@ def is_ai_monitor_strategy(strategy: UserStrategy) -> bool:
     return spec.get("managed_policy") == AI_MONITOR_STRATEGY_TEMPLATE_KEY
 
 
+def strategy_management_mode(strategy: UserStrategy) -> str:
+    """Expose one strategy-center contract without changing runtime dispatch."""
+
+    if is_ai_monitor_strategy(strategy):
+        return "managed_parameters"
+    if strategy.strategy_kind == "source_strategy":
+        return "python_source"
+    if strategy.strategy_kind == "full_strategy":
+        return "strategy_dsl"
+    return "parameterized_engine"
+
+
 def apply_ai_monitor_strategy_parameters(
     db: Session,
     user_id: int,
@@ -786,6 +798,8 @@ def strategy_snapshot(strategy: UserStrategy) -> dict[str, Any]:
         "version": strategy.version,
         "engine_key": strategy.engine_key,
         "strategy_kind": strategy.strategy_kind,
+        "complete_strategy": True,
+        "management_mode": strategy_management_mode(strategy),
         "lifecycle_status": strategy.lifecycle_status,
         "spec_schema_version": strategy.spec_schema_version,
         "spec": copy.deepcopy(strategy.spec_json),
@@ -1051,6 +1065,8 @@ def serialize_user_strategy(strategy: UserStrategy) -> dict[str, Any]:
         "version": strategy.version,
         "engine_key": strategy.engine_key,
         "strategy_kind": strategy.strategy_kind,
+        "complete_strategy": True,
+        "management_mode": strategy_management_mode(strategy),
         "lifecycle_status": strategy.lifecycle_status,
         "spec_schema_version": strategy.spec_schema_version,
         "spec": copy.deepcopy(strategy.spec_json),
@@ -1087,6 +1103,8 @@ def strategy_to_catalog_item(strategy: UserStrategy) -> dict[str, Any]:
         "description": strategy.description,
         "engine_key": strategy.engine_key,
         "strategy_kind": strategy.strategy_kind,
+        "complete_strategy": True,
+        "management_mode": strategy_management_mode(strategy),
         "lifecycle_status": strategy.lifecycle_status,
         "spec_schema_version": strategy.spec_schema_version,
         "spec": copy.deepcopy(strategy.spec_json),

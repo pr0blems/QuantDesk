@@ -27,7 +27,9 @@ from quantdesk_v2.strategy_catalog import (
     get_user_strategy,
     is_ai_monitor_strategy,
     list_user_strategies,
+    serialize_user_strategy,
     serialize_strategy_catalog,
+    strategy_management_mode,
     strategy_snapshot,
     validate_ai_monitor_strategy_parameters,
     validate_strategy_parameters,
@@ -169,6 +171,14 @@ def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
     assert len({strategy.source_template_id for strategy in first}) == 21
     assert all(uuid.UUID(strategy.public_id).version == 4 for strategy in first)
     assert all(strategy.created_via == "system_default" for strategy in first)
+    serialized = [serialize_user_strategy(strategy) for strategy in first]
+    assert all(item["complete_strategy"] is True for item in serialized)
+    assert {item["management_mode"] for item in serialized} == {
+        "managed_parameters",
+        "parameterized_engine",
+        "strategy_dsl",
+    }
+    assert all(strategy_management_mode(strategy) != "legacy" for strategy in first)
     assert (
         session.scalar(
             select(func.count()).select_from(UserStrategy).where(UserStrategy.user_id == user.id)

@@ -77,7 +77,6 @@ class StrategyCenter extends window.QuantDeskPageController {
           <button type="button" data-section="indicators" aria-pressed="false"><span>指标库</span><strong id="strategy-tab-indicators">0</strong></button>
           <button type="button" data-section="deployments" aria-pressed="false"><span>运行部署</span><strong id="strategy-tab-deployments">0</strong></button>
           <button type="button" data-section="signals" aria-pressed="false"><span>信号记录</span><strong id="strategy-tab-signals">0</strong></button>
-          <button type="button" data-section="legacy" aria-pressed="false"><span>旧版策略</span><strong id="strategy-tab-legacy">0</strong></button>
         </nav>
 
         <section class="strategy-overview" aria-label="策略统计">
@@ -572,6 +571,8 @@ class StrategyCenter extends window.QuantDeskPageController {
       version: Number(item.version ?? 1),
       engine_key: String(item.engine_key ?? "rule_engine"),
       strategy_kind: String(item.strategy_kind ?? "builtin_strategy"),
+      complete_strategy: item.complete_strategy !== false,
+      management_mode: String(item.management_mode || "parameterized_engine"),
       lifecycle_status: String(item.lifecycle_status ?? "draft"),
       spec: this.plainObject(item.spec),
       source_language: String(item.source_language ?? ""),
@@ -607,6 +608,27 @@ class StrategyCenter extends window.QuantDeskPageController {
     return value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
   }
 
+  isManagedAiMonitorStrategy(item = {}) {
+    const templateKey = String(item.source_template_key || "");
+    const managedPolicy = String(this.plainObject(item.spec).managed_policy || "");
+    return templateKey === "ai_monitor_actionable_entry_v11"
+      || managedPolicy === "ai_monitor_actionable_entry_v11";
+  }
+
+  isCompleteStrategy(item = {}) {
+    return item.complete_strategy !== false;
+  }
+
+  managementModeLabel(item = {}) {
+    if (this.isManagedAiMonitorStrategy(item)) return "运行决策策略";
+    return {
+      python_source: "Python 源码策略",
+      strategy_dsl: "完整策略",
+      parameterized_engine: "参数化完整策略",
+      managed_parameters: "运行决策策略",
+    }[String(item.management_mode || "")] || "完整策略";
+  }
+
   lifecycleLabel(status) {
     return {
       draft: "草稿",
@@ -616,7 +638,7 @@ class StrategyCenter extends window.QuantDeskPageController {
       paper: "模拟盘",
       micro_live: "微型实盘",
       live: "正式实盘",
-      published: "旧版已发布",
+      published: "已发布",
       retired: "已退役",
     }[String(status || "")] || String(status || "未知");
   }
@@ -682,9 +704,8 @@ class StrategyCenter extends window.QuantDeskPageController {
   }
 
   renderStats() {
-    const full = this.items.filter((item) => ["full_strategy", "source_strategy"].includes(item.strategy_kind)).length;
+    const full = this.items.filter((item) => this.isCompleteStrategy(item)).length;
     const composite = this.items.filter((item) => item.spec?.strategy_type === "indicator_composite").length;
-    const legacy = this.items.filter((item) => !["full_strategy", "source_strategy"].includes(item.strategy_kind)).length;
     const running = this.deployments.filter((item) => item.status === "running").length;
     this.querySelector("#strategy-total").textContent = String(full).padStart(2, "0");
     this.querySelector("#strategy-active").textContent = String(running).padStart(2, "0");
@@ -694,31 +715,27 @@ class StrategyCenter extends window.QuantDeskPageController {
     this.querySelector("#strategy-tab-indicators").textContent = String(this.indicators.length);
     this.querySelector("#strategy-tab-deployments").textContent = String(this.deployments.length);
     this.querySelector("#strategy-tab-signals").textContent = String(this.signals.length);
-    this.querySelector("#strategy-tab-legacy").textContent = String(legacy);
   }
 
   filteredItems() {
     return this.items.filter((item) => {
-      const complete = ["full_strategy", "source_strategy"].includes(item.strategy_kind);
-      const kindMatches = this.section === "legacy" ? !complete : complete;
       const isDefault = Boolean(item.is_default || item.source_template_key);
       const statusMatches = this.statusFilter === "all"
         || (this.statusFilter === "default" && isDefault)
         || (this.statusFilter === "custom" && !isDefault);
       const categoryMatches = this.categoryFilter === "all" || item.category === this.categoryFilter;
       const haystack = `${item.name} ${item.category} ${item.description} ${item.engine_key}`.toLocaleLowerCase("zh-CN");
-      return kindMatches && statusMatches && categoryMatches && (!this.query || haystack.includes(this.query));
+      return this.isCompleteStrategy(item) && statusMatches && categoryMatches && (!this.query || haystack.includes(this.query));
     });
   }
 
   renderSection() {
-    const strategyView = ["strategies", "legacy"].includes(this.section);
+    const strategyView = this.section === "strategies";
     this.querySelector("#strategy-create").classList.toggle("hidden", this.section !== "strategies");
     this.querySelector("#strategy-status-filter").classList.toggle("hidden", !strategyView);
     this.querySelector("#strategy-category-filter").closest("label").classList.toggle("hidden", !strategyView);
     const placeholders = {
       strategies: "搜索完整策略名称、分类或说明",
-      legacy: "搜索旧版指标信号",
       indicators: "搜索指标名称、类别或输出",
       deployments: "搜索模拟盘或回测部署",
       signals: "搜索标的、方向、状态或周期",
@@ -759,7 +776,7 @@ class StrategyCenter extends window.QuantDeskPageController {
       const empty = this.node("div", "strategy-grid-state");
       empty.append(this.node("span", "strategy-state-icon", this.items.length ? "⌕" : "策"));
       empty.append(this.node("strong", "", this.items.length ? "没有匹配的策略" : "还没有个人策略"));
-      empty.append(this.node("small", "", this.section === "legacy" ? "旧版信号仅用于兼容，不建议继续新增。" : "从指标库选择多个指标后，可用于回测和独立模拟盘。"));
+      empty.append(this.node("small", "", "从指标库选择多个指标后，可用于回测和独立模拟盘。"));
       const action = this.node("button", "strategy-create-button", this.items.length ? "清除筛选" : "新增策略");
       action.type = "button";
       action.addEventListener("click", () => {
@@ -787,14 +804,16 @@ class StrategyCenter extends window.QuantDeskPageController {
 
   strategyCard(item) {
     const isSource = item.strategy_kind === "source_strategy";
-    const isFull = item.strategy_kind === "full_strategy" || isSource;
-    const card = this.node("article", `strategy-card-item ${isFull ? "full-strategy" : "legacy-signal"}`);
+    const isManagedAiMonitor = this.isManagedAiMonitorStrategy(item);
+    const card = this.node("article", "strategy-card-item full-strategy");
     const head = this.node("header", "strategy-card-head");
     const icon = this.node("span", "strategy-card-icon", this.strategyInitial(item.name));
     const title = this.node("div", "strategy-card-title");
-    title.append(this.node("strong", "", item.name), this.node("small", "", `${item.category} · ${isSource ? "Python 源码策略" : (isFull ? "完整策略" : "旧版信号")}`));
-    const lifecycleReady = ["validated", "backtested", "shadow", "paper", "micro_live", "live"].includes(item.lifecycle_status);
-    const state = this.node("span", `strategy-state ${lifecycleReady ? "active" : "draft"}`, this.lifecycleLabel(item.lifecycle_status));
+    const strategyTypeLabel = this.managementModeLabel(item);
+    title.append(this.node("strong", "", item.name), this.node("small", "", `${item.category} · ${strategyTypeLabel}`));
+    const lifecycleReady = isManagedAiMonitor || ["validated", "backtested", "shadow", "paper", "micro_live", "live"].includes(item.lifecycle_status);
+    const lifecycleText = isManagedAiMonitor ? "自动监控中" : this.lifecycleLabel(item.lifecycle_status);
+    const state = this.node("span", `strategy-state ${lifecycleReady ? "active" : "draft"}`, lifecycleText);
     head.append(icon, title, state);
 
     const description = this.node("p", "strategy-card-description", item.description || "尚未填写策略说明");
@@ -807,9 +826,10 @@ class StrategyCenter extends window.QuantDeskPageController {
         const indicator = this.indicators.find((candidate) => candidate.key === selection.key);
         tags.append(this.node("span", "", indicator?.name || selection.key));
       });
-    } else if (isSource) tags.append(this.node("span", "strategy-kind-tag", `Python · ${String(item.source_hash || "").slice(0, 10) || "未发布"}`));
-    else if (isFull) tags.append(this.node("span", "strategy-kind-tag", `多周期 ${timeframes.regime || "4h"}/${timeframes.setup || "1h"}/${timeframes.trigger || "15m"}`));
-    else tags.append(this.node("span", "strategy-legacy-tag", "兼容指标信号"));
+    } else if (isManagedAiMonitor) tags.append(this.node("span", "strategy-kind-tag", `决策 · ${item.spec?.decision_version || "actionable_entry_v11"}`));
+    else if (isSource) tags.append(this.node("span", "strategy-kind-tag", `Python · ${String(item.source_hash || "").slice(0, 10) || "未发布"}`));
+    else if (item.strategy_kind === "full_strategy") tags.append(this.node("span", "strategy-kind-tag", `多周期 ${timeframes.regime || "4h"}/${timeframes.setup || "1h"}/${timeframes.trigger || "15m"}`));
+    else tags.append(this.node("span", "strategy-kind-tag", `参数引擎 · ${item.engine_key}`));
     const schema = Array.isArray(item.parameter_schema) ? item.parameter_schema : [];
     schema.slice(0, 3).forEach((field) => {
       const key = String(field.key ?? "");
@@ -821,7 +841,7 @@ class StrategyCenter extends window.QuantDeskPageController {
 
     const meta = this.node("div", "strategy-card-meta");
     const identity = this.node("div");
-    identity.append(this.node("span", "", item.is_default || item.source_template_key ? "默认策略副本" : "自建策略"), this.node("small", "", `v${item.version} · ${this.shortDate(item.updated_at || item.created_at)}`));
+    identity.append(this.node("span", "", isManagedAiMonitor ? "自动监控当前策略" : (item.is_default || item.source_template_key ? "默认策略副本" : "自建策略")), this.node("small", "", `v${item.version} · ${this.shortDate(item.updated_at || item.created_at)}`));
     const edit = this.node("button", "strategy-edit-button", "编辑");
     edit.type = "button";
     edit.setAttribute("aria-label", `编辑策略 ${item.name}`);
@@ -839,7 +859,8 @@ class StrategyCenter extends window.QuantDeskPageController {
     archive.setAttribute("aria-label", `归档策略 ${item.name}`);
     archive.addEventListener("click", () => void this.archiveItem(item, archive));
     const actions = this.node("div", "strategy-card-actions");
-    actions.append(details, validate, edit, archive);
+    actions.append(details, validate, edit);
+    if (!isManagedAiMonitor) actions.append(archive);
     meta.append(identity, actions);
     card.append(head, description, tags, meta);
     return card;
@@ -2312,7 +2333,7 @@ class StrategyCenter extends window.QuantDeskPageController {
       return;
     }
     select.disabled = false;
-    select.replaceChildren(...ordered.map((template) => this.option(template.template_key, `${template.template_kind === "strategy" ? "完整策略" : "旧版信号"} · ${template.name}`)));
+    select.replaceChildren(...ordered.map((template) => this.option(template.template_key, `策略模板 · ${template.name}`)));
   }
 
   switchCreateMode(mode, { resetValues = true, keepComposition = false } = {}) {
@@ -3005,7 +3026,7 @@ class StrategyCenter extends window.QuantDeskPageController {
     const specs = this.node("div", "strategy-detail-specs");
     specs.append(
       this.node("span", "", `类别 ${item.category}`),
-      this.node("span", "", `类型 ${item.strategy_kind}`),
+      this.node("span", "", `维护方式 ${this.managementModeLabel(item)}`),
       this.node("span", "", `规格哈希 ${item.spec_hash || "--"}`),
     );
     const warnings = Array.isArray(validation?.warnings) ? validation.warnings : [];

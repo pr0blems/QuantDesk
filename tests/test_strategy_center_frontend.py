@@ -173,6 +173,24 @@ def test_strategy_controller_initializes_after_mount() -> None:
     assert "this.bindEvents()" in connected
 
 
+def test_all_supported_strategies_share_the_complete_strategy_view() -> None:
+    script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
+
+    assert 'data-section="legacy"' not in script
+    assert '>旧版策略<' not in script
+    assert '"旧版信号"' not in script
+    assert 'isManagedAiMonitorStrategy(item = {})' in script
+    assert 'templateKey === "ai_monitor_actionable_entry_v11"' in script
+    assert 'managedPolicy === "ai_monitor_actionable_entry_v11"' in script
+    assert 'return item.complete_strategy !== false;' in script
+    assert 'const full = this.items.filter((item) => this.isCompleteStrategy(item)).length;' in script
+    assert 'this.querySelector("#strategy-tab-legacy")' not in script
+    assert '参数化完整策略' in script
+    assert '参数引擎 · ${item.engine_key}' in script
+    assert 'const lifecycleText = isManagedAiMonitor ? "自动监控中"' in script
+    assert 'isManagedAiMonitor ? "自动监控当前策略"' in script
+
+
 def test_controller_runtime_keeps_legacy_rollback_but_react_mounts_directly() -> None:
     runtime = (ROOT / "src/quantdesk_v2/static/controller-runtime.js").read_text(encoding="utf-8")
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")

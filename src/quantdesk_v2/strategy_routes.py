@@ -68,6 +68,7 @@ from .strategy_catalog import (
     get_user_strategy,
     is_ai_monitor_strategy,
     serialize_user_strategy,
+    strategy_management_mode,
     strategy_snapshot,
     validate_ai_monitor_strategy_parameters,
     validate_strategy_parameters,
@@ -141,6 +142,10 @@ def _template_response(template: StrategyTemplate) -> dict[str, Any]:
         "description": template.description,
         "engine_key": template.engine_key,
         "template_kind": template.template_kind,
+        "complete_strategy": True,
+        "management_mode": (
+            "strategy_dsl" if template.template_kind == "strategy" else "parameterized_engine"
+        ),
         "spec_schema_version": template.spec_schema_version,
         "spec": copy.deepcopy(template.spec_json),
         "implementation_version": template.implementation_version,
@@ -1875,10 +1880,38 @@ def validate_full_strategy(
             raise HTTPException(status_code=422, detail="源码策略不完整")
         return _source_validation_response(strategy.source_code, strategy.source_language)
     if strategy.strategy_kind != "full_strategy" or not strategy.spec_json:
+        try:
+            parameters = (
+                validate_ai_monitor_strategy_parameters(strategy.parameters_json)
+                if is_ai_monitor_strategy(strategy)
+                else validate_strategy_parameters(
+                    strategy.engine_key, strategy.parameters_json
+                )
+            )
+            normalized_risks = _normalize_risk_defaults(
+                {
+                    key: value
+                    for key, value in strategy.risk_defaults_json.items()
+                    if key in _RISK_RULES
+                },
+                base=DEFAULT_RISK,
+            )
+            risks = {
+                **copy.deepcopy(strategy.risk_defaults_json),
+                **normalized_risks,
+            }
+        except (StrategyParameterError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         return {
             "valid": True,
-            "legacy": True,
-            "warnings": ["这是旧版指标信号，只保留兼容运行；建议迁移到完整策略。"],
+            "legacy": False,
+            "strategy_type": "parameterized_engine",
+            "management_mode": strategy_management_mode(strategy),
+            "engine_key": strategy.engine_key,
+            "parameter_schema": copy.deepcopy(strategy.parameter_schema_json),
+            "parameters": parameters,
+            "risk_defaults": risks,
+            "warnings": [],
         }
     try:
         spec = validate_strategy_spec(strategy.spec_json)

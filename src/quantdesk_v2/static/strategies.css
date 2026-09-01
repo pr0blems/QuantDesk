@@ -182,7 +182,6 @@
 }
 .strategy-card-item:hover { border-color: rgba(43, 215, 163, .26); transform: translateY(-2px); background: linear-gradient(150deg, rgba(16, 38, 57, .94), rgba(8, 23, 37, .95)); }
 .strategy-card-item.full-strategy { border-color: rgba(43, 215, 163, .24); background: radial-gradient(circle at 100% 0, rgba(43, 215, 163, .08), transparent 42%), linear-gradient(150deg, rgba(14, 35, 51, .92), rgba(7, 19, 32, .94)); }
-.strategy-card-item.legacy-signal { border-color: rgba(244, 196, 92, .16); }
 .strategy-card-item.indicator-card .strategy-card-icon { color: #82b2ff; border-color: rgba(77, 141, 247, .28); background: rgba(77, 141, 247, .08); }
 .strategy-card-item.deployment-card { min-height: 196px; }
 .strategy-card-item.signal-card { min-height: 196px; border-color: rgba(77, 141, 247, .2); }
@@ -199,7 +198,6 @@
 .strategy-card-tags { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 5px; }
 .strategy-card-tags span { max-width: 100%; overflow: hidden; padding: 4px 6px; border: 1px solid rgba(77, 141, 247, .17); border-radius: 5px; color: #80a6d8; background: rgba(77, 141, 247, .055); font-size: 11.2px; text-overflow: ellipsis; white-space: nowrap; }
 .strategy-card-tags .strategy-kind-tag { color: var(--brand); border-color: rgba(43, 215, 163, .25); background: rgba(43, 215, 163, .065); }
-.strategy-card-tags .strategy-legacy-tag { color: var(--warning); border-color: rgba(244, 196, 92, .23); background: rgba(244, 196, 92, .055); }
 .strategy-card-meta { align-self: end; display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; padding-top: 11px; border-top: 1px solid rgba(125, 155, 183, .11); }
 .strategy-card-meta > div { min-width: 0; display: grid; gap: 4px; }
 .strategy-card-meta span { overflow: hidden; color: #728aa0; font-size: 12.8px; text-overflow: ellipsis; white-space: nowrap; }
