@@ -40,6 +40,8 @@ class TigerQuote:
     symbol: str
     price: float
     previous_close: float | None
+    change: float | None
+    change_rate: float | None
     source_timestamp: int
     fetched_at: datetime
     session: str
@@ -215,6 +217,13 @@ def _finite_price(value: object) -> float | None:
     return normalized if math.isfinite(normalized) and normalized > 0 else None
 
 
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    normalized = float(value)
+    return normalized if math.isfinite(normalized) else None
+
+
 def _timestamp_seconds(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -232,15 +241,26 @@ def _parse_quote(item: Mapping[str, Any], now: datetime) -> TigerQuote | None:
     if not SYMBOL_PATTERN.fullmatch(symbol):
         return None
 
-    candidates: list[tuple[int, float, float | None, str]] = []
+    candidates: list[
+        tuple[int, float, float | None, float | None, float | None, str]
+    ] = []
 
     def add_candidate(payload: Mapping[str, Any], *, session: str) -> None:
         timestamp = _timestamp_seconds(payload.get("timestamp"))
         price = _finite_price(payload.get("latestPrice"))
         if timestamp is None or price is None:
             return
+        direct_change = _finite_number(payload.get("change"))
+        direct_change_rate = _finite_number(payload.get("changeRate"))
         candidates.append(
-            (timestamp, price, _finite_price(payload.get("preClose")), session)
+            (
+                timestamp,
+                price,
+                _finite_price(payload.get("preClose")),
+                direct_change,
+                direct_change_rate,
+                session,
+            )
         )
 
     add_candidate(item, session="regular")
@@ -254,7 +274,13 @@ def _parse_quote(item: Mapping[str, Any], now: datetime) -> TigerQuote | None:
     if not candidates:
         return None
 
-    timestamp, price, previous_close, session = max(candidates, key=lambda value: value[0])
+    timestamp, price, previous_close, change, change_rate, session = max(
+        candidates, key=lambda value: value[0]
+    )
+    if change is None and previous_close is not None:
+        change = price - previous_close
+    if change_rate is None and change is not None and previous_close is not None:
+        change_rate = change / previous_close
     delay_value = item.get("delay")
     delayed = bool(delay_value not in (None, 0, 0.0, False))
     age_seconds = max(0.0, now.timestamp() - timestamp)
@@ -262,6 +288,8 @@ def _parse_quote(item: Mapping[str, Any], now: datetime) -> TigerQuote | None:
         symbol=symbol,
         price=price,
         previous_close=previous_close,
+        change=change,
+        change_rate=change_rate,
         source_timestamp=timestamp,
         fetched_at=now,
         session=session,

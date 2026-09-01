@@ -142,6 +142,48 @@ def test_price_comparison_uses_binance_execution_and_tiger_reference() -> None:
     assert result["actionable"] is False
 
 
+def test_price_comparison_exposes_live_change_for_binance_and_tiger() -> None:
+    now = datetime.now(UTC)
+    now_ms = int(now.timestamp() * 1_000)
+
+    result = _price_comparison_out(
+        {"price": 102.0, "pct_24h": 2.0, "ts": now_ms},
+        {
+            "price": 50.5,
+            "source_timestamp": int(now.timestamp()),
+            "available": True,
+            "stale": False,
+            "live": True,
+        },
+        {
+            "price": 51.0,
+            "previous_close": 50.0,
+            "change": 1.25,
+            "change_rate": 0.025,
+            "source_timestamp": int(now.timestamp()),
+            "fetched_at": now,
+            "available": True,
+            "stale": False,
+            "live": True,
+            "session": "regular",
+            "delayed": False,
+        },
+    )
+
+    binance = result["sources"]["binance"]
+    tiger = result["sources"]["tiger"]
+    assert binance["display_price"] == pytest.approx(102.0)
+    assert binance["previous_close"] == pytest.approx(100.0)
+    assert binance["change"] == pytest.approx(2.0)
+    assert binance["change_percent"] == pytest.approx(2.0)
+    assert tiger["price"] == pytest.approx(50.5)
+    assert tiger["display_price"] == pytest.approx(51.0)
+    assert tiger["display_source"] == "tiger_last_trade"
+    assert tiger["change"] == pytest.approx(1.25)
+    assert tiger["change_percent"] == pytest.approx(2.5)
+    assert tiger["display_fresh"] is True
+
+
 def test_price_comparison_uses_stale_cash_snapshot_for_opening_gap_forecast() -> None:
     now = datetime.now(UTC)
     stale_at = now - timedelta(hours=2)
@@ -4085,6 +4127,18 @@ def test_opportunity_live_order_book_endpoint_is_tenant_scoped() -> None:
     assert '"source": "tiger_level2"' in endpoint
 
 
+def test_opportunities_include_tiger_realtime_quotes_for_active_cards() -> None:
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
+    endpoint = api[api.index('@router.get("/opportunities")') : api.index(
+        '@router.get("/opportunities/{opportunity_id}/order-book")'
+    )]
+
+    assert 'getattr(request.app.state, "tiger_us_quote_service", None)' in endpoint
+    assert "isinstance(tiger_quote_service, TigerUsQuoteService)" in endpoint
+    assert "tiger_realtime_quotes = tiger_quote_service.latest_many(" in endpoint
+    assert '"tiger_realtime_quote": dict(tiger_quote or {})' in api
+
+
 def test_opportunities_are_ordered_by_signal_time_descending() -> None:
     api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
     endpoint = api[
@@ -4187,16 +4241,16 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'name="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260901-tiger-depth"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260902-live-change"' in entrypoint
     assert '"/assets/monitor.js?v=20260901-research-pages"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
-    assert 'href="/assets/ai-monitor.css?v=20260901-tiger-depth"' in component
+    assert 'href="/assets/ai-monitor.css?v=20260902-live-change"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
     assert "/assets/controller-runtime.js?v=20260831-react3" in react_index
     assert "/assets/strategies.js?v=20260831-react3" in react_index
     for asset in (
-        '"/assets/ai-monitor.js?v=20260901-tiger-depth"',
+        '"/assets/ai-monitor.js?v=20260902-live-change"',
         '"/assets/monitor.js?v=20260901-research-pages"',
         '"/assets/paper.js?v=20260831-react3"',
         '"/assets/live.js?v=20260831-react3"',
@@ -4472,7 +4526,7 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert "跨进程时由短缓存 REST 快照补齐" in component
     assert "买卖盘口梯形表" in component
     assert "老虎证券盘口信息" in component
-    assert "老虎证券 Level 2 买一/卖一盘口中间价" in component
+    assert "老虎证券实时成交价；BN/TG 基差仍使用 Level 2 买一/卖一盘口中间价" in component
     assert "币安交易所合约盘口信息" in component
     assert ".order-book-ladder" in stylesheet
     assert ".order-book-chart" in stylesheet

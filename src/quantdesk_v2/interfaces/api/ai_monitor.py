@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -79,7 +80,11 @@ from ...schemas import (
 )
 from ...security import CredentialCipher, SecurityError, decode_access_token
 from ...strategy_artifacts import add_run_manifest, record_revision_artifact
-from ...tiger_quotes import TigerDepthClient, TigerUsDepthService
+from ...tiger_quotes import (
+    TigerDepthClient,
+    TigerUsDepthService,
+    TigerUsQuoteService,
+)
 from .ai_monitor_runs import router as run_router
 from .ai_monitor_support import (
     add_ai_monitor_audit,
@@ -155,6 +160,14 @@ def _finite_price(value: Any) -> float | None:
     return number if number > 0 else None
 
 
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _quote_time(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
@@ -186,6 +199,7 @@ def _quote_age_seconds(observed_at: datetime | None, now: datetime) -> float | N
 def _price_comparison_out(
     live_market: Mapping[str, Any] | None,
     tiger_depth: Mapping[str, Any] | None = None,
+    tiger_quote: Mapping[str, Any] | None = None,
     *,
     direction: str | None = None,
     news_score: float | None = None,
@@ -204,8 +218,22 @@ def _price_comparison_out(
     now = datetime.now(UTC)
     market = dict(live_market or {})
     tiger = dict(tiger_depth or {})
+    tiger_trade = dict(tiger_quote or {})
 
     binance_price = _finite_price(market.get("price"))
+    binance_change_percent = _finite_number(market.get("pct_24h"))
+    binance_previous_close = (
+        binance_price / (1 + binance_change_percent / 100)
+        if binance_price is not None
+        and binance_change_percent is not None
+        and 1 + binance_change_percent / 100 > 0
+        else None
+    )
+    binance_change = (
+        binance_price - binance_previous_close
+        if binance_price is not None and binance_previous_close is not None
+        else None
+    )
     binance_at = _quote_time(market.get("ts"))
     binance_age = _quote_age_seconds(binance_at, now)
     binance = {
@@ -215,17 +243,50 @@ def _price_comparison_out(
         "role": "execution",
         "available": binance_price is not None,
         "price": binance_price,
+        "display_price": binance_price,
+        "previous_close": binance_previous_close,
+        "change": binance_change,
+        "change_percent": binance_change_percent,
         "observed_at": binance_at,
         "age_seconds": binance_age,
         "fresh": bool(binance_price is not None and binance_age is not None and binance_age <= 120),
     }
 
     tiger_price = _finite_price(tiger.get("price"))
-    tiger_previous_close = _finite_price(tiger.get("previous_close"))
+    tiger_last_price = _finite_price(tiger_trade.get("price"))
+    tiger_previous_close = _finite_price(tiger_trade.get("previous_close"))
+    if tiger_previous_close is None:
+        tiger_previous_close = _finite_price(tiger.get("previous_close"))
+    tiger_change = _finite_number(tiger_trade.get("change"))
+    if tiger_change is None:
+        tiger_change = (
+            tiger_last_price - tiger_previous_close
+            if tiger_last_price is not None and tiger_previous_close is not None
+            else None
+        )
+    tiger_change_rate = _finite_number(tiger_trade.get("change_rate"))
+    tiger_change_percent = (
+        tiger_change_rate * 100
+        if tiger_change_rate is not None
+        else tiger_change / tiger_previous_close * 100
+        if tiger_change is not None and tiger_previous_close is not None
+        else None
+    )
     tiger_at = _quote_time(tiger.get("source_timestamp")) or _quote_time(
         tiger.get("fetched_at")
     )
     tiger_age = _quote_age_seconds(tiger_at, now)
+    tiger_trade_at = _quote_time(tiger_trade.get("source_timestamp")) or _quote_time(
+        tiger_trade.get("fetched_at")
+    )
+    tiger_trade_age = _quote_age_seconds(tiger_trade_at, now)
+    tiger_trade_fresh = bool(
+        tiger_last_price is not None
+        and tiger_trade.get("stale") is not True
+        and tiger_trade.get("live") is True
+        and tiger_trade_age is not None
+        and tiger_trade_age <= 120
+    )
     tiger_fresh = bool(
         tiger_price is not None
         and tiger.get("stale") is not True
@@ -238,14 +299,24 @@ def _price_comparison_out(
         "label": "TG",
         "venue": "us_cash_arca_level2",
         "role": "reference",
-        "available": tiger_price is not None,
+        "available": tiger_price is not None or tiger_last_price is not None,
         "price": tiger_price,
+        "display_price": tiger_last_price if tiger_last_price is not None else tiger_price,
+        "display_source": "tiger_last_trade" if tiger_last_price is not None else "tiger_level2_midpoint",
+        "last_price": tiger_last_price,
+        "previous_close": tiger_previous_close,
+        "change": tiger_change,
+        "change_percent": tiger_change_percent,
+        "display_observed_at": tiger_trade_at if tiger_last_price is not None else tiger_at,
+        "display_age_seconds": tiger_trade_age if tiger_last_price is not None else tiger_age,
+        "display_fresh": tiger_trade_fresh if tiger_last_price is not None else tiger_fresh,
+        "quote_session": tiger_trade.get("session"),
+        "quote_delayed": bool(tiger_trade.get("delayed")),
         "reference_mode": "best_bid_ask_midpoint",
         "best_bid": _finite_price(tiger.get("best_bid")),
         "best_ask": _finite_price(tiger.get("best_ask")),
         "spread_bps": tiger.get("spread_bps"),
         "levels_available": tiger.get("levels_available"),
-        "previous_close": tiger_previous_close,
         "observed_at": tiger_at,
         "age_seconds": tiger_age,
         "fresh": tiger_fresh,
@@ -1753,6 +1824,7 @@ def _opportunity_out(
     live_market: dict[str, Any] | None = None,
     current_market_flow: Mapping[str, Any] | None = None,
     market_snapshot: OpportunityMarketSnapshot | None = None,
+    tiger_depth: Mapping[str, Any] | None = None,
     tiger_quote: Mapping[str, Any] | None = None,
     *,
     use_frozen: bool = False,
@@ -1873,6 +1945,7 @@ def _opportunity_out(
     }
     price_comparison = _price_comparison_out(
         live_market,
+        tiger_depth,
         tiger_quote,
         direction=item.direction,
         news_score=news_score,
@@ -1962,7 +2035,8 @@ def _opportunity_out(
             if prediction is not None
             else None
         ),
-        "tiger_order_book_quote": dict(tiger_quote or {}),
+        "tiger_order_book_quote": dict(tiger_depth or {}),
+        "tiger_realtime_quote": dict(tiger_quote or {}),
         "binance_contract_quote": dict(price_comparison["sources"]["binance"]),
         "price_comparison": price_comparison,
         "prediction_created_at": (
@@ -3729,6 +3803,7 @@ def opportunities(
     live_tickers: dict[str, dict[str, Any]] = {}
     current_market_flows: dict[int, dict[str, Any]] = {}
     tiger_depth_quotes: dict[str, dict[str, Any]] = {}
+    tiger_realtime_quotes: dict[str, dict[str, Any]] = {}
     if items:
         try:
             repository = MonitorRepository(
@@ -3753,19 +3828,24 @@ def opportunities(
         except MonitorUnavailable:
             live_tickers = {}
             current_market_flows = {}
+        active_quote_items = [
+            item
+            for item in items
+            if item.status in {"candidate", "discovered"} and item.expires_at > now
+        ]
         tiger_depth_service = getattr(request.app.state, "tiger_us_depth_service", None)
         if isinstance(tiger_depth_service, TigerUsDepthService):
             # The legacy response can contain up to 300 historical rows. Depth
             # is real-time and only belongs on active cards; historical rows
             # keep their frozen signal-time data and can fetch depth on demand
             # if an operator opens the popup.
-            active_depth_items = [
-                item
-                for item in items
-                if item.status in {"candidate", "discovered"} and item.expires_at > now
-            ]
             tiger_depth_quotes = tiger_depth_service.latest_many(
-                item.symbol for item in active_depth_items
+                item.symbol for item in active_quote_items
+            )
+        tiger_quote_service = getattr(request.app.state, "tiger_us_quote_service", None)
+        if isinstance(tiger_quote_service, TigerUsQuoteService):
+            tiger_realtime_quotes = tiger_quote_service.latest_many(
+                item.symbol for item in active_quote_items
             )
     response_now = now
     response = {
@@ -3777,6 +3857,7 @@ def opportunities(
                 current_market_flows.get(item.id),
                 snapshot_by_opportunity_id.get(item.id),
                 tiger_depth_quotes.get(TigerDepthClient.normalize_symbol(item.symbol)),
+                tiger_realtime_quotes.get(TigerDepthClient.normalize_symbol(item.symbol)),
                 # The frontend requests active and historical rows together so
                 # it can switch tabs without a second round-trip.  The query's
                 # ``include_expired`` flag must not freeze active candidates;

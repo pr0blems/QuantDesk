@@ -63,6 +63,13 @@ def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert ".virtual-position-action .opportunity-detail-toggle" in STYLES
     assert ".opportunity-quotes .provider-quote-badge b" in STYLES
     assert ".provider-quote-badge.tiger" in STYLES
+    assert 'class="provider-quote-body"' in SCRIPT
+    assert 'class="provider-quote-move ${direction}"' in SCRIPT
+    assert "source?.display_price ?? source?.price" in SCRIPT
+    assert 'value != null && value !== ""' in SCRIPT
+    assert "source.display_fresh ?? source.fresh" in SCRIPT
+    assert ".provider-quote-move.up" in STYLES
+    assert ".provider-quote-move.down" in STYLES
     assert "${binancePriceControl}${tigerSpotControl}" in SCRIPT
     assert "finnhubSpotControl" not in SCRIPT
     assert "unusualWhalesControl" not in SCRIPT

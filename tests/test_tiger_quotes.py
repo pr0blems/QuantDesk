@@ -40,6 +40,8 @@ def test_tiger_client_uses_direct_batch_endpoint_and_freshest_session() -> None:
                         "hourTrading": {
                             "latestPrice": 368.66,
                             "preClose": 367.95,
+                            "change": 0.71,
+                            "changeRate": 0.00192961,
                             "timestamp": now_ms,
                         },
                     }
@@ -61,6 +63,8 @@ def test_tiger_client_uses_direct_batch_endpoint_and_freshest_session() -> None:
     assert headers["Authorization"] == "Bearer server-only-token"
     assert quote.price == pytest.approx(368.66)
     assert quote.previous_close == pytest.approx(367.95)
+    assert quote.change == pytest.approx(0.71)
+    assert quote.change_rate == pytest.approx(0.00192961)
     assert quote.session == "extended_hours"
     assert quote.live is True
     assert quote.delayed is False
@@ -102,6 +106,8 @@ def test_tiger_service_caches_batch() -> None:
 
     assert calls == 1
     assert first["price"] == pytest.approx(220.25)
+    assert first["change"] == pytest.approx(1.25)
+    assert first["change_rate"] == pytest.approx(1.25 / 219.0)
     assert second["live"] is True
     assert second["error_category"] is None
 

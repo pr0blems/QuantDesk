@@ -2152,10 +2152,10 @@ td.negative { color: var(--ai-red); }
 .opportunity-badges :where(.direction, .direction-badge, .lifecycle-badge, .readiness-badge, .quality-badge) { min-height: 23px; padding: 3px 7px; border: 1px solid #304039; border-radius: 4px; font-size: 10px; font-weight: 750; }
 .opportunity-badges .direction-badge.long { border-color: rgba(91, 214, 170, .62); color: var(--ai-green); background: rgba(91, 214, 170, .045); }
 .opportunity-badges .direction-badge.short { border-color: rgba(255, 120, 136, .62); color: var(--ai-red); background: rgba(255, 120, 136, .045); }
-.opportunity-quotes .provider-quote-badge { min-height: 36px; gap: 6px; padding: 6px 9px; border-color: transparent; background: rgba(255, 255, 255, .018); }
-.opportunity-quotes .provider-quote-badge i { padding: 3px 5px; font-size: 10px; }
-.opportunity-quotes .provider-quote-badge b { font-size: 16px; line-height: 1; }
-.opportunity-quotes .provider-quote-badge small { font-size: 11px; line-height: 1; }
+.opportunity-quotes .provider-quote-badge { min-height: 48px; gap: 8px; padding: 7px 10px; border-color: transparent; background: rgba(255, 255, 255, .018); }
+.opportunity-quotes .provider-quote-badge i { align-self: stretch; display: grid; place-items: center; min-width: 29px; padding: 4px 6px; font-size: 10px; }
+.opportunity-quotes .provider-quote-badge b { font-size: 17px; line-height: 1; }
+.opportunity-quotes .provider-quote-badge small { font-size: 9px; line-height: 1; }
 .opportunity-top-metrics { min-width: 0; height: 78px; align-self: center; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .opportunity-top-metrics .market-depth-control,
 .opportunity-top-metrics .opportunity-score {
@@ -2603,6 +2603,14 @@ td.negative { color: var(--ai-red); }
 .provider-quote-badge i { padding: 2px 3px; background: rgba(78, 171, 255, .14); color: #69b8ff; font-style: normal; font-size: 9px; }
 .provider-quote-badge b { color: var(--ai-text); font-size: 12px; }
 .provider-quote-badge small { color: var(--ai-dim); font-size: 9px; }
+.provider-quote-body { min-width: 0; display: grid; gap: 5px; }
+.provider-quote-value, .provider-quote-move { display: flex; align-items: baseline; gap: 7px; }
+.provider-quote-value small { font-weight: 650; }
+.provider-quote-move { font-size: 10px; line-height: 1; }
+.provider-quote-move em, .provider-quote-move strong { font-style: normal; font-weight: 800; }
+.provider-quote-move.up { color: var(--ai-green); }
+.provider-quote-move.down { color: var(--ai-red); }
+.provider-quote-move.flat, .provider-quote-move.unknown { color: var(--ai-muted); }
 .provider-quote-badge.binance { border-color: rgba(244, 190, 75, .42); background: rgba(244, 190, 75, .065); }
 .provider-quote-badge.binance i { color: #f4be4b; background: rgba(244, 190, 75, .12); }
 .provider-quote-badge.tiger { border-color: rgba(255, 121, 77, .42); background: rgba(255, 121, 77, .065); }

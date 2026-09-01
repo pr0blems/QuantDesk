@@ -150,7 +150,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-tiger-depth">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260902-live-change">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -4434,11 +4434,32 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       const symbolControl = marketAvailable
         ? `<button class="opportunity-symbol" type="button" data-opportunity-id="${this.escape(item.id)}" data-open-contract="${this.escape(item.contract_symbol)}" data-timeframe="${this.escape(item.timeframe)}" title="打开 ${this.escape(item.symbol)} 的合约 K 线研究与预测模拟">${this.escape(item.symbol)}</button>`
         : `<button class="opportunity-symbol unavailable" type="button" disabled title="该股票暂无对应的合约技术行情">${this.escape(item.symbol)}</button>`;
-      const providerQuoteBadge = (source, tone, liveLabel) => source?.available && Number(source.price) > 0
-        ? `<span class="provider-quote-badge ${tone} ${source.fresh ? "live" : "stale"}" title="${this.escape(liveLabel)} · ${source.fresh ? "新鲜" : "延迟/休市"} · ${this.formatDate(source.observed_at)}"><i>${this.escape(source.label || "--")}</i><b>${this.escape(this.compactNumber(Number(source.price)))}</b><small>${source.fresh ? "实时" : "延迟"}</small></span>`
-        : "";
+      const providerQuoteBadge = (source, tone, liveLabel) => {
+        const price = Number(source?.display_price ?? source?.price);
+        if (!source?.available || !Number.isFinite(price) || price <= 0) return "";
+        const finiteQuoteNumber = (value) => value != null && value !== "" && Number.isFinite(Number(value))
+          ? Number(value)
+          : null;
+        const change = finiteQuoteNumber(source.change);
+        const changePercent = finiteQuoteNumber(source.change_percent);
+        const hasChange = change != null;
+        const hasChangePercent = changePercent != null;
+        const direction = hasChangePercent
+          ? changePercent > 0 ? "up" : changePercent < 0 ? "down" : "flat"
+          : hasChange
+          ? change > 0 ? "up" : change < 0 ? "down" : "flat"
+          : "unknown";
+        const fresh = source.display_fresh ?? source.fresh;
+        const observedAt = source.display_observed_at || source.observed_at;
+        const changeLabel = hasChange ? `${change > 0 ? "+" : ""}${this.compactNumber(change)}` : "--";
+        const percentLabel = hasChangePercent ? `${changePercent > 0 ? "+" : ""}${changePercent.toFixed(2)}%` : "--";
+        return `<span class="provider-quote-badge ${tone} ${fresh ? "live" : "stale"}" title="${this.escape(liveLabel)} · ${fresh ? "实时" : "延迟/休市"} · ${this.formatDate(observedAt)}">
+          <i>${this.escape(source.label || "--")}</i>
+          <span class="provider-quote-body"><span class="provider-quote-value"><b>${this.escape(this.compactNumber(price))}</b><small>${fresh ? "实时" : "延迟"}</small></span><span class="provider-quote-move ${direction}"><em>${this.escape(changeLabel)}</em><strong>${this.escape(percentLabel)}</strong></span></span>
+        </span>`;
+      };
       const binancePriceControl = providerQuoteBadge(binanceQuote, "binance", "Binance 映射合约执行参考价");
-      const tigerSpotControl = providerQuoteBadge(tigerSpot, "tiger", "老虎证券 Level 2 买一/卖一盘口中间价");
+      const tigerSpotControl = providerQuoteBadge(tigerSpot, "tiger", "老虎证券实时成交价；BN/TG 基差仍使用 Level 2 买一/卖一盘口中间价");
       const finiteComparisonValue = (value) => value != null && value !== "" && Number.isFinite(Number(value))
         ? Number(value)
         : null;
