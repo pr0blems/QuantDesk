@@ -266,10 +266,12 @@ def test_admin_frontend_assets_and_route(mysql_test_engine: Engine) -> None:
         login_page = client.get("/admin/login", follow_redirects=False)
         user_page = client.get("/monitor")
 
-    assert page.status_code == 308
+    assert page.status_code == 307
     assert page.headers["location"] == "/next/admin/#overview"
-    assert login_page.status_code == 308
+    assert page.headers["cache-control"] == "no-store"
+    assert login_page.status_code == 307
     assert login_page.headers["location"] == "/next/admin/#overview"
+    assert login_page.headers["cache-control"] == "no-store"
     assert user_page.status_code == 200
 
 

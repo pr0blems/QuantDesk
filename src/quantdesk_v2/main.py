@@ -81,7 +81,9 @@ def _admin_frontend_redirect() -> RedirectResponse:
     # A loopback URL is resolved on the visitor's computer, not on this server.
     # Local Vite users already enter through port 5173 directly, so the backend
     # redirect must remain same-origin in development, test and production.
-    return RedirectResponse(url="/next/admin/#overview", status_code=308)
+    response = RedirectResponse(url="/next/admin/#overview", status_code=307)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _monitor_symbols(path: Path) -> tuple[str, ...]:
