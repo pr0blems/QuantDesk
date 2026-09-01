@@ -79,7 +79,7 @@ from ...schemas import (
 )
 from ...security import CredentialCipher, SecurityError, decode_access_token
 from ...strategy_artifacts import add_run_manifest, record_revision_artifact
-from ...tiger_quotes import TigerQuoteClient, TigerUsQuoteService
+from ...tiger_quotes import TigerDepthClient, TigerUsDepthService
 from .ai_monitor_runs import router as run_router
 from .ai_monitor_support import (
     add_ai_monitor_audit,
@@ -185,7 +185,7 @@ def _quote_age_seconds(observed_at: datetime | None, now: datetime) -> float | N
 
 def _price_comparison_out(
     live_market: Mapping[str, Any] | None,
-    tiger_quote: Mapping[str, Any] | None = None,
+    tiger_depth: Mapping[str, Any] | None = None,
     *,
     direction: str | None = None,
     news_score: float | None = None,
@@ -194,16 +194,16 @@ def _price_comparison_out(
     reused_news_count: int = 0,
     memory_window_hours: int = 168,
 ) -> dict[str, Any]:
-    """Compare the Binance mapped contract with Tiger's US cash quote.
+    """Compare the Binance contract with Tiger's Level-2 midpoint.
 
-    Binance remains the only execution/valuation source. Tiger is the only stock
-    reference used by the opportunity read model; the spread stays research-only
-    until both quotes are fresh and synchronized.
+    Binance remains the only execution/valuation source. The Tiger reference is
+    derived from the demo's NYSE Arca buy-one/sell-one order-book snapshot, not
+    from Tiger's ordinary last-trade quote.
     """
 
     now = datetime.now(UTC)
     market = dict(live_market or {})
-    tiger = dict(tiger_quote or {})
+    tiger = dict(tiger_depth or {})
 
     binance_price = _finite_price(market.get("price"))
     binance_at = _quote_time(market.get("ts"))
@@ -234,19 +234,24 @@ def _price_comparison_out(
         and tiger_age <= 120
     )
     tiger_source = {
-        "source": "tiger",
+        "source": "tiger_level2",
         "label": "TG",
-        "venue": "us_cash_last_trade",
+        "venue": "us_cash_arca_level2",
         "role": "reference",
         "available": tiger_price is not None,
         "price": tiger_price,
+        "reference_mode": "best_bid_ask_midpoint",
+        "best_bid": _finite_price(tiger.get("best_bid")),
+        "best_ask": _finite_price(tiger.get("best_ask")),
+        "spread_bps": tiger.get("spread_bps"),
+        "levels_available": tiger.get("levels_available"),
         "previous_close": tiger_previous_close,
         "observed_at": tiger_at,
         "age_seconds": tiger_age,
         "fresh": tiger_fresh,
         "live": bool(tiger.get("live")),
         "delayed": bool(tiger.get("delayed")),
-        "market_session": tiger.get("session"),
+        "market_session": "arca_level2",
         "error_category": tiger.get("error_category"),
     }
 
@@ -346,7 +351,7 @@ def _price_comparison_out(
     else:
         forecast_label = "bullish_open"
     return {
-        "version": "cross_venue_basis_v3",
+        "version": "cross_venue_basis_v4",
         "execution_source": "binance",
         "sources": {
             "binance": binance,
@@ -368,7 +373,7 @@ def _price_comparison_out(
         "pair_direction": pair_direction,
         "comparable": comparable,
         "actionable": False,
-        "research_only_reason": "binance_tiger_basis_requires_synchronized_executable_two_leg_quotes",
+        "research_only_reason": "binance_tiger_depth_basis_is_a_research_reference",
         "opening_forecast": {
             "available": forecast_available,
             "label": forecast_label,
@@ -1957,7 +1962,7 @@ def _opportunity_out(
             if prediction is not None
             else None
         ),
-        "tiger_spot_quote": dict(tiger_quote or {}),
+        "tiger_order_book_quote": dict(tiger_quote or {}),
         "binance_contract_quote": dict(price_comparison["sources"]["binance"]),
         "price_comparison": price_comparison,
         "prediction_created_at": (
@@ -3723,7 +3728,7 @@ def opportunities(
     )
     live_tickers: dict[str, dict[str, Any]] = {}
     current_market_flows: dict[int, dict[str, Any]] = {}
-    tiger_spot_quotes: dict[str, dict[str, Any]] = {}
+    tiger_depth_quotes: dict[str, dict[str, Any]] = {}
     if items:
         try:
             repository = MonitorRepository(
@@ -3748,10 +3753,19 @@ def opportunities(
         except MonitorUnavailable:
             live_tickers = {}
             current_market_flows = {}
-        tiger_quote_service = getattr(request.app.state, "tiger_us_quote_service", None)
-        if isinstance(tiger_quote_service, TigerUsQuoteService):
-            tiger_spot_quotes = tiger_quote_service.latest_many(
-                item.symbol for item in items
+        tiger_depth_service = getattr(request.app.state, "tiger_us_depth_service", None)
+        if isinstance(tiger_depth_service, TigerUsDepthService):
+            # The legacy response can contain up to 300 historical rows. Depth
+            # is real-time and only belongs on active cards; historical rows
+            # keep their frozen signal-time data and can fetch depth on demand
+            # if an operator opens the popup.
+            active_depth_items = [
+                item
+                for item in items
+                if item.status in {"candidate", "discovered"} and item.expires_at > now
+            ]
+            tiger_depth_quotes = tiger_depth_service.latest_many(
+                item.symbol for item in active_depth_items
             )
     response_now = now
     response = {
@@ -3762,7 +3776,7 @@ def opportunities(
                 live_tickers.get((item.contract_symbol or "").upper()),
                 current_market_flows.get(item.id),
                 snapshot_by_opportunity_id.get(item.id),
-                tiger_spot_quotes.get(TigerQuoteClient.normalize_symbol(item.symbol)),
+                tiger_depth_quotes.get(TigerDepthClient.normalize_symbol(item.symbol)),
                 # The frontend requests active and historical rows together so
                 # it can switch tabs without a second round-trip.  The query's
                 # ``include_expired`` flag must not freeze active candidates;
@@ -3810,11 +3824,12 @@ def opportunities(
 @router.get("/opportunities/{opportunity_id}/order-book")
 def opportunity_order_book(
     opportunity_id: str,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     limit: int = Query(default=100),
 ) -> dict[str, Any]:
-    """Expose Binance Futures depth across the API/market process boundary."""
+    """Expose synchronized Binance and Tiger Level-2 research snapshots."""
 
     if limit not in {20, 50, 100}:
         raise HTTPException(status_code=422, detail="limit must be 20, 50, or 100")
@@ -3836,11 +3851,30 @@ def opportunity_order_book(
             status_code=503,
             detail=str(exc),
         ) from exc
+    tiger_snapshot: dict[str, Any] | None = None
+    tiger_depth_service = getattr(request.app.state, "tiger_us_depth_service", None)
+    if isinstance(tiger_depth_service, TigerUsDepthService):
+        try:
+            tiger_snapshot = tiger_depth_service.latest_one(opportunity.symbol)
+        except Exception:
+            # Tiger is a research reference. It must never hide an otherwise
+            # valid Binance execution order book.
+            tiger_snapshot = None
     return {
         **snapshot,
         "opportunity_id": str(opportunity.public_id),
         "equity_symbol": str(opportunity.symbol or "").strip().upper(),
         "contract_symbol": contract_symbol,
+        "tiger_order_book": tiger_snapshot
+        or {
+            "available": False,
+            "source": "tiger_level2",
+            "label": "TG",
+            "venue": "us_cash_arca_level2",
+            "symbol": TigerDepthClient.normalize_symbol(opportunity.symbol),
+            "bids": [],
+            "asks": [],
+        },
     }
 
 

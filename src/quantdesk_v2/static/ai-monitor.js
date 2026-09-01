@@ -150,7 +150,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-bn-tiger-basis">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-tiger-depth">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -419,8 +419,8 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
               <button id="order-book-close" class="ai-conclusion-close" type="button" data-order-book-close aria-label="关闭盘口与资金分析">×</button>
             </div>
           </header>
-          <div class="order-book-content"><div id="order-book-body" class="order-book-body" role="tabpanel"><div class="order-book-loading">正在同步 Binance 实时盘口…</div></div><div id="order-book-flow-body" class="order-book-flow-body hidden" role="tabpanel"></div></div>
-          <footer class="order-book-foot"><span id="order-book-foot-copy">页面每秒读取服务端盘口；优先使用 WebSocket，跨进程时由短缓存 REST 快照补齐</span><strong>可见挂单与资金盘口评分用于研究，不代表真实主力资金</strong></footer>
+          <div class="order-book-content"><div id="order-book-body" class="order-book-body" role="tabpanel"><div class="order-book-loading">正在同步老虎证券 Level 2 与 Binance 实时盘口…</div></div><div id="order-book-flow-body" class="order-book-flow-body hidden" role="tabpanel"></div></div>
+          <footer class="order-book-foot"><span id="order-book-foot-copy">TG 来自老虎证券 Level 2 买一/卖一盘口；BN 优先使用 Binance WebSocket，跨进程时由短缓存 REST 快照补齐</span><strong>可见挂单与资金盘口评分用于研究；TG/BN 价差不代表无风险套利机会</strong></footer>
         </section>
       </div>
       <div id="ai-conclusion-modal" class="ai-conclusion-modal hidden" aria-hidden="true">
@@ -3572,6 +3572,41 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     </svg>`;
   }
 
+  renderTigerOrderBook(snapshot) {
+    if (!snapshot?.available) {
+      return `<section class="tiger-depth-venue unavailable"><header><div><span>TIGER LEVEL 2</span><strong>老虎证券盘口信息</strong></div><small>当前股票盘口暂不可用；下方 Binance 合约盘口仍可正常使用</small></header></section>`;
+    }
+    const bids = Array.isArray(snapshot.bids) ? snapshot.bids : [];
+    const asks = Array.isArray(snapshot.asks) ? snapshot.asks : [];
+    const rowCount = Math.max(bids.length, asks.length);
+    const bodyRows = Array.from({ length: rowCount }, (_, index) => {
+      const bid = bids[index];
+      const ask = asks[index];
+      return `<tr>
+        <td>${bid ? this.escape(this.compactMetric(bid.cumulative_notional)) : "--"}</td>
+        <td>${bid ? this.escape(this.compactNumber(bid.quantity)) : "--"}</td>
+        <td>${bid ? this.escape(this.compactNumber(bid.price)) : "--"}</td>
+        <td>${bid ? this.number(bid.order_count) : "--"}</td>
+        <td>${ask ? this.escape(this.compactNumber(ask.price)) : "--"}</td>
+        <td>${ask ? this.escape(this.compactNumber(ask.quantity)) : "--"}</td>
+        <td>${ask ? this.number(ask.order_count) : "--"}</td>
+        <td>${ask ? this.escape(this.compactMetric(ask.cumulative_notional)) : "--"}</td>
+      </tr>`;
+    }).join("");
+    const ratio = Number(snapshot.bid_ask_ratio);
+    return `<section class="tiger-depth-venue"><header><div><span>TIGER LEVEL 2 · NYSE ARCA</span><strong>老虎证券盘口信息</strong></div><small>更新 ${this.escape(this.formatUnix(snapshot.captured_at))} · ${this.number(snapshot.levels_available)} 档</small></header>
+      <div class="tiger-depth-summary">
+        <span class="bid"><em>买方累计</em><b>${this.escape(this.compactMetric(snapshot.bid_depth_notional, " U"))}</b></span>
+        <span class="ask"><em>卖方累计</em><b>${this.escape(this.compactMetric(snapshot.ask_depth_notional, " U"))}</b></span>
+        <span><em>买卖深度比</em><b>${Number.isFinite(ratio) ? ratio.toFixed(3) : "--"}</b></span>
+        <span><em>盘口中间价</em><b>${this.escape(this.compactNumber(snapshot.mid_price))}</b><small>${this.escape(this.compactNumber(snapshot.best_bid))} / ${this.escape(this.compactNumber(snapshot.best_ask))}</small></span>
+        <span><em>最优价差</em><b>${Number(snapshot.spread_bps).toFixed(2)} bps</b></span>
+        <span><em>TG 参考价口径</em><b>买一卖一中间价</b></span>
+      </div>
+      <div class="tiger-depth-workspace"><div class="tiger-depth-ladder"><table><thead><tr><th>买方累计</th><th>买量</th><th>买价</th><th>委托</th><th>卖价</th><th>卖量</th><th>委托</th><th>卖方累计</th></tr></thead><tbody>${bodyRows}</tbody></table></div><div class="tiger-depth-chart"><header><strong>老虎证券累计深度趋势</strong><small>绿色买盘 · 红色卖盘</small></header>${this.renderOrderBookChart(snapshot)}</div></div>
+    </section>`;
+  }
+
   renderOrderBook() {
     const snapshot = this.orderBookSnapshot;
     if (!snapshot) return;
@@ -3612,7 +3647,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     const ratio = Number(snapshot.bid_ask_ratio);
     const ratioTone = !Number.isFinite(ratio) ? "flat" : ratio > 1.05 ? "up" : ratio < .95 ? "down" : "flat";
     const change = (value) => value == null || !Number.isFinite(Number(value)) ? "--" : `${Number(value) > 0 ? "+" : ""}${Number(value).toFixed(1)}%`;
-    this.q("#order-book-body").innerHTML = `<section class="order-book-summary">
+    this.q("#order-book-body").innerHTML = `${this.renderTigerOrderBook(snapshot.tiger_order_book)}<div class="order-book-source-divider"><span>BINANCE FUTURES</span><strong>币安交易所合约盘口信息</strong></div><section class="order-book-summary">
       <article class="bid"><span>买方 ${snapshot.limit} 档</span><b>${this.escape(this.compactMetric(snapshot.bid_depth_notional, " U"))}</b><small>30秒 ${change(snapshot.bid_depth_change_30s_pct)}</small></article>
       <article class="ask"><span>卖方 ${snapshot.limit} 档</span><b>${this.escape(this.compactMetric(snapshot.ask_depth_notional, " U"))}</b><small>30秒 ${change(snapshot.ask_depth_change_30s_pct)}</small></article>
       <article class="${ratioTone}"><span>买卖深度比</span><b>${Number.isFinite(ratio) ? ratio.toFixed(3) : "--"}</b><small>失衡 ${Number(snapshot.book_imbalance || 0).toFixed(3)}</small></article>
@@ -4186,7 +4221,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       const priceComparison = item.price_comparison || {};
       const priceSources = priceComparison.sources || {};
       const binanceQuote = priceSources.binance || item.binance_contract_quote || {};
-      const tigerSpot = priceSources.tiger || item.tiger_spot_quote || {};
+      const tigerSpot = priceSources.tiger || item.tiger_order_book_quote || {};
       const marketEnvironment = evidence.market_environment || evidence.score_snapshot?.macro_market || {};
       const macroSnapshot = evidence.macro_market_snapshot || {};
       const macroIndices = Object.fromEntries((macroSnapshot.indices || []).map((entry) => [entry.key, entry]));
@@ -4403,7 +4438,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
         ? `<span class="provider-quote-badge ${tone} ${source.fresh ? "live" : "stale"}" title="${this.escape(liveLabel)} · ${source.fresh ? "新鲜" : "延迟/休市"} · ${this.formatDate(source.observed_at)}"><i>${this.escape(source.label || "--")}</i><b>${this.escape(this.compactNumber(Number(source.price)))}</b><small>${source.fresh ? "实时" : "延迟"}</small></span>`
         : "";
       const binancePriceControl = providerQuoteBadge(binanceQuote, "binance", "Binance 映射合约执行参考价");
-      const tigerSpotControl = providerQuoteBadge(tigerSpot, "tiger", "老虎证券美股现货实时参考价");
+      const tigerSpotControl = providerQuoteBadge(tigerSpot, "tiger", "老虎证券 Level 2 买一/卖一盘口中间价");
       const finiteComparisonValue = (value) => value != null && value !== "" && Number.isFinite(Number(value))
         ? Number(value)
         : null;
@@ -4447,12 +4482,12 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
         : "等待参考快照";
       const comparisonConclusion = liveBasisMode ? livePairDirection : forecastLabel;
       const gapLabel = liveBasisMode ? "BN / TG 实时基差" : "BN / TG 快照差";
-      const referenceLabel = liveBasisMode ? "TG 实时现货" : "TG 最近快照";
+      const referenceLabel = liveBasisMode ? "TG 盘口中间价" : "TG 最近盘口快照";
       const basisExplanation = liveBasisMode
-        ? "BN 映射合约与 TG 美股现货均新鲜且时间同步；价差仅用于研究，不代表可无风险套利"
+        ? "BN 映射合约与 TG Level 2 盘口中间价均新鲜且时间同步；价差仅用于研究，不代表可无风险套利"
         : openingForecast.available
         ? `${newNewsCount > 0 ? `本轮新增 ${newNewsCount} 条` : "本轮没有新增新闻"} · 当前机会关联 ${relatedNewsCount} 条${reusedNewsCount > 0 ? `（沿用 ${reusedNewsCount} 条）` : ""} · ${memoryWindowLabel} AI 记忆用于新新闻回溯；TG 快照${openingForecast.gap_aligned ? "与新闻方向共振" : "与新闻方向未共振"}。这是开盘概率预判，不是无风险套利`
-        : "缺少可用 TG 现货快照或新闻方向，暂不生成开盘缺口预判";
+        : "缺少可用 TG Level 2 盘口快照或新闻方向，暂不生成开盘缺口预判";
       const basisPanel = `<section class="cross-venue-basis ${this.escape(basisState)} forecast-${this.escape(forecastDirection)}" data-patch-key="price-comparison" aria-label="跨市场价格比对与开盘预判">
         <strong><i>${liveBasisMode ? "LIVE BASIS" : "OPEN GAP"}</i>${this.escape(basisStateLabel)}</strong>
         <span><em>${gapLabel}</em><b>${displayedGapBps == null ? "--" : `${displayedGapBps >= 0 ? "+" : ""}${displayedGapBps.toFixed(1)} bps`}</b><small>${!liveBasisMode && previousCloseGapBps != null ? `BN / 昨收 ${previousCloseGapBps >= 0 ? "+" : ""}${previousCloseGapBps.toFixed(1)} bps` : ""}</small></span>

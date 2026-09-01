@@ -131,6 +131,8 @@ def test_price_comparison_uses_binance_execution_and_tiger_reference() -> None:
     assert result["sources"]["binance"]["fresh"] is True
     assert result["sources"]["tiger"]["fresh"] is True
     assert result["sources"]["tiger"]["price"] == pytest.approx(100.2)
+    assert result["sources"]["tiger"]["venue"] == "us_cash_arca_level2"
+    assert result["sources"]["tiger"]["reference_mode"] == "best_bid_ask_midpoint"
     assert result["reference_source"] == "tiger"
     assert result["reference_price"] == pytest.approx(100.2)
     assert result["basis_bps"] == pytest.approx((101.0 / 100.2 - 1) * 10_000)
@@ -4079,6 +4081,8 @@ def test_opportunity_live_order_book_endpoint_is_tenant_scoped() -> None:
     assert "except ws_depth.OrderBookUnavailableError as exc" in endpoint
     assert "status_code=503" in endpoint
     assert 'raise HTTPException(status_code=404, detail="opportunity not found")' in endpoint
+    assert '"tiger_order_book": tiger_snapshot' in endpoint
+    assert '"source": "tiger_level2"' in endpoint
 
 
 def test_opportunities_are_ordered_by_signal_time_descending() -> None:
@@ -4183,16 +4187,16 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'name="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260901-bn-tiger-basis"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260901-tiger-depth"' in entrypoint
     assert '"/assets/monitor.js?v=20260831-react3"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
-    assert 'href="/assets/ai-monitor.css?v=20260901-bn-tiger-basis"' in component
+    assert 'href="/assets/ai-monitor.css?v=20260901-tiger-depth"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
     assert "/assets/controller-runtime.js?v=20260831-react3" in react_index
     assert "/assets/strategies.js?v=20260831-react3" in react_index
     for asset in (
-        '"/assets/ai-monitor.js?v=20260901-bn-tiger-basis"',
+        '"/assets/ai-monitor.js?v=20260901-tiger-depth"',
         '"/assets/monitor.js?v=20260831-react3"',
         '"/assets/paper.js?v=20260831-react3"',
         '"/assets/live.js?v=20260831-react3"',
@@ -4467,6 +4471,9 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert '"REST 快照"' in component
     assert "跨进程时由短缓存 REST 快照补齐" in component
     assert "买卖盘口梯形表" in component
+    assert "老虎证券盘口信息" in component
+    assert "老虎证券 Level 2 买一/卖一盘口中间价" in component
+    assert "币安交易所合约盘口信息" in component
     assert ".order-book-ladder" in stylesheet
     assert ".order-book-chart" in stylesheet
     assert ".score-line.combined" in stylesheet

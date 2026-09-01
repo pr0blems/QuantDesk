@@ -73,10 +73,12 @@ class Settings(BaseSettings):
     finnhub_websocket_enabled: bool = True
     tradfi_universe_sync_seconds: int = 3600
 
-    # Tiger individual-stock quotes are fetched server-side from the approved
-    # batch endpoint. The authorization value must never enter static assets.
+    # Tiger market data is fetched server-side. The authorization value must
+    # never enter static assets; the depth origin is the same Level-2 source as
+    # the local HAR demo, not the demo's localhost HTTP route.
     tiger_quote_authorization: SecretStr = SecretStr("")
     tiger_quote_base_url: str = "https://hq2.skytigris.cn"
+    tiger_depth_base_url: str = "https://hq-depth.skytigris.cn"
     tiger_quote_timeout_seconds: float = 5.0
     tiger_quote_cache_seconds: float = 2.0
     tiger_quote_stale_seconds: int = 900
@@ -257,6 +259,24 @@ class Settings(BaseSettings):
         authorization = self.tiger_quote_authorization.get_secret_value()
         if authorization and len(authorization) < 12:
             raise RuntimeError("TIGER_QUOTE_AUTHORIZATION must contain at least 12 characters")
+        depth = urlparse(self.tiger_depth_base_url)
+        try:
+            depth_port = depth.port
+        except ValueError:
+            depth_port = -1
+        if (
+            depth.scheme.lower() != "https"
+            or depth.hostname != "hq-depth.skytigris.cn"
+            or depth.username is not None
+            or depth.password is not None
+            or depth_port not in (None, 443)
+            or depth.path not in ("", "/")
+            or depth.query
+            or depth.fragment
+        ):
+            raise RuntimeError(
+                "TIGER_DEPTH_BASE_URL must be the approved Tiger Level-2 HTTPS origin"
+            )
 
     @staticmethod
     def _validate_binance_origin(name: str, value: str, allowed_hosts: set[str]) -> None:
