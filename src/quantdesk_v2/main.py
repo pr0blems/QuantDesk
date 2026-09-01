@@ -40,6 +40,7 @@ from .macro_market import (
 from .models import AdminSetting
 from .news import _unusual_whales_api_key
 from .strategy_routes import router as strategy_router
+from .tiger_quotes import TigerQuoteClient, TigerUsQuoteService
 from .unusual_whales import UnusualWhalesMarketClient
 from .unusual_whales_runtime import DEFAULT_CHANNEL_FLAGS, UnusualWhalesRuntime
 
@@ -276,6 +277,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=database_engine,
         enabled=bool(initial_finnhub_config.get("enabled", True)),
         market_open_checker=is_us_regular_market,
+    )
+    app.state.tiger_us_quote_service = TigerUsQuoteService(
+        TigerQuoteClient(
+            runtime_settings.tiger_quote_base_url,
+            runtime_settings.tiger_quote_authorization.get_secret_value(),
+            timeout_seconds=runtime_settings.tiger_quote_timeout_seconds,
+        ),
+        cache_seconds=runtime_settings.tiger_quote_cache_seconds,
+        stale_seconds=runtime_settings.tiger_quote_stale_seconds,
     )
     initial_uw_runtime_config = _unusual_whales_runtime_config(database_engine)
     initial_uw_enabled = bool(initial_uw_runtime_config.get("enabled", True))

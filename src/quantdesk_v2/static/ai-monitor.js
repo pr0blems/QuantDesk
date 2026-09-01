@@ -151,7 +151,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-macro-tooltip-layer1">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-tiger-quotes">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -4249,6 +4249,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       const binanceQuote = priceSources.binance || item.binance_contract_quote || {};
       const finnhubSpot = priceSources.finnhub || item.finnhub_spot_quote || {};
       const unusualWhalesQuote = priceSources.unusual_whales || {};
+      const tigerSpot = priceSources.tiger || item.tiger_spot_quote || {};
       const marketEnvironment = evidence.market_environment || evidence.score_snapshot?.macro_market || {};
       const macroSnapshot = evidence.macro_market_snapshot || {};
       const macroIndices = Object.fromEntries((macroSnapshot.indices || []).map((entry) => [entry.key, entry]));
@@ -4467,6 +4468,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       const binancePriceControl = providerQuoteBadge(binanceQuote, "binance", "Binance 映射合约执行参考价");
       const finnhubSpotControl = providerQuoteBadge(finnhubSpot, "finnhub", "Finnhub 美股现货参考价");
       const unusualWhalesControl = providerQuoteBadge(unusualWhalesQuote, "unusual-whales", "Unusual Whales 美股 NBBO/成交参考价");
+      const tigerSpotControl = providerQuoteBadge(tigerSpot, "tiger", "老虎证券美股现货实时参考价");
       const finiteComparisonValue = (value) => value != null && value !== "" && Number.isFinite(Number(value))
         ? Number(value)
         : null;
@@ -4532,7 +4534,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
           <div class="opportunity-identity">
             <div class="opportunity-symbol-line">${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small></div>
             <div class="opportunity-badges"><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="direction-badge ${directionClass}">${directionLabel}</span>${triggerBadge}</div>
-            <div class="opportunity-quotes">${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}</div>
+            <div class="opportunity-quotes">${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${tigerSpotControl}</div>
           </div>
           <div class="opportunity-top-metrics">${marketDepthControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></div>
         </header>

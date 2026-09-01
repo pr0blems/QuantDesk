@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     finnhub_websocket_enabled: bool = True
     tradfi_universe_sync_seconds: int = 3600
 
+    # Tiger individual-stock quotes are fetched server-side from the approved
+    # batch endpoint. The authorization value must never enter static assets.
+    tiger_quote_authorization: SecretStr = SecretStr("")
+    tiger_quote_base_url: str = "https://hq2.skytigris.cn"
+    tiger_quote_timeout_seconds: float = 5.0
+    tiger_quote_cache_seconds: float = 2.0
+    tiger_quote_stale_seconds: int = 900
+
     # News-source rows contain the endpoint and polling policy, never this secret.
     unusual_whales_api_key: SecretStr = SecretStr("")
 
@@ -121,6 +129,7 @@ class Settings(BaseSettings):
         self._validate_binance_futures_settings()
         self._validate_openai_settings()
         self._validate_finnhub_settings()
+        self._validate_tiger_quote_settings()
         external_news_api_key = self.external_news_api_key.get_secret_value()
         if external_news_api_key and len(external_news_api_key) < 12:
             raise RuntimeError("EXTERNAL_NEWS_API_KEY must contain at least 12 characters")
@@ -219,6 +228,35 @@ class Settings(BaseSettings):
         webhook_secret = self.finnhub_webhook_secret.get_secret_value()
         if webhook_secret and not 16 <= len(webhook_secret) <= 256:
             raise RuntimeError("FINNHUB_WEBHOOK_SECRET must contain 16 to 256 characters")
+
+    def _validate_tiger_quote_settings(self) -> None:
+        parsed = urlparse(self.tiger_quote_base_url)
+        try:
+            port = parsed.port
+        except ValueError:
+            port = -1
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.hostname != "hq2.skytigris.cn"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise RuntimeError(
+                "TIGER_QUOTE_BASE_URL must be the approved Tiger HTTPS origin"
+            )
+        if not 1 <= self.tiger_quote_timeout_seconds <= 10:
+            raise RuntimeError("TIGER_QUOTE_TIMEOUT_SECONDS must be between 1 and 10")
+        if not 0.5 <= self.tiger_quote_cache_seconds <= 30:
+            raise RuntimeError("TIGER_QUOTE_CACHE_SECONDS must be between 0.5 and 30")
+        if not 60 <= self.tiger_quote_stale_seconds <= 3_600:
+            raise RuntimeError("TIGER_QUOTE_STALE_SECONDS must be between 60 and 3600")
+        authorization = self.tiger_quote_authorization.get_secret_value()
+        if authorization and len(authorization) < 12:
+            raise RuntimeError("TIGER_QUOTE_AUTHORIZATION must contain at least 12 characters")
 
     @staticmethod
     def _validate_binance_origin(name: str, value: str, allowed_hosts: set[str]) -> None:

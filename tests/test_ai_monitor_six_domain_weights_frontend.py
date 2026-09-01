@@ -64,6 +64,8 @@ def test_ai_monitor_exposes_unusual_whales_platform_switch() -> None:
     assert "binanceQuote" in SCRIPT
     assert "finnhubSpot" in SCRIPT
     assert "unusualWhalesQuote" in SCRIPT
+    assert "tigerSpot" in SCRIPT
+    assert 'providerQuoteBadge(tigerSpot, "tiger"' in SCRIPT
     assert "5分钟/次" in SCRIPT
 
 

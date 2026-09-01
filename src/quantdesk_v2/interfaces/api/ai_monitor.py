@@ -81,6 +81,7 @@ from ...schemas import (
 )
 from ...security import CredentialCipher, SecurityError, decode_access_token
 from ...strategy_artifacts import add_run_manifest, record_revision_artifact
+from ...tiger_quotes import TigerQuoteClient, TigerUsQuoteService
 from .ai_monitor_runs import router as run_router
 from .ai_monitor_support import (
     add_ai_monitor_audit,
@@ -188,6 +189,7 @@ def _price_comparison_out(
     live_market: Mapping[str, Any] | None,
     spot_quote: Mapping[str, Any] | None,
     enhanced_market: Mapping[str, Any] | None,
+    tiger_quote: Mapping[str, Any] | None = None,
     *,
     direction: str | None = None,
     news_score: float | None = None,
@@ -208,6 +210,7 @@ def _price_comparison_out(
     market = dict(live_market or {})
     finnhub = dict(spot_quote or {})
     enhanced = dict(enhanced_market or {})
+    tiger = dict(tiger_quote or {})
     uw_quote = dict(enhanced.get("quote") or {})
 
     binance_price = _finite_price(market.get("price"))
@@ -286,6 +289,36 @@ def _price_comparison_out(
         "age_seconds": uw_age,
         "fresh": uw_fresh,
         "market_session": uw_quote.get("market_session"),
+    }
+
+    tiger_price = _finite_price(tiger.get("price"))
+    tiger_previous_close = _finite_price(tiger.get("previous_close"))
+    tiger_at = _quote_time(tiger.get("source_timestamp")) or _quote_time(
+        tiger.get("fetched_at")
+    )
+    tiger_age = _quote_age_seconds(tiger_at, now)
+    tiger_fresh = bool(
+        tiger_price is not None
+        and tiger.get("stale") is not True
+        and tiger.get("live") is True
+        and tiger_age is not None
+        and tiger_age <= 120
+    )
+    tiger_source = {
+        "source": "tiger",
+        "label": "TG",
+        "venue": "us_cash_last_trade",
+        "role": "reference",
+        "available": tiger_price is not None,
+        "price": tiger_price,
+        "previous_close": tiger_previous_close,
+        "observed_at": tiger_at,
+        "age_seconds": tiger_age,
+        "fresh": tiger_fresh,
+        "live": bool(tiger.get("live")),
+        "delayed": bool(tiger.get("delayed")),
+        "market_session": tiger.get("session"),
+        "error_category": tiger.get("error_category"),
     }
 
     fresh_references = [
@@ -417,6 +450,7 @@ def _price_comparison_out(
             "binance": binance,
             "finnhub": finnhub_source,
             "unusual_whales": unusual_whales,
+            "tiger": tiger_source,
         },
         "reference_price": reference_price,
         "fresh_reference_count": len(fresh_references),
@@ -1818,6 +1852,7 @@ def _opportunity_out(
     market_snapshot: OpportunityMarketSnapshot | None = None,
     spot_quote: dict[str, Any] | None = None,
     enhanced_market: Mapping[str, Any] | None = None,
+    tiger_quote: Mapping[str, Any] | None = None,
     *,
     use_frozen: bool = False,
 ) -> dict[str, Any]:
@@ -1939,6 +1974,7 @@ def _opportunity_out(
         live_market,
         spot_quote,
         enhanced_market,
+        tiger_quote,
         direction=item.direction,
         news_score=news_score,
         news_count=len(related_news_ids),
@@ -2028,6 +2064,7 @@ def _opportunity_out(
             else None
         ),
         "finnhub_spot_quote": dict(spot_quote or {}),
+        "tiger_spot_quote": dict(tiger_quote or {}),
         "binance_contract_quote": dict(price_comparison["sources"]["binance"]),
         "price_comparison": price_comparison,
         "prediction_created_at": (
@@ -3794,6 +3831,7 @@ def opportunities(
     live_tickers: dict[str, dict[str, Any]] = {}
     current_market_flows: dict[int, dict[str, Any]] = {}
     finnhub_spot_quotes: dict[str, dict[str, Any]] = {}
+    tiger_spot_quotes: dict[str, dict[str, Any]] = {}
     enhanced_market_features: dict[str, RealtimeMarketFeatureSnapshot] = {}
     if items:
         try:
@@ -3822,6 +3860,11 @@ def opportunities(
         quote_service = getattr(request.app.state, "finnhub_us_quote_service", None)
         if isinstance(quote_service, FinnhubUsQuoteService) and quote_service.enabled:
             finnhub_spot_quotes = quote_service.latest_many(item.symbol for item in items)
+        tiger_quote_service = getattr(request.app.state, "tiger_us_quote_service", None)
+        if isinstance(tiger_quote_service, TigerUsQuoteService):
+            tiger_spot_quotes = tiger_quote_service.latest_many(
+                item.symbol for item in items
+            )
         enhanced_market_features = latest_realtime_feature_snapshots(
             db,
             [item.symbol for item in items],
@@ -3841,6 +3884,7 @@ def opportunities(
                 realtime_feature_payload(
                     enhanced_market_features.get(item.symbol.strip().upper())
                 ),
+                tiger_spot_quotes.get(TigerQuoteClient.normalize_symbol(item.symbol)),
                 # The frontend requests active and historical rows together so
                 # it can switch tabs without a second round-trip.  The query's
                 # ``include_expired`` flag must not freeze active candidates;

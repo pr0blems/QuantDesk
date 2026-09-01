@@ -130,12 +130,24 @@ def test_price_comparison_uses_binance_as_execution_and_cash_feeds_as_reference(
                 "quote_received_at_ms": now_ms,
             },
         },
+        {
+            "price": 100.2,
+            "previous_close": 99.5,
+            "source_timestamp": int(now.timestamp()),
+            "fetched_at": now,
+            "available": True,
+            "stale": False,
+            "live": True,
+            "session": "regular",
+        },
     )
 
     assert result["execution_source"] == "binance"
     assert result["sources"]["binance"]["fresh"] is True
     assert result["sources"]["finnhub"]["fresh"] is True
     assert result["sources"]["unusual_whales"]["fresh"] is True
+    assert result["sources"]["tiger"]["fresh"] is True
+    assert result["sources"]["tiger"]["price"] == pytest.approx(100.2)
     assert result["reference_price"] == pytest.approx(100.0)
     assert result["basis_bps"] == pytest.approx(100.0)
     assert result["state"] == "spread_watch"
@@ -4195,16 +4207,16 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'name="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260901-macro-tooltip-layer1"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260901-tiger-quotes"' in entrypoint
     assert '"/assets/monitor.js?v=20260831-react3"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
-    assert 'href="/assets/ai-monitor.css?v=20260901-macro-tooltip-layer1"' in component
+    assert 'href="/assets/ai-monitor.css?v=20260901-tiger-quotes"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
     assert "/assets/controller-runtime.js?v=20260831-react3" in react_index
     assert "/assets/strategies.js?v=20260831-react3" in react_index
     for asset in (
-        '"/assets/ai-monitor.js?v=20260901-macro-tooltip-layer1"',
+        '"/assets/ai-monitor.js?v=20260901-tiger-quotes"',
         '"/assets/monitor.js?v=20260831-react3"',
         '"/assets/paper.js?v=20260831-react3"',
         '"/assets/live.js?v=20260831-react3"',

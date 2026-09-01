@@ -2620,6 +2620,8 @@ td.negative { color: var(--ai-red); }
 .provider-quote-badge.binance i { color: #f4be4b; background: rgba(244, 190, 75, .12); }
 .provider-quote-badge.unusual-whales { border-color: rgba(173, 156, 255, .42); background: rgba(173, 156, 255, .065); }
 .provider-quote-badge.unusual-whales i { color: var(--ai-brand); background: rgba(173, 156, 255, .12); }
+.provider-quote-badge.tiger { border-color: rgba(255, 121, 77, .42); background: rgba(255, 121, 77, .065); }
+.provider-quote-badge.tiger i { color: #ff8a63; background: rgba(255, 121, 77, .12); }
 .provider-quote-badge.stale { border-color: rgba(224, 189, 92, .3); opacity: .72; }
 .provider-quote-badge.stale small { color: var(--ai-yellow); }
 

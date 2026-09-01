@@ -60,6 +60,7 @@ def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert ".virtual-position-action .ai-conclusion-trigger" in STYLES
     assert ".virtual-position-action .opportunity-detail-toggle" in STYLES
     assert ".opportunity-quotes .provider-quote-badge b" in STYLES
+    assert ".provider-quote-badge.tiger" in STYLES
     assert ".opportunity-item > .opportunity-card-footer" in STYLES
     assert "@container (max-width: 680px)" in STYLES
     assert "@container (max-width: 520px)" in STYLES
