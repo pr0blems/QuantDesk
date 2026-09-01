@@ -10,6 +10,10 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
 
     for marker in (
         'class="modal-box research-modal"',
+        'class="research-sidebar"',
+        'class="research-workspace"',
+        '<span>01</span><strong>趋势</strong><small>K线与成交量</small>',
+        '<span>07</span><strong>新闻列表</strong><small>老虎证券资讯</small>',
         'id="modal-metric-price"',
         'id="modal-metric-volume"',
         'id="modal-metric-depth"',
@@ -49,6 +53,8 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
     assert "renderStrategyIndicators(indicatorScan)" in script
     assert "this.api(`/tiger-news?symbol=${encoded}&limit=30`)" in script
     assert "renderResearchNews(researchNews)" in script
+    assert 'const workspace = this.q(".research-workspace")' in script
+    assert 'button.setAttribute("aria-selected", selected ? "true" : "false")' in script
     assert "老虎证券三路新闻接口聚合" in script
     assert "featureScan.bullish_count" in script
     assert 'bullish: "偏多"' in script
@@ -91,6 +97,9 @@ def test_monitor_research_modal_is_responsive_and_supports_light_theme() -> None
     )
 
     assert ".research-modal { width: min(1420px, 98vw)" in stylesheet
+    assert "grid-template-columns: 180px minmax(0, 1fr)" in stylesheet
+    assert ".research-tabs button.on" in stylesheet
+    assert "box-shadow: inset 3px 0 0 #9f8dff" in stylesheet
     assert ".research-metrics { display: grid" in stylesheet
     assert ".research-modal .report { grid-template-columns: repeat(3" in stylesheet
     assert ".chart-stage { position: relative" in stylesheet
