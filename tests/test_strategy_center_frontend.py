@@ -125,9 +125,9 @@ def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
     controller_panel = (ROOT / "web/src/pages/PageControllerPanel.tsx").read_text(encoding="utf-8")
 
     assert "/assets/controller-runtime.js?v=20260831-react3" in index
-    assert "/assets/strategies.js?v=20260902-unified1" in index
-    assert index.index("/assets/controller-runtime.js?v=20260831-react3") < index.index("/assets/strategies.js?v=20260902-unified1")
-    assert index.index("/assets/strategies.js?v=20260902-unified1") < index.index("/src/main.tsx")
+    assert "/assets/strategies.js?v=20260902-unified2" in index
+    assert index.index("/assets/controller-runtime.js?v=20260831-react3") < index.index("/assets/strategies.js?v=20260902-unified2")
+    assert index.index("/assets/strategies.js?v=20260902-unified2") < index.index("/src/main.tsx")
     assert "/assets/strategies.js" not in entrypoint
     assert "window.quantdeskMountPageController(name, host)" in controller_panel
     assert "document.createElement" not in controller_panel
@@ -159,7 +159,7 @@ def test_react_shell_loads_the_current_strategy_controller() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
 
     assert "/assets/controller-runtime.js?v=20260831-react3" in index
-    assert "/assets/strategies.js?v=20260902-unified1" in index
+    assert "/assets/strategies.js?v=20260902-unified2" in index
 
 
 def test_strategy_controller_initializes_after_mount() -> None:
@@ -171,6 +171,13 @@ def test_strategy_controller_initializes_after_mount() -> None:
     assert "this.bindEvents()" not in constructor
     assert "this.renderShell()" in connected
     assert "this.bindEvents()" in connected
+
+
+def test_parameterized_complete_strategies_validate_without_revision_promotion() -> None:
+    script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
+
+    assert 'const revisionWorkflow = ["python_source", "strategy_dsl"].includes(item.management_mode);' in script
+    assert 'if (revisionWorkflow && ["draft", "published"].includes(item.lifecycle_status))' in script
 
 
 def test_all_supported_strategies_share_the_complete_strategy_view() -> None:

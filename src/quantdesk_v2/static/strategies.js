@@ -1415,7 +1415,8 @@ class StrategyCenter extends window.QuantDeskPageController {
         });
       }
       let item = this.normalizeItem(result?.item ?? result);
-      if (["draft", "published"].includes(item.lifecycle_status)) {
+      const revisionWorkflow = ["python_source", "strategy_dsl"].includes(item.management_mode);
+      if (revisionWorkflow && ["draft", "published"].includes(item.lifecycle_status)) {
         const promoted = await this.promoteLifecycle(item, "validated");
         item = promoted.item;
       }
