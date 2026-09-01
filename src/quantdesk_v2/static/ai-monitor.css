@@ -2561,49 +2561,6 @@ td.negative { color: var(--ai-red); }
 .uw-usage-toggle.loading { opacity: .62; }
 .uw-usage-toggle:disabled { cursor: not-allowed; }
 
-/* Finnhub cash-equity collection switch */
-.ai-head-actions > .market-data-toggle {
-  min-width: 158px;
-  gap: 8px;
-  justify-content: flex-start;
-  padding: 5px 9px;
-  border-color: rgba(78, 171, 255, .4);
-  background: rgba(78, 171, 255, .06);
-}
-.market-data-toggle > span:last-child { display: grid; gap: 0; text-align: left; line-height: 1.05; }
-.market-data-toggle b { color: var(--ai-text); font-size: 12px; white-space: nowrap; }
-.market-data-toggle small { margin-top: 3px; color: #69b8ff; font-size: 10px; }
-.market-data-toggle-track {
-  width: 29px;
-  height: 16px;
-  position: relative;
-  flex: 0 0 auto;
-  border: 1px solid rgba(78, 171, 255, .68);
-  border-radius: 10px;
-  background: rgba(78, 171, 255, .16);
-}
-.market-data-toggle-track i {
-  width: 10px;
-  height: 10px;
-  position: absolute;
-  top: 2px;
-  left: 14px;
-  border-radius: 50%;
-  background: #69b8ff;
-  box-shadow: 0 0 8px rgba(78, 171, 255, .55);
-  transition: left .18s ease, background .18s ease;
-}
-.market-data-toggle.standby:not(.disabled) small { color: var(--ai-yellow); }
-.ai-head-actions > .market-data-toggle.disabled {
-  border-color: rgba(255, 120, 136, .4);
-  background: rgba(255, 120, 136, .045);
-}
-.market-data-toggle.disabled .market-data-toggle-track { border-color: rgba(255, 120, 136, .55); background: rgba(255, 120, 136, .1); }
-.market-data-toggle.disabled .market-data-toggle-track i { left: 3px; background: var(--ai-red); box-shadow: none; }
-.market-data-toggle.disabled small { color: var(--ai-red); }
-.market-data-toggle.loading { opacity: .62; }
-.market-data-toggle:disabled { cursor: not-allowed; }
-
 .provider-quote-badge {
   display: inline-flex;
   align-items: center;
@@ -2621,8 +2578,6 @@ td.negative { color: var(--ai-red); }
 .provider-quote-badge small { color: var(--ai-dim); font-size: 9px; }
 .provider-quote-badge.binance { border-color: rgba(244, 190, 75, .42); background: rgba(244, 190, 75, .065); }
 .provider-quote-badge.binance i { color: #f4be4b; background: rgba(244, 190, 75, .12); }
-.provider-quote-badge.unusual-whales { border-color: rgba(173, 156, 255, .42); background: rgba(173, 156, 255, .065); }
-.provider-quote-badge.unusual-whales i { color: var(--ai-brand); background: rgba(173, 156, 255, .12); }
 .provider-quote-badge.tiger { border-color: rgba(255, 121, 77, .42); background: rgba(255, 121, 77, .065); }
 .provider-quote-badge.tiger i { color: #ff8a63; background: rgba(255, 121, 77, .12); }
 .provider-quote-badge.stale { border-color: rgba(224, 189, 92, .3); opacity: .72; }
@@ -2707,7 +2662,6 @@ td.negative { color: var(--ai-red); }
   }
   .ai-head-actions > .live-copy-toggle { min-width: 146px; }
   .ai-head-actions > .uw-usage-toggle { min-width: 146px; }
-  .ai-head-actions > .market-data-toggle { min-width: 146px; }
   .live-copy-modal { padding: 8px; }
   .live-copy-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
   .live-copy-dialog.macro-impact-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }

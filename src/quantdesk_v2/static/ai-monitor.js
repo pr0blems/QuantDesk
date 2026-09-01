@@ -21,7 +21,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       manualFollowAttemptId: "",
       manualFollowLoading: false,
       uwToggleLoading: false,
-      finnhubToggleLoading: false,
       indicators: [],
       indicatorTemplates: [],
       indicatorConflictPairs: [],
@@ -151,7 +150,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-quote-header-layout">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260901-bn-tiger-basis">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -174,10 +173,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
             <button id="uw-usage-toggle" class="uw-usage-toggle loading" type="button" aria-pressed="false" disabled>
               <span class="uw-toggle-track" aria-hidden="true"><i></i></span>
               <span><b>Unusual Whales</b><small>读取中</small></span>
-            </button>
-            <button id="finnhub-usage-toggle" class="market-data-toggle finnhub-usage-toggle loading" type="button" aria-pressed="false" disabled>
-              <span class="market-data-toggle-track" aria-hidden="true"><i></i></span>
-              <span><b>Finnhub 美股现货</b><small>读取中</small></span>
             </button>
             <button id="run-news" type="button">分析新闻</button>
             <button id="run-opportunity" class="primary-action" type="button">发现机会</button>
@@ -537,7 +532,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       void this.loadLiveCopyStatus();
     });
     this.q("#uw-usage-toggle").addEventListener("click", () => this.toggleUnusualWhales());
-    this.q("#finnhub-usage-toggle").addEventListener("click", () => this.toggleFinnhub());
     this.qa("[data-macro-impact-close]").forEach((button) => button.addEventListener("click", () => this.closeMacroImpact()));
     this.q("#macro-impact-body").addEventListener("click", (event) => {
       const button = event.target.closest("[data-refresh-macro-ai]");
@@ -1060,7 +1054,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       this.state.macroMarket = data;
       this.renderMacroMarket();
       this.renderUnusualWhalesToggle();
-      this.renderFinnhubToggle();
       this.renderSignalHealth();
     } catch (_) {
       // Keep the last valid market snapshot; the normal 20-second refresh owns banners.
@@ -1106,7 +1099,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     try {
       this.state.scorePolicy = await this.api("/score-policy");
       this.renderUnusualWhalesToggle();
-      this.renderFinnhubToggle();
       if (!this.state.weightDraftDirty) this.renderScorePolicy(this.state.config || {});
       return this.state.scorePolicy;
     } catch (error) {
@@ -1124,7 +1116,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     this.renderDecisionStrategyTrigger();
     this.renderLiveCopyToggle();
     this.renderUnusualWhalesToggle();
-    this.renderFinnhubToggle();
     this.q("#model-warning").classList.toggle("hidden", Boolean(data.model_configured));
     this.renderSignalHealth();
   }
@@ -1945,58 +1936,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     } finally {
       this.state.uwToggleLoading = false;
       this.renderUnusualWhalesToggle();
-    }
-  }
-
-  renderFinnhubToggle() {
-    const button = this.q("#finnhub-usage-toggle");
-    if (!button) return;
-    const policy = this.state.scorePolicy;
-    const enabled = policy?.finnhub_enabled !== false;
-    const loading = !policy || this.state.finnhubToggleLoading;
-    const session = String(this.state.macroMarket?.market_session?.key || "closed");
-    const collecting = enabled && session === "regular";
-    button.className = `market-data-toggle finnhub-usage-toggle ${loading ? "loading" : enabled ? "enabled" : "disabled"} ${collecting ? "collecting" : "standby"}`;
-    button.setAttribute("aria-pressed", enabled ? "true" : "false");
-    button.disabled = loading || policy?.can_edit !== true;
-    button.title = policy?.can_edit === false
-      ? "仅管理员可以调整平台 Finnhub 美股现货总开关"
-      : enabled
-      ? collecting
-        ? "美股常规交易时段正在采集；最新报价按股票写入数据库"
-        : "已启用，休市期间暂停调用；页面继续读取各股票最新入库报价"
-      : "已关闭；不采集，也不把 Finnhub 现货用于机会展示";
-    const status = button.querySelector("small");
-    if (status) status.textContent = loading ? "切换中" : !enabled ? "已关闭" : collecting ? "盘中采集" : "休市待机";
-  }
-
-  async toggleFinnhub() {
-    const policy = this.state.scorePolicy;
-    if (!policy || policy.can_edit !== true || this.state.finnhubToggleLoading) return;
-    const enabled = policy.finnhub_enabled === false;
-    this.state.finnhubToggleLoading = true;
-    this.renderFinnhubToggle();
-    try {
-      this.state.scorePolicy = await this.api("/finnhub-enabled", {
-        method: "PUT",
-        body: JSON.stringify({ enabled }),
-      });
-      this.renderFinnhubToggle();
-      await Promise.all([
-        this.loadMarketContext(),
-        this.state.view === "opportunities" ? this.loadOpportunities() : Promise.resolve(),
-      ]);
-      this.showBanner(
-        enabled
-          ? "Finnhub 美股现货已启用；仅常规交易时段采集并持续写入数据库"
-          : "Finnhub 美股现货已关闭；机会卡片不再使用该数据源",
-        "success",
-      );
-    } catch (error) {
-      this.showBanner(error.message || "Finnhub 美股现货开关保存失败", "error");
-    } finally {
-      this.state.finnhubToggleLoading = false;
-      this.renderFinnhubToggle();
     }
   }
 
@@ -4247,8 +4186,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       const priceComparison = item.price_comparison || {};
       const priceSources = priceComparison.sources || {};
       const binanceQuote = priceSources.binance || item.binance_contract_quote || {};
-      const finnhubSpot = priceSources.finnhub || item.finnhub_spot_quote || {};
-      const unusualWhalesQuote = priceSources.unusual_whales || {};
       const tigerSpot = priceSources.tiger || item.tiger_spot_quote || {};
       const marketEnvironment = evidence.market_environment || evidence.score_snapshot?.macro_market || {};
       const macroSnapshot = evidence.macro_market_snapshot || {};
@@ -4466,8 +4403,6 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
         ? `<span class="provider-quote-badge ${tone} ${source.fresh ? "live" : "stale"}" title="${this.escape(liveLabel)} · ${source.fresh ? "新鲜" : "延迟/休市"} · ${this.formatDate(source.observed_at)}"><i>${this.escape(source.label || "--")}</i><b>${this.escape(this.compactNumber(Number(source.price)))}</b><small>${source.fresh ? "实时" : "延迟"}</small></span>`
         : "";
       const binancePriceControl = providerQuoteBadge(binanceQuote, "binance", "Binance 映射合约执行参考价");
-      const finnhubSpotControl = providerQuoteBadge(finnhubSpot, "finnhub", "Finnhub 美股现货参考价");
-      const unusualWhalesControl = providerQuoteBadge(unusualWhalesQuote, "unusual-whales", "Unusual Whales 美股 NBBO/成交参考价");
       const tigerSpotControl = providerQuoteBadge(tigerSpot, "tiger", "老虎证券美股现货实时参考价");
       const finiteComparisonValue = (value) => value != null && value !== "" && Number.isFinite(Number(value))
         ? Number(value)
@@ -4475,7 +4410,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       const basisBps = finiteComparisonValue(priceComparison.basis_bps);
       const snapshotGapBps = finiteComparisonValue(priceComparison.snapshot_gap_bps);
       const previousCloseGapBps = finiteComparisonValue(priceComparison.previous_close_gap_bps);
-      const providerDivergenceBps = finiteComparisonValue(priceComparison.provider_divergence_bps);
+      const quoteTimeGapSeconds = finiteComparisonValue(priceComparison.quote_time_gap_seconds);
       const liveBasisMode = priceComparison.comparable === true;
       const openingForecast = priceComparison.opening_forecast || {};
       const forecastDirection = String(openingForecast.direction || "neutral");
@@ -4499,9 +4434,9 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
         ? "执行价缺失"
         : "参考价缺失";
       const livePairDirection = priceComparison.pair_direction === "short_binance_long_spot"
-        ? "BN 偏高：空合约 / 多现货"
+        ? "BN 偏高：空 BN / 多 TG"
         : priceComparison.pair_direction === "long_binance_short_spot"
-        ? "BN 偏低：多合约 / 空现货"
+        ? "BN 偏低：多 BN / 空 TG"
         : "价差在观察阈值内";
       const forecastLabel = openingForecast.label === "bearish_open"
         ? `偏空开盘 · ${Number(openingForecast.confidence || 0).toFixed(0)}分`
@@ -4511,19 +4446,18 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
         ? "中性观察"
         : "等待参考快照";
       const comparisonConclusion = liveBasisMode ? livePairDirection : forecastLabel;
-      const gapLabel = liveBasisMode ? "BN / 实时现货基差" : "BN / 最近现货差";
-      const referenceLabel = liveBasisMode ? "实时现货参考" : "最近现货快照";
-      const divergenceSuffix = priceComparison.provider_divergence_mode === "snapshot" ? " · 快照" : "";
+      const gapLabel = liveBasisMode ? "BN / TG 实时基差" : "BN / TG 快照差";
+      const referenceLabel = liveBasisMode ? "TG 实时现货" : "TG 最近快照";
       const basisExplanation = liveBasisMode
-        ? "实时多源报价仅用于基差观察；只有两端均可执行时才具备套利研究意义"
+        ? "BN 映射合约与 TG 美股现货均新鲜且时间同步；价差仅用于研究，不代表可无风险套利"
         : openingForecast.available
-        ? `${newNewsCount > 0 ? `本轮新增 ${newNewsCount} 条` : "本轮没有新增新闻"} · 当前机会关联 ${relatedNewsCount} 条${reusedNewsCount > 0 ? `（沿用 ${reusedNewsCount} 条）` : ""} · ${memoryWindowLabel} AI 记忆用于新新闻回溯；${openingForecast.gap_aligned ? "价格与新闻方向共振" : "价格与新闻方向未共振"}。这是开盘概率预判，不是无风险套利`
-        : "缺少可用现货快照或新闻方向，暂不生成开盘缺口预判";
+        ? `${newNewsCount > 0 ? `本轮新增 ${newNewsCount} 条` : "本轮没有新增新闻"} · 当前机会关联 ${relatedNewsCount} 条${reusedNewsCount > 0 ? `（沿用 ${reusedNewsCount} 条）` : ""} · ${memoryWindowLabel} AI 记忆用于新新闻回溯；TG 快照${openingForecast.gap_aligned ? "与新闻方向共振" : "与新闻方向未共振"}。这是开盘概率预判，不是无风险套利`
+        : "缺少可用 TG 现货快照或新闻方向，暂不生成开盘缺口预判";
       const basisPanel = `<section class="cross-venue-basis ${this.escape(basisState)} forecast-${this.escape(forecastDirection)}" data-patch-key="price-comparison" aria-label="跨市场价格比对与开盘预判">
         <strong><i>${liveBasisMode ? "LIVE BASIS" : "OPEN GAP"}</i>${this.escape(basisStateLabel)}</strong>
         <span><em>${gapLabel}</em><b>${displayedGapBps == null ? "--" : `${displayedGapBps >= 0 ? "+" : ""}${displayedGapBps.toFixed(1)} bps`}</b><small>${!liveBasisMode && previousCloseGapBps != null ? `BN / 昨收 ${previousCloseGapBps >= 0 ? "+" : ""}${previousCloseGapBps.toFixed(1)} bps` : ""}</small></span>
         <span><em>${referenceLabel}</em><b>${displayedReferencePrice == null ? "--" : this.escape(this.compactNumber(displayedReferencePrice))}</b><small>${!liveBasisMode && priceComparison.previous_close_price ? `昨收 ${this.escape(this.compactNumber(Number(priceComparison.previous_close_price)))}` : ""}</small></span>
-        <span><em>FH / UW 分歧${divergenceSuffix}</em><b>${providerDivergenceBps == null ? "--" : `${providerDivergenceBps.toFixed(1)} bps`}</b></span>
+        <span><em>BN / TG 报价同步</em><b>${quoteTimeGapSeconds == null ? "--" : `${quoteTimeGapSeconds.toFixed(1)} 秒`}</b><small>${liveBasisMode ? "实时可比" : "仅快照参考"}</small></span>
         <span class="basis-direction"><em>${liveBasisMode ? "配对观察" : "开盘预判"}</em><b>${this.escape(comparisonConclusion)}</b></span>
         <small>${this.escape(basisExplanation)}</small>
       </section>`;
@@ -4532,7 +4466,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       return `<article class="opportunity-item ${this.escape(item.status)} state-${this.escape(entryState.tone)} ${expanded ? "is-expanded" : ""} ${triggeredPosition ? "has-position" : candidateSummaryVisible ? "has-candidate-summary" : "has-signal"} ${historicalTab ? `historical outcome-${this.escape(outcomeResult)}` : ""}" data-opportunity-card="${this.escape(item.id)}" data-layout-state="${this.escape(entryState.tone)}:${this.escape(entryState.label)}:${historicalTab ? "history" : "current"}" data-details-expanded="${expanded}">
         <header data-patch-key="header">
           <div class="opportunity-identity">
-            <div class="opportunity-symbol-row"><div class="opportunity-symbol-line">${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small></div><div class="opportunity-quotes">${binancePriceControl}${finnhubSpotControl}${unusualWhalesControl}${tigerSpotControl}</div></div>
+            <div class="opportunity-symbol-row"><div class="opportunity-symbol-line">${symbolControl}<small>${marketAvailable ? this.escape(item.contract_symbol) : "暂无技术行情"}</small></div><div class="opportunity-quotes">${binancePriceControl}${tigerSpotControl}</div></div>
             <div class="opportunity-badges"><span class="direction ${confirmed ? "confirmed" : "candidate"}">${confirmed ? "技术已确认" : "新闻候选"}</span><span class="direction-badge ${directionClass}">${directionLabel}</span>${triggerBadge}</div>
           </div>
           <div class="opportunity-top-metrics">${marketDepthControl}<button class="opportunity-score ${scoreTrend.direction}" type="button" data-score-trend="${this.escape(item.id)}" title="查看 ${this.escape(item.symbol)} 评分变化走势"><span class="score-current"><i>${scoreTrend.arrow}</i><b data-live-field="combined-score" data-live-value="${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore : ""}">${Number.isFinite(displayedCombinedScore) ? displayedCombinedScore.toFixed(1) : "无数据"}</b></span><span>组合评分${scoreDelta}</span><em>${scoreTrend.badge}</em></button></div>

@@ -53,19 +53,18 @@ def test_weight_editor_defaults_validate_and_save_versioned_six_domain_payload()
         assert status in SCRIPT
 
 
-def test_ai_monitor_exposes_unusual_whales_platform_switch() -> None:
+def test_ai_monitor_keeps_unusual_whales_features_but_removes_fh_uw_stock_quotes() -> None:
     assert 'id="uw-usage-toggle"' in SCRIPT
     assert 'this.api("/unusual-whales-enabled", {' in SCRIPT
-    assert 'id="finnhub-usage-toggle"' in SCRIPT
-    assert 'this.api("/finnhub-enabled", {' in SCRIPT
-    assert "Finnhub 美股现货" in SCRIPT
-    assert "盘中采集" in SCRIPT
+    assert 'id="finnhub-usage-toggle"' not in SCRIPT
+    assert 'this.api("/finnhub-enabled", {' not in SCRIPT
+    assert "Finnhub 美股现货" not in SCRIPT
     assert "provider-quote-badge" in SCRIPT
     assert "binanceQuote" in SCRIPT
-    assert "finnhubSpot" in SCRIPT
-    assert "unusualWhalesQuote" in SCRIPT
     assert "tigerSpot" in SCRIPT
     assert 'providerQuoteBadge(tigerSpot, "tiger"' in SCRIPT
+    assert "finnhubSpot" not in SCRIPT
+    assert "unusualWhalesQuote" not in SCRIPT
     assert "5分钟/次" in SCRIPT
 
 

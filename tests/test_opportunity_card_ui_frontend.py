@@ -63,6 +63,10 @@ def test_opportunity_card_styles_animate_and_keep_summary_visible() -> None:
     assert ".virtual-position-action .opportunity-detail-toggle" in STYLES
     assert ".opportunity-quotes .provider-quote-badge b" in STYLES
     assert ".provider-quote-badge.tiger" in STYLES
+    assert "${binancePriceControl}${tigerSpotControl}" in SCRIPT
+    assert "finnhubSpotControl" not in SCRIPT
+    assert "unusualWhalesControl" not in SCRIPT
+    assert "BN / TG 报价同步" in SCRIPT
     symbol_row = SCRIPT.index('class="opportunity-symbol-row"')
     symbol_line = SCRIPT.index('class="opportunity-symbol-line"', symbol_row)
     quotes = SCRIPT.index('class="opportunity-quotes"', symbol_line)

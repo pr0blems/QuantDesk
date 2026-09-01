@@ -108,28 +108,12 @@ from quantdesk_v2.schemas import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_price_comparison_uses_binance_as_execution_and_cash_feeds_as_reference() -> None:
+def test_price_comparison_uses_binance_execution_and_tiger_reference() -> None:
     now = datetime.now(UTC)
     now_ms = int(now.timestamp() * 1000)
 
     result = _price_comparison_out(
         {"price": 101.0, "ts": now_ms},
-        {
-            "price": 100.0,
-            "source_timestamp": int(now.timestamp()),
-            "fetched_at": now,
-            "available": True,
-            "stale": False,
-            "live": True,
-        },
-        {
-            "captured_at": now.isoformat(),
-            "quote": {
-                "bid": 99.9,
-                "ask": 100.1,
-                "quote_received_at_ms": now_ms,
-            },
-        },
         {
             "price": 100.2,
             "previous_close": 99.5,
@@ -143,13 +127,14 @@ def test_price_comparison_uses_binance_as_execution_and_cash_feeds_as_reference(
     )
 
     assert result["execution_source"] == "binance"
+    assert set(result["sources"]) == {"binance", "tiger"}
     assert result["sources"]["binance"]["fresh"] is True
-    assert result["sources"]["finnhub"]["fresh"] is True
-    assert result["sources"]["unusual_whales"]["fresh"] is True
     assert result["sources"]["tiger"]["fresh"] is True
     assert result["sources"]["tiger"]["price"] == pytest.approx(100.2)
-    assert result["reference_price"] == pytest.approx(100.0)
-    assert result["basis_bps"] == pytest.approx(100.0)
+    assert result["reference_source"] == "tiger"
+    assert result["reference_price"] == pytest.approx(100.2)
+    assert result["basis_bps"] == pytest.approx((101.0 / 100.2 - 1) * 10_000)
+    assert result["quote_time_gap_seconds"] == pytest.approx(0.0, abs=1.0)
     assert result["state"] == "spread_watch"
     assert result["pair_direction"] == "short_binance_long_spot"
     assert result["actionable"] is False
@@ -170,14 +155,6 @@ def test_price_comparison_uses_stale_cash_snapshot_for_opening_gap_forecast() ->
             "stale": True,
             "live": False,
         },
-        {
-            "captured_at": stale_at.isoformat(),
-            "quote": {
-                "bid": 99.9,
-                "ask": 100.1,
-                "quote_received_at_ms": int(stale_at.timestamp() * 1000),
-            },
-        },
         direction="short",
         news_score=85.0,
         news_count=4,
@@ -193,8 +170,7 @@ def test_price_comparison_uses_stale_cash_snapshot_for_opening_gap_forecast() ->
     assert result["snapshot_reference_price"] == pytest.approx(100.0)
     assert result["snapshot_gap_bps"] == pytest.approx(-500.0)
     assert result["previous_close_gap_bps"] == pytest.approx(-404.0404)
-    assert result["provider_divergence_bps"] == pytest.approx(0.0)
-    assert result["provider_divergence_mode"] == "snapshot"
+    assert result["quote_time_gap_seconds"] == pytest.approx(7200.0, abs=1.0)
     assert result["pair_direction"] is None
     forecast = result["opening_forecast"]
     assert forecast["available"] is True
@@ -208,7 +184,7 @@ def test_price_comparison_uses_stale_cash_snapshot_for_opening_gap_forecast() ->
     assert forecast["memory_window_hours"] == 168
     assert forecast["gap_bps"] == pytest.approx(-500.0)
     assert forecast["gap_aligned"] is True
-    assert forecast["reference_mode"] == "latest_cash_snapshot"
+    assert forecast["reference_mode"] == "tiger_snapshot"
     assert forecast["research_only"] is True
     assert result["actionable"] is False
 
@@ -4207,16 +4183,16 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'name="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260901-quote-header-layout"' in entrypoint
+    assert '"/assets/ai-monitor.js?v=20260901-bn-tiger-basis"' in entrypoint
     assert '"/assets/monitor.js?v=20260831-react3"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
-    assert 'href="/assets/ai-monitor.css?v=20260901-quote-header-layout"' in component
+    assert 'href="/assets/ai-monitor.css?v=20260901-bn-tiger-basis"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
     assert "/assets/controller-runtime.js?v=20260831-react3" in react_index
     assert "/assets/strategies.js?v=20260831-react3" in react_index
     for asset in (
-        '"/assets/ai-monitor.js?v=20260901-quote-header-layout"',
+        '"/assets/ai-monitor.js?v=20260901-bn-tiger-basis"',
         '"/assets/monitor.js?v=20260831-react3"',
         '"/assets/paper.js?v=20260831-react3"',
         '"/assets/live.js?v=20260831-react3"',

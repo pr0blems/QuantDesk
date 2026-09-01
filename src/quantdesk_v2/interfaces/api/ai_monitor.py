@@ -27,14 +27,12 @@ from ...ai_model_config import global_ai_model_configured
 from ...application.ai_monitor import (
     OpportunityProjectionError,
     OpportunityProjectionService,
-    realtime_feature_payload,
 )
 from ...binance_client import BinanceAccountClientError
 from ...database import get_db
 from ...dependencies import bearer, get_current_user, require_admin_write
-from ...finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
+from ...finnhub_quotes import FINNHUB_USAGE_SETTING_KEY
 from ...infrastructure.persistence.ai_monitor_market_features import (
-    latest_realtime_feature_snapshots,
     load_market_flow_input_maps,
 )
 from ...infrastructure.persistence.ai_monitor_projection import (
@@ -187,8 +185,6 @@ def _quote_age_seconds(observed_at: datetime | None, now: datetime) -> float | N
 
 def _price_comparison_out(
     live_market: Mapping[str, Any] | None,
-    spot_quote: Mapping[str, Any] | None,
-    enhanced_market: Mapping[str, Any] | None,
     tiger_quote: Mapping[str, Any] | None = None,
     *,
     direction: str | None = None,
@@ -198,20 +194,16 @@ def _price_comparison_out(
     reused_news_count: int = 0,
     memory_window_hours: int = 168,
 ) -> dict[str, Any]:
-    """Build a current three-provider quote view without treating it as risk-free arbitrage.
+    """Compare the Binance mapped contract with Tiger's US cash quote.
 
-    Binance is the execution/valuation source for the mapped contract. Finnhub and
-    Unusual Whales describe the US cash-market reference and may be delayed or
-    closed.  A spread is therefore a basis observation until both legs are fresh,
-    synchronized and executable.
+    Binance remains the only execution/valuation source. Tiger is the only stock
+    reference used by the opportunity read model; the spread stays research-only
+    until both quotes are fresh and synchronized.
     """
 
     now = datetime.now(UTC)
     market = dict(live_market or {})
-    finnhub = dict(spot_quote or {})
-    enhanced = dict(enhanced_market or {})
     tiger = dict(tiger_quote or {})
-    uw_quote = dict(enhanced.get("quote") or {})
 
     binance_price = _finite_price(market.get("price"))
     binance_at = _quote_time(market.get("ts"))
@@ -226,69 +218,6 @@ def _price_comparison_out(
         "observed_at": binance_at,
         "age_seconds": binance_age,
         "fresh": bool(binance_price is not None and binance_age is not None and binance_age <= 120),
-    }
-
-    finnhub_price = _finite_price(finnhub.get("price"))
-    finnhub_previous_close = _finite_price(finnhub.get("previous_close"))
-    finnhub_at = _quote_time(finnhub.get("source_timestamp")) or _quote_time(
-        finnhub.get("fetched_at")
-    )
-    finnhub_age = _quote_age_seconds(finnhub_at, now)
-    finnhub_fresh = bool(
-        finnhub_price is not None
-        and finnhub.get("stale") is not True
-        and finnhub.get("live") is True
-        and finnhub_age is not None
-        and finnhub_age <= 600
-    )
-    finnhub_source = {
-        "source": "finnhub",
-        "label": "FH",
-        "venue": "us_cash_last_trade",
-        "role": "reference",
-        "available": finnhub_price is not None,
-        "price": finnhub_price,
-        "previous_close": finnhub_previous_close,
-        "observed_at": finnhub_at,
-        "age_seconds": finnhub_age,
-        "fresh": finnhub_fresh,
-        "live": bool(finnhub.get("live")),
-        "storage": finnhub.get("storage"),
-    }
-
-    uw_bid = _finite_price(uw_quote.get("bid"))
-    uw_ask = _finite_price(uw_quote.get("ask"))
-    uw_last = _finite_price(uw_quote.get("last_price"))
-    uw_previous_close = _finite_price(uw_quote.get("previous_close"))
-    uw_midpoint = (
-        (uw_bid + uw_ask) / 2
-        if uw_bid is not None and uw_ask is not None and uw_ask >= uw_bid
-        else None
-    )
-    uw_price = uw_midpoint or uw_last
-    uw_at = (
-        _quote_time(uw_quote.get("quote_received_at_ms"))
-        or _quote_time(uw_quote.get("received_at_ms"))
-        or _quote_time(enhanced.get("captured_at"))
-        or _quote_time(enhanced.get("bucket_at"))
-    )
-    uw_age = _quote_age_seconds(uw_at, now)
-    uw_fresh = bool(uw_price is not None and uw_age is not None and uw_age <= 360)
-    unusual_whales = {
-        "source": "unusual_whales",
-        "label": "UW",
-        "venue": "us_cash_nbbo" if uw_midpoint is not None else "us_cash_last_trade",
-        "role": "reference",
-        "available": uw_price is not None,
-        "price": uw_price,
-        "previous_close": uw_previous_close,
-        "bid": uw_bid,
-        "ask": uw_ask,
-        "spread_bps": uw_quote.get("spread_bps"),
-        "observed_at": uw_at,
-        "age_seconds": uw_age,
-        "fresh": uw_fresh,
-        "market_session": uw_quote.get("market_session"),
     }
 
     tiger_price = _finite_price(tiger.get("price"))
@@ -321,41 +250,16 @@ def _price_comparison_out(
         "error_category": tiger.get("error_category"),
     }
 
-    fresh_references = [
-        source
-        for source in (finnhub_source, unusual_whales)
-        if source["fresh"] and source["price"] is not None
-    ]
-    reference_price = (
-        sum(float(source["price"]) for source in fresh_references)
-        / len(fresh_references)
-        if fresh_references
+    reference_price = tiger_price if tiger_fresh else None
+    snapshot_reference_price = tiger_price
+    snapshot_reference_at = tiger_at if tiger_price is not None else None
+    snapshot_reference_source = "tiger" if tiger_price is not None else None
+    previous_close_price = tiger_previous_close
+    quote_time_gap_seconds = (
+        round(abs((binance_at - tiger_at).total_seconds()), 3)
+        if binance_at is not None and tiger_at is not None
         else None
     )
-    available_references = [
-        source
-        for source in (finnhub_source, unusual_whales)
-        if source["available"] and source["price"] is not None
-    ]
-    latest_reference = max(
-        available_references,
-        key=lambda source: (
-            source["observed_at"].timestamp()
-            if isinstance(source.get("observed_at"), datetime)
-            else 0.0
-        ),
-        default=None,
-    )
-    snapshot_reference_price = (
-        float(latest_reference["price"]) if latest_reference is not None else None
-    )
-    snapshot_reference_at = (
-        latest_reference.get("observed_at") if latest_reference is not None else None
-    )
-    snapshot_reference_source = (
-        latest_reference.get("source") if latest_reference is not None else None
-    )
-    previous_close_price = finnhub_previous_close or uw_previous_close
     basis_bps = (
         round((binance_price / reference_price - 1) * 10_000, 4)
         if binance_price is not None and reference_price is not None
@@ -371,12 +275,12 @@ def _price_comparison_out(
         if binance_price is not None and previous_close_price is not None
         else None
     )
-    provider_divergence_bps = (
-        round(abs(finnhub_price / uw_price - 1) * 10_000, 4)
-        if finnhub_price is not None and uw_price is not None
-        else None
+    comparable = bool(
+        binance["fresh"]
+        and tiger_source["fresh"]
+        and quote_time_gap_seconds is not None
+        and quote_time_gap_seconds <= 120
     )
-    comparable = bool(binance["fresh"] and fresh_references)
     threshold_bps = 30.0
     if not binance["available"]:
         state = "execution_unavailable"
@@ -434,8 +338,6 @@ def _price_comparison_out(
         if abs(float(forecast_gap_bps)) >= threshold_bps:
             forecast_confidence += 8.0 if gap_aligned else -8.0
         forecast_confidence += min(5.0, max(0, normalized_news_count - 1))
-        if provider_divergence_bps is not None and provider_divergence_bps >= 100:
-            forecast_confidence -= 5.0
         forecast_confidence = round(max(0.0, min(99.0, forecast_confidence)), 1)
     if not forecast_available or (normalized_news_score or 0) < 60:
         forecast_label = "neutral_watch"
@@ -444,16 +346,15 @@ def _price_comparison_out(
     else:
         forecast_label = "bullish_open"
     return {
-        "version": "cross_venue_basis_v2",
+        "version": "cross_venue_basis_v3",
         "execution_source": "binance",
         "sources": {
             "binance": binance,
-            "finnhub": finnhub_source,
-            "unusual_whales": unusual_whales,
             "tiger": tiger_source,
         },
         "reference_price": reference_price,
-        "fresh_reference_count": len(fresh_references),
+        "reference_source": "tiger" if reference_price is not None else None,
+        "fresh_reference_count": 1 if tiger_fresh else 0,
         "snapshot_reference_price": snapshot_reference_price,
         "snapshot_reference_at": snapshot_reference_at,
         "snapshot_reference_source": snapshot_reference_source,
@@ -461,16 +362,13 @@ def _price_comparison_out(
         "basis_bps": basis_bps,
         "snapshot_gap_bps": snapshot_gap_bps,
         "previous_close_gap_bps": previous_close_gap_bps,
-        "provider_divergence_bps": provider_divergence_bps,
-        "provider_divergence_mode": (
-            "live" if finnhub_fresh and uw_fresh else "snapshot"
-        ) if provider_divergence_bps is not None else None,
+        "quote_time_gap_seconds": quote_time_gap_seconds,
         "minimum_watch_bps": threshold_bps,
         "state": state,
         "pair_direction": pair_direction,
         "comparable": comparable,
         "actionable": False,
-        "research_only_reason": "cash_contract_basis_requires_synchronized_executable_two_leg_quotes",
+        "research_only_reason": "binance_tiger_basis_requires_synchronized_executable_two_leg_quotes",
         "opening_forecast": {
             "available": forecast_available,
             "label": forecast_label,
@@ -485,9 +383,9 @@ def _price_comparison_out(
             "gap_bps": forecast_gap_bps,
             "gap_aligned": gap_aligned if forecast_available else None,
             "reference_mode": (
-                "latest_cash_snapshot"
+                "tiger_snapshot"
                 if snapshot_reference_price is not None
-                else "previous_close"
+                else "tiger_previous_close"
                 if previous_close_price is not None
                 else "unavailable"
             ),
@@ -1850,8 +1748,6 @@ def _opportunity_out(
     live_market: dict[str, Any] | None = None,
     current_market_flow: Mapping[str, Any] | None = None,
     market_snapshot: OpportunityMarketSnapshot | None = None,
-    spot_quote: dict[str, Any] | None = None,
-    enhanced_market: Mapping[str, Any] | None = None,
     tiger_quote: Mapping[str, Any] | None = None,
     *,
     use_frozen: bool = False,
@@ -1972,8 +1868,6 @@ def _opportunity_out(
     }
     price_comparison = _price_comparison_out(
         live_market,
-        spot_quote,
-        enhanced_market,
         tiger_quote,
         direction=item.direction,
         news_score=news_score,
@@ -2063,7 +1957,6 @@ def _opportunity_out(
             if prediction is not None
             else None
         ),
-        "finnhub_spot_quote": dict(spot_quote or {}),
         "tiger_spot_quote": dict(tiger_quote or {}),
         "binance_contract_quote": dict(price_comparison["sources"]["binance"]),
         "price_comparison": price_comparison,
@@ -3830,9 +3723,7 @@ def opportunities(
     )
     live_tickers: dict[str, dict[str, Any]] = {}
     current_market_flows: dict[int, dict[str, Any]] = {}
-    finnhub_spot_quotes: dict[str, dict[str, Any]] = {}
     tiger_spot_quotes: dict[str, dict[str, Any]] = {}
-    enhanced_market_features: dict[str, RealtimeMarketFeatureSnapshot] = {}
     if items:
         try:
             repository = MonitorRepository(
@@ -3857,18 +3748,11 @@ def opportunities(
         except MonitorUnavailable:
             live_tickers = {}
             current_market_flows = {}
-        quote_service = getattr(request.app.state, "finnhub_us_quote_service", None)
-        if isinstance(quote_service, FinnhubUsQuoteService) and quote_service.enabled:
-            finnhub_spot_quotes = quote_service.latest_many(item.symbol for item in items)
         tiger_quote_service = getattr(request.app.state, "tiger_us_quote_service", None)
         if isinstance(tiger_quote_service, TigerUsQuoteService):
             tiger_spot_quotes = tiger_quote_service.latest_many(
                 item.symbol for item in items
             )
-        enhanced_market_features = latest_realtime_feature_snapshots(
-            db,
-            [item.symbol for item in items],
-        )
     response_now = now
     response = {
         "items": [
@@ -3878,12 +3762,6 @@ def opportunities(
                 live_tickers.get((item.contract_symbol or "").upper()),
                 current_market_flows.get(item.id),
                 snapshot_by_opportunity_id.get(item.id),
-                finnhub_spot_quotes.get(
-                    FinnhubUsQuoteService.normalize_symbol(item.symbol)
-                ),
-                realtime_feature_payload(
-                    enhanced_market_features.get(item.symbol.strip().upper())
-                ),
                 tiger_spot_quotes.get(TigerQuoteClient.normalize_symbol(item.symbol)),
                 # The frontend requests active and historical rows together so
                 # it can switch tabs without a second round-trip.  The query's
