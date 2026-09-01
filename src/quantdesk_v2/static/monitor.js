@@ -85,7 +85,7 @@ class ContractMonitor extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260901-research-sidebar">
+      <link rel="stylesheet" href="/assets/monitor.css?v=20260901-research-pages">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>
@@ -170,13 +170,13 @@ class ContractMonitor extends window.QuantDeskPageController {
         <div class="modal-box research-modal" role="dialog" aria-modal="true" aria-labelledby="modal-symbol">
           <aside class="research-sidebar">
             <nav class="research-tabs" role="tablist" aria-label="研究内容导航">
-              <button class="on" type="button" role="tab" aria-selected="true" data-modal-section="#modal-trend"><span>01</span><strong>趋势</strong><small>K线与成交量</small></button>
-              <button type="button" role="tab" aria-selected="false" data-modal-section="#modal-indicator-section"><span>02</span><strong>策略指标</strong><small>20项指标</small></button>
-              <button type="button" role="tab" aria-selected="false" data-modal-section="#modal-battle-section"><span>03</span><strong>多空预测</strong><small>概率与方向</small></button>
-              <button type="button" role="tab" aria-selected="false" data-modal-section="#modal-strategy-section"><span>04</span><strong>策略机会</strong><small>条件与有效期</small></button>
-              <button type="button" role="tab" aria-selected="false" data-modal-section="#modal-report-section"><span>05</span><strong>研判报告</strong><small>多周期研判</small></button>
-              <button type="button" role="tab" aria-selected="false" data-modal-section="#modal-factor-section"><span>06</span><strong>评分因子</strong><small>因子贡献</small></button>
-              <button type="button" role="tab" aria-selected="false" data-modal-section="#modal-news-section"><span>07</span><strong>新闻列表</strong><small>老虎证券资讯</small></button>
+              <button class="on" type="button" role="tab" aria-selected="true" data-modal-page="overview" data-modal-section="#modal-trend"><span>01</span><strong>趋势</strong><small>K线与成交量</small></button>
+              <button type="button" role="tab" aria-selected="false" data-modal-page="overview" data-modal-section="#modal-indicator-section"><span>02</span><strong>策略指标</strong><small>20项指标</small></button>
+              <button type="button" role="tab" aria-selected="false" data-modal-page="battle" data-modal-section="#modal-battle-section"><span>03</span><strong>多空预测</strong><small>概率与方向</small></button>
+              <button type="button" role="tab" aria-selected="false" data-modal-page="strategy" data-modal-section="#modal-strategy-section"><span>04</span><strong>策略机会</strong><small>条件与有效期</small></button>
+              <button type="button" role="tab" aria-selected="false" data-modal-page="report" data-modal-section="#modal-report-section"><span>05</span><strong>研判报告</strong><small>多周期研判</small></button>
+              <button type="button" role="tab" aria-selected="false" data-modal-page="factors" data-modal-section="#modal-factor-section"><span>06</span><strong>评分因子</strong><small>因子贡献</small></button>
+              <button type="button" role="tab" aria-selected="false" data-modal-page="news" data-modal-section="#modal-news-section"><span>07</span><strong>新闻列表</strong><small>老虎证券资讯</small></button>
             </nav>
           </aside>
           <div class="research-workspace">
@@ -197,7 +197,7 @@ class ContractMonitor extends window.QuantDeskPageController {
             </div>
           </header>
 
-          <section class="research-metrics" aria-label="标的关键行情">
+          <section class="research-metrics" data-research-page="overview" aria-label="标的关键行情">
             <article><span>最新价</span><strong id="modal-metric-price">--</strong><small>实时合约报价</small></article>
             <article><span>24h 涨跌</span><strong id="modal-metric-change">--</strong><small id="modal-metric-change-note">相对 24 小时前</small></article>
             <article><span>24h 成交额</span><strong id="modal-metric-volume">--</strong><small>计价资产口径</small></article>
@@ -206,7 +206,7 @@ class ContractMonitor extends window.QuantDeskPageController {
             <article><span>机会质量</span><strong id="modal-metric-quality">--</strong><small id="modal-metric-quality-note">等待策略扫描</small></article>
           </section>
 
-          <section id="modal-trend" class="research-section research-trend">
+          <section id="modal-trend" class="research-section research-trend" data-research-page="overview">
             <div class="research-section-head trend-toolbar">
               <div>
                 <strong>趋势与成交量</strong>
@@ -240,7 +240,7 @@ class ContractMonitor extends window.QuantDeskPageController {
             </div>
           </section>
 
-          <section id="modal-indicator-section" class="research-section strategy-indicator-section">
+          <section id="modal-indicator-section" class="research-section strategy-indicator-section" data-research-page="overview">
             <div class="research-section-head">
               <div><strong>策略与预测指标</strong><span id="indicator-total-caption">共 20 项 · 正在读取真实数据</span></div>
             </div>
@@ -254,23 +254,23 @@ class ContractMonitor extends window.QuantDeskPageController {
             </div>
             <div id="strategy-indicator-detail" class="strategy-indicator-detail"></div>
           </section>
-          <section id="modal-battle-section" class="research-section">
+          <section id="modal-battle-section" class="research-section" data-research-page="battle" hidden>
             <div id="battle-detail" class="battle-detail"></div>
           </section>
-          <section id="modal-strategy-section" class="research-section">
+          <section id="modal-strategy-section" class="research-section" data-research-page="strategy" hidden>
             <div class="research-section-head"><div><strong>策略机会</strong><span>条件、有效期与匹配策略</span></div></div>
             <div id="opportunity-detail" class="opportunity-detail"></div>
           </section>
-          <section id="modal-report-section" class="research-section">
+          <section id="modal-report-section" class="research-section" data-research-page="report" hidden>
             <div class="research-section-head"><div><strong>多周期研判报告</strong><span>价格结构与新闻仅作辅助证据</span></div></div>
             <div id="score-summary" class="score-summary"></div>
             <div id="report" class="report"></div>
           </section>
-          <section id="modal-factor-section" class="research-section">
+          <section id="modal-factor-section" class="research-section" data-research-page="factors" hidden>
             <div class="research-section-head"><div><strong>评分因子</strong><span>当前图表周期的因子贡献</span></div></div>
             <div id="factors" class="factors"></div>
           </section>
-          <section id="modal-news-section" class="research-section research-news-section">
+          <section id="modal-news-section" class="research-section research-news-section" data-research-page="news" hidden>
             <div class="research-section-head">
               <div><strong>新闻列表</strong><span id="research-news-caption">老虎证券三路新闻接口聚合</span></div>
             </div>
@@ -737,18 +737,7 @@ class ContractMonitor extends window.QuantDeskPageController {
     });
     this.qa("[data-modal-section]").forEach((button) => {
       button.addEventListener("click", () => {
-        const target = this.q(button.dataset.modalSection);
-        const workspace = this.q(".research-workspace");
-        if (!target || !workspace) return;
-        this.qa("[data-modal-section]").forEach((item) => {
-          const selected = item === button;
-          item.classList.toggle("on", selected);
-          item.setAttribute("aria-selected", selected ? "true" : "false");
-        });
-        workspace.scrollTo({
-          top: Math.max(0, target.offsetTop - 82),
-          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-        });
+        this.activateResearchPage(button, { smooth: true });
       });
     });
     this.qa(".tf-switch button").forEach((button) => {
@@ -1468,17 +1457,35 @@ class ContractMonitor extends window.QuantDeskPageController {
     } catch (_) {}
   }
 
+  activateResearchPage(button, { smooth = false } = {}) {
+    const workspace = this.q(".research-workspace");
+    if (!button || !workspace) return;
+    const page = button.dataset.modalPage || "overview";
+    const target = this.q(button.dataset.modalSection);
+    this.qa("[data-research-page]").forEach((panel) => {
+      panel.hidden = panel.dataset.researchPage !== page;
+    });
+    this.qa("[data-modal-section]").forEach((item) => {
+      const selected = item === button;
+      item.classList.toggle("on", selected);
+      item.setAttribute("aria-selected", selected ? "true" : "false");
+    });
+    const top = page === "overview" && button.dataset.modalSection === "#modal-indicator-section" && target
+      ? Math.max(0, target.offsetTop - 82)
+      : 0;
+    workspace.scrollTo({
+      top,
+      behavior: smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "auto",
+    });
+    if (page === "overview") requestAnimationFrame(() => this.drawChart());
+  }
+
   revealModal(symbol) {
     this.state.modal.symbol = symbol;
     const modal = this.q("#modal");
     modal.classList.remove("hidden");
     modal.setAttribute("aria-hidden", "false");
-    this.q(".research-workspace").scrollTop = 0;
-    this.qa("[data-modal-section]").forEach((button, index) => {
-      const selected = index === 0;
-      button.classList.toggle("on", selected);
-      button.setAttribute("aria-selected", selected ? "true" : "false");
-    });
+    this.activateResearchPage(this.q('[data-modal-section="#modal-trend"]'));
     this.q("#modal-close").focus({ preventScroll: true });
   }
 

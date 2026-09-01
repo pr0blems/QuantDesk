@@ -367,7 +367,9 @@ button { cursor: pointer; }
 .research-tabs button:hover { border-color: #58716f; color: var(--m-text); }
 .research-tabs button.on { border-color: #9f8dff; color: #eef0ff; background: rgba(159, 141, 255, .1); box-shadow: inset 3px 0 0 #9f8dff; }
 .research-tabs button.on > span, .research-tabs button.on small { color: #ad9dff; }
+.research-workspace [data-research-page][hidden] { display: none !important; }
 .research-section { scroll-margin-top: 82px; margin: 10px 18px 0; padding: 12px; border: 1px solid var(--m-border); background: var(--m-panel); }
+.research-section[data-research-page]:not([data-research-page="overview"]) { min-height: calc(100% - 100px); margin-bottom: 18px; }
 .research-section-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 9px; }
 .research-section-head > div { display: flex; align-items: baseline; gap: 10px; }
 .research-section-head strong { color: var(--m-text); font-size: 22.4px; }
