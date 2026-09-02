@@ -414,7 +414,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
         input.type = type === "integer" || type === "float" || type === "number" ? "number" : "text";
         if (param.min != null) input.min = String(param.min);
         if (param.max != null) input.max = String(param.max);
-        if (param.step != null) input.step = String(param.step);
+        // A number input defaults to step=1.  Many imported strategy schemas
+        // only declare min/max, and their decimals are still valid strategy
+        // values (for example Lot=0.01 or ATR factor=0.2).  Without an
+        // explicit fallback the browser rejects those defaults before the
+        // request reaches the backtest engine.
+        input.step = param.step != null ? String(param.step) : "any";
       }
       input.dataset.paramKey = String(param.key || "");
       input.dataset.paramType = type;

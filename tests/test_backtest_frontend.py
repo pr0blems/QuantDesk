@@ -22,3 +22,4 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'id="standard-execution-note"' in script
     assert 'id="position-field"' in script
     assert 'id="stop-field"' in script
+    assert 'input.step = param.step != null ? String(param.step) : "any";' in script
