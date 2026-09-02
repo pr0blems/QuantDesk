@@ -44,6 +44,7 @@ from quantdesk_v2.ai_monitor import (
     prediction_adaptive_path_exit,
     prediction_cost_breakdown,
     prediction_estimated_cost_bps,
+    prediction_feature_quality_required,
     prediction_live_score_snapshot,
     prediction_net_outcome,
     prediction_outcome,
@@ -1529,6 +1530,38 @@ def test_configured_indicators_ignore_unavailable_observation_inputs() -> None:
     assert policy["core_matched_count"] == 2
     assert policy["technical_score"] == 80
     assert [item["available"] for item in evidence[-2:]] == [False, False]
+
+
+def test_missing_optional_prediction_inputs_do_not_require_snapshot_quality() -> None:
+    assert (
+        prediction_feature_quality_required(
+            [
+                {
+                    "key": "moving_average_bull",
+                    "available": True,
+                    "matched": True,
+                },
+                {
+                    "key": "prediction_trend",
+                    "available": False,
+                    "matched": False,
+                },
+            ]
+        )
+        is False
+    )
+    assert (
+        prediction_feature_quality_required(
+            [
+                {
+                    "key": "prediction_trend",
+                    "available": True,
+                    "matched": True,
+                }
+            ]
+        )
+        is True
+    )
 
 
 def test_configured_indicators_accept_one_coherent_setup_group() -> None:

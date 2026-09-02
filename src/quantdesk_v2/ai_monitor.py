@@ -914,6 +914,25 @@ def valid_indicator_keys() -> set[str]:
     return {item["key"] for item in indicator_catalog()}
 
 
+def prediction_feature_quality_required(
+    indicator_evidence: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Require snapshot quality only when a selected prediction input is usable.
+
+    Prediction/market-flow inputs are optional enrichments in the grouped
+    indicator policy.  Treating their mere configuration as a hard data-quality
+    dependency caused otherwise valid K-line setups to be blocked whenever the
+    optional snapshot was absent.  A present prediction input still has to pass
+    the configured quality threshold before it may influence admission.
+    """
+
+    return any(
+        str(item.get("key") or "").startswith("prediction_")
+        and bool(item.get("available"))
+        for item in indicator_evidence
+    )
+
+
 indicator_group = classify_indicator_group
 
 def cleanup_unpredicted_opportunities(db: Session, user_id: int) -> dict[str, int]:
@@ -7216,9 +7235,6 @@ def _scan_opportunities(
         )
         for direction in ("long", "short")
     }
-    requires_prediction_features = any(
-        key.startswith("prediction_") for key in indicator_keys
-    )
     market_flow_inputs = load_market_flow_input_maps(db, repository)
     realtime_features = market_feature_service.latest(
         db,
@@ -7267,6 +7283,9 @@ def _scan_opportunities(
                     scan = {"items": [], "prediction_features": {"items": []}, "evaluated_at": 0}
         primary_policy_matched, indicator_evidence = match_configured_indicators(
             scan, indicator_keys, candidate["direction"]
+        )
+        requires_prediction_features = prediction_feature_quality_required(
+            indicator_evidence
         )
         primary_indicator_policy = configured_indicator_policy(indicator_evidence)
         multi_timeframe_technical = dict(
