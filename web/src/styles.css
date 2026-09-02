@@ -1,6 +1,6 @@
-@import "../../src/quantdesk_v2/static/style.css";
-@import "../../src/quantdesk_v2/static/strategies.css";
-@import "../../src/quantdesk_v2/static/terminal.css";
+@import "./theme/style.css";
+@import "./theme/strategies.css";
+@import "./theme/terminal.css";
 
 .auth-boot-visible { display: grid; }
 .sidebar-backdrop { padding: 0; border: 0; border-radius: 0 !important; }

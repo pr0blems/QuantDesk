@@ -36,7 +36,7 @@ class PaperDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/paper.css?v=20260809-paper-combo-1">
+      <link rel="stylesheet" href="/next/assets/paper.css?v=20260809-paper-combo-1">
       <main class="paper-dashboard">
         <nav class="account-switcher" aria-label="模拟盘切换">
           <div id="paper-account-tabs" class="account-tabs" role="tablist" aria-label="我的模拟盘">

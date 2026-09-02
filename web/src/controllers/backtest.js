@@ -35,7 +35,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/backtest.css?v=20260809-font1_6x-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260809-font1_6x-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">

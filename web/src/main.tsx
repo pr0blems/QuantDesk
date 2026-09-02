@@ -1,5 +1,13 @@
 import { createRoot } from "react-dom/client";
 
+import "./controllers/controller-runtime.js";
+import "./controllers/strategies.js";
+import "./controllers/monitor.js";
+import "./controllers/ai-monitor.js";
+import "./controllers/paper.js";
+import "./controllers/live.js";
+import "./controllers/backtest.js";
+
 import {
   apiRequest,
   apiStream,
@@ -27,19 +35,6 @@ window.quantdeskApiStream = (path, options = {}) => {
 
 window.quantdeskOpenAiMonitorSocket = openAiMonitorWebSocket;
 window.quantdeskOpenMonitorMarketSocket = openMonitorMarketWebSocket;
-
-for (const source of [
-  "/assets/monitor.js?v=20260901-research-pages",
-  "/assets/ai-monitor.js?v=20260902-tooltip-layer",
-  "/assets/paper.js?v=20260831-react3",
-  "/assets/live.js?v=20260831-react3",
-  "/assets/backtest.js?v=20260831-react3",
-]) {
-  const script = document.createElement("script");
-  script.src = source;
-  script.async = false;
-  document.head.append(script);
-}
 
 const root = document.getElementById("root");
 

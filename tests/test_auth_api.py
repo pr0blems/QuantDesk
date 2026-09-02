@@ -215,6 +215,13 @@ def test_login_page_and_navigation_shell_are_served(
     build_dir = tmp_path / "react_static"
     assets_dir = build_dir / "assets"
     assets_dir.mkdir(parents=True)
+    for asset_name in (
+        "ai-monitor.css",
+        "backtest.css",
+        "monitor.css",
+        "paper.css",
+    ):
+        (assets_dir / asset_name).write_text("/* frontend asset */", encoding="utf-8")
     (build_dir / "index.html").write_text(
         '<!doctype html><html lang="zh-CN"><body><div id="root"></div></body></html>',
         encoding="utf-8",
@@ -256,16 +263,12 @@ def test_login_page_and_navigation_shell_are_served(
 
         assert client.get("/unknown-frontend-route").status_code == 404
         assert client.get("/assets/app.js").status_code == 404
+        assert client.get("/assets/controller-runtime.js").status_code == 404
         for asset_path in (
-            "/assets/controller-runtime.js",
-            "/assets/paper.js",
-            "/assets/live.js",
-            "/assets/backtest.js",
-            "/assets/backtest.css",
-            "/assets/monitor.js",
-            "/assets/strategies.js",
-            "/assets/strategies.css",
-            "/assets/style.css",
+            "/next/assets/ai-monitor.css",
+            "/next/assets/backtest.css",
+            "/next/assets/monitor.css",
+            "/next/assets/paper.css",
         ):
             assert client.get(asset_path).status_code == 200
 

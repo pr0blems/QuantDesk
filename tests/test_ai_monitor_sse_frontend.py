@@ -4,7 +4,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_ai_monitor_prefers_authenticated_websocket_with_stream_fallback() -> None:
-    component = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+    component = (ROOT / "web/src/controllers/ai-monitor.js").read_text(
         encoding="utf-8"
     )
     client = (ROOT / "web/src/api/client.ts").read_text(encoding="utf-8")
@@ -40,7 +40,7 @@ def test_ai_monitor_prefers_authenticated_websocket_with_stream_fallback() -> No
 
 
 def test_ai_monitor_incremental_stream_never_places_token_in_query_string() -> None:
-    component = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+    component = (ROOT / "web/src/controllers/ai-monitor.js").read_text(
         encoding="utf-8"
     )
     client = (ROOT / "web/src/api/client.ts").read_text(encoding="utf-8")
@@ -51,7 +51,7 @@ def test_ai_monitor_incremental_stream_never_places_token_in_query_string() -> N
 
 
 def test_research_modal_prefers_live_market_websocket_before_rest_fallback() -> None:
-    component = (ROOT / "src/quantdesk_v2/static/monitor.js").read_text(
+    component = (ROOT / "web/src/controllers/monitor.js").read_text(
         encoding="utf-8"
     )
     client = (ROOT / "web/src/api/client.ts").read_text(encoding="utf-8")

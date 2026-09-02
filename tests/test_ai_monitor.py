@@ -3601,7 +3601,7 @@ def test_prediction_surfaces_only_expose_the_current_settlement_policy() -> None
     api_source = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(
         encoding="utf-8"
     )
-    frontend = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
+    frontend = (ROOT / "web/src/controllers/ai-monitor.js").read_text(encoding="utf-8")
     fact_analytics = analytics_source[
         analytics_source.index(
             "def historical_opportunity_fact_analytics("
@@ -4236,25 +4236,25 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     entrypoint = (ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
     react_index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     app_styles = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
-    component = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
-    stylesheet = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(encoding="utf-8")
+    component = (ROOT / "web/src/controllers/ai-monitor.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/public/assets/ai-monitor.css").read_text(encoding="utf-8")
 
     assert app.index('{ key: "monitor"') < app.index('{ key: "ai-monitor"')
     assert 'name="ai-monitor-dashboard"' in app
-    assert '"/assets/ai-monitor.js?v=20260902-live-change"' in entrypoint
-    assert '"/assets/monitor.js?v=20260901-research-pages"' in entrypoint
+    assert 'import "./controllers/ai-monitor.js"' in entrypoint
+    assert 'import "./controllers/monitor.js"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
-    assert 'href="/assets/ai-monitor.css?v=20260902-live-change"' in component
+    assert 'href="/next/assets/ai-monitor.css?v=20260902-tooltip-layer"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
-    assert "/assets/controller-runtime.js?v=20260831-react3" in react_index
-    assert "/assets/strategies.js?v=20260902-groups1" in react_index
+    assert "/assets/controller-runtime.js" not in react_index
+    assert "/assets/strategies.js" not in react_index
     for asset in (
-        '"/assets/ai-monitor.js?v=20260902-live-change"',
-        '"/assets/monitor.js?v=20260901-research-pages"',
-        '"/assets/paper.js?v=20260831-react3"',
-        '"/assets/live.js?v=20260831-react3"',
-        '"/assets/backtest.js?v=20260831-react3"',
+        'import "./controllers/ai-monitor.js"',
+        'import "./controllers/monitor.js"',
+        'import "./controllers/paper.js"',
+        'import "./controllers/live.js"',
+        'import "./controllers/backtest.js"',
     ):
         assert asset in entrypoint
     assert 'view: "opportunities"' in component

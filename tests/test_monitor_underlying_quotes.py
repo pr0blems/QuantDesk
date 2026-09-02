@@ -178,8 +178,8 @@ def test_persisted_quote_is_preferred_for_aligned_basis() -> None:
 
 def test_monitor_frontend_renders_pair_row_and_spread_alert() -> None:
     root = Path(__file__).resolve().parents[1]
-    script = (root / "src/quantdesk_v2/static/monitor.js").read_text(encoding="utf-8")
-    styles = (root / "src/quantdesk_v2/static/monitor.css").read_text(encoding="utf-8")
+    script = (root / "web/src/controllers/monitor.js").read_text(encoding="utf-8")
+    styles = (root / "web/public/assets/monitor.css").read_text(encoding="utf-8")
 
     assert 'class="underlying-row' in script
     assert "maybeNotifySpreadAlert(item)" in script

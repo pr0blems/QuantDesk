@@ -348,12 +348,8 @@ class Settings(BaseSettings):
             raise RuntimeError(f"{name} must be an approved Binance HTTPS origin")
 
     @property
-    def static_dir(self) -> Path:
-        return Path(__file__).resolve().parent / "static"
-
-    @property
     def react_static_dir(self) -> Path:
-        """Optional production build of the incrementally migrated React UI."""
+        """Production build of the single QuantDesk frontend."""
 
         return Path(__file__).resolve().parent / "react_static"
 

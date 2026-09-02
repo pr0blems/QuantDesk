@@ -101,51 +101,42 @@ def test_legacy_credentials_route_redirects_to_settings_without_shadowing_api(
     assert "location" not in credentials_api.headers
 
 
-def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes() -> None:
+def test_assets_and_api_routes_are_not_shadowed_by_frontend_routes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _install_react_build(monkeypatch, tmp_path)
+    assets_dir = tmp_path / "react_static" / "assets"
+    assets_dir.mkdir()
+    (assets_dir / "monitor.css").write_text("body { color: white; }", encoding="utf-8")
     client = _client()
     with client:
-        asset = client.get("/assets/controller-runtime.js")
+        asset = client.get("/next/assets/monitor.css")
+        retired_asset_root = client.get("/assets/monitor.css")
+        retired_controller = client.get("/assets/controller-runtime.js")
         retired_asset = client.get("/assets/app.js")
         docs = client.get("/api/docs")
         api_missing = client.get("/api/v2/route-that-does-not-exist")
 
     assert asset.status_code == 200
-    assert "javascript" in asset.headers["content-type"]
-    assert "customElements.define" in asset.text
+    assert "text/css" in asset.headers["content-type"]
+    assert retired_asset_root.status_code == 404
+    assert retired_controller.status_code == 404
     assert retired_asset.status_code == 404
-    live_asset = client.get("/assets/live.js")
-    assert live_asset.status_code == 200
-    assert "REAL FUNDS" in live_asset.text
-    assert "与模拟盘完全相同" in live_asset.text
-    assert "live-symbols" not in live_asset.text
-    assert "BTCUSDT" not in live_asset.text
-    assert 'id="live-delete"' in live_asset.text
-    assert 'id="live-rename"' in live_asset.text
-    assert 'account.last_error_code === "risk_review_required"' in live_asset.text
-    assert "历史/人工仓位沿用原保护，新开仓暂停，需人工复核" in live_asset.text
-    paper_asset = client.get("/assets/paper.js")
-    assert paper_asset.status_code == 200
-    assert 'id="paper-delete"' in paper_asset.text
-    assert 'id="paper-rename"' in paper_asset.text
-    assert 'id="paper-adjust"' in paper_asset.text
-    assert 'id="paper-adjust-modal"' in paper_asset.text
-    assert 'id="paper-adjust-form"' in paper_asset.text
-    assert 'id="paper-create-strategies"' in paper_asset.text
-    assert 'id="paper-adjust-strategies"' in paper_asset.text
-    assert "strategy_ids: strategyIds" in paper_asset.text
-    assert "全部同向满足才开仓" in paper_asset.text
-    assert 'max="20" step="1" value="20"' in paper_asset.text
-    assert "syncCountKnown && Number(syncedTradfiSymbols) === 0" in paper_asset.text
-    assert "Number(data.account?.synced_tradfi_symbols || 0) === 0" not in paper_asset.text
-    missing_build = client.get("/")
-    assert missing_build.status_code == 503
-    assert missing_build.json() == {"detail": "frontend build is unavailable"}
     assert docs.status_code == 200
     assert api_missing.status_code == 404
     assert api_missing.json() == {"detail": "Not Found"}
     _assert_security_headers(asset)
     _assert_security_headers(api_missing)
 
+
+def test_missing_frontend_build_returns_503() -> None:
+    client = _client()
+    with client:
+        response = client.get("/")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "frontend build is unavailable"}
 
 @pytest.mark.parametrize(
     "path",

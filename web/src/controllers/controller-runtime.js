@@ -50,8 +50,7 @@
     }
     definitions.set(name, Controller);
 
-    // 旧正式入口和 AI 研究弹窗仍可使用相同控制器作为即时回滚路径。
-    // React 正式入口通过 quantdeskMountPageController 直接挂载，不经过此包装元素。
+    // AI 研究弹窗仍会嵌套使用同一控制器；正式页面由 React 宿主直接挂载。
     if (!global.customElements.get(name)) {
       class QuantDeskControllerElement extends HTMLElement {
         connectedCallback() { mountPageController(name, this); }

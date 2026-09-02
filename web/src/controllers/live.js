@@ -35,8 +35,8 @@ class LiveDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/paper.css?v=20260809-font1_6x-1">
-      <link rel="stylesheet" href="/assets/live.css?v=20260809-font1_6x-1">
+      <link rel="stylesheet" href="/next/assets/paper.css?v=20260809-font1_6x-1">
+      <link rel="stylesheet" href="/next/assets/live.css?v=20260809-font1_6x-1">
       <main class="paper-dashboard live-dashboard">
         <nav class="account-switcher" aria-label="实盘策略切换">
           <div id="live-tabs" class="account-tabs" role="tablist"><span class="tabs-loading">正在读取实盘策略…</span></div>

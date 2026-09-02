@@ -416,72 +416,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(deployment_router)
     app.include_router(public_news_router)
 
-    if runtime_settings.static_dir.is_dir():
-        app.mount(
-            "/assets",
-            StaticFiles(directory=runtime_settings.static_dir),
-            name="assets",
+    def index() -> FileResponse:
+        react_index = runtime_settings.react_static_dir / "index.html"
+        if react_index.is_file():
+            return FileResponse(react_index)
+        raise HTTPException(
+            status_code=503,
+            detail="frontend build is unavailable",
         )
 
-        def index() -> FileResponse:
-            react_index = runtime_settings.react_static_dir / "index.html"
-            if react_index.is_file():
-                return FileResponse(react_index)
-            raise HTTPException(
-                status_code=503,
-                detail="frontend build is unavailable",
-            )
-
+    app.add_api_route(
+        "/",
+        index,
+        methods=["GET"],
+        include_in_schema=False,
+        name="frontend_index",
+    )
+    for frontend_route in FRONTEND_ROUTES:
         app.add_api_route(
-            "/",
+            frontend_route,
             index,
             methods=["GET"],
             include_in_schema=False,
-            name="frontend_index",
+            name=f"frontend_{frontend_route.removeprefix('/')}",
         )
-        for frontend_route in FRONTEND_ROUTES:
-            app.add_api_route(
-                frontend_route,
-                index,
-                methods=["GET"],
-                include_in_schema=False,
-                name=f"frontend_{frontend_route.removeprefix('/')}",
-            )
 
-        for admin_route in ("/admin", "/admin/login"):
-            app.add_api_route(
-                admin_route,
-                _admin_frontend_redirect,
-                methods=["GET"],
-                include_in_schema=False,
-                name=f"admin_{admin_route.removeprefix('/').replace('/', '_')}",
-            )
-
-        def legacy_credentials_redirect() -> RedirectResponse:
-            return RedirectResponse(url="/settings", status_code=308)
-
+    for admin_route in ("/admin", "/admin/login"):
         app.add_api_route(
-            "/credentials",
-            legacy_credentials_redirect,
+            admin_route,
+            _admin_frontend_redirect,
             methods=["GET"],
             include_in_schema=False,
-            name="frontend_credentials_redirect",
+            name=f"admin_{admin_route.removeprefix('/').replace('/', '_')}",
         )
 
-        def retired_frontend_redirect(request: Request) -> RedirectResponse:
-            return RedirectResponse(
-                url=LEGACY_FRONTEND_REDIRECTS[request.url.path],
-                status_code=308,
-            )
+    def legacy_credentials_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/settings", status_code=308)
 
-        for retired_route in LEGACY_FRONTEND_REDIRECTS:
-            app.add_api_route(
-                retired_route,
-                retired_frontend_redirect,
-                methods=["GET"],
-                include_in_schema=False,
-                name=f"frontend_{retired_route.removeprefix('/')}_redirect",
-            )
+    app.add_api_route(
+        "/credentials",
+        legacy_credentials_redirect,
+        methods=["GET"],
+        include_in_schema=False,
+        name="frontend_credentials_redirect",
+    )
+
+    def retired_frontend_redirect(request: Request) -> RedirectResponse:
+        return RedirectResponse(
+            url=LEGACY_FRONTEND_REDIRECTS[request.url.path],
+            status_code=308,
+        )
+
+    for retired_route in LEGACY_FRONTEND_REDIRECTS:
+        app.add_api_route(
+            retired_route,
+            retired_frontend_redirect,
+            methods=["GET"],
+            include_in_schema=False,
+            name=f"frontend_{retired_route.removeprefix('/')}_redirect",
+        )
 
     if runtime_settings.react_static_dir.is_dir():
         # The same immutable React build serves both the canonical routes and

@@ -5,10 +5,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_prediction_analytics_renders_frozen_ablation_without_imputation() -> None:
     component = (
-        ROOT / "src/quantdesk_v2/static/ai-monitor.js"
+        ROOT / "web/src/controllers/ai-monitor.js"
     ).read_text(encoding="utf-8")
     stylesheet = (
-        ROOT / "src/quantdesk_v2/static/ai-monitor.css"
+        ROOT / "web/public/assets/ai-monitor.css"
     ).read_text(encoding="utf-8")
 
     assert 'id="market-ablation"' in component
@@ -40,7 +40,7 @@ def test_prediction_analytics_renders_frozen_ablation_without_imputation() -> No
 
 def test_prediction_advanced_filters_round_trip_through_url_query() -> None:
     component = (
-        ROOT / "src/quantdesk_v2/static/ai-monitor.js"
+        ROOT / "web/src/controllers/ai-monitor.js"
     ).read_text(encoding="utf-8")
 
     for control_id in (

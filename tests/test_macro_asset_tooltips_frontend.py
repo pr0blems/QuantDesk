@@ -4,7 +4,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_macro_asset_tooltips_cover_all_proxies_and_current_direction() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+    script = (ROOT / "web/src/controllers/ai-monitor.js").read_text(
         encoding="utf-8"
     )
 
@@ -18,7 +18,7 @@ def test_macro_asset_tooltips_cover_all_proxies_and_current_direction() -> None:
 
 
 def test_macro_asset_tooltip_supports_hover_focus_and_visible_overflow() -> None:
-    styles = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(
+    styles = (ROOT / "web/public/assets/ai-monitor.css").read_text(
         encoding="utf-8"
     )
 
@@ -32,7 +32,7 @@ def test_macro_asset_tooltip_supports_hover_focus_and_visible_overflow() -> None
 
 
 def test_macro_index_and_risk_cards_explain_market_impact_and_data_basis() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+    script = (ROOT / "web/src/controllers/ai-monitor.js").read_text(
         encoding="utf-8"
     )
 
@@ -53,10 +53,10 @@ def test_macro_index_and_risk_cards_explain_market_impact_and_data_basis() -> No
 
 
 def test_macro_risk_summary_is_rendered_in_the_header_without_source_note() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+    script = (ROOT / "web/src/controllers/ai-monitor.js").read_text(
         encoding="utf-8"
     )
-    styles = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(
+    styles = (ROOT / "web/public/assets/ai-monitor.css").read_text(
         encoding="utf-8"
     )
 
@@ -75,7 +75,7 @@ def test_macro_risk_summary_is_rendered_in_the_header_without_source_note() -> N
 
 
 def test_macro_index_and_risk_tooltips_support_hover_and_keyboard_focus() -> None:
-    styles = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(
+    styles = (ROOT / "web/public/assets/ai-monitor.css").read_text(
         encoding="utf-8"
     )
 
@@ -93,7 +93,7 @@ def test_macro_index_and_risk_tooltips_support_hover_and_keyboard_focus() -> Non
 
 
 def test_macro_policy_labels_directional_values_as_independent_caps() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+    script = (ROOT / "web/src/controllers/ai-monitor.js").read_text(
         encoding="utf-8"
     )
 
@@ -104,7 +104,7 @@ def test_macro_policy_labels_directional_values_as_independent_caps() -> None:
 
 
 def test_treasury_tenor_cards_explain_meaning_drivers_and_market_impact() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+    script = (ROOT / "web/src/controllers/ai-monitor.js").read_text(
         encoding="utf-8"
     )
 
@@ -127,7 +127,7 @@ def test_treasury_tenor_cards_explain_meaning_drivers_and_market_impact() -> Non
 
 
 def test_treasury_tenor_tooltips_support_hover_and_keyboard_focus() -> None:
-    styles = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(
+    styles = (ROOT / "web/public/assets/ai-monitor.css").read_text(
         encoding="utf-8"
     )
 

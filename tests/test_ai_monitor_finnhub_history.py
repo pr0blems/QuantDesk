@@ -72,7 +72,7 @@ def test_point_in_time_finnhub_quote_never_uses_future_or_stale_rows() -> None:
 
 
 def test_prediction_analytics_explains_partial_and_missing_domains() -> None:
-    component = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(
+    component = (ROOT / "web/src/controllers/ai-monitor.js").read_text(
         encoding="utf-8"
     )
 

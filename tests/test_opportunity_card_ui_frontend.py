@@ -1,8 +1,8 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
-STYLES = (ROOT / "src/quantdesk_v2/static/ai-monitor.css").read_text(encoding="utf-8")
+SCRIPT = (ROOT / "web/src/controllers/ai-monitor.js").read_text(encoding="utf-8")
+STYLES = (ROOT / "web/public/assets/ai-monitor.css").read_text(encoding="utf-8")
 
 
 def test_opportunity_card_has_distinct_summary_details_and_actions() -> None:

@@ -85,7 +85,7 @@ class ContractMonitor extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/monitor.css?v=20260901-research-pages">
+      <link rel="stylesheet" href="/next/assets/monitor.css?v=20260901-research-pages">
       <div class="monitor">
         <header class="monitor-head">
           <div class="monitor-logo">⚡ QuantDesk <small>多市场行情监控</small></div>

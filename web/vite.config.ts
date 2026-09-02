@@ -5,7 +5,7 @@ import { defineConfig, loadEnv } from "vite";
 import type { Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
-const adminSourceDir = resolve(__dirname, "../src/quantdesk_v2/static");
+const adminSourceDir = resolve(__dirname, "admin-source");
 
 function adminUiPlugin(): Plugin {
   const adminHtml = readFileSync(resolve(adminSourceDir, "admin.html"), "utf8")
@@ -57,10 +57,6 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       proxy: {
         "/api": {
-          target: apiTarget,
-          changeOrigin: true,
-        },
-        "/assets": {
           target: apiTarget,
           changeOrigin: true,
         },

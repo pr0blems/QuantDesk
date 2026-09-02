@@ -41,7 +41,7 @@ where = ["src"]
 include = ["quantdesk_v2*"]
 
 [tool.setuptools.package-data]
-quantdesk_v2 = ["static/*", "react_static/*", "react_static/assets/*"]
+quantdesk_v2 = ["react_static/*", "react_static/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

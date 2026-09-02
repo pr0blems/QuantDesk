@@ -150,7 +150,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260902-tooltip-layer">
+      <link rel="stylesheet" href="/next/assets/ai-monitor.css?v=20260902-tooltip-layer">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>

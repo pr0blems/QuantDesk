@@ -809,7 +809,7 @@ def test_independent_ai_account_runs_when_ordinary_live_server_is_off(
 
 
 def test_ai_monitor_live_copy_ui_enables_with_one_confirmation_button() -> None:
-    frontend = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
+    frontend = (ROOT / "web/src/controllers/ai-monitor.js").read_text(encoding="utf-8")
     api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
 
     assert 'id="live-copy-toggle"' in frontend
@@ -872,7 +872,7 @@ def test_real_fund_entry_is_blocked_until_current_policy_is_quantitatively_ready
 
 
 def test_manual_follow_ui_and_api_require_second_real_funds_confirmation() -> None:
-    frontend = (ROOT / "src/quantdesk_v2/static/ai-monitor.js").read_text(encoding="utf-8")
+    frontend = (ROOT / "web/src/controllers/ai-monitor.js").read_text(encoding="utf-8")
     api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
 
     assert 'data-manual-follow="${this.escape(item.id)}"' in frontend

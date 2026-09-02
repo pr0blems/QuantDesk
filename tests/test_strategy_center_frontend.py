@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_strategy_center_exposes_complete_strategy_workflow() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
+    script = (ROOT / "web/src/controllers/strategies.js").read_text(encoding="utf-8")
 
     for visible_contract in (
         'data-section="signals"',
@@ -117,18 +117,19 @@ def test_strategy_center_exposes_complete_strategy_workflow() -> None:
 
 def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
     entrypoint = (ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
-    stylesheet = (ROOT / "src/quantdesk_v2/static/strategies.css").read_text(
+    stylesheet = (ROOT / "web/src/theme/strategies.css").read_text(
         encoding="utf-8"
     )
 
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
     controller_panel = (ROOT / "web/src/pages/PageControllerPanel.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/controller-runtime.js?v=20260831-react3" in index
-    assert "/assets/strategies.js?v=20260902-groups1" in index
-    assert index.index("/assets/controller-runtime.js?v=20260831-react3") < index.index("/assets/strategies.js?v=20260902-groups1")
-    assert index.index("/assets/strategies.js?v=20260902-groups1") < index.index("/src/main.tsx")
-    assert "/assets/strategies.js" not in entrypoint
+    assert "/assets/controller-runtime.js" not in index
+    assert "/assets/strategies.js" not in index
+    assert entrypoint.index('import "./controllers/controller-runtime.js"') < entrypoint.index(
+        'import "./controllers/strategies.js"'
+    )
+    assert 'import "./controllers/strategies.js"' in entrypoint
     assert "window.quantdeskMountPageController(name, host)" in controller_panel
     assert "document.createElement" not in controller_panel
     assert "customElements" not in controller_panel
@@ -159,13 +160,16 @@ def test_react_frontend_mounts_the_current_strategy_controller_asset() -> None:
 
 def test_react_shell_loads_the_current_strategy_controller() -> None:
     index = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
 
-    assert "/assets/controller-runtime.js?v=20260831-react3" in index
-    assert "/assets/strategies.js?v=20260902-groups1" in index
+    assert "/assets/controller-runtime.js" not in index
+    assert "/assets/strategies.js" not in index
+    assert 'import "./controllers/controller-runtime.js"' in entrypoint
+    assert 'import "./controllers/strategies.js"' in entrypoint
 
 
 def test_grouped_binary_parameters_render_as_switches_and_preserve_integer_contract() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
+    script = (ROOT / "web/src/controllers/strategies.js").read_text(encoding="utf-8")
 
     assert 'definition.control === "switch" && type === "integer"' in script
     assert 'input.dataset.binaryInteger = "true"' in script
@@ -175,7 +179,7 @@ def test_grouped_binary_parameters_render_as_switches_and_preserve_integer_contr
 
 
 def test_strategy_controller_initializes_after_mount() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
+    script = (ROOT / "web/src/controllers/strategies.js").read_text(encoding="utf-8")
     constructor = script.split("constructor(host) {", 1)[1].split("connectedCallback() {", 1)[0]
     connected = script.split("connectedCallback() {", 1)[1].split("renderShell() {", 1)[0]
 
@@ -186,7 +190,7 @@ def test_strategy_controller_initializes_after_mount() -> None:
 
 
 def test_parameterized_complete_strategies_validate_without_revision_promotion() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
+    script = (ROOT / "web/src/controllers/strategies.js").read_text(encoding="utf-8")
 
     assert 'const revisionWorkflow = ["python_source", "strategy_dsl"].includes(item.management_mode);' in script
     assert script.count('const revisionWorkflow = ["python_source", "strategy_dsl"].includes(item.management_mode);') == 2
@@ -194,7 +198,7 @@ def test_parameterized_complete_strategies_validate_without_revision_promotion()
 
 
 def test_all_supported_strategies_share_the_complete_strategy_view() -> None:
-    script = (ROOT / "src/quantdesk_v2/static/strategies.js").read_text(encoding="utf-8")
+    script = (ROOT / "web/src/controllers/strategies.js").read_text(encoding="utf-8")
 
     assert 'data-section="legacy"' not in script
     assert '>旧版策略<' not in script
@@ -211,8 +215,8 @@ def test_all_supported_strategies_share_the_complete_strategy_view() -> None:
     assert 'isManagedAiMonitor ? "自动监控当前策略"' in script
 
 
-def test_controller_runtime_keeps_legacy_rollback_but_react_mounts_directly() -> None:
-    runtime = (ROOT / "src/quantdesk_v2/static/controller-runtime.js").read_text(encoding="utf-8")
+def test_controller_runtime_is_bundled_and_react_mounts_directly() -> None:
+    runtime = (ROOT / "web/src/controllers/controller-runtime.js").read_text(encoding="utf-8")
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
 
     assert "function mountPageController(name, host)" in runtime
@@ -229,3 +233,16 @@ def test_unused_alternate_react_pages_are_removed() -> None:
     page_dir = ROOT / "web/src/pages"
     for name in ("MonitorPage.tsx", "PaperPage.tsx", "LivePage.tsx", "StrategiesPage.tsx", "BacktestsPage.tsx"):
         assert not (page_dir / name).exists()
+
+
+def test_frontend_source_has_a_single_web_owner() -> None:
+    assert not (ROOT / "src/quantdesk_v2/static").exists()
+    assert (ROOT / "web/src/controllers/ai-monitor.js").is_file()
+    assert (ROOT / "web/src/theme/style.css").is_file()
+    assert (ROOT / "web/public/assets/ai-monitor.css").is_file()
+
+    backend = (ROOT / "src/quantdesk_v2/main.py").read_text(encoding="utf-8")
+    config = (ROOT / "src/quantdesk_v2/config.py").read_text(encoding="utf-8")
+    assert "runtime_settings.static_dir" not in backend
+    assert 'app.mount(\n            "/assets"' not in backend
+    assert "def static_dir" not in config
