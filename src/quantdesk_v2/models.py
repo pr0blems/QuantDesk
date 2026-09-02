@@ -777,13 +777,13 @@ class AiMonitorConfig(Base):
         Numeric(8, 4), default=Decimal("10.0000"), nullable=False, comment="成本之外要求的安全边际基点"
     )
     news_score_weight: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2), default=Decimal("45.00"), nullable=False, comment="新闻评分组合权重百分比"
+        Numeric(5, 2), default=Decimal("20.00"), nullable=False, comment="新闻评分组合权重百分比"
     )
     technical_score_weight: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2), default=Decimal("35.00"), nullable=False, comment="技术指标组合权重百分比"
+        Numeric(5, 2), default=Decimal("50.00"), nullable=False, comment="技术指标组合权重百分比"
     )
     market_flow_score_weight: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2), default=Decimal("20.00"), nullable=False, comment="资金盘口组合权重百分比"
+        Numeric(5, 2), default=Decimal("30.00"), nullable=False, comment="资金盘口组合权重百分比"
     )
     news_system_prompt: Mapped[str | None] = mapped_column(
         Text,

@@ -642,6 +642,26 @@ def test_six_domain_score_renormalizes_only_real_quality_weighted_evidence() -> 
     assert result["missing_domains"] == ["gex"]
 
 
+def test_six_domain_score_excludes_missing_news_from_effective_weights() -> None:
+    result = ai_monitor.enhanced_opportunity_domain_score(
+        news_score=0,
+        news_available=False,
+        technical_score=84,
+        market_environment={"available": False},
+        market_flow={"domains": {}},
+        policy={
+            "mode": "score",
+            "weights": ai_monitor.DEFAULT_UNUSUAL_WHALES_WEIGHTS,
+            "weights_version": "technical-primary-v1",
+        },
+    )
+
+    assert result["score"] == 84
+    assert result["domains"]["news"]["available"] is False
+    assert result["effective_weights"] == {"technical": 1.0}
+    assert "news" in result["missing_domains"]
+
+
 def test_record_mode_observes_external_quote_failures_without_blocking_binance() -> None:
     now = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
     quality = {

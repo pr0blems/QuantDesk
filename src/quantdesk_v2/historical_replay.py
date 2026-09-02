@@ -1327,8 +1327,8 @@ def _replay_symbol(
         )
         # Historical replay has no trustworthy order-book snapshot. Re-normalize the
         # configured news/technical weights and record this degraded, stricter mode.
-        news_weight = float(config.get("news_score_weight", 45))
-        technical_weight = float(config.get("technical_score_weight", 35))
+        news_weight = float(config.get("news_score_weight", 20))
+        technical_weight = float(config.get("technical_score_weight", 50))
         usable_weight = max(news_weight + technical_weight, 1.0)
         combined_score = (
             news_score * news_weight + indicator_score * technical_weight

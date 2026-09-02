@@ -876,9 +876,9 @@ class AiMonitorConfigUpdate(BaseModel):
     minimum_market_flow_quality: float = Field(default=0.5, ge=0, le=1)
     minimum_calibration_samples: int = Field(default=1000, ge=30, le=5000)
     live_safety_margin_bps: float = Field(default=10, ge=0, le=500)
-    news_score_weight: float = Field(default=45, ge=0, le=100)
-    technical_score_weight: float = Field(default=35, ge=0, le=100)
-    market_flow_score_weight: float = Field(default=20, ge=0, le=100)
+    news_score_weight: float = Field(default=20, ge=0, le=100)
+    technical_score_weight: float = Field(default=50, ge=0, le=100)
+    market_flow_score_weight: float = Field(default=30, ge=0, le=100)
 
     @field_validator("indicator_keys")
     @classmethod

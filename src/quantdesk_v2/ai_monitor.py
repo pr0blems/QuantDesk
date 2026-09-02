@@ -31,6 +31,9 @@ from .application.ai_monitor import (
     OpportunityGenerationService,
     PredictionSettlementService,
     classify_ablation_signal_state,
+    filter_technically_admissible_candidates,
+    merge_candidate_sources,
+    technical_market_candidates,
 )
 from .application.ai_monitor import (
     adaptive_exit_precedes as should_prefer_adaptive_exit,
@@ -183,6 +186,7 @@ from .models import (
     AiMonitorPredictionFact,
     AiMonitorRun,
     FinnhubQuoteSnapshot,
+    MarketOpportunity,
     MarketStreamEvent,
     News,
     NewsAiBatch,
@@ -512,7 +516,7 @@ def default_config_data() -> dict[str, Any]:
         "opportunity_interval_minutes": 15,
         "news_lookback_hours": 168,
         "news_trigger_window_hours": 4,
-        "require_new_news_trigger": True,
+        "require_new_news_trigger": False,
         "require_market_quality_for_prediction": True,
         "timeframe": "1h",
         "prediction_max_holding_bars": 4,
@@ -527,9 +531,9 @@ def default_config_data() -> dict[str, Any]:
         "minimum_market_flow_quality": 0.5,
         "minimum_calibration_samples": 1000,
         "live_safety_margin_bps": 10.0,
-        "news_score_weight": 45.0,
-        "technical_score_weight": 35.0,
-        "market_flow_score_weight": 20.0,
+        "news_score_weight": 20.0,
+        "technical_score_weight": 50.0,
+        "market_flow_score_weight": 30.0,
         "news_system_prompt": DEFAULT_NEWS_ANALYSIS_SYSTEM_PROMPT,
         "news_system_prompt_is_custom": False,
         "prediction_fee_enabled": True,
@@ -558,7 +562,7 @@ def config_data(config: AiMonitorConfig | None) -> dict[str, Any]:
         "opportunity_interval_minutes": int(config.opportunity_interval_minutes),
         "news_lookback_hours": int(config.news_lookback_hours),
         "news_trigger_window_hours": 4,
-        "require_new_news_trigger": True,
+        "require_new_news_trigger": False,
         "require_market_quality_for_prediction": True,
         "timeframe": config.timeframe,
         "prediction_max_holding_bars": int(config.prediction_max_holding_bars),
@@ -605,15 +609,15 @@ def opportunity_score_weights(config: Mapping[str, Any] | None = None) -> dict[s
 
     source = config or {}
     raw = {
-        "news": float(source.get("news_score_weight", 45.0)),
-        "technical": float(source.get("technical_score_weight", 35.0)),
-        "market_flow": float(source.get("market_flow_score_weight", 20.0)),
+        "news": float(source.get("news_score_weight", 20.0)),
+        "technical": float(source.get("technical_score_weight", 50.0)),
+        "market_flow": float(source.get("market_flow_score_weight", 30.0)),
     }
     total = sum(raw.values())
     if any(value < 0 or not math.isfinite(value) for value in raw.values()) or not math.isclose(
         total, 100.0, abs_tol=0.01
     ):
-        raw = {"news": 45.0, "technical": 35.0, "market_flow": 20.0}
+        raw = {"news": 20.0, "technical": 50.0, "market_flow": 30.0}
         total = 100.0
     return {key: round(value / total, 6) for key, value in raw.items()}
 
@@ -624,8 +628,14 @@ def weighted_opportunity_score(
     market_flow_score: float,
     config: Mapping[str, Any] | None = None,
     market_flow: Mapping[str, Any] | None = None,
+    *,
+    news_available: bool = True,
 ) -> float:
-    weights = effective_opportunity_score_weights(config, market_flow)
+    weights = effective_opportunity_score_weights(
+        config,
+        market_flow,
+        news_available=news_available,
+    )
     return round(
         float(news_score) * weights["news"]
         + float(technical_score) * weights["technical"]
@@ -637,6 +647,8 @@ def weighted_opportunity_score(
 def effective_opportunity_score_weights(
     config: Mapping[str, Any] | None = None,
     market_flow: Mapping[str, Any] | None = None,
+    *,
+    news_available: bool = True,
 ) -> dict[str, float]:
     """Reduce the flow weight when its directional evidence is missing or weak.
 
@@ -646,31 +658,38 @@ def effective_opportunity_score_weights(
     """
 
     configured = opportunity_score_weights(config)
+    active_weights = {
+        "news": configured["news"] if news_available else 0.0,
+        "technical": configured["technical"],
+        "market_flow": configured["market_flow"],
+    }
+    total = sum(active_weights.values())
+    if total <= 0:
+        return {"news": 0.0, "technical": 1.0, "market_flow": 0.0}
+    active_weights = {key: weight / total for key, weight in active_weights.items()}
     if market_flow is None:
-        return configured
+        return {key: round(weight, 6) for key, weight in active_weights.items()}
     try:
-        quality = float(market_flow.get("data_quality") or 0)
+        flow_quality = float(market_flow.get("data_quality") or 0)
     except (TypeError, ValueError, OverflowError):
-        quality = 0.0
-    if not math.isfinite(quality):
-        quality = 0.0
+        flow_quality = 0.0
+    if not math.isfinite(flow_quality):
+        flow_quality = 0.0
     if not bool(market_flow.get("directional_data_available")) or not bool(
         market_flow.get("fresh")
     ):
-        quality = 0.0
-    quality = max(0.0, min(1.0, quality))
-    flow_weight = configured["market_flow"] * quality
-    non_flow_total = configured["news"] + configured["technical"]
+        flow_quality = 0.0
+    flow_quality = max(0.0, min(1.0, flow_quality))
+    flow_weight = active_weights["market_flow"] * flow_quality
+    non_flow_total = active_weights["news"] + active_weights["technical"]
     if non_flow_total <= 0:
-        return {
-            "news": round((1.0 - flow_weight) / 2, 6),
-            "technical": round((1.0 - flow_weight) / 2, 6),
-            "market_flow": round(flow_weight, 6),
-        }
+        return {"news": 0.0, "technical": 1.0 - flow_weight, "market_flow": flow_weight}
     remaining = 1.0 - flow_weight
     return {
-        "news": round(remaining * configured["news"] / non_flow_total, 6),
-        "technical": round(remaining * configured["technical"] / non_flow_total, 6),
+        "news": round(remaining * active_weights["news"] / non_flow_total, 6),
+        "technical": round(
+            remaining * active_weights["technical"] / non_flow_total, 6
+        ),
         "market_flow": round(flow_weight, 6),
     }
 
@@ -748,6 +767,7 @@ def enhanced_opportunity_domain_score(
     market_environment: Mapping[str, Any],
     market_flow: Mapping[str, Any],
     policy: Mapping[str, Any],
+    news_available: bool = True,
 ) -> dict[str, Any]:
     """Map the six published domains and renormalize only over real evidence.
 
@@ -768,10 +788,14 @@ def enhanced_opportunity_domain_score(
 
     domains: dict[str, dict[str, Any]] = {
         "news": {
-            "available": math.isfinite(float(news_score)),
-            "fresh": True,
-            "score": max(0.0, min(100.0, float(news_score))),
-            "data_quality": 1.0,
+            "available": bool(news_available and math.isfinite(float(news_score))),
+            "fresh": bool(news_available),
+            "score": (
+                max(0.0, min(100.0, float(news_score)))
+                if news_available
+                else None
+            ),
+            "data_quality": 1.0 if news_available else 0.0,
             "source": "news_ai",
         },
         "technical": {
@@ -1100,6 +1124,12 @@ def prediction_live_score_snapshot(
         now=now,
     )
     news_score = float(candidate.get("news_score") or 0)
+    news_available = bool(
+        candidate.get(
+            "news_available",
+            bool(candidate.get("news")) or news_score > 0,
+        )
+    )
     flow_score = float(flow["score"])
     effective_weights = effective_opportunity_score_weights(
         {
@@ -1108,6 +1138,7 @@ def prediction_live_score_snapshot(
             "market_flow_score_weight": weights["market_flow"] * 100,
         },
         flow,
+        news_available=news_available,
     )
     base_combined_score = round(
         news_score * effective_weights["news"]
@@ -1166,6 +1197,7 @@ def prediction_live_score_snapshot(
     )
     return {
         "news": news_score,
+        "news_available": news_available,
         "technical": technical_score,
         "market_flow": flow_score,
         "market_flow_snapshot": market_flow_history_snapshot(flow),
@@ -1270,6 +1302,9 @@ def refresh_pending_prediction_scores(
             "direction": prediction.direction,
             "news_score": 0.0,
             "news": [],
+            # Legacy predictions were born under a news-required policy. New
+            # technical-first predictions freeze news_available=False.
+            "news_available": bool(evidence.get("news_available", True)),
         }
         opposite_direction = "short" if prediction.direction == "long" else "long"
         opposite_candidate = candidates.get((prediction.symbol, opposite_direction))
@@ -1411,6 +1446,9 @@ def virtual_entry_gate_snapshot(
                 news_score >= minimum_news_score
                 and news_mention_count >= minimum_news_mentions
             ),
+            # News is an auxiliary score domain unless the deployment has
+            # explicitly opted back into the legacy news-trigger policy.
+            "blocking": bool(require_new_trigger_news),
             "current": round(float(news_score), 4),
             "required": round(float(minimum_news_score), 4),
             "detail": f"{int(news_mention_count)} 条关联新闻",
@@ -3542,12 +3580,14 @@ def opportunity_score_components(
     combined_score: float,
     configured_weights: Mapping[str, Any],
     effective_weights: Mapping[str, Any],
+    news_available: bool = True,
     enhanced_domain_scoring: Mapping[str, Any] | None = None,
     signal_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     domains = dict(market_flow.get("domains") or {})
     result = {
         "news": round(float(news_score), 4),
+        "news_available": bool(news_available),
         "technical": round(float(technical_score), 4),
         "market_flow": round(float(market_flow.get("score") or 0), 4),
         "option_flow": dict(domains.get("option_flow") or {}).get("score"),
@@ -7045,11 +7085,38 @@ def _scan_opportunities(
         minimum_confidence=float(config["minimum_news_confidence"]),
         minimum_mentions=int(config["minimum_news_mentions"]),
     ).payload["candidates"]
-    # Preserve both news directions until the 15m/1h/4h technical context has
-    # been evaluated. Choosing by news score alone discarded valid shorts when
-    # a slightly stronger bullish headline existed for the same symbol.
-    all_candidates = [dict(item) for item in directional_candidates]
-    unmapped_candidates = [item for item in all_candidates if not item.get("contract_symbol")]
+    market_opportunity_rows = (
+        list(
+            db.scalars(
+                select(MarketOpportunity)
+                .where(
+                    MarketOpportunity.symbol.in_(supported_contracts),
+                    MarketOpportunity.status.in_(("detected", "watching", "confirmed")),
+                    MarketOpportunity.direction.in_(("long", "short")),
+                )
+                .order_by(
+                    MarketOpportunity.detected_bar_time.desc(),
+                    MarketOpportunity.quality_score.desc(),
+                )
+            ).all()
+        )
+        if supported_contracts
+        else []
+    )
+    technical_candidates = technical_market_candidates(
+        market_opportunity_rows,
+        symbol_map,
+    )
+    # The deterministic market scanner is the primary source of symbols and
+    # directions. Related news enriches those candidates but does not own the
+    # discovery lifecycle or block a technically valid setup.
+    all_candidates = merge_candidate_sources(
+        directional_candidates,
+        technical_candidates,
+    )
+    unmapped_candidates = [
+        item for item in directional_candidates if not item.get("contract_symbol")
+    ]
     monitor_symbols = list(config.get("monitor_symbols") or [])
     candidates = apply_monitor_symbol_allowlist(all_candidates, monitor_symbols)
     # A news event is consumed once per user and direction, not once per symbol.
@@ -7067,7 +7134,7 @@ def _scan_opportunities(
         user_id=run.user_id,
         now=now,
     )
-    require_new_news = bool(config.get("require_new_news_trigger", True))
+    require_new_news = bool(config.get("require_new_news_trigger", False))
     eligible_candidates, reused_news_skipped = prepare_candidate_admission(
         candidates,
         consumed_by_direction=consumed_news_ids_by_direction,
@@ -7081,30 +7148,32 @@ def _scan_opportunities(
     candidates = mark_event_cluster_selection(eligible_candidates)
     indicator_keys = list(config["indicator_keys"])
     timeframe = str(config["timeframe"])
-    technical_scans: dict[str, dict[str, dict[str, Any]]] = {}
-    for contract_symbol in sorted(
+    technical_contracts = sorted(
         {
             str(item.get("contract_symbol") or "").upper()
             for item in candidates
             if str(item.get("contract_symbol") or "").strip()
         }
-    ):
-        contract_scans: dict[str, dict[str, Any]] = {}
-        for technical_timeframe in MULTI_TIMEFRAME_TECHNICAL_WEIGHTS:
-            try:
-                contract_scans[technical_timeframe] = repository.strategy_indicators(
-                    contract_symbol,
-                    technical_timeframe,
-                )
-            except MonitorUnavailable:
-                contract_scans[technical_timeframe] = {
+    )
+    try:
+        technical_scans = repository.strategy_indicators_many(
+            technical_contracts,
+            tuple(MULTI_TIMEFRAME_TECHNICAL_WEIGHTS),
+        )
+    except MonitorUnavailable:
+        technical_scans = {
+            contract_symbol: {
+                technical_timeframe: {
                     "items": [],
                     "prediction_features": {"items": []},
                     "evaluated_at": 0,
                 }
-        technical_scans[contract_symbol] = contract_scans
+                for technical_timeframe in MULTI_TIMEFRAME_TECHNICAL_WEIGHTS
+            }
+            for contract_symbol in technical_contracts
+        }
     macro_snapshot = macro_regime_service.snapshot(repository, now=now).payload
-    candidates = news_scoring_service.select_directional(
+    directional_selection_candidates = news_scoring_service.select_directional(
         candidates,
         technical_scans,
         indicator_keys,
@@ -7113,6 +7182,9 @@ def _scan_opportunities(
             or "neutral"
         ),
         market_tide=dict(macro_snapshot.get("market_tide") or {}),
+    )
+    candidates = filter_technically_admissible_candidates(
+        directional_selection_candidates
     )
     run.input_count = len(candidates)
     stored = 0
@@ -7336,10 +7408,22 @@ def _scan_opportunities(
             blend_into_legacy=bool(uw_signal_policy["score_enabled"]),
         )
         flow_score = float(market_flow["score"])
+        news_available = bool(
+            candidate.get("news_available", bool(candidate.get("news")))
+        )
         score_weights = opportunity_score_weights(config)
-        effective_score_weights = effective_opportunity_score_weights(config, market_flow)
+        effective_score_weights = effective_opportunity_score_weights(
+            config,
+            market_flow,
+            news_available=news_available,
+        )
         legacy_base_combined_score = weighted_opportunity_score(
-            candidate["news_score"], indicator_score, flow_score, config, market_flow
+            candidate["news_score"],
+            indicator_score,
+            flow_score,
+            config,
+            market_flow,
+            news_available=news_available,
         )
         company_profile = dict(
             market_flow_inputs.get("profile", {}).get(str(candidate["symbol"]).upper(), {})
@@ -7361,6 +7445,7 @@ def _scan_opportunities(
             market_environment=market_environment,
             market_flow=market_flow,
             policy=uw_signal_policy,
+            news_available=news_available,
         )
         if bool(uw_signal_policy["score_enabled"]) and enhanced_domain_scoring.get(
             "score"
@@ -7458,6 +7543,7 @@ def _scan_opportunities(
             combined_score=combined_score,
             configured_weights=score_weights,
             effective_weights=effective_score_weights,
+            news_available=news_available,
             enhanced_domain_scoring=enhanced_domain_scoring,
             signal_policy=uw_signal_policy,
         )
@@ -7597,6 +7683,7 @@ def _scan_opportunities(
             reference_price_time_ms = 0
         score_snapshot = {
             "news": float(candidate["news_score"]),
+            "news_available": news_available,
             "technical": indicator_score,
             "market_flow": flow_score,
             "market_flow_snapshot": market_flow_history_snapshot(market_flow),
@@ -7669,7 +7756,10 @@ def _scan_opportunities(
             "match_policy": INDICATOR_MATCH_POLICY,
             "indicator_scoring": "continuous_directional_mtf_v3",
             "direction": candidate["direction"],
+            "candidate_origin": str(candidate.get("candidate_origin") or "news"),
+            "news_available": news_available,
             "direction_selection": dict(candidate.get("direction_selection") or {}),
+            "technical_seed": dict(candidate.get("technical_seed") or {}),
             "multi_timeframe_technical": multi_timeframe_technical,
             "confirmed": signal_confirmed,
             "technical_confirmed": technical_confirmed,
@@ -7889,7 +7979,15 @@ def _scan_opportunities(
         "candidate_count": len(candidates),
         "long_candidate_count": sum(item["direction"] == "long" for item in candidates),
         "short_candidate_count": sum(item["direction"] == "short" for item in candidates),
-        "news_candidate_count": len(all_candidates),
+        "news_candidate_count": len(directional_candidates),
+        "technical_seed_candidate_count": len(technical_candidates),
+        "technical_eligible_candidate_count": sum(
+            not bool(item.get("news_available"))
+            for item in candidates
+        ),
+        "directional_selection_candidate_count": len(
+            directional_selection_candidates
+        ),
         "directional_candidate_count": len(directional_candidates),
         "stored_count": stored,
         "merged_count": merged,

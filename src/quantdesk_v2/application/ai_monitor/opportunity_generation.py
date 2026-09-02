@@ -37,6 +37,137 @@ def filter_monitored_candidates(
     ]
 
 
+def technical_market_candidates(
+    rows: Sequence[Any],
+    symbol_map: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """Convert the latest shared market scans into AI Monitor candidate seeds.
+
+    The shared scanner is the deterministic discovery authority.  News can enrich
+    these seeds later, but the absence of a related headline must not make an
+    otherwise valid multi-timeframe setup invisible.
+    """
+
+    reverse_symbols: dict[str, str] = {}
+    for symbol, contract in symbol_map.items():
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_contract = str(contract).strip().upper()
+        if normalized_symbol and normalized_contract:
+            reverse_symbols.setdefault(normalized_contract, normalized_symbol)
+
+    def value(row: Any, key: str, default: Any = None) -> Any:
+        return row.get(key, default) if isinstance(row, Mapping) else getattr(row, key, default)
+
+    latest: dict[str, tuple[tuple[int, float, int], dict[str, Any]]] = {}
+    for row in rows:
+        contract_symbol = str(value(row, "symbol", "")).strip().upper()
+        direction = str(value(row, "direction", "")).strip().lower()
+        status = str(value(row, "status", "")).strip().lower()
+        if (
+            not contract_symbol
+            or contract_symbol not in reverse_symbols
+            or direction not in {"long", "short"}
+            or status not in {"detected", "watching", "confirmed"}
+        ):
+            continue
+        detected_bar_time = int(value(row, "detected_bar_time", 0) or 0)
+        quality_score = float(value(row, "quality_score", 0) or 0)
+        scanner_version = int(value(row, "scanner_version", 0) or 0)
+        evidence = value(row, "evidence_json")
+        candidate = {
+            "symbol": reverse_symbols[contract_symbol],
+            "contract_symbol": contract_symbol,
+            "market_available": True,
+            "direction": direction,
+            "news_score": 0.0,
+            "news": [],
+            "news_available": False,
+            "candidate_origin": "technical_market_scan",
+            "technical_seed": {
+                "scanner_key": str(value(row, "scanner_key", "")),
+                "scanner_version": scanner_version,
+                "status": status,
+                "quality_score": round(quality_score, 4),
+                "detected_bar_time": detected_bar_time,
+                "expires_bar_time": int(value(row, "expires_bar_time", 0) or 0),
+                "evidence": dict(evidence) if isinstance(evidence, Mapping) else {},
+            },
+        }
+        rank = (detected_bar_time, quality_score, scanner_version)
+        current = latest.get(contract_symbol)
+        if current is None or rank > current[0]:
+            latest[contract_symbol] = (rank, candidate)
+    return sorted(
+        (item[1] for item in latest.values()),
+        key=lambda item: float(
+            dict(item.get("technical_seed") or {}).get("quality_score") or 0
+        ),
+        reverse=True,
+    )
+
+
+def merge_candidate_sources(
+    news_candidates: Sequence[Mapping[str, Any]],
+    technical_candidates: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge news evidence into technical seeds without making it mandatory."""
+
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in technical_candidates:
+        candidate = dict(raw)
+        key = (
+            str(candidate.get("contract_symbol") or candidate.get("symbol") or "").upper(),
+            "short" if candidate.get("direction") == "short" else "long",
+        )
+        if key[0]:
+            merged[key] = candidate
+    for raw in news_candidates:
+        candidate = dict(raw)
+        candidate["news_available"] = bool(candidate.get("news"))
+        candidate["candidate_origin"] = "news_enriched"
+        key = (
+            str(candidate.get("contract_symbol") or candidate.get("symbol") or "").upper(),
+            "short" if candidate.get("direction") == "short" else "long",
+        )
+        if not key[0]:
+            continue
+        technical = merged.get(key)
+        if technical is not None and technical.get("technical_seed"):
+            candidate["technical_seed"] = dict(technical["technical_seed"])
+            candidate["candidate_origin"] = "technical_and_news"
+        merged[key] = candidate
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            bool(item.get("news_available")),
+            float(item.get("news_score") or 0),
+            float(dict(item.get("technical_seed") or {}).get("quality_score") or 0),
+        ),
+        reverse=True,
+    )
+
+
+def filter_technically_admissible_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep actionable technical seeds while preserving news-enriched watches.
+
+    A broad market scan is intentionally cheap and may produce more than one
+    hundred directional seeds. Only multi-timeframe-eligible technical-only
+    rows should enter the persisted AI Monitor lifecycle; news-enriched rows
+    remain visible as candidates while waiting for technical confirmation.
+    """
+
+    return [
+        dict(candidate)
+        for candidate in candidates
+        if bool(candidate.get("news_available"))
+        or bool(
+            dict(candidate.get("multi_timeframe_technical") or {}).get("eligible")
+        )
+    ]
+
+
 def annotate_event_cluster_selection(
     candidates: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:

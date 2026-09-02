@@ -71,8 +71,11 @@ from quantdesk_v2.ai_monitor import (
 from quantdesk_v2.application.ai_monitor import (
     annotate_event_cluster_selection,
     filter_monitored_candidates,
+    filter_technically_admissible_candidates,
     fresh_candidate_news_ids,
+    merge_candidate_sources,
     strongest_candidate_per_symbol,
+    technical_market_candidates,
 )
 from quantdesk_v2.interfaces.api.ai_monitor import (
     _ai_monitor_revisions,
@@ -1022,6 +1025,157 @@ def test_direction_selection_can_override_single_sided_news_with_confirmed_short
     assert selected[0]["direction_selection"]["combined_score_adjustment"] == -5.0
 
 
+def test_technical_market_candidates_do_not_require_related_news() -> None:
+    rows = [
+        SimpleNamespace(
+            symbol="AAPLUSDT",
+            direction="long",
+            status="detected",
+            quality_score=71.5,
+            scanner_key="market_bias_v1",
+            scanner_version=1,
+            detected_bar_time=100,
+            expires_bar_time=200,
+            evidence_json={"reason_codes": ["BIAS_LONG"]},
+        ),
+        SimpleNamespace(
+            symbol="AAPLUSDT",
+            direction="short",
+            status="confirmed",
+            quality_score=88.0,
+            scanner_key="market_bias_v1",
+            scanner_version=2,
+            detected_bar_time=101,
+            expires_bar_time=201,
+            evidence_json={"reason_codes": ["BIAS_SHORT"]},
+        ),
+        SimpleNamespace(
+            symbol="BTCUSDT",
+            direction="long",
+            status="confirmed",
+            quality_score=99.0,
+            scanner_key="market_bias_v1",
+            scanner_version=1,
+            detected_bar_time=102,
+            expires_bar_time=202,
+            evidence_json={},
+        ),
+    ]
+
+    candidates = technical_market_candidates(rows, {"AAPL": "AAPLUSDT"})
+
+    assert len(candidates) == 1
+    assert candidates[0]["symbol"] == "AAPL"
+    assert candidates[0]["direction"] == "short"
+    assert candidates[0]["news"] == []
+    assert candidates[0]["news_available"] is False
+    assert candidates[0]["technical_seed"]["detected_bar_time"] == 101
+
+
+def test_news_enriches_instead_of_owning_a_technical_candidate() -> None:
+    technical = [
+        {
+            "symbol": "AAPL",
+            "contract_symbol": "AAPLUSDT",
+            "direction": "long",
+            "news_score": 0,
+            "news": [],
+            "news_available": False,
+            "technical_seed": {"quality_score": 82},
+        }
+    ]
+    news = [
+        {
+            "symbol": "AAPL",
+            "contract_symbol": "AAPLUSDT",
+            "direction": "long",
+            "news_score": 70,
+            "news": [{"id": "news-1", "ts": 100}],
+        }
+    ]
+
+    candidates = merge_candidate_sources(news, technical)
+
+    assert len(candidates) == 1
+    assert candidates[0]["candidate_origin"] == "technical_and_news"
+    assert candidates[0]["news_available"] is True
+    assert candidates[0]["technical_seed"]["quality_score"] == 82
+
+
+def test_technical_seed_must_pass_mtf_but_news_watch_can_remain_visible() -> None:
+    candidates = filter_technically_admissible_candidates(
+        [
+            {
+                "symbol": "READY",
+                "news_available": False,
+                "multi_timeframe_technical": {"eligible": True},
+            },
+            {
+                "symbol": "WEAK",
+                "news_available": False,
+                "multi_timeframe_technical": {"eligible": False},
+            },
+            {
+                "symbol": "NEWS",
+                "news_available": True,
+                "multi_timeframe_technical": {"eligible": False},
+            },
+        ]
+    )
+
+    assert [item["symbol"] for item in candidates] == ["READY", "NEWS"]
+
+
+def test_direction_selection_uses_technical_context_without_news() -> None:
+    def bearish_scan(evaluated_at: int) -> dict:
+        return {
+            "evaluated_at": evaluated_at,
+            "items": [
+                {
+                    "key": key,
+                    "available": True,
+                    "status": "triggered",
+                    "bullish_triggered": False,
+                    "bearish_triggered": True,
+                    "bullish_strength": 15,
+                    "bearish_strength": 92,
+                }
+                for key in ("moving_average_bull", "ma_golden_cross")
+            ],
+            "prediction_features": {"items": []},
+        }
+
+    selected = select_directional_candidates_with_technical_context(
+        [
+            {
+                "symbol": "TEST",
+                "contract_symbol": "TESTUSDT",
+                "direction": "long",
+                "news_score": 0,
+                "news": [],
+                "news_available": False,
+                "candidate_origin": "technical_market_scan",
+            }
+        ],
+        {
+            "TESTUSDT": {
+                "15m": bearish_scan(1),
+                "1h": bearish_scan(2),
+                "4h": bearish_scan(3),
+            }
+        },
+        ["moving_average_bull", "ma_golden_cross"],
+        market_direction="bear",
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["direction"] == "short"
+    assert selected[0]["news_available"] is False
+    assert selected[0]["direction_origin"] == "technical_regime_override"
+    assert selected[0]["direction_selection"]["combined_score_adjustment"] == 0
+    assert selected[0]["multi_timeframe_technical"]["eligible"] is True
+
+
 def test_upcoming_event_warns_without_becoming_an_active_block() -> None:
     warning = market_risk_event_gate_snapshot(
         [
@@ -1884,6 +2038,34 @@ def test_virtual_entry_gate_requires_every_signal_condition_and_a_real_price() -
         "new_news_trigger",
         "market_quality",
     }
+
+
+def test_virtual_entry_gate_treats_missing_news_as_auxiliary() -> None:
+    ready = virtual_entry_gate_snapshot(
+        direction="short",
+        news_score=0,
+        news_mention_count=0,
+        minimum_news_score=60,
+        minimum_news_mentions=1,
+        indicator_policy_passed=True,
+        indicator_score=88,
+        minimum_indicator_score=65,
+        combined_score=82,
+        minimum_combined_score=75,
+        market_flow_hard_conflict=False,
+        entry_price=100,
+        checked_at="2026-09-02T12:00:00+00:00",
+        has_new_trigger_news=False,
+        require_new_trigger_news=False,
+    )
+
+    news_check = next(
+        item for item in ready["checks"] if item["key"] == "news_candidate"
+    )
+    assert news_check["passed"] is False
+    assert news_check["blocking"] is False
+    assert ready["signal_confirmed"] is True
+    assert ready["entry_ready"] is True
 
 
 def test_virtual_entry_gate_blocks_a_correlated_news_event_loser() -> None:
@@ -3398,9 +3580,9 @@ def test_ai_monitor_config_normalizes_symbol_allowlist() -> None:
     assert config.news_lookback_hours == 168
     assert config.prediction_max_holding_bars == 4
     assert config.minimum_calibration_samples == 1000
-    assert config.news_score_weight == 45
-    assert config.technical_score_weight == 35
-    assert config.market_flow_score_weight == 20
+    assert config.news_score_weight == 20
+    assert config.technical_score_weight == 50
+    assert config.market_flow_score_weight == 30
 
     with pytest.raises(ValueError):
         AiMonitorConfigUpdate(prediction_max_holding_bars=0)
@@ -3442,6 +3624,27 @@ def test_ai_monitor_score_weights_are_validated_and_applied() -> None:
         "market_flow": 0.0,
     }
     assert weighted_opportunity_score(80, 60, 50, config.model_dump(), missing_flow) == 68
+
+    no_news_flow = {
+        "directional_data_available": True,
+        "fresh": True,
+        "data_quality": 1,
+    }
+    assert effective_opportunity_score_weights(
+        config.model_dump(), no_news_flow, news_available=False
+    ) == {
+        "news": 0.0,
+        "technical": 0.375,
+        "market_flow": 0.625,
+    }
+    assert weighted_opportunity_score(
+        0,
+        80,
+        60,
+        config.model_dump(),
+        no_news_flow,
+        news_available=False,
+    ) == 67.5
 
     with pytest.raises(ValueError, match="权重合计必须为 100%"):
         AiMonitorConfigUpdate(

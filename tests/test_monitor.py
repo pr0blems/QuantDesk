@@ -219,6 +219,17 @@ def test_monitor_detail_queries(mysql_test_engine, tmp_path) -> None:
     assert repository.score_detail("TESTUSDT")["1h"]["score"] == 80
 
 
+def test_strategy_indicators_many_matches_single_symbol_evaluation(
+    mysql_test_engine, tmp_path
+) -> None:
+    repository, _, _ = build_monitor_fixture(mysql_test_engine, tmp_path)
+
+    single = repository.strategy_indicators("TESTUSDT", "1h")
+    batched = repository.strategy_indicators_many(["testusdt"], ["1h"])
+
+    assert batched == {"TESTUSDT": {"1h": single}}
+
+
 def test_prediction_optimizer_history_selects_latest_rows_then_restores_time_order(
     mysql_test_engine, tmp_path, monkeypatch
 ) -> None:

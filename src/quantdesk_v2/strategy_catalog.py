@@ -296,9 +296,9 @@ def _ai_monitor_parameter_schema() -> list[dict[str, Any]]:
         {"key": "minimum_market_flow_quality", "label": "最低盘口质量", "type": "number", "default": 0.5, "min": 0, "max": 1, "step": 0.01, "group": "数据质量与成本"},
         {"key": "minimum_calibration_samples", "label": "最低校准样本数", "type": "integer", "default": 1000, "min": 30, "max": 5000, "group": "数据质量与成本"},
         {"key": "live_safety_margin_bps", "label": "成本安全边际（bp）", "type": "number", "default": 10, "min": 0, "max": 500, "step": 0.1, "group": "数据质量与成本"},
-        {"key": "news_score_weight", "label": "新闻评分权重（%）", "type": "number", "default": 45, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
-        {"key": "technical_score_weight", "label": "技术评分权重（%）", "type": "number", "default": 35, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
-        {"key": "market_flow_score_weight", "label": "盘口评分权重（%）", "type": "number", "default": 20, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
+        {"key": "news_score_weight", "label": "新闻评分权重（%）", "type": "number", "default": 20, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
+        {"key": "technical_score_weight", "label": "技术评分权重（%）", "type": "number", "default": 50, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
+        {"key": "market_flow_score_weight", "label": "盘口评分权重（%）", "type": "number", "default": 30, "min": 0, "max": 100, "step": 0.1, "group": "评分权重"},
     ]
     schema.extend(
         {

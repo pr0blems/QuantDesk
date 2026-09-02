@@ -88,6 +88,45 @@ def _datetime_to_ms(value: Any) -> int:
     return 0
 
 
+def _strategy_indicator_payload(
+    candles: list[dict[str, Any]],
+    timeframe: str,
+    snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Evaluate the shared indicator catalog from already-loaded source rows."""
+
+    from . import indicators
+    from .prediction_feature_indicators import evaluate_prediction_feature_indicators
+    from .strategy_indicators import evaluate_directional_strategy_indicators
+
+    result = evaluate_directional_strategy_indicators(candles, timeframe)
+    if candles:
+        highs = [float(item["high"]) for item in candles]
+        lows = [float(item["low"]) for item in candles]
+        closes = [float(item["close"]) for item in candles]
+        atr14 = indicators.atr(highs, lows, closes, 14)
+        close = closes[-1]
+        result["risk_metrics"] = {
+            "atr14": round(float(atr14), 12) if atr14 is not None else None,
+            "atr_pct": (
+                round(float(atr14) / close * 100, 8)
+                if atr14 is not None and close > 0
+                else None
+            ),
+            "close": close,
+        }
+    else:
+        result["risk_metrics"] = {
+            "atr14": None,
+            "atr_pct": None,
+            "close": None,
+        }
+    prediction_features = evaluate_prediction_feature_indicators(snapshot, timeframe)
+    result["prediction_features"] = prediction_features
+    result["total_count"] = result["count"] + prediction_features["count"]
+    return result
+
+
 def _underlying_market_state(status: dict[str, Any]) -> str:
     if not status.get("available"):
         return "unknown"
@@ -1332,34 +1371,8 @@ class MonitorRepository:
         )
 
     def strategy_indicators(self, symbol: str, timeframe: str) -> dict[str, Any]:
-        from . import indicators
-        from .prediction_feature_indicators import evaluate_prediction_feature_indicators
-        from .strategy_indicators import evaluate_directional_strategy_indicators
-
         normalized = self._validate_symbol(symbol)
         candles = self.klines(normalized, timeframe, 120)
-        result = evaluate_directional_strategy_indicators(candles, timeframe)
-        if candles:
-            highs = [float(item["high"]) for item in candles]
-            lows = [float(item["low"]) for item in candles]
-            closes = [float(item["close"]) for item in candles]
-            atr14 = indicators.atr(highs, lows, closes, 14)
-            close = closes[-1]
-            result["risk_metrics"] = {
-                "atr14": round(float(atr14), 12) if atr14 is not None else None,
-                "atr_pct": (
-                    round(float(atr14) / close * 100, 8)
-                    if atr14 is not None and close > 0
-                    else None
-                ),
-                "close": close,
-            }
-        else:
-            result["risk_metrics"] = {
-                "atr14": None,
-                "atr_pct": None,
-                "close": None,
-            }
         snapshot: dict[str, Any] | None = None
         try:
             rows = self._query(
@@ -1376,10 +1389,108 @@ class MonitorRepository:
         except MonitorUnavailable:
             # The K-line indicators remain usable during a rolling battle migration.
             snapshot = None
-        prediction_features = evaluate_prediction_feature_indicators(snapshot, timeframe)
-        result["prediction_features"] = prediction_features
-        result["total_count"] = result["count"] + prediction_features["count"]
-        return result
+        return _strategy_indicator_payload(candles, timeframe, snapshot)
+
+    def strategy_indicators_many(
+        self,
+        symbols: Sequence[str],
+        timeframes: Sequence[str],
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        """Evaluate many symbols with two bounded database round trips.
+
+        AI Monitor evaluates 15m/1h/4h for a broad market universe. Calling the
+        single-symbol method in a nested loop caused hundreds of network queries
+        per scan, so the source rows are loaded in batches and evaluated with the
+        exact same deterministic indicator function used by the detail endpoint.
+        """
+
+        normalized_symbols = list(
+            dict.fromkeys(self._validate_symbol(symbol) for symbol in symbols)
+        )
+        normalized_timeframes = list(
+            dict.fromkeys(str(timeframe).strip() for timeframe in timeframes)
+        )
+        if not normalized_symbols or not normalized_timeframes:
+            return {}
+        if any(
+            timeframe not in {"15m", "1h", "4h"}
+            for timeframe in normalized_timeframes
+        ):
+            raise MonitorUnavailable("unsupported monitor timeframe")
+
+        symbol_placeholders = ",".join("?" for _ in normalized_symbols)
+        timeframe_placeholders = ",".join("?" for _ in normalized_timeframes)
+        kline_query = f"""
+            SELECT symbol,tf,open_time,open,high,low,close,volume
+            FROM (
+                SELECT symbol,tf,open_time,open,high,low,close,volume,
+                       ROW_NUMBER() OVER(
+                           PARTITION BY symbol,tf ORDER BY open_time DESC
+                       ) AS rn
+                FROM klines
+                WHERE symbol IN ({symbol_placeholders})
+                  AND tf IN ({timeframe_placeholders})
+            ) ranked
+            WHERE rn<=120
+            ORDER BY symbol,tf,open_time ASC
+            """  # noqa: S608 -- interpolated values are bound placeholders only
+        rows = self._query(
+            kline_query,
+            (*normalized_symbols, *normalized_timeframes),
+        )
+        candles_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            key = (str(row["symbol"]).upper(), str(row["tf"]))
+            candles_by_key.setdefault(key, []).append(
+                {
+                    "open_time": row["open_time"],
+                    "open": row["open"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "close": row["close"],
+                    "volume": row["volume"],
+                }
+            )
+
+        snapshots: dict[str, dict[str, Any]] = {}
+        try:
+            snapshot_query = f"""
+                SELECT symbol,as_of_ms,feature_schema_version,features_json,quality_score
+                FROM (
+                    SELECT symbol,as_of_ms,feature_schema_version,features_json,
+                           quality_score,
+                           ROW_NUMBER() OVER(
+                               PARTITION BY symbol ORDER BY as_of_ms DESC,id DESC
+                           ) AS rn
+                    FROM prediction_feature_snapshots
+                    WHERE symbol IN ({symbol_placeholders})
+                ) ranked
+                WHERE rn=1
+                """  # noqa: S608 -- interpolated values are bound placeholders only
+            snapshot_rows = self._query(
+                snapshot_query,
+                tuple(normalized_symbols),
+            )
+            for row in snapshot_rows:
+                snapshots[str(row["symbol"]).upper()] = {
+                    **row,
+                    "features": _json_object(row.get("features_json")),
+                }
+        except MonitorUnavailable:
+            # Preserve the same rolling-migration behavior as strategy_indicators().
+            snapshots = {}
+
+        return {
+            symbol: {
+                timeframe: _strategy_indicator_payload(
+                    candles_by_key.get((symbol, timeframe), []),
+                    timeframe,
+                    snapshots.get(symbol),
+                )
+                for timeframe in normalized_timeframes
+            }
+            for symbol in normalized_symbols
+        }
 
     def score_detail(self, symbol: str) -> dict[str, Any]:
         normalized = self._validate_symbol(symbol)

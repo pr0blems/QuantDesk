@@ -27,9 +27,12 @@ from .opportunity_generation import (
     OpportunityGenerationService,
     annotate_event_cluster_selection,
     filter_monitored_candidates,
+    filter_technically_admissible_candidates,
     fresh_candidate_news_ids,
+    merge_candidate_sources,
     prepare_candidate_news_triggers,
     strongest_candidate_per_symbol,
+    technical_market_candidates,
 )
 from .opportunity_projection import (
     OpportunityProjectionError,
@@ -75,7 +78,9 @@ __all__ = [
     "OpportunityGenerationService",
     "annotate_event_cluster_selection",
     "filter_monitored_candidates",
+    "filter_technically_admissible_candidates",
     "fresh_candidate_news_ids",
+    "merge_candidate_sources",
     "news_event_bursts",
     "news_actionability_snapshot",
     "news_event_cluster_id",
@@ -109,5 +114,6 @@ __all__ = [
     "resolved_news_event_cluster_id",
     "select_directional_candidates_with_technical_context",
     "strongest_candidate_per_symbol",
+    "technical_market_candidates",
     "utc_event_iso",
 ]

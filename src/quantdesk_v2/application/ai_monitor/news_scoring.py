@@ -597,15 +597,27 @@ def select_directional_candidates_with_technical_context(
             explicit = explicit_by_direction.get(direction)
             if explicit is not None:
                 candidate = dict(explicit)
-                candidate["direction_origin"] = "explicit_news"
+                has_news = bool(
+                    candidate.get("news_available", bool(candidate.get("news")))
+                )
+                candidate["news_available"] = has_news
+                candidate["direction_origin"] = (
+                    "explicit_news" if has_news else "technical_market_scan"
+                )
                 candidate["source_news_direction"] = direction
                 candidate["synthetic_direction"] = False
             else:
                 candidate = dict(strongest_explicit)
                 candidate["direction"] = direction
+                has_news = bool(
+                    candidate.get("news_available", bool(candidate.get("news")))
+                )
+                candidate["news_available"] = has_news
                 candidate["direction_origin"] = "technical_regime_override"
-                candidate["source_news_direction"] = str(
-                    strongest_explicit.get("direction") or "long"
+                candidate["source_news_direction"] = (
+                    str(strongest_explicit.get("direction") or "long")
+                    if has_news
+                    else None
                 )
                 candidate["synthetic_direction"] = True
             directional_alternatives.append(candidate)
@@ -632,11 +644,16 @@ def select_directional_candidates_with_technical_context(
             )
             contexts[(symbol_key, direction)] = technical
             news_score = float(candidate.get("news_score") or 0.0)
-            explicit_news_direction = not bool(candidate.get("synthetic_direction"))
+            news_available = bool(candidate.get("news_available"))
+            explicit_news_direction = bool(
+                news_available and not candidate.get("synthetic_direction")
+            )
             directional_news_score = (
                 news_score
                 if explicit_news_direction
                 else max(0.0, 100.0 - news_score)
+                if news_available
+                else 0.0
             )
             macro_bias = (
                 4.0
@@ -662,14 +679,18 @@ def select_directional_candidates_with_technical_context(
                 )
                 else 0.0
             )
+            news_ranking_weight = 0.20 if news_available else 0.0
+            technical_ranking_weight = 0.75 if news_available else 0.95
             ranking_score = (
-                directional_news_score * 0.40
-                + float(technical["technical_score"]) * 0.55
+                directional_news_score * news_ranking_weight
+                + float(technical["technical_score"]) * technical_ranking_weight
                 + (5.0 if technical["eligible"] else 0.0)
                 + macro_bias
                 + tide_bias
             )
-            if not explicit_news_direction and not bool(technical["eligible"]):
+            if bool(candidate.get("synthetic_direction")) and news_available and not bool(
+                technical["eligible"]
+            ):
                 ranking_score = -1.0
             latest_news = max(
                 (int(item.get("ts") or 0) for item in candidate.get("news") or []),
@@ -680,6 +701,7 @@ def select_directional_candidates_with_technical_context(
                     "direction": direction,
                     "news_score": round(news_score, 4),
                     "directional_news_score": round(directional_news_score, 4),
+                    "news_available": news_available,
                     "news_direction_explicit": explicit_news_direction,
                     "direction_origin": candidate.get("direction_origin"),
                     "technical_score": technical["technical_score"],
@@ -689,6 +711,10 @@ def select_directional_candidates_with_technical_context(
                     "macro_bias": macro_bias,
                     "market_tide_bias": tide_bias,
                     "ranking_score": round(ranking_score, 4),
+                    "ranking_weights": {
+                        "news_direction": news_ranking_weight,
+                        "technical": technical_ranking_weight,
+                    },
                 }
             )
             ranked.append(((ranking_score, news_score, latest_news), candidate))
@@ -704,9 +730,16 @@ def select_directional_candidates_with_technical_context(
             "selected_direction": winner_direction,
             "direction_origin": winner.get("direction_origin"),
             "source_news_direction": winner.get("source_news_direction"),
-            "news_direction_aligned": not bool(winner.get("synthetic_direction")),
+            "news_available": bool(winner.get("news_available")),
+            "news_direction_aligned": bool(
+                winner.get("news_available")
+                and not winner.get("synthetic_direction")
+            ),
             "combined_score_adjustment": (
-                -5.0 if bool(winner.get("synthetic_direction")) else 0.0
+                -5.0
+                if bool(winner.get("news_available"))
+                and bool(winner.get("synthetic_direction"))
+                else 0.0
             ),
             "market_direction": normalized_market_direction,
             "market_tide": tide_signal,
@@ -715,7 +748,11 @@ def select_directional_candidates_with_technical_context(
                 key=lambda item: float(item["ranking_score"]),
                 reverse=True,
             ),
-            "weights": {"news_direction": 0.40, "technical": 0.55},
+            "weights": (
+                {"news_direction": 0.20, "technical": 0.75}
+                if winner.get("news_available")
+                else {"news_direction": 0.0, "technical": 0.95}
+            ),
             "technical_eligibility_bonus": 5.0,
             "macro_alignment_bonus": 4.0,
             "market_tide_alignment_bonus": tide_strength,
