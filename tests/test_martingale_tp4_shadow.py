@@ -192,6 +192,89 @@ def test_binance_execution_spread_blocks_new_risk() -> None:
     assert evaluation.decision.evidence["execution_spread_points"] == "20"
 
 
+def test_daily_realized_loss_blocks_new_shadow_risk() -> None:
+    evaluation = evaluate_shadow_tick(
+        _config(),
+        BasketSnapshot(
+            box_high=Decimal("100"),
+            box_low=Decimal("90"),
+            previous_bid=Decimal("99.99"),
+        ),
+        tiger=_tiger("100.01", "100.02"),
+        binance=_binance("100.00", "100.01"),
+        mapping_verified=True,
+        point_size=Decimal("0.01"),
+        hour=12,
+        account_balance=Decimal("10000"),
+        daily_realized_pnl=Decimal("-500"),
+        deployment_scope="deployment-1",
+        event_id="tick-daily-loss",
+        now=NOW,
+    )
+
+    assert evaluation.source_decision.action == DecisionAction.OPEN
+    assert evaluation.decision.action == DecisionAction.HOLD
+    assert evaluation.decision.reason_code == "live_daily_loss_limit"
+
+
+def test_liquidation_buffer_blocks_new_shadow_risk() -> None:
+    evaluation = evaluate_shadow_tick(
+        _config(),
+        BasketSnapshot(
+            box_high=Decimal("100"),
+            box_low=Decimal("90"),
+            previous_bid=Decimal("99.99"),
+        ),
+        tiger=_tiger("100.01", "100.02"),
+        binance=_binance("100.00", "100.01"),
+        mapping_verified=True,
+        point_size=Decimal("0.01"),
+        hour=12,
+        account_balance=Decimal("10000"),
+        liquidation_buffer_pct=Decimal("7.99"),
+        deployment_scope="deployment-1",
+        event_id="tick-liquidation-buffer",
+        now=NOW,
+    )
+
+    assert evaluation.source_decision.action == DecisionAction.OPEN
+    assert evaluation.decision.action == DecisionAction.HOLD
+    assert evaluation.decision.reason_code == "live_liquidation_buffer_limit"
+
+
+def test_shadow_virtual_fill_applies_adverse_slippage() -> None:
+    basket = BasketSnapshot(
+        box_high=Decimal("100"),
+        box_low=Decimal("90"),
+        previous_bid=Decimal("99.99"),
+    )
+    tiger = _tiger("100.01", "100.02")
+    binance = _binance("99.49", "99.50")
+    evaluation = evaluate_shadow_tick(
+        _config(),
+        basket,
+        tiger=tiger,
+        binance=binance,
+        mapping_verified=True,
+        point_size=Decimal("0.01"),
+        hour=12,
+        account_balance=Decimal("10000"),
+        deployment_scope="deployment-1",
+        event_id="tick-with-slippage",
+        now=NOW,
+    )
+
+    transition = apply_shadow_evaluation(
+        evaluation,
+        binance=binance,
+        tiger_bid=tiger.bid,
+        slippage_bps=Decimal("10"),
+    )
+
+    assert transition.fills[0].price == Decimal("99.59950")
+    assert transition.basket_after.legs[0].entry_price == Decimal("99.59950")
+
+
 def test_stale_tiger_never_blocks_a_binance_currency_stop_exit() -> None:
     config = _config(
         Mq4Inputs(

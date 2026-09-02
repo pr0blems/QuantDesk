@@ -7,6 +7,7 @@ import json
 import math
 import threading
 import uuid
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
@@ -16,7 +17,17 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import market_store
+from . import market_store, ws_depth
+from .application.martingale_tp4.runtime import (
+    DEFAULT_SIGNAL_POINT_SIZE,
+    binance_quote_from_snapshot,
+    binance_tick_size,
+    build_shadow_config,
+    current_shadow_box,
+    session_hour,
+    shadow_event_id,
+    tiger_quote_from_snapshot,
+)
 from .application.order_plans import EntryOrderPlan, build_entry_order_plan
 from .application.risk import RiskPolicy
 from .application.safety import PreflightPolicy
@@ -25,9 +36,11 @@ from .domain.execution import ExecutionMode, ExecutionResult, ExecutionState
 from .domain.runtime import decision_record_key, strategy_decision_id
 from .domain.trading import AccountSnapshot, AccountType, InstrumentRules
 from .infrastructure.persistence.executions import MySqlExecutionJournal
+from .infrastructure.persistence.martingale_tp4 import process_shadow_tick
 from .infrastructure.shadow_execution import ShadowExecutionRuntime
 from .infrastructure.store_market_data import StoreMarketDataFeed
 from .models import (
+    SecuritySymbolMapping,
     StrategyDeployment,
     StrategyRevision,
     StrategySignal,
@@ -35,8 +48,13 @@ from .models import (
     utcnow,
 )
 from .strategy_evaluator import StrategyEvaluationError, resolve_strategy_timing_policy
+from .tiger_market_data import (
+    TigerMarketDataRepository,
+    resolve_verified_contract_market_link,
+)
 
 _LOOP_SECONDS = 5.0
+TigerDepthProvider = Callable[[str], Mapping[str, Any] | None]
 
 
 def _json_safe(value: object) -> Any:
@@ -178,14 +196,214 @@ def _execution_snapshot(
     }
 
 
+def _martingale_depth_snapshot(contract_symbol: str) -> dict[str, Any] | None:
+    try:
+        return ws_depth.order_book_snapshot(contract_symbol, 20)
+    except (ValueError, ws_depth.OrderBookUnavailableError):
+        return None
+
+
+def _evaluate_martingale_deployment(
+    db: Session,
+    deployment: StrategyDeployment,
+    revision: StrategyRevision,
+    *,
+    tiger_depth_provider: TigerDepthProvider | None,
+) -> None:
+    snapshot = copy.deepcopy(revision.snapshot_json or {})
+    symbols = sorted(
+        {
+            str(symbol).strip().upper()
+            for symbol in (deployment.universe_override_json or {}).get("symbols", [])
+            if str(symbol).strip()
+        }
+    )
+    runtime = copy.deepcopy(deployment.runtime_state_json or {})
+    symbol_states = dict(runtime.get("martingale_tp4_symbol_states") or {})
+    evaluations = int(runtime.get("evaluations") or 0)
+    decisions = int(runtime.get("decisions") or 0)
+    order_intents = int(runtime.get("order_intents") or 0)
+    risk = copy.deepcopy(deployment.risk_override_json or {})
+    now = datetime.now(UTC)
+    account_balance = _shadow_account(risk, now).wallet_balance
+    leverage = min(_decimal(risk.get("leverage", 2), "2"), Decimal("20"))
+    fee_bps = _decimal(risk.get("fee_bps", 0), "0")
+    slippage_bps = _decimal(risk.get("slippage_bps", 0), "0")
+    repository = TigerMarketDataRepository(db)
+
+    for contract_symbol in symbols:
+        mapping = db.scalar(
+            select(SecuritySymbolMapping).where(
+                SecuritySymbolMapping.source == "binance_tradfi",
+                SecuritySymbolMapping.source_symbol == contract_symbol,
+            )
+        )
+        if mapping is None:
+            symbol_states[contract_symbol] = {
+                "status": "blocked",
+                "reason_code": "binance_contract_mapping_missing",
+                "evaluated_at": now.isoformat(),
+            }
+            continue
+        verified_link = resolve_verified_contract_market_link(
+            db, contract_symbol=contract_symbol
+        )
+        underlying_symbol = (
+            verified_link.underlying_symbol
+            if verified_link is not None
+            else str(mapping.normalized_symbol).strip().upper()
+        )
+        try:
+            config = build_shadow_config(
+                snapshot,
+                risk,
+                underlying_symbol=underlying_symbol,
+                contract_symbol=contract_symbol,
+            )
+            execution_point_size = binance_tick_size(
+                mapping.source_metadata_json or {}
+            )
+        except ValueError as exc:
+            symbol_states[contract_symbol] = {
+                "status": "blocked",
+                "reason_code": "martingale_runtime_config_invalid",
+                "detail": str(exc)[:200],
+                "evaluated_at": now.isoformat(),
+            }
+            continue
+
+        tiger_snapshot = (
+            tiger_depth_provider(underlying_symbol)
+            if tiger_depth_provider is not None
+            else None
+        )
+        binance_snapshot = _martingale_depth_snapshot(contract_symbol)
+        try:
+            tiger_quote = (
+                tiger_quote_from_snapshot(tiger_snapshot)
+                if tiger_snapshot is not None
+                else None
+            )
+        except ValueError:
+            tiger_quote = None
+        try:
+            binance_quote = (
+                binance_quote_from_snapshot(binance_snapshot)
+                if binance_snapshot is not None
+                else None
+            )
+        except ValueError:
+            binance_quote = None
+
+        box = None
+        box_reason = "tiger_quote_unavailable_for_box"
+        if tiger_quote is not None:
+            end_time = int(now.timestamp() * 1000)
+            parameters = config.parameters
+            signal_bars = repository.load_latest_bars(
+                symbol=underlying_symbol,
+                timeframe=parameters.box.timeframe,
+                trade_session=config.market_data.trade_sessions[0],
+                adjustment=config.market_data.adjustment,
+                end_time=end_time,
+                limit=max(1_000, parameters.box.length + 2),
+            )
+            daily_bars = (
+                repository.load_latest_bars(
+                    symbol=underlying_symbol,
+                    timeframe="1d",
+                    trade_session=config.market_data.trade_sessions[0],
+                    adjustment=config.market_data.adjustment,
+                    end_time=end_time,
+                    limit=max(60, parameters.box.daily_atr_period + 2),
+                )
+                if parameters.box.auto_range
+                else ()
+            )
+            box_context = current_shadow_box(
+                signal_bars,
+                daily_bars,
+                config,
+                point_size=DEFAULT_SIGNAL_POINT_SIZE,
+                current_price=tiger_quote.mid,
+                evaluated_at=now,
+            )
+            box = box_context.level
+            box_reason = box_context.reason_code
+
+        processed = process_shadow_tick(
+            db,
+            deployment,
+            config,
+            tiger=tiger_quote,
+            binance=binance_quote,
+            mapping_verified=verified_link is not None,
+            point_size=DEFAULT_SIGNAL_POINT_SIZE,
+            execution_point_size=execution_point_size,
+            hour=session_hour(now, config.parameters.session.timezone),
+            account_balance=account_balance,
+            leverage=leverage,
+            liquidation_buffer_pct=Decimal("100") / leverage,
+            event_id=shadow_event_id(tiger_snapshot, binance_snapshot),
+            occurred_at=now,
+            box_high=box.high if box is not None else None,
+            box_low=box.low if box is not None else None,
+            box_time=box.bar_open_time if box is not None else None,
+            replace_idle_box=True,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
+        )
+        evaluations += int(not processed.recorded.idempotent)
+        if not processed.recorded.idempotent:
+            decisions += 1
+            order_intents += len(processed.transition.fills)
+        symbol_states[contract_symbol] = {
+            "status": "observing",
+            "mapping_verified": verified_link is not None,
+            "tiger_quote_available": tiger_quote is not None,
+            "binance_quote_available": binance_quote is not None,
+            "box_reason_code": box_reason,
+            "decision": processed.recorded.signal.decision,
+            "reason_code": processed.recorded.signal.reason_codes_json[0],
+            "idempotent": processed.recorded.idempotent,
+            "evaluated_at": now.isoformat(),
+            "network_write": False,
+        }
+
+    runtime = copy.deepcopy(deployment.runtime_state_json or {})
+    runtime.update(
+        {
+            "martingale_tp4_symbol_states": symbol_states,
+            "evaluations": evaluations,
+            "decisions": decisions,
+            "order_intents": order_intents,
+            "last_cycle_at": utcnow().isoformat() + "Z",
+            "network_writes": 0,
+        }
+    )
+    deployment.runtime_state_json = runtime
+    deployment.last_error_code = None
+    deployment.updated_at = utcnow()
+
+
 def _evaluate_deployment(
     db: Session,
     engine: Engine,
     deployment: StrategyDeployment,
     revision: StrategyRevision,
     strategy: UserStrategy,
+    *,
+    tiger_depth_provider: TigerDepthProvider | None = None,
 ) -> None:
     snapshot = copy.deepcopy(revision.snapshot_json or {})
+    if snapshot.get("engine_key") == "martingale_tp4":
+        _evaluate_martingale_deployment(
+            db,
+            deployment,
+            revision,
+            tiger_depth_provider=tiger_depth_provider,
+        )
+        return
     symbols = sorted(
         {
             str(symbol).strip().upper()
@@ -340,7 +558,10 @@ def _evaluate_deployment(
     deployment.updated_at = utcnow()
 
 
-def tick(engine: Engine) -> int:
+def tick(
+    engine: Engine,
+    tiger_depth_provider: TigerDepthProvider | None = None,
+) -> int:
     completed = 0
     with Session(engine) as db:
         deployments = db.scalars(
@@ -358,7 +579,14 @@ def tick(engine: Engine) -> int:
                 deployment.updated_at = utcnow()
                 continue
             try:
-                _evaluate_deployment(db, engine, deployment, revision, strategy)
+                _evaluate_deployment(
+                    db,
+                    engine,
+                    deployment,
+                    revision,
+                    strategy,
+                    tiger_depth_provider=tiger_depth_provider,
+                )
                 db.commit()
                 completed += 1
             except IntegrityError:
@@ -373,7 +601,11 @@ def tick(engine: Engine) -> int:
         return completed
 
 
-def shadow_loop(engine: Engine, stop_event: threading.Event) -> None:
+def shadow_loop(
+    engine: Engine,
+    stop_event: threading.Event,
+    tiger_depth_provider: TigerDepthProvider | None = None,
+) -> None:
     print("[shadow] revision-pinned shadow evaluator started")
     while not stop_event.wait(_LOOP_SECONDS):
-        tick(engine)
+        tick(engine, tiger_depth_provider)

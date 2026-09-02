@@ -206,6 +206,15 @@ def _release_singleton(connection: Connection, worker_type: WorkerType) -> None:
 
 def _start_market(app, settings: Settings) -> Callable[[], None]:
     from . import battle, market_config, market_engine, market_store, underlying_quotes
+    from .martingale_tp4_bar_sync import (
+        record_bar_sync_unavailable,
+        start_martingale_tiger_bar_sync_loop,
+    )
+    from .tiger_market_data import (
+        TigerBarClient,
+        TigerMarketDataError,
+        build_tiger_quote_api,
+    )
     from .tradfi_universe import (
         TradfiSyncResult,
         start_tradfi_sync_loop,
@@ -277,12 +286,41 @@ def _start_market(app, settings: Settings) -> Callable[[], None]:
         interval_seconds=settings.tradfi_universe_sync_seconds,
         on_updated=apply_universe,
     )
+    tiger_bar_sync_stop: threading.Event | None = None
+    tiger_key_path = settings.tiger_openapi_private_key_path
+    if (
+        settings.tiger_openapi_tiger_id.strip()
+        and settings.tiger_openapi_account.strip()
+        and tiger_key_path is not None
+    ):
+        try:
+            tiger_quote_api = build_tiger_quote_api(
+                tiger_id=settings.tiger_openapi_tiger_id,
+                account=settings.tiger_openapi_account,
+                private_key_path=tiger_key_path,
+                sandbox=settings.tiger_openapi_sandbox,
+            )
+            tiger_bar_sync_stop = start_martingale_tiger_bar_sync_loop(
+                engine,
+                TigerBarClient(tiger_quote_api),
+            )
+        except TigerMarketDataError as exc:
+            record_bar_sync_unavailable(engine, category=exc.category)
+            print(
+                "[martingale-tiger-bars] disabled: "
+                f"{exc.category}",
+                file=sys.stderr,
+            )
+    else:
+        record_bar_sync_unavailable(engine, category="not_configured")
     market_engine.start()
     battle.start()
     underlying_quotes.start()
 
     def stop() -> None:
         tradfi_sync_stop.set()
+        if tiger_bar_sync_stop is not None:
+            tiger_bar_sync_stop.set()
         app.state.unusual_whales_runtime.stop()
         app.state.finnhub_us_quote_service.stop()
         underlying_quotes.stop()
@@ -310,9 +348,11 @@ def _start_shadow(app, settings: Settings) -> Callable[[], None]:
 
     market_store.configure_engine(app.state.database_engine)
     shadow_stop = threading.Event()
+    tiger_depth_service = getattr(app.state, "tiger_us_depth_service", None)
+    tiger_depth_provider = getattr(tiger_depth_service, "latest_one", None)
     threading.Thread(
         target=shadow_loop,
-        args=(app.state.database_engine, shadow_stop),
+        args=(app.state.database_engine, shadow_stop, tiger_depth_provider),
         daemon=True,
         name="shadow-runtime",
     ).start()

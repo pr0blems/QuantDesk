@@ -9,6 +9,7 @@ from quantdesk_v2.tiger_market_data import (
     TigerBar,
     TigerBarClient,
     TigerTradingCalendarClient,
+    closed_tiger_bars,
     evaluate_bar_quality,
 )
 
@@ -169,3 +170,13 @@ def test_client_rejects_unsupported_adjustment_instead_of_silent_fallback() -> N
             trade_session="regular",
             adjustment="backward",
         )
+
+
+def test_only_fully_closed_tiger_bars_can_enter_strategy_storage() -> None:
+    now = datetime(2026, 9, 2, 4, 0, tzinfo=UTC)
+    closed = _bar(int((now - timedelta(minutes=15)).timestamp() * 1000))
+    forming = _bar(int(now.timestamp() * 1000))
+
+    selected = closed_tiger_bars((closed, forming), cutoff=now)
+
+    assert selected == (closed,)

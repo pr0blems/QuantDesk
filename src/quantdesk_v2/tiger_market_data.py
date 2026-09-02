@@ -16,7 +16,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import Session
 
@@ -183,6 +183,21 @@ def _timeframe_delta(timeframe: str) -> timedelta:
         return values[timeframe]
     except KeyError as exc:
         raise ValueError("unsupported Tiger timeframe") from exc
+
+
+def closed_tiger_bars(
+    bars: Sequence[TigerBar], *, cutoff: datetime
+) -> tuple[TigerBar, ...]:
+    """Return only bars whose complete interval ended by ``cutoff``.
+
+    Tiger can include the currently forming bar in a historical response.  A
+    forming OHLC value is not deterministic and must never enter the strategy
+    data set, otherwise a restart can evaluate a different box for the same
+    timestamp.
+    """
+
+    cutoff_ms = int(_normalized_datetime(cutoff).timestamp() * 1000)
+    return tuple(item for item in bars if item.close_time <= cutoff_ms)
 
 
 class TigerBarClient:
@@ -506,6 +521,77 @@ class TigerMarketDataRepository:
             for row in rows
         )
 
+    def load_latest_bars(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        trade_session: str,
+        adjustment: str,
+        end_time: int,
+        limit: int,
+    ) -> tuple[TigerBar, ...]:
+        """Load a bounded closed-bar tail in chronological order."""
+
+        if limit < 1 or limit > 10_000:
+            raise ValueError("latest bar limit must be between 1 and 10000")
+        rows = self.db.scalars(
+            select(ReferenceMarketBar)
+            .where(
+                ReferenceMarketBar.source == TIGER_SOURCE,
+                ReferenceMarketBar.symbol == symbol.strip().upper(),
+                ReferenceMarketBar.timeframe == timeframe,
+                ReferenceMarketBar.trade_session == trade_session,
+                ReferenceMarketBar.adjustment == adjustment,
+                ReferenceMarketBar.close_time <= end_time,
+            )
+            .order_by(ReferenceMarketBar.open_time.desc())
+            .limit(limit)
+        ).all()
+        rows.reverse()
+        return tuple(
+            TigerBar(
+                symbol=row.symbol,
+                timeframe=row.timeframe,
+                trade_session=row.trade_session,
+                adjustment=row.adjustment,
+                open_time=row.open_time,
+                close_time=row.close_time,
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                volume=row.volume,
+                amount=row.amount,
+                received_at=(
+                    row.received_at.replace(tzinfo=UTC)
+                    if row.received_at.tzinfo is None
+                    else row.received_at.astimezone(UTC)
+                ),
+                source_version=row.source_version,
+            )
+            for row in rows
+        )
+
+    def latest_open_time(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        trade_session: str,
+        adjustment: str,
+    ) -> int | None:
+        value = self.db.scalar(
+            select(func.max(ReferenceMarketBar.open_time)).where(
+                ReferenceMarketBar.source == TIGER_SOURCE,
+                ReferenceMarketBar.symbol == symbol.strip().upper(),
+                ReferenceMarketBar.timeframe == timeframe,
+                ReferenceMarketBar.trade_session == trade_session,
+                ReferenceMarketBar.adjustment == adjustment,
+            )
+        )
+        return int(value) if value is not None else None
+
     def save_quality(self, report: BarQualityReport) -> ReferenceMarketDataQuality:
         row = self.db.scalar(
             select(ReferenceMarketDataQuality).where(
@@ -618,7 +704,7 @@ class TigerBarBackfillService:
         maximum_age_seconds: int,
         total: int = 10_000,
     ) -> TigerBackfillResult:
-        bars = self.client.bars(
+        requested = self.client.bars(
             symbol,
             timeframe=timeframe,
             begin_at=begin_at,
@@ -626,6 +712,10 @@ class TigerBarBackfillService:
             trade_session=trade_session,
             adjustment=adjustment,
             total=total,
+        )
+        bars = closed_tiger_bars(
+            requested,
+            cutoff=min(_normalized_datetime(end_at), datetime.now(UTC)),
         )
         stored = self.repository.upsert_bars(bars, security_id=security_id)
         report = evaluate_bar_quality(
@@ -730,6 +820,47 @@ def resolve_verified_market_link(
     return VerifiedMarketLink(
         security_id=int(tiger.security_id),
         underlying_symbol=underlying,
+        contract_symbol=contract,
+        tiger_mapping_id=int(tiger.id),
+        binance_mapping_id=int(binance.id),
+    )
+
+
+def resolve_verified_contract_market_link(
+    db: Session,
+    *,
+    contract_symbol: str,
+) -> VerifiedMarketLink | None:
+    """Resolve one verified Binance contract to its Tiger cash symbol."""
+
+    contract = contract_symbol.strip().upper()
+    binance = db.scalar(
+        select(SecuritySymbolMapping).where(
+            SecuritySymbolMapping.source == "binance_tradfi",
+            SecuritySymbolMapping.source_symbol == contract,
+        )
+    )
+    if binance is None:
+        return None
+    tiger = db.scalar(
+        select(SecuritySymbolMapping).where(
+            SecuritySymbolMapping.security_id == binance.security_id,
+            SecuritySymbolMapping.source == TIGER_SOURCE,
+        )
+    )
+    if (
+        tiger is None
+        or tiger.mapping_status not in VERIFIED_MAPPING_STATES
+        or binance.mapping_status not in VERIFIED_MAPPING_STATES
+        or tiger.source_status != "ACTIVE"
+        or binance.source_status != "TRADING"
+        or not tiger.strategy_enabled
+        or not binance.strategy_enabled
+    ):
+        return None
+    return VerifiedMarketLink(
+        security_id=int(binance.security_id),
+        underlying_symbol=tiger.source_symbol.strip().upper(),
         contract_symbol=contract,
         tiger_mapping_id=int(tiger.id),
         binance_mapping_id=int(binance.id),

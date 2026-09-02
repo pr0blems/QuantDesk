@@ -189,6 +189,8 @@ def _new_risk_limit_reason(
     account_balance: Decimal,
     leverage: Decimal,
     execution_point_size: Decimal,
+    daily_realized_pnl: Decimal,
+    liquidation_buffer_pct: Decimal | None,
 ) -> tuple[str, dict[str, Any]] | None:
     if decision.action == DecisionAction.ADD and not config.live_risk.additions_enabled:
         return "live_additions_disabled", {}
@@ -199,6 +201,32 @@ def _new_risk_limit_reason(
         or binance is None
     ):
         return None
+    maximum_daily_loss = (
+        account_balance * config.live_risk.daily_loss_limit_pct / Decimal("100")
+    )
+    if daily_realized_pnl <= -maximum_daily_loss:
+        return (
+            "live_daily_loss_limit",
+            {
+                "daily_realized_pnl": str(daily_realized_pnl),
+                "maximum_daily_loss": str(maximum_daily_loss),
+                "account_balance": str(account_balance),
+            },
+        )
+    if (
+        liquidation_buffer_pct is not None
+        and liquidation_buffer_pct
+        < config.live_risk.minimum_liquidation_buffer_pct
+    ):
+        return (
+            "live_liquidation_buffer_limit",
+            {
+                "liquidation_buffer_pct": str(liquidation_buffer_pct),
+                "minimum_liquidation_buffer_pct": str(
+                    config.live_risk.minimum_liquidation_buffer_pct
+                ),
+            },
+        )
     execution_spread_points = (binance.ask - binance.bid) / execution_point_size
     if execution_spread_points > config.parameters.execution.max_spread_points:
         return (
@@ -250,6 +278,8 @@ def evaluate_shadow_tick(
     now: datetime | None = None,
     leverage: Decimal = Decimal("1"),
     execution_point_size: Decimal | None = None,
+    daily_realized_pnl: Decimal = Decimal("0"),
+    liquidation_buffer_pct: Decimal | None = None,
     manual_direction: Direction | None = None,
     manual_quantity: Decimal | None = None,
 ) -> ShadowEvaluation:
@@ -262,6 +292,12 @@ def evaluate_shadow_tick(
         raise ValueError("account_balance must be positive")
     if leverage <= 0:
         raise ValueError("leverage must be positive")
+    if not daily_realized_pnl.is_finite():
+        raise ValueError("daily_realized_pnl must be finite")
+    if liquidation_buffer_pct is not None and (
+        not liquidation_buffer_pct.is_finite() or liquidation_buffer_pct < 0
+    ):
+        raise ValueError("liquidation_buffer_pct must be finite and non-negative")
     execution_tick_size = execution_point_size or point_size
     if execution_tick_size <= 0:
         raise ValueError("execution_point_size must be positive")
@@ -336,6 +372,8 @@ def evaluate_shadow_tick(
         account_balance=account_balance,
         leverage=leverage,
         execution_point_size=execution_tick_size,
+        daily_realized_pnl=daily_realized_pnl,
+        liquidation_buffer_pct=liquidation_buffer_pct,
     )
     if action in {"open", "add"} and not gate.allowed:
         decision = _hold(
@@ -384,11 +422,14 @@ def apply_shadow_evaluation(
     binance: BinanceExecutionQuote | None,
     tiger_bid: Decimal | None,
     fee_bps: Decimal = Decimal("0"),
+    slippage_bps: Decimal = Decimal("0"),
 ) -> ShadowTransition:
     """Apply approved Shadow intents to an immutable virtual basket."""
 
     if fee_bps < 0:
         raise ValueError("fee_bps must not be negative")
+    if not Decimal("0") <= slippage_bps < _TEN_THOUSAND:
+        raise ValueError("slippage_bps must be between 0 and 10000")
     before = evaluation.marked_basket
     decision = evaluation.decision
     legs = list(before.legs)
@@ -398,7 +439,10 @@ def apply_shadow_evaluation(
     if decision.action in {DecisionAction.OPEN, DecisionAction.ADD}:
         if binance is None or decision.direction is None or decision.quantity is None:
             raise ValueError("approved new-risk decision requires a Binance quote and order terms")
-        price = binance.ask if decision.direction == Direction.BUY else binance.bid
+        if decision.direction == Direction.BUY:
+            price = binance.ask * (Decimal("1") + slippage_bps / _TEN_THOUSAND)
+        else:
+            price = binance.bid * (Decimal("1") - slippage_bps / _TEN_THOUSAND)
         leg_index = max((item.leg_index for item in legs), default=-1) + 1
         fee = price * decision.quantity * fee_bps / _TEN_THOUSAND
         legs.append(
@@ -438,7 +482,10 @@ def apply_shadow_evaluation(
         closing_indices = {item.leg_index for item in closing}
         legs = [item for item in legs if item.leg_index not in closing_indices]
         for leg in closing:
-            price = binance.bid if leg.direction == Direction.BUY else binance.ask
+            if leg.direction == Direction.BUY:
+                price = binance.bid * (Decimal("1") - slippage_bps / _TEN_THOUSAND)
+            else:
+                price = binance.ask * (Decimal("1") + slippage_bps / _TEN_THOUSAND)
             gross = _close_pnl(leg, price)
             fee = price * leg.quantity * fee_bps / _TEN_THOUSAND
             net = gross - fee

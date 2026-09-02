@@ -6,7 +6,7 @@ import copy
 import hashlib
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -318,6 +318,34 @@ def _cycle_sequence(db: Session, deployment_id: int, contract_symbol: str) -> in
     ) + 1
 
 
+def _daily_realized_pnl(
+    db: Session,
+    deployment: StrategyDeployment,
+    occurred_at: datetime,
+) -> Decimal:
+    observed = (
+        occurred_at.replace(tzinfo=UTC)
+        if occurred_at.tzinfo is None
+        else occurred_at.astimezone(UTC)
+    )
+    day_start = observed.replace(hour=0, minute=0, second=0, microsecond=0).replace(
+        tzinfo=None
+    )
+    value = db.scalar(
+        select(func.sum(StrategyBasketLeg.realized_pnl))
+        .join(
+            StrategyBasketCycle,
+            StrategyBasketCycle.id == StrategyBasketLeg.cycle_id,
+        )
+        .where(
+            StrategyBasketCycle.user_id == deployment.user_id,
+            StrategyBasketCycle.deployment_id == deployment.id,
+            StrategyBasketLeg.filled_at >= day_start,
+        )
+    )
+    return Decimal(value or 0)
+
+
 def record_shadow_transition(
     db: Session,
     deployment: StrategyDeployment,
@@ -472,10 +500,13 @@ def process_shadow_tick(
     occurred_at: datetime,
     leverage: Decimal = Decimal("1"),
     execution_point_size: Decimal | None = None,
+    liquidation_buffer_pct: Decimal | None = None,
     box_high: Decimal | None = None,
     box_low: Decimal | None = None,
     box_time: int | None = None,
+    replace_idle_box: bool = False,
     fee_bps: Decimal = Decimal("0"),
+    slippage_bps: Decimal = Decimal("0"),
     manual_direction: Direction | None = None,
     manual_quantity: Decimal | None = None,
 ) -> ProcessedShadowTick:
@@ -488,8 +519,10 @@ def process_shadow_tick(
         for_update=True,
     )
     basket = restored.basket
-    if not basket.legs and (box_high is not None or box_low is not None):
-        if box_high is None or box_low is None:
+    if not basket.legs and (
+        replace_idle_box or box_high is not None or box_low is not None
+    ):
+        if (box_high is None) != (box_low is None):
             raise ValueError("box_high and box_low must be supplied together")
         basket = replace(basket, box_high=box_high, box_low=box_low)
     evaluation = evaluate_shadow_tick(
@@ -506,6 +539,8 @@ def process_shadow_tick(
         now=occurred_at,
         leverage=leverage,
         execution_point_size=execution_point_size,
+        daily_realized_pnl=_daily_realized_pnl(db, deployment, occurred_at),
+        liquidation_buffer_pct=liquidation_buffer_pct,
         manual_direction=manual_direction,
         manual_quantity=manual_quantity,
     )
@@ -514,6 +549,7 @@ def process_shadow_tick(
         binance=binance,
         tiger_bid=tiger.bid if tiger is not None else None,
         fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
     )
     recorded = record_shadow_transition(
         db,
