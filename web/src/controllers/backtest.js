@@ -382,7 +382,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#capital-section .section-head small").textContent = basket ? "篮子仓位由策略参数控制" : "单标的 · 单仓";
     this.q("#cost-section .section-head small").textContent = basket ? "成本可调 · 退出由策略控制" : "结果均为净值";
     this.q("#run-backtest").disabled = !strategy || !symbols.length || !timeframes.length;
-    this.syncBounds();
+    this.syncBounds(basket && changed);
   }
 
   renderParameters(reset = false) {
@@ -450,13 +450,19 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return { min, max };
   }
 
-  syncBounds() {
+  syncBounds(resetBasketRange = false) {
     if (this.isBasketStrategy()) {
       const start = this.q("#start-date");
       const end = this.q("#end-date");
       const today = this.dateOnly(new Date());
       if (!end.value || end.value > today) end.value = today;
-      if (!start.value || start.value > end.value) start.value = this.shiftMonths(end.value, -3);
+      // A basket replay needs daily ATR history before its evaluation window.
+      // Start new basket selections with a shorter research window so the
+      // default request leaves enough warmup, while keeping longer ranges
+      // available through the explicit range controls.
+      if (resetBasketRange || !start.value || start.value > end.value) {
+        start.value = this.shiftMonths(end.value, -1);
+      }
       start.min = "";
       start.max = today;
       end.min = "";

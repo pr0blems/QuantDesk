@@ -23,3 +23,5 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'id="position-field"' in script
     assert 'id="stop-field"' in script
     assert 'input.step = param.step != null ? String(param.step) : "any";' in script
+    assert "this.syncBounds(basket && changed);" in script
+    assert "this.shiftMonths(end.value, -1)" in script
