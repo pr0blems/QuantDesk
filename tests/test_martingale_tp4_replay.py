@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -302,6 +303,26 @@ def test_replay_coverage_fails_closed_on_missing_warmup_and_intraday_gap() -> No
         "daily_atr_warmup_incomplete",
         "intraday_bar_gap",
     }
+
+
+def test_replay_coverage_accepts_inclusive_and_exclusive_contiguous_bars() -> None:
+    exclusive = tuple(_bar(index) for index in range(4))
+    inclusive = tuple(replace(bar, close_time=bar.close_time - 1) for bar in exclusive)
+
+    for signal in (exclusive, inclusive):
+        coverage = assess_replay_coverage(
+            signal,
+            (),
+            evaluation_begin_time=signal[2].open_time,
+            evaluation_end_time=signal[-1].close_time,
+            required_signal_warmup_bars=2,
+            required_daily_warmup_bars=0,
+            timezone="UTC",
+        )
+
+        assert coverage.status == "usable"
+        assert coverage.intraday_gap_count == 0
+        assert coverage.reason_codes == ()
 
 
 def test_fixed_box_replay_does_not_require_daily_atr_bars() -> None:

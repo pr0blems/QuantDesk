@@ -265,10 +265,13 @@ def _intraday_gap_count(bars: Sequence[TigerBar], timezone: str) -> int:
         ).date()
         if previous_date != current_date:
             continue
-        if current.open_time > previous.close_time:
+        gap_duration = current.open_time - previous.close_time
+        # Providers differ on whether close_time is inclusive or exclusive.
+        # A one-millisecond boundary between closed bars is still contiguous.
+        if gap_duration > 1:
             duration = previous.close_time - previous.open_time
             if duration > 0:
-                count += max(1, (current.open_time - previous.close_time) // duration)
+                count += max(1, gap_duration // duration)
     return count
 
 
