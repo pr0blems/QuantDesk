@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
-from quantdesk_v2 import api
+from quantdesk_v2 import api, backtest
 from quantdesk_v2.backtest import BacktestRepository, BacktestUnavailable
 from quantdesk_v2.config import Settings
 from quantdesk_v2.database import get_db
@@ -502,6 +502,43 @@ def test_repository_fetches_and_persists_an_empty_local_range() -> None:
         "requested_end_ts": 1_700_003_600,
         "bars_fetched": 1,
     }
+
+
+def test_repository_refetches_a_partial_local_range(monkeypatch) -> None:
+    repository = object.__new__(BacktestRepository)
+    repository.symbol_set = {"AAPLUSDT"}
+    start_ts = 1_700_000_000
+    end_ts = start_ts + 3_600
+    query_results = iter(
+        [
+            [{"bars": 2, "end_time": (start_ts + 900) * 1_000}],
+            [
+                {
+                    "bars": 2,
+                    "start_time": start_ts * 1_000,
+                    "end_time": (start_ts + 900) * 1_000,
+                }
+            ],
+        ]
+    )
+    repository._query = lambda *_: next(query_results)
+    fetched_calls: list[tuple[str, str, int, int]] = []
+    repository.kline_fetcher = lambda symbol, timeframe, start_ms, end_ms: (
+        fetched_calls.append((symbol, timeframe, start_ms, end_ms))
+        or [(start_ms, 10.0, 12.0, 9.0, 11.0, 100.0)]
+    )
+    repository._upsert_binance_klines = lambda *_: None
+    monkeypatch.setattr(backtest.time, "time", lambda: end_ts + 10_000)
+
+    result = repository._ensure_klines_if_missing(
+        "AAPLUSDT", "15m", start_ts, end_ts
+    )
+
+    assert fetched_calls == [
+        ("AAPLUSDT", "15m", start_ts * 1_000, end_ts * 1_000)
+    ]
+    assert result is not None
+    assert result["bars_fetched"] == 1
 
 
 def test_backtest_endpoints_require_authentication(mysql_test_engine: Engine) -> None:

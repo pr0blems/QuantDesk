@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import time
 from bisect import bisect_right
 from collections.abc import Callable
 from pathlib import Path
@@ -808,7 +809,13 @@ class BacktestRepository:
         start_ts: int,
         end_ts: int,
     ) -> dict[str, Any] | None:
-        """Fetch and persist Binance closed bars only when the local range is empty."""
+        """Fetch and persist Binance closed bars when the local range is incomplete.
+
+        A range with only one cached page is not usable for deterministic replay.
+        Validate both boundaries and the expected closed-bar count before reusing
+        local data; otherwise fetch the bounded range again and idempotently upsert
+        it.  This also repairs partial data left by an interrupted prior fetch.
+        """
 
         if symbol not in self.symbol_set or timeframe not in SUPPORTED_MARKET_DATA_TIMEFRAMES:
             raise BacktestUnavailable("unsupported on-demand market data request")
@@ -826,12 +833,39 @@ class BacktestRepository:
         )
         local_rows = self._query(
             """
-            SELECT COUNT(*) AS bars FROM klines
+            SELECT COUNT(*) AS bars, MIN(open_time) AS start_time,
+                   MAX(open_time) AS end_time
+            FROM klines
             WHERE symbol=? AND tf=? AND open_time>=? AND open_time<=?
             """,
             (symbol, timeframe, start_ts * scale, end_ts * scale + scale - 1),
         )
-        if local_rows and int(local_rows[0]["bars"] or 0) > 0:
+        interval = _timeframe_seconds(timeframe)
+        if interval is None:
+            raise BacktestUnavailable("unsupported on-demand market data timeframe")
+        first_expected = start_ts - (start_ts % interval)
+        now_ts = int(time.time())
+        last_closed_open = now_ts - (now_ts % interval) - interval
+        final_expected = min(end_ts - (end_ts % interval), last_closed_open)
+        expected_bars = (
+            (final_expected - first_expected) // interval + 1
+            if final_expected >= first_expected
+            else 0
+        )
+        local = local_rows[0] if local_rows else {}
+        local_bars = int(local.get("bars") or 0)
+        local_start = local.get("start_time")
+        local_end = local.get("end_time")
+        if (
+            expected_bars == 0
+            or (
+                local_bars >= expected_bars
+                and local_start is not None
+                and local_end is not None
+                and _to_unix_seconds(local_start, scale) <= first_expected
+                and _to_unix_seconds(local_end, scale) >= final_expected
+            )
+        ):
             return None
         try:
             rows = self.kline_fetcher(symbol, timeframe, start_ts * 1_000, end_ts * 1_000)
