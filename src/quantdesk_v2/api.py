@@ -762,6 +762,9 @@ def _normalize_martingale_backtest_result(
     total_return = decimal(raw_metrics.get("return_pct"))
     signal_bars = int(replay.get("signal_bar_count") or 0)
     warnings = [str(item) for item in replay.get("warnings", []) if item]
+    market_data_source = str(envelope.get("market_data_source") or "tiger_openapi")
+    if market_data_source == "binance_fapi":
+        warnings.append("Tiger 历史 K 线不可用，本次使用 Binance 映射合约 K 线回退")
     actual_start = curve[0]["timestamp"] if curve else None
     actual_end = curve[-1]["timestamp"] if curve else None
     metrics = {
@@ -778,6 +781,8 @@ def _normalize_martingale_backtest_result(
     }
     data_quality = {
         "grade": "优秀",
+        "source": market_data_source,
+        "source_quality": _json_safe(envelope.get("market_data_quality") or {}),
         "coverage_pct": 100.0,
         "actual_bars": signal_bars,
         "expected_bars": signal_bars,
@@ -786,11 +791,19 @@ def _normalize_martingale_backtest_result(
         "actual_start_ts": actual_start,
         "actual_end_ts": actual_end,
         "warnings": warnings,
-        "assumptions": [
-            "Tiger 美股现货已收盘 K 线用于生成信号",
-            "Binance 映射合约以现货参考价代理撮合，未计资金费与合约乘数",
-            "同一根 K 线内的价格路径按确定性 OHLC 模型模拟",
-        ],
+        "assumptions": (
+            [
+                "Tiger 历史 K 线不可用时，使用同一 Binance 映射合约的已收盘 K 线生成信号并模拟撮合",
+                "回退结果用于检验马丁篮子逻辑，不代表 Tiger 现货信号表现",
+                "同一根 K 线内的价格路径按确定性 OHLC 模型模拟",
+            ]
+            if market_data_source == "binance_fapi"
+            else [
+                "Tiger 美股现货已收盘 K 线用于生成信号",
+                "Binance 映射合约以现货参考价代理撮合，未计资金费与合约乘数",
+                "同一根 K 线内的价格路径按确定性 OHLC 模型模拟",
+            ]
+        ),
         "trades_total": len(trades),
         "trades_returned": len(trades),
         "trades_truncated": False,
@@ -2472,6 +2485,7 @@ def create_backtest(
                     initial_capital=payload.initial_capital,
                     fee_bps=payload.fee_bps,
                     slippage_bps=payload.slippage_bps,
+                    backtest_repository=repository,
                 )
                 raw_result = _normalize_martingale_backtest_result(
                     replay_envelope,

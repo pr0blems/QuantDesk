@@ -6,7 +6,7 @@ or execute a live basket strategy.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any
@@ -23,6 +23,7 @@ from ...application.martingale_tp4.replay import (
     run_bar_replay,
 )
 from ...application.martingale_tp4.runtime import DEFAULT_SIGNAL_POINT_SIZE
+from ...backtest import BacktestRepository, BacktestUnavailable
 from ...database import get_db
 from ...dependencies import get_current_user, require_admin_write
 from ...domain.martingale_tp4 import (
@@ -50,6 +51,7 @@ from ...models import (
 )
 from ...tiger_market_data import (
     TIGER_SOURCE,
+    TigerBar,
     TigerBarBackfillService,
     TigerBarClient,
     TigerMarketDataError,
@@ -501,6 +503,7 @@ def _timeframe_milliseconds(timeframe: str) -> int:
         "15m": 900_000,
         "30m": 1_800_000,
         "1h": 3_600_000,
+        "1d": 86_400_000,
     }
     try:
         return values[timeframe]
@@ -549,31 +552,39 @@ def _execute_martingale_bar_backtest(
     user: User,
     *,
     link: VerifiedMarketLink,
+    signal_bars_override: Sequence[TigerBar] | None = None,
+    daily_bars_override: Sequence[TigerBar] | None = None,
+    source_name: str = TIGER_SOURCE,
+    source_quality: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     config = payload.config
     market_data = config.market_data
     timeframe = config.parameters.box.timeframe
     trade_session = market_data.trade_sessions[0]
-    signal_quality = _required_quality(
-        db,
-        symbol=market_data.underlying_symbol,
-        timeframe=timeframe,
-        trade_session=trade_session,
-        adjustment=market_data.adjustment,
-        allow_historical_stale=True,
-    )
-    daily_quality = (
-        _required_quality(
+    if signal_bars_override is None:
+        signal_quality = _required_quality(
             db,
             symbol=market_data.underlying_symbol,
-            timeframe="1d",
+            timeframe=timeframe,
             trade_session=trade_session,
             adjustment=market_data.adjustment,
             allow_historical_stale=True,
         )
-        if config.parameters.box.auto_range
-        else None
-    )
+        daily_quality = (
+            _required_quality(
+                db,
+                symbol=market_data.underlying_symbol,
+                timeframe="1d",
+                trade_session=trade_session,
+                adjustment=market_data.adjustment,
+                allow_historical_stale=True,
+            )
+            if config.parameters.box.auto_range
+            else None
+        )
+    else:
+        signal_quality = None
+        daily_quality = None
     begin_ms = int(payload.begin_at.timestamp() * 1000)
     end_ms = int(payload.end_at.timestamp() * 1000)
     timeframe_ms = _timeframe_milliseconds(timeframe)
@@ -586,27 +597,31 @@ def _execute_martingale_bar_backtest(
     daily_begin_ms = int(
         (payload.begin_at - timedelta(days=daily_warmup_days)).timestamp() * 1000
     )
-    repository = TigerMarketDataRepository(db)
-    signal_bars = repository.load_bars(
-        symbol=market_data.underlying_symbol,
-        timeframe=timeframe,
-        trade_session=trade_session,
-        adjustment=market_data.adjustment,
-        begin_time=warmup_begin_ms,
-        end_time=end_ms,
-    )
-    daily_bars = (
-        repository.load_bars(
+    if signal_bars_override is None:
+        repository = TigerMarketDataRepository(db)
+        signal_bars = repository.load_bars(
             symbol=market_data.underlying_symbol,
-            timeframe="1d",
+            timeframe=timeframe,
             trade_session=trade_session,
             adjustment=market_data.adjustment,
-            begin_time=daily_begin_ms,
+            begin_time=warmup_begin_ms,
             end_time=end_ms,
         )
-        if config.parameters.box.auto_range
-        else ()
-    )
+        daily_bars = (
+            repository.load_bars(
+                symbol=market_data.underlying_symbol,
+                timeframe="1d",
+                trade_session=trade_session,
+                adjustment=market_data.adjustment,
+                begin_time=daily_begin_ms,
+                end_time=end_ms,
+            )
+            if config.parameters.box.auto_range
+            else ()
+        )
+    else:
+        signal_bars = tuple(signal_bars_override)
+        daily_bars = tuple(daily_bars_override or ())
     if len(signal_bars) > 20_000:
         raise HTTPException(status_code=422, detail="replay exceeds the 20000 bar limit")
     try:
@@ -652,10 +667,20 @@ def _execute_martingale_bar_backtest(
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
     quality_payload = {
-        "signal": _quality_out(signal_quality),
-        "daily": _quality_out(daily_quality),
+        "signal": (
+            _quality_out(signal_quality)
+            if signal_quality is not None
+            else dict((source_quality or {}).get("signal") or {})
+        ),
+        "daily": (
+            _quality_out(daily_quality)
+            if daily_quality is not None
+            else dict((source_quality or {}).get("daily") or {})
+        ),
         "requested_range": coverage.audit_payload(),
         "freshness_policy": "historical_range_allows_stale_closed_bars",
+        "source": source_name,
+        "source_fallback_reason": (source_quality or {}).get("fallback_reason"),
         "mapping_security_id": link.security_id,
         "warmup_begin_time": warmup_begin_ms,
         "evaluation_begin_time": begin_ms,
@@ -668,8 +693,12 @@ def _execute_martingale_bar_backtest(
     )
     if manifest is None:
         manifest = StrategyMarketDataManifest(
-            signal_source=TIGER_SOURCE,
-            execution_source="tiger_reference_proxy",
+            signal_source=source_name,
+            execution_source=(
+                "binance_contract_research"
+                if source_name == "binance_fapi"
+                else "tiger_reference_proxy"
+            ),
             underlying_symbol=market_data.underlying_symbol,
             contract_symbol=market_data.contract_symbol,
             timeframe=timeframe,
@@ -680,7 +709,8 @@ def _execute_martingale_bar_backtest(
             row_count=len(signal_bars) + len(daily_bars),
             quality_json=quality_payload,
             storage_uri=(
-                f"mysql://reference_market_bars/{market_data.underlying_symbol}/"
+                f"mysql://{'klines' if source_name == 'binance_fapi' else 'reference_market_bars'}/"
+                f"{market_data.contract_symbol if source_name == 'binance_fapi' else market_data.underlying_symbol}/"
                 f"{timeframe}/{result.dataset_sha256}"
             ),
             content_sha256=result.dataset_sha256,
@@ -712,6 +742,8 @@ def _execute_martingale_bar_backtest(
     return {
         "manifest_id": manifest.public_id,
         "result": result.audit_payload(),
+        "market_data_source": source_name,
+        "market_data_quality": quality_payload,
         "live_trading_changed": False,
     }
 
@@ -753,6 +785,7 @@ def run_catalog_martingale_backtest(
     initial_capital: Decimal,
     fee_bps: Decimal,
     slippage_bps: Decimal,
+    backtest_repository: BacktestRepository | None = None,
 ) -> dict[str, Any]:
     """Run the basket engine through the standard Data Backtest workflow.
 
@@ -817,12 +850,11 @@ def run_catalog_martingale_backtest(
 
     settings = request.app.state.settings
     private_key_path = settings.tiger_openapi_private_key_path
-    if (
-        not settings.tiger_openapi_tiger_id.strip()
-        or not settings.tiger_openapi_account.strip()
-        or private_key_path is None
-    ):
-        raise HTTPException(status_code=503, detail="Tiger Open API 尚未配置，无法同步回测 K 线")
+    tiger_configured = bool(
+        settings.tiger_openapi_tiger_id.strip()
+        and settings.tiger_openapi_account.strip()
+        and private_key_path is not None
+    )
     timeframe_ms = _timeframe_milliseconds(timeframe)
     signal_lookback = max(
         timedelta(days=30),
@@ -832,51 +864,108 @@ def run_catalog_martingale_backtest(
     daily_begin_at = replay_request.begin_at - timedelta(
         days=max(60, parameters.box.daily_atr_period * 3)
     )
-    try:
-        quote_api = build_tiger_quote_api(
-            tiger_id=settings.tiger_openapi_tiger_id,
-            account=settings.tiger_openapi_account,
-            private_key_path=private_key_path,
-            sandbox=settings.tiger_openapi_sandbox,
-        )
-        service = TigerBarBackfillService(
-            TigerBarClient(quote_api),
-            TigerMarketDataRepository(db),
-        )
-        service.backfill(
-            security_id=link.security_id,
-            symbol=link.underlying_symbol,
-            timeframe=timeframe,
-            begin_at=signal_begin_at,
-            end_at=replay_request.end_at,
-            trade_session="regular",
-            adjustment="none",
-            expected_bars=None,
-            maximum_age_seconds=config.market_data.maximum_tiger_age_seconds,
-            total=20_000,
-        )
-        if parameters.box.auto_range:
+    fallback_reason = "tiger_openapi_not_configured"
+    if tiger_configured:
+        try:
+            quote_api = build_tiger_quote_api(
+                tiger_id=settings.tiger_openapi_tiger_id,
+                account=settings.tiger_openapi_account,
+                private_key_path=private_key_path,
+                sandbox=settings.tiger_openapi_sandbox,
+            )
+            service = TigerBarBackfillService(
+                TigerBarClient(quote_api),
+                TigerMarketDataRepository(db),
+            )
             service.backfill(
                 security_id=link.security_id,
                 symbol=link.underlying_symbol,
-                timeframe="1d",
-                begin_at=daily_begin_at,
+                timeframe=timeframe,
+                begin_at=signal_begin_at,
                 end_at=replay_request.end_at,
                 trade_session="regular",
                 adjustment="none",
                 expected_bars=None,
                 maximum_age_seconds=config.market_data.maximum_tiger_age_seconds,
-                total=1_000,
+                total=20_000,
             )
-    except TigerMarketDataError as exc:
-        db.rollback()
+            if parameters.box.auto_range:
+                service.backfill(
+                    security_id=link.security_id,
+                    symbol=link.underlying_symbol,
+                    timeframe="1d",
+                    begin_at=daily_begin_at,
+                    end_at=replay_request.end_at,
+                    trade_session="regular",
+                    adjustment="none",
+                    expected_bars=None,
+                    maximum_age_seconds=config.market_data.maximum_tiger_age_seconds,
+                    total=1_000,
+                )
+        except TigerMarketDataError as exc:
+            db.rollback()
+            fallback_reason = f"tiger_openapi_unavailable:{exc.category}"
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        else:
+            return _execute_martingale_bar_backtest(
+                replay_request,
+                request,
+                db,
+                user,
+                link=link,
+            )
+
+    if backtest_repository is None:
         raise HTTPException(
             status_code=503,
-            detail=f"Tiger 历史行情暂不可用（{exc.category}）",
-        ) from None
-    except ValueError as exc:
-        db.rollback()
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+            detail="Tiger Open API 尚不可用，且 Binance 映射合约回测源未初始化",
+        )
+    try:
+        signal_candles, signal_source_quality = backtest_repository.load_market_candles(
+            link.contract_symbol,
+            timeframe,
+            int(signal_begin_at.timestamp()),
+            int(replay_request.end_at.timestamp()),
+            max_bars=20_000,
+        )
+        daily_candles: Sequence[Any] = ()
+        daily_source_quality: Mapping[str, Any] = {}
+        if parameters.box.auto_range:
+            daily_candles, daily_source_quality = backtest_repository.load_market_candles(
+                link.contract_symbol,
+                "1d",
+                int(daily_begin_at.timestamp()),
+                int(replay_request.end_at.timestamp()),
+                max_bars=1_000,
+            )
+    except BacktestUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+    received_at = datetime.now(UTC)
+
+    def reference_bars(candles: Sequence[Any], bar_timeframe: str) -> tuple[TigerBar, ...]:
+        interval_ms = _timeframe_milliseconds(bar_timeframe)
+        return tuple(
+            TigerBar(
+                symbol=link.underlying_symbol,
+                timeframe=bar_timeframe,
+                trade_session="regular",
+                adjustment="none",
+                open_time=int(candle.ts) * 1_000,
+                close_time=int(candle.ts) * 1_000 + interval_ms - 1,
+                open=Decimal(str(candle.open)),
+                high=Decimal(str(candle.high)),
+                low=Decimal(str(candle.low)),
+                close=Decimal(str(candle.close)),
+                volume=Decimal(str(candle.volume)),
+                amount=None,
+                received_at=received_at,
+                source_version="binance_fapi_mapped_v1",
+            )
+            for candle in candles
+        )
 
     return _execute_martingale_bar_backtest(
         replay_request,
@@ -884,6 +973,14 @@ def run_catalog_martingale_backtest(
         db,
         user,
         link=link,
+        signal_bars_override=reference_bars(signal_candles, timeframe),
+        daily_bars_override=reference_bars(daily_candles, "1d"),
+        source_name="binance_fapi",
+        source_quality={
+            "signal": signal_source_quality,
+            "daily": daily_source_quality,
+            "fallback_reason": fallback_reason,
+        },
     )
 
 

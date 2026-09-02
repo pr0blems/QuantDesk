@@ -55,6 +55,9 @@ MAX_EQUITY_POINTS = 1_500
 MAX_RETURNED_TRADES = 5_000
 MAINTENANCE_MARGIN_RATE = 0.005
 SUPPORTED_BACKTEST_TIMEFRAMES = SUPPORTED_STRATEGY_TIMEFRAMES
+SUPPORTED_MARKET_DATA_TIMEFRAMES = frozenset(
+    {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+)
 
 
 STRATEGY_TEMPLATES: tuple[dict[str, Any], ...] = (
@@ -398,6 +401,83 @@ class BacktestRepository:
         result = _run_engine(candles, validated)
         return _finalize_result(result, candles, validated, raw_count, quality)
 
+    def load_market_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_ts: int,
+        end_ts: int,
+        *,
+        max_bars: int = 20_000,
+    ) -> tuple[list[_Candle], dict[str, Any]]:
+        """Load closed Binance candles for a specialized research adapter.
+
+        This deliberately bypasses the single-position strategy validator while
+        retaining the same bounded fetch, persistence, cleaning and provenance
+        rules.  Basket engines may use the additional 1m/5m/30m/1d intervals,
+        but ordinary backtests keep their existing timeframe policy.
+        """
+
+        normalized_symbol = str(symbol).strip().upper()
+        normalized_timeframe = str(timeframe).strip()
+        if normalized_symbol not in self.symbol_set:
+            raise BacktestUnavailable("unknown backtest symbol")
+        if normalized_timeframe not in SUPPORTED_MARKET_DATA_TIMEFRAMES:
+            raise BacktestUnavailable("unsupported specialized market-data timeframe")
+        if start_ts < 0 or end_ts <= start_ts:
+            raise BacktestUnavailable("invalid specialized market-data range")
+        interval = _timeframe_seconds(normalized_timeframe)
+        if interval is None:
+            raise BacktestUnavailable("invalid specialized market-data timeframe")
+        requested_bars = (end_ts - start_ts) // interval + 1
+        if requested_bars > max_bars:
+            raise BacktestUnavailable(
+                f"specialized market-data range exceeds the {max_bars} bar limit"
+            )
+
+        fetched = self._ensure_klines_if_missing(
+            normalized_symbol,
+            normalized_timeframe,
+            start_ts,
+            end_ts,
+        )
+        series = self._series_info(normalized_symbol, normalized_timeframe)
+        scale = series["scale"]
+        rows = self._query(
+            """
+            SELECT open_time, open, high, low, close, volume FROM klines
+            WHERE symbol=? AND tf=? AND open_time>=? AND open_time<=?
+            ORDER BY open_time ASC
+            """,
+            (
+                normalized_symbol,
+                normalized_timeframe,
+                start_ts * scale,
+                end_ts * scale + scale - 1,
+            ),
+        )
+        if not rows:
+            raise BacktestUnavailable("no closed klines are available for the requested range")
+        if len(rows) > max_bars:
+            raise BacktestUnavailable(
+                f"specialized market-data range exceeds the {max_bars} bar limit"
+            )
+        candles, quality = _clean_candles(rows, scale, normalized_timeframe)
+        if not candles:
+            raise BacktestUnavailable("no valid closed klines are available for the requested range")
+        quality.update(
+            {
+                "source": "binance_fapi",
+                "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe,
+                "actual_bars": len(candles),
+                "raw_bars": len(rows),
+            }
+        )
+        if fetched:
+            quality["on_demand_fetch"] = fetched
+        return candles, quality
+
     def run_full_strategy(
         self,
         config: dict[str, Any],
@@ -730,7 +810,7 @@ class BacktestRepository:
     ) -> dict[str, Any] | None:
         """Fetch and persist Binance closed bars only when the local range is empty."""
 
-        if symbol not in self.symbol_set or timeframe not in SUPPORTED_BACKTEST_TIMEFRAMES:
+        if symbol not in self.symbol_set or timeframe not in SUPPORTED_MARKET_DATA_TIMEFRAMES:
             raise BacktestUnavailable("unsupported on-demand market data request")
         series_rows = self._query(
             """

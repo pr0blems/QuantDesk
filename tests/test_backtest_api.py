@@ -329,6 +329,8 @@ def test_martingale_replay_is_normalized_for_standard_backtest_persistence() -> 
     normalized = api._normalize_martingale_backtest_result(
         {
             "manifest_id": "manifest-1",
+            "market_data_source": "binance_fapi",
+            "market_data_quality": {"source_fallback_reason": "not_configured"},
             "result": {
                 "signal_bar_count": 3,
                 "metrics": {
@@ -405,6 +407,8 @@ def test_martingale_replay_is_normalized_for_standard_backtest_persistence() -> 
     assert normalized["trades"][0]["exit_reason"] == "basket_take_profit"
     assert normalized["equity_curve"][0]["timestamp"] == 1000
     assert normalized["data_quality"]["manifest_id"] == "manifest-1"
+    assert normalized["data_quality"]["source"] == "binance_fapi"
+    assert any("Binance 映射合约" in item for item in normalized["data_quality"]["warnings"])
 
 
 def test_catalog_keeps_symbols_without_local_history_for_on_demand_fetch() -> None:

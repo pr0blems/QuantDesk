@@ -174,6 +174,21 @@ def test_catalog_lists_templates_symbols_and_unix_second_bounds(repository_facto
     assert catalog["limits"]["timestamp_unit"] == "seconds"
 
 
+def test_specialized_market_loader_reuses_clean_binance_candles(repository_factory) -> None:
+    repository, _ = repository_factory([100, 101, 102, 103])
+
+    candles, quality = repository.load_market_candles(
+        "TESTUSDT",
+        "1h",
+        BASE_TS,
+        BASE_TS + 3 * HOUR,
+    )
+
+    assert [candle.close for candle in candles] == [100, 101, 102, 103]
+    assert quality["source"] == "binance_fapi"
+    assert quality["actual_bars"] == 4
+
+
 def test_signal_is_filled_at_next_open_and_costs_are_charged_both_sides(
     repository_factory,
 ) -> None:
