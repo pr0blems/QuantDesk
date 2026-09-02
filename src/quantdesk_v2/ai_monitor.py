@@ -4720,12 +4720,6 @@ def _frozen_analytics_evidence(
     }
 
 
-def _ablation_signal_state(item: Mapping[str, Any]) -> dict[str, Any]:
-    """Compatibility facade for the stable frozen-ablation application port."""
-
-    return classify_ablation_signal_state(item)
-
-
 def _ablation_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     returns = [
         float(item["net_directional_return_bps"])

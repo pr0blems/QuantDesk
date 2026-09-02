@@ -233,7 +233,7 @@ function LiveMarketStrip({ market }: { market: MarketRefreshResult }) {
     <section className="market-indices" aria-label="三大指数">
       {quotes.map((quote) => <IndexCard key={quote.symbol} quote={quote} source={state.source} />)}
       <article className="market-breadth-card">
-        <header><strong>市场宽度</strong><div><span className={`market-live-dot ${state.breadthSource}`}>{state.breadthSource === "live" ? "LIVE" : "HAR 快照"}</span><SourceBadge>/v2/market</SourceBadge></div></header>
+        <header><strong>市场宽度</strong><div><span className={`market-live-dot ${state.breadthSource}`}>{state.breadthSource === "live" ? "LIVE" : "HAR 快照"}</span><SourceBadge>{breadth.provider ?? "/v2/market"}</SourceBadge></div></header>
         <div className="market-breadth-numbers"><span><b className="positive">{breadth.up.toLocaleString("en-US")}</b>上涨</span><span><b>{breadth.flat.toLocaleString("en-US")}</b>平盘</span><span><b className="negative">{breadth.down.toLocaleString("en-US")}</b>下跌</span></div>
         <div className="market-breadth-bar"><i style={{ width: `${upWidth}%` }} /><i style={{ width: `${flatWidth}%` }} /><i /></div>
         <small>上涨占比 {upWidth.toFixed(1)}% · 下跌占比 {(breadth.down / Math.max(totalBreadth, 1) * 100).toFixed(1)}% · 接口响应 {formatRefreshTime(breadth.serverTime ?? null)}</small>
@@ -272,13 +272,17 @@ function FearGreedCard({
 
   return <section className="market-panel market-fear">
     <header className="market-panel-head">
-      <div><h2>恐贪指数</h2><span className={`market-live-dot ${source}`}>{source === "live" ? "LIVE" : "HAR 快照"}</span><SourceBadge>/fear_greed_index</SourceBadge></div>
+      <div><h2>恐贪指数</h2><span className={`market-live-dot ${source}`}>{source === "live" ? "LIVE" : "HAR 快照"}</span><SourceBadge>{data.provider ?? "/fear_greed_index"}</SourceBadge></div>
       <div className="market-tabs" role="tablist" aria-label="恐贪指数市场">
         <button className={view === "US" ? "active" : ""} onClick={() => setView("US")} role="tab" aria-selected={view === "US"} type="button">美股</button>
         <button className={view === "CC" ? "active" : ""} onClick={() => setView("CC")} role="tab" aria-selected={view === "CC"} type="button">虚拟币</button>
       </div>
     </header>
-    <div className="market-fear-gauge" style={{ "--fear-angle": `${angle.toFixed(1)}deg` } as CSSProperties}><div><strong>{data.latestValue.toFixed(2)}</strong><span>{fearGreedLabel(data.latestValue)}</span></div></div>
+    <div className="market-fear-gauge" style={{ "--fear-angle": `${angle.toFixed(1)}deg` } as CSSProperties} aria-label={`当前恐贪指数 ${data.latestValue.toFixed(2)}，${fearGreedLabel(data.latestValue)}`}>
+      <i className="market-fear-needle" aria-hidden="true" />
+      <strong>{data.latestValue.toFixed(2)}</strong>
+    </div>
+    <div className="market-fear-status">{fearGreedLabel(data.latestValue)}</div>
     <dl>
       <div><dt>前一日</dt><dd>{data.prevDayValue.toFixed(2)}</dd></div>
       <div><dt>一周前</dt><dd>{data.prevWeekValue.toFixed(2)}</dd></div>

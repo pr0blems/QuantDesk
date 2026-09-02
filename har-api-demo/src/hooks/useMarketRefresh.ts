@@ -13,6 +13,7 @@ export type MarketBreadth = {
   flat: number;
   down: number;
   serverTime?: number;
+  provider?: string;
 };
 
 export type FearGreedIndex = {
@@ -27,6 +28,7 @@ export type FearGreedIndex = {
   latestComparedValue?: number;
   serverTime?: number;
   items?: FearGreedHistoryPoint[];
+  provider?: string;
 };
 
 export type FearGreedHistoryPoint = {
@@ -116,6 +118,7 @@ function mergeFearGreed(current: FearGreedIndex, update?: Partial<FearGreedIndex
     latestComparedValue: update.latestComparedValue ?? current.latestComparedValue,
     serverTime: update.serverTime ?? current.serverTime,
     items: update.items?.length ? update.items : current.items,
+    provider: update.provider ?? current.provider,
   };
 }
 
@@ -213,6 +216,7 @@ export function useMarketRefresh(
             flat: payload.upDownSummary.flat ?? breadthRef.current.flat,
             down: payload.upDownSummary.down ?? breadthRef.current.down,
             serverTime: payload.upDownSummary.serverTime ?? breadthRef.current.serverTime,
+            provider: payload.upDownSummary.provider ?? breadthRef.current.provider,
           };
           breadthChanged = nextBreadth.up !== breadthRef.current.up
             || nextBreadth.flat !== breadthRef.current.flat

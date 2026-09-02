@@ -12,15 +12,15 @@ import json
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from quantdesk_v2.ai_monitor_read_models import (
+from quantdesk_v2.config import get_settings
+from quantdesk_v2.database import build_engine
+from quantdesk_v2.infrastructure.persistence.ai_monitor_read_models import (
     read_models_available,
     reconcile_ai_monitor_read_models,
     refresh_current_opportunities,
     refresh_prediction_facts,
     refresh_score_history,
 )
-from quantdesk_v2.config import get_settings
-from quantdesk_v2.database import build_engine
 from quantdesk_v2.models import (
     AiMonitorOpportunity,
     AiMonitorOpportunityCurrent,

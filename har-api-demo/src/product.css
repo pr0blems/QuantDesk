@@ -368,11 +368,11 @@
 .market-fear-gauge { position: relative; width: 190px; height: 96px; margin: 22px auto 3px; overflow: hidden; }
 .market-fear-gauge::before { content: ""; position: absolute; inset: 0; width: 190px; height: 190px; border-radius: 50%; background: conic-gradient(from 270deg, #3c78f0 0 11%, #7e56e9 11% 23%, #d64d94 23% 36%, #ee6262 36% 50%, transparent 50% 100%); }
 .market-fear-gauge::after { content: ""; position: absolute; left: 27px; top: 27px; width: 136px; height: 136px; border-radius: 50%; background: #11191d; }
-.market-fear-gauge > div { position: absolute; z-index: 2; left: 50%; bottom: 0; display: grid; justify-items: center; transform: translateX(-50%); }
-.market-fear-gauge > div::before { content: ""; position: absolute; left: 50%; bottom: 12px; width: 2px; height: 58px; transform: translateX(-50%) rotate(var(--fear-angle)); transform-origin: bottom; background: #f0f2f1; }
-.market-fear-gauge > div::after { content: ""; position: absolute; left: 50%; bottom: 7px; width: 10px; height: 10px; transform: translateX(-50%); border-radius: 50%; background: #f0f2f1; }
-.market-fear-gauge strong { position: relative; z-index: 3; font: 650 20px/1 "SFMono-Regular", Consolas, monospace; }
-.market-fear-gauge span { position: relative; z-index: 3; margin-top: 5px; color: #ef7272; font-size: 10px; }
+.market-fear-needle { position: absolute; z-index: 2; inset: 0; pointer-events: none; }
+.market-fear-needle::before { content: ""; position: absolute; left: 50%; bottom: 12px; width: 2px; height: 58px; transform: translateX(-50%) rotate(var(--fear-angle)); transform-origin: bottom; background: #f0f2f1; }
+.market-fear-needle::after { content: ""; position: absolute; left: 50%; bottom: 7px; width: 10px; height: 10px; transform: translateX(-50%); border: 2px solid #11191d; border-radius: 50%; background: #f0f2f1; box-sizing: border-box; }
+.market-fear-gauge strong { position: absolute; z-index: 3; left: 50%; bottom: 22px; padding: 2px 4px; transform: translateX(-50%); background: rgba(17, 25, 29, .86); font: 650 20px/1 "SFMono-Regular", Consolas, monospace; }
+.market-fear-status { min-height: 14px; margin-top: 1px; color: #ef7272; font-size: 10px; line-height: 14px; text-align: center; }
 .market-fear dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin: 14px 16px 0; background: #263238; }
 .market-fear dl div { display: grid; justify-items: center; gap: 5px; padding: 9px 5px; background: #11191d; }
 .market-fear dt { color: #718087; font-size: 8px; }.market-fear dd { margin: 0; font: 600 11px/1 "SFMono-Regular", Consolas, monospace; }

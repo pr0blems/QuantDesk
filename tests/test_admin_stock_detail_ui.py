@@ -1,7 +1,6 @@
 from pathlib import Path
 
-
-STATIC_DIR = Path(__file__).parents[1] / "src" / "quantdesk_v2" / "static"
+STATIC_DIR = Path(__file__).parents[1] / "web" / "admin-source"
 
 
 def test_stock_library_names_open_accessible_detail_dialog() -> None:

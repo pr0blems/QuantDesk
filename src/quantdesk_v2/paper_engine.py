@@ -904,15 +904,6 @@ def _entry_loss_guard(
         return False
 
 
-def _set_balance(account: dict[str, Any], balance: float) -> None:
-    safe_balance = max(round(balance, 8), 0.0)
-    store.execute(
-        "UPDATE paper_accounts SET balance=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
-        (safe_balance, account["id"], account["user_id"]),
-    )
-    account["balance"] = safe_balance
-
-
 def _strategy_signal(
     account: dict[str, Any], symbol: str, snapshot: dict[str, Any] | None = None
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:

@@ -18,14 +18,6 @@ from .strategy_evaluator import (
     DEFAULT_STRATEGY_EVALUATOR,
     SUPPORTED_STRATEGY_TIMEFRAMES,
     StrategyCandle,
-    bollinger_bands,
-    cross_signals,
-    exponential_moving_average,
-    optional_exponential_moving_average,
-    relative_strength_index,
-    rsi_value,
-    simple_moving_average,
-    zero_cross_signals,
 )
 from .strategy_runtime import (
     StrategyMarketDataError,
@@ -244,18 +236,7 @@ _REQUIRED_CONFIG = {
 }
 
 
-# Private aliases are retained for compatibility with older internal callers.
-# New execution modes must import these public primitives from
-# ``strategy_evaluator`` instead of reaching into the backtest module.
 _Candle = StrategyCandle
-_sma = simple_moving_average
-_ema = exponential_moving_average
-_ema_optional = optional_exponential_moving_average
-_rsi = relative_strength_index
-_bollinger = bollinger_bands
-_cross_signals = cross_signals
-_zero_cross_signals = zero_cross_signals
-_rsi_value = rsi_value
 
 
 class BacktestRepository:

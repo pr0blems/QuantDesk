@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structure() -> None:
-    script = (ROOT / "src" / "quantdesk_v2" / "static" / "monitor.js").read_text(encoding="utf-8")
+    script = (ROOT / "web" / "src" / "controllers" / "monitor.js").read_text(encoding="utf-8")
 
     for marker in (
         'class="modal-box research-modal"',
@@ -102,7 +102,7 @@ def test_monitor_research_modal_keeps_existing_actions_and_adds_research_structu
 
 
 def test_monitor_research_modal_is_responsive_and_supports_light_theme() -> None:
-    stylesheet = (ROOT / "src" / "quantdesk_v2" / "static" / "monitor.css").read_text(
+    stylesheet = (ROOT / "web" / "public" / "assets" / "monitor.css").read_text(
         encoding="utf-8"
     )
 
@@ -131,7 +131,7 @@ def test_monitor_research_modal_is_responsive_and_supports_light_theme() -> None
 
 
 def test_prediction_algorithm_includes_all_twelve_kline_strategy_weights() -> None:
-    script = (ROOT / "src" / "quantdesk_v2" / "static" / "monitor.js").read_text(encoding="utf-8")
+    script = (ROOT / "web" / "src" / "controllers" / "monitor.js").read_text(encoding="utf-8")
     feature_keys = (
         "kline_bollinger_breakout",
         "kline_moving_average_pullback_bounce",
@@ -188,7 +188,7 @@ def test_prediction_algorithm_includes_all_twelve_kline_strategy_weights() -> No
 
 
 def test_prediction_algorithm_optimizer_has_review_ui() -> None:
-    stylesheet = (ROOT / "src" / "quantdesk_v2" / "static" / "monitor.css").read_text(
+    stylesheet = (ROOT / "web" / "public" / "assets" / "monitor.css").read_text(
         encoding="utf-8"
     )
 
@@ -208,8 +208,8 @@ def test_prediction_algorithm_optimizer_has_review_ui() -> None:
 
 
 def test_prediction_history_exposes_versioned_algorithm_snapshot_action() -> None:
-    script = (ROOT / "src" / "quantdesk_v2" / "static" / "monitor.js").read_text(encoding="utf-8")
-    stylesheet = (ROOT / "src" / "quantdesk_v2" / "static" / "monitor.css").read_text(
+    script = (ROOT / "web" / "src" / "controllers" / "monitor.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web" / "public" / "assets" / "monitor.css").read_text(
         encoding="utf-8"
     )
 

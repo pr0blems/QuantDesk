@@ -258,9 +258,6 @@ def test_prediction_settlement_policy_and_persistence_have_owned_boundaries() ->
 
 
 def test_read_model_projection_is_owned_by_the_persistence_boundary() -> None:
-    compatibility_source = (
-        ROOT / "src/quantdesk_v2/ai_monitor_read_models.py"
-    ).read_text(encoding="utf-8")
     persistence_source = (
         ROOT
         / "src/quantdesk_v2/infrastructure/persistence/ai_monitor_read_models.py"
@@ -278,7 +275,6 @@ def test_read_model_projection_is_owned_by_the_persistence_boundary() -> None:
         "refresh_ai_monitor_read_models",
         "reconcile_ai_monitor_read_models",
     ):
-        assert f"def {name}(" not in compatibility_source
         assert f"def {name}(" in persistence_source
     assert "from .ai_monitor_read_models import read_models_available" in reader_source
     assert "from ...ai_monitor_read_models" not in reader_source

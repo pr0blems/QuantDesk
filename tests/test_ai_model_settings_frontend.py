@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SETTINGS_PAGE = ROOT / "web" / "src" / "pages" / "SettingsPage.tsx"
-APP_STYLES = ROOT / "src" / "quantdesk_v2" / "static" / "style.css"
+APP_STYLES = ROOT / "web" / "src" / "theme" / "style.css"
 
 
 def test_api_credentials_and_ai_models_share_the_react_settings_page() -> None:

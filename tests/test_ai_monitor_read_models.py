@@ -9,11 +9,11 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
 
 from quantdesk_v2.ai_monitor import historical_opportunity_fact_analytics
-from quantdesk_v2.ai_monitor_read_models import (
+from quantdesk_v2.application.ai_monitor import OpportunityProjectionLagging
+from quantdesk_v2.infrastructure.persistence.ai_monitor_read_models import (
     reconcile_ai_monitor_read_models,
     refresh_ai_monitor_read_models,
 )
-from quantdesk_v2.application.ai_monitor import OpportunityProjectionLagging
 from quantdesk_v2.interfaces.api.ai_monitor import _current_opportunity_projection_page
 from quantdesk_v2.models import (
     AiMonitorOpportunity,
@@ -443,9 +443,9 @@ def test_read_model_migration_follows_latest_revision() -> None:
 def test_ai_monitor_frontend_cancels_stale_opportunity_requests() -> None:
     source = (
         __import__("pathlib").Path(__file__).parents[1]
+        / "web"
         / "src"
-        / "quantdesk_v2"
-        / "static"
+        / "controllers"
         / "ai-monitor.js"
     ).read_text(encoding="utf-8")
     assert "this.opportunitiesAbortController?.abort()" in source

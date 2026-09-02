@@ -456,6 +456,56 @@ class TigerMarketDataRepository:
         )
         return int(self.db.execute(statement).rowcount or 0)
 
+    def load_bars(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        trade_session: str,
+        adjustment: str,
+        begin_time: int,
+        end_time: int,
+    ) -> tuple[TigerBar, ...]:
+        if end_time <= begin_time:
+            raise ValueError("end_time must be greater than begin_time")
+        rows = self.db.scalars(
+            select(ReferenceMarketBar)
+            .where(
+                ReferenceMarketBar.source == TIGER_SOURCE,
+                ReferenceMarketBar.symbol == symbol.strip().upper(),
+                ReferenceMarketBar.timeframe == timeframe,
+                ReferenceMarketBar.trade_session == trade_session,
+                ReferenceMarketBar.adjustment == adjustment,
+                ReferenceMarketBar.open_time >= begin_time,
+                ReferenceMarketBar.open_time < end_time,
+                ReferenceMarketBar.close_time <= end_time,
+            )
+            .order_by(ReferenceMarketBar.open_time)
+        ).all()
+        return tuple(
+            TigerBar(
+                symbol=row.symbol,
+                timeframe=row.timeframe,
+                trade_session=row.trade_session,
+                adjustment=row.adjustment,
+                open_time=row.open_time,
+                close_time=row.close_time,
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                volume=row.volume,
+                amount=row.amount,
+                received_at=(
+                    row.received_at.replace(tzinfo=UTC)
+                    if row.received_at.tzinfo is None
+                    else row.received_at.astimezone(UTC)
+                ),
+                source_version=row.source_version,
+            )
+            for row in rows
+        )
+
     def save_quality(self, report: BarQualityReport) -> ReferenceMarketDataQuality:
         row = self.db.scalar(
             select(ReferenceMarketDataQuality).where(

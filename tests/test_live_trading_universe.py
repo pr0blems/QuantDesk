@@ -86,7 +86,7 @@ def test_strategy_update_preserves_existing_new_risk_controls() -> None:
 
 def test_live_frontend_exposes_strategy_adjustment_and_twenty_position_limit() -> None:
     source = (
-        Path(__file__).parents[1] / "src" / "quantdesk_v2" / "static" / "live.js"
+        Path(__file__).parents[1] / "web" / "src" / "controllers" / "live.js"
     ).read_text(encoding="utf-8")
 
     assert 'id="live-adjust"' in source

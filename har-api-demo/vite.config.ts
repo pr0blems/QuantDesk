@@ -152,6 +152,148 @@ function normalizeBreadth(payload: Record<string, unknown>) {
   };
 }
 
+type TradingViewScanResponse = {
+  totalCount?: number;
+  data?: Array<{ s?: string; d?: unknown[] }>;
+};
+
+const publicProviderCache = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
+
+function cachedPublicProvider<T>(key: string, ttlMs: number, load: () => Promise<T>) {
+  const existing = publicProviderCache.get(key);
+  if (existing && existing.expiresAt > Date.now()) return existing.promise as Promise<T>;
+  const promise = load().catch((error) => {
+    publicProviderCache.delete(key);
+    throw error;
+  });
+  publicProviderCache.set(key, { expiresAt: Date.now() + ttlMs, promise });
+  return promise;
+}
+
+async function fetchTradingViewScan(body: Record<string, unknown>, market = "america") {
+  const upstream = await fetch(`https://scanner.tradingview.com/${market}/scan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!upstream.ok) throw new Error(`TradingView 返回 HTTP ${upstream.status}`);
+  return upstream.json() as Promise<TradingViewScanResponse>;
+}
+
+function tradingViewBase(filter: Array<Record<string, unknown>>) {
+  return {
+    filter: [{ left: "type", operation: "equal", right: "stock" }, { left: "is_primary", operation: "equal", right: true }, ...filter],
+    options: { lang: "zh" },
+    markets: ["america"],
+    symbols: { query: { types: [] }, tickers: [] },
+    columns: ["change"],
+    range: [0, 1],
+  };
+}
+
+async function fetchPublicBreadth() {
+  const [up, flat, down] = await Promise.all([
+    fetchTradingViewScan(tradingViewBase([{ left: "change", operation: "greater", right: 0 }])),
+    fetchTradingViewScan(tradingViewBase([{ left: "change", operation: "equal", right: 0 }])),
+    fetchTradingViewScan(tradingViewBase([{ left: "change", operation: "less", right: 0 }])),
+  ]);
+  return { up: up.totalCount ?? 0, flat: flat.totalCount ?? 0, down: down.totalCount ?? 0, serverTime: Date.now(), provider: "TradingView 主上市股票" };
+}
+
+async function fetchPublicIndices() {
+  const payload = await fetchTradingViewScan({
+    symbols: { tickers: ["TVC:DJI", "NASDAQ:IXIC", "SP:SPX"], query: { types: [] } },
+    columns: ["name", "description", "close", "change", "change_abs"],
+    range: [0, 3],
+  }, "global");
+  const symbolMap: Record<string, string> = { "TVC:DJI": ".DJI", "NASDAQ:IXIC": ".IXIC", "SP:SPX": ".SPX" };
+  return (payload.data ?? []).flatMap((item) => {
+    const latestPrice = Number(item.d?.[2]);
+    const change = Number(item.d?.[4]);
+    const symbol = item.s ? symbolMap[item.s] : undefined;
+    return symbol && Number.isFinite(latestPrice) && Number.isFinite(change)
+      ? [{ symbol, name: String(item.d?.[1] ?? item.d?.[0] ?? symbol), latestPrice, preClose: latestPrice - change, timestamp: Date.now() }]
+      : [];
+  });
+}
+
+async function fetchPublicUsFearGreed() {
+  const upstream = await fetch("https://production.dataviz.cnn.io/index/fearandgreed/graphdata", {
+    headers: {
+      Accept: "application/json",
+      Referer: "https://www.cnn.com/markets/fear-and-greed",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+    },
+    cache: "no-store",
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!upstream.ok) throw new Error(`CNN 恐贪接口返回 HTTP ${upstream.status}`);
+  const payload = await upstream.json() as {
+    fear_and_greed?: { score?: number; timestamp?: string; previous_close?: number; previous_1_week?: number; previous_1_month?: number };
+    fear_and_greed_historical?: { data?: Array<{ x?: number; y?: number }> };
+    market_momentum_sp500?: { data?: Array<{ x?: number; y?: number }> };
+  };
+  const current = payload.fear_and_greed;
+  if (typeof current?.score !== "number") throw new Error("CNN 恐贪接口缺少 score");
+  const spByDay = new Map((payload.market_momentum_sp500?.data ?? []).flatMap((item) => (
+    typeof item.x === "number" && typeof item.y === "number" ? [[new Date(item.x).toISOString().slice(0, 10), { timestamp: item.x, value: item.y }] as const] : []
+  )));
+  const items = (payload.fear_and_greed_historical?.data ?? []).flatMap((item) => {
+    if (typeof item.x !== "number" || typeof item.y !== "number") return [];
+    const compared = spByDay.get(new Date(item.x).toISOString().slice(0, 10));
+    return compared ? [{ timestamp: item.x, value: item.y, comparedTimestamp: compared.timestamp, comparedValue: compared.value }] : [];
+  });
+  const latestTimestamp = current.timestamp ? Date.parse(current.timestamp) : Date.now();
+  return {
+    type: "US" as const,
+    latestValue: current.score,
+    prevDayValue: current.previous_close,
+    prevWeekValue: current.previous_1_week,
+    prevMonthValue: current.previous_1_month,
+    symbol: ".SPX",
+    latestTimestamp,
+    latestTime: current.timestamp,
+    latestComparedValue: items.at(-1)?.comparedValue,
+    items,
+    serverTime: Date.now(),
+    provider: "CNN Fear & Greed",
+  };
+}
+
+async function fetchPublicCryptoFearGreed() {
+  const upstream = await fetch("https://api.alternative.me/fng/?limit=365&format=json", {
+    headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+    cache: "no-store",
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!upstream.ok) throw new Error(`Alternative.me 返回 HTTP ${upstream.status}`);
+  const payload = await upstream.json() as { data?: Array<{ value?: string; timestamp?: string }> };
+  const points = (payload.data ?? []).flatMap((item) => {
+    const value = Number(item.value);
+    const timestamp = Number(item.timestamp) * 1000;
+    return Number.isFinite(value) && Number.isFinite(timestamp) ? [{ value, timestamp }] : [];
+  });
+  if (!points.length) throw new Error("虚拟币恐贪接口没有有效数据");
+  return {
+    type: "CC" as const,
+    latestValue: points[0].value,
+    prevDayValue: points[1]?.value,
+    prevWeekValue: points[7]?.value,
+    prevMonthValue: points[30]?.value,
+    latestTimestamp: points[0].timestamp,
+    latestTime: new Date(points[0].timestamp).toISOString(),
+    serverTime: Date.now(),
+    provider: "Alternative.me",
+  };
+}
+
+const getPublicBreadth = () => cachedPublicProvider("market-breadth", 15000, fetchPublicBreadth);
+const getPublicIndices = () => cachedPublicProvider("market-indices", 5000, fetchPublicIndices);
+const getPublicUsFearGreed = () => cachedPublicProvider("us-fear-greed", 30000, fetchPublicUsFearGreed);
+const getPublicCryptoFearGreed = () => cachedPublicProvider("crypto-fear-greed", 300000, fetchPublicCryptoFearGreed);
+
 function marketProxyPlugin(harPath: string): Plugin {
   let templatesPromise: Promise<{ indices: RequestTemplate; overview: RequestTemplate; usFear: RequestTemplate; cryptoFear: RequestTemplate }> | null = null;
 
@@ -172,31 +314,30 @@ function marketProxyPlugin(harPath: string): Plugin {
   const attachMiddleware = (middlewares: Connect.Server) => {
     middlewares.use("/api/market/breadth", async (req, res, next) => {
       if (req.method !== "GET") return next();
-      if (!harPath) return jsonResponse(res, 503, { error: "MARKET_HAR_PATH 未配置" });
       try {
         const templates = await loadTemplates();
-        return jsonResponse(res, 200, normalizeBreadth(await fetchJson(templates.overview)));
-      } catch (error) {
-        return jsonResponse(res, 502, { error: error instanceof Error ? error.message : "市场宽度代理请求失败" });
+        return jsonResponse(res, 200, { ...normalizeBreadth(await fetchJson(templates.overview)), provider: "Tiger HAR 授权接口" });
+      } catch {
+        try { return jsonResponse(res, 200, await getPublicBreadth()); }
+        catch (error) { return jsonResponse(res, 502, { error: error instanceof Error ? error.message : "市场宽度代理请求失败" }); }
       }
     });
 
     middlewares.use("/api/market/fear-greed", async (req, res, next) => {
       if (req.method !== "GET") return next();
-      if (!harPath) return jsonResponse(res, 503, { error: "MARKET_HAR_PATH 未配置" });
+      const type = new URL(req.url ?? "", "http://localhost").searchParams.get("type") === "CC" ? "CC" : "US";
       try {
-        const type = new URL(req.url ?? "", "http://localhost").searchParams.get("type") === "CC" ? "CC" : "US";
         const templates = await loadTemplates();
         const payload = await fetchJson(type === "CC" ? templates.cryptoFear : templates.usFear);
-        return jsonResponse(res, 200, normalizeFearGreed(payload));
-      } catch (error) {
-        return jsonResponse(res, 502, { error: error instanceof Error ? error.message : "恐贪指数代理请求失败" });
+        return jsonResponse(res, 200, { ...normalizeFearGreed(payload), provider: "Tiger HAR 授权接口" });
+      } catch {
+        try { return jsonResponse(res, 200, type === "CC" ? await getPublicCryptoFearGreed() : await getPublicUsFearGreed()); }
+        catch (error) { return jsonResponse(res, 502, { error: error instanceof Error ? error.message : "恐贪指数代理请求失败" }); }
       }
     });
 
     middlewares.use("/api/market/indices", async (req, res, next) => {
       if (req.method !== "GET") return next();
-      if (!harPath) return jsonResponse(res, 503, { error: "MARKET_HAR_PATH 未配置" });
       try {
         const templates = await loadTemplates();
         const [indicesResult, overviewResult, usFearResult, cryptoFearResult] = await Promise.allSettled([
@@ -235,8 +376,26 @@ function marketProxyPlugin(harPath: string): Plugin {
             cryptoFearResult.status === "rejected" ? `CC: ${String(cryptoFearResult.reason)}` : null,
           ].filter(Boolean),
         });
-      } catch (error) {
-        return jsonResponse(res, 502, { error: error instanceof Error ? error.message : "本地行情代理请求失败" });
+      } catch {
+        try {
+          const [indices, breadth, fearGreedIndex, cryptoFearGreedIndex] = await Promise.all([
+            getPublicIndices(),
+            getPublicBreadth(),
+            getPublicUsFearGreed(),
+            getPublicCryptoFearGreed(),
+          ]);
+          return jsonResponse(res, 200, {
+            serverTime: Date.now(),
+            market: "US",
+            indices,
+            upDownSummary: breadth,
+            fearGreedIndex,
+            cryptoFearGreedIndex,
+            provider: "public-fallback",
+          });
+        } catch (error) {
+          return jsonResponse(res, 502, { error: error instanceof Error ? error.message : "本地行情代理请求失败" });
+        }
       }
     });
   };

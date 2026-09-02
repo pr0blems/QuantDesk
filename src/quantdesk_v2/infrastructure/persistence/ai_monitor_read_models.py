@@ -92,17 +92,6 @@ def _domain_score(domains: Mapping[str, Any], key: str) -> Decimal | None:
     return _decimal(value)
 
 
-def _quote_quality(value: Any) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized in {"healthy", "passed", "ok", "live"}:
-        return "passed"
-    if normalized in {"degraded", "partial", "last_trade_only", "stale"}:
-        return "partial"
-    if normalized in {"blocked", "rejected", "invalid"}:
-        return "blocked"
-    return "missing"
-
-
 def _event_risk(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     if normalized in {"blocked", "critical"}:
@@ -967,4 +956,3 @@ def reconcile_ai_monitor_read_models(
         "invalid_reasons": invalid_reasons,
         "checked_at": now,
     }
-
