@@ -5,12 +5,15 @@ from decimal import Decimal
 
 import pytest
 
+from quantdesk_v2.models import SecuritySymbolMapping
 from quantdesk_v2.tiger_market_data import (
     TigerBar,
     TigerBarClient,
     TigerTradingCalendarClient,
     closed_tiger_bars,
     evaluate_bar_quality,
+    resolve_research_contract_market_link,
+    resolve_verified_contract_market_link,
 )
 
 
@@ -62,6 +65,56 @@ class _QuoteApi:
             {"date": "2026-09-02", "type": "TRADING"},
             {"date": "2026-09-01", "type": "TRADING"},
         ]
+
+
+class _MappingSession:
+    def __init__(self, binance: SecuritySymbolMapping, tiger: SecuritySymbolMapping) -> None:
+        self.rows = iter((binance, tiger))
+
+    def scalar(self, _statement):
+        return next(self.rows)
+
+
+def _mapping_pair() -> tuple[SecuritySymbolMapping, SecuritySymbolMapping]:
+    binance = SecuritySymbolMapping(
+        id=1,
+        security_id=10,
+        source="binance_tradfi",
+        source_symbol="AAPLUSDT",
+        normalized_symbol="AAPL",
+        mapping_status="AUTO",
+        source_status="TRADING",
+        strategy_enabled=True,
+    )
+    tiger = SecuritySymbolMapping(
+        id=2,
+        security_id=10,
+        source="tiger_openapi",
+        source_symbol="AAPL",
+        normalized_symbol="AAPL",
+        mapping_status="VERIFIED",
+        source_status="ACTIVE",
+        strategy_enabled=True,
+    )
+    return binance, tiger
+
+
+def test_research_mapping_accepts_auto_binance_without_weakening_live_resolver() -> None:
+    binance, tiger = _mapping_pair()
+    strict = resolve_verified_contract_market_link(
+        _MappingSession(binance, tiger),  # type: ignore[arg-type]
+        contract_symbol="AAPLUSDT",
+    )
+    binance, tiger = _mapping_pair()
+    research = resolve_research_contract_market_link(
+        _MappingSession(binance, tiger),  # type: ignore[arg-type]
+        contract_symbol="AAPLUSDT",
+    )
+
+    assert strict is None
+    assert research is not None
+    assert research.underlying_symbol == "AAPL"
+    assert research.contract_symbol == "AAPLUSDT"
 
 
 def test_tiger_bar_client_uses_official_source_semantics() -> None:

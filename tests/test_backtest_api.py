@@ -25,6 +25,7 @@ from quantdesk_v2.models import (
     User,
     UserStrategy,
 )
+from quantdesk_v2.strategy_catalog import ENGINE_PARAMETER_SCHEMAS
 
 
 class FakeBacktestRepository:
@@ -302,6 +303,108 @@ def test_validated_published_full_strategy_remains_backtestable() -> None:
     )
 
     assert api._strategy_is_backtest_compatible(strategy, revision) is True
+
+
+def test_validated_martingale_basket_strategy_is_a_manual_backtest_choice() -> None:
+    strategy = UserStrategy(
+        status="active",
+        version=2,
+        engine_key="martingale_tp4",
+        strategy_kind="basket_strategy",
+        lifecycle_status="validated",
+        parameters_json={
+            item["key"]: item["default"] for item in ENGINE_PARAMETER_SCHEMAS["martingale_tp4"]
+        },
+    )
+    revision = StrategyRevision(
+        version=2,
+        lifecycle_status="validated",
+        validation_json={"valid": True},
+    )
+
+    assert api._strategy_is_backtest_compatible(strategy, revision) is True
+
+
+def test_martingale_replay_is_normalized_for_standard_backtest_persistence() -> None:
+    normalized = api._normalize_martingale_backtest_result(
+        {
+            "manifest_id": "manifest-1",
+            "result": {
+                "signal_bar_count": 3,
+                "metrics": {
+                    "initial_capital": "10000",
+                    "final_equity": "10010",
+                    "net_profit": "10",
+                    "return_pct": "0.1",
+                    "cycle_count": 1,
+                    "win_rate_pct": "100",
+                    "profit_factor": None,
+                    "total_fees": "2",
+                    "maximum_drawdown_pct": "0.05",
+                },
+                "cycles": [
+                    {
+                        "sequence": 1,
+                        "opened_at": 1_000_000,
+                        "closed_at": 1_120_000,
+                        "mode": "auto",
+                        "leg_count": 1,
+                        "realized_pnl": "10",
+                        "fees": "2",
+                        "exit_reason": "basket_take_profit",
+                    }
+                ],
+                "fills": [
+                    {
+                        "bar_open_time": 1_000_000,
+                        "action": "open",
+                        "direction": "buy",
+                        "quantity": "1",
+                        "price": "100",
+                    },
+                    {
+                        "bar_open_time": 1_120_000,
+                        "action": "close_all",
+                        "direction": "buy",
+                        "quantity": "1",
+                        "price": "112",
+                    },
+                ],
+                "equity_curve": [
+                    {
+                        "bar_open_time": 1_000_000,
+                        "equity": "10000",
+                        "drawdown_pct": "0",
+                        "open_legs": 1,
+                    },
+                    {
+                        "bar_open_time": 1_060_000,
+                        "equity": "10005",
+                        "drawdown_pct": "0",
+                        "open_legs": 1,
+                    },
+                    {
+                        "bar_open_time": 1_120_000,
+                        "equity": "10010",
+                        "drawdown_pct": "0",
+                        "open_legs": 0,
+                    },
+                ],
+                "warnings": ["tiger_reference_prices_are_not_binance_execution_prices"],
+            },
+        },
+        initial_capital=Decimal("10000"),
+    )
+
+    assert normalized["account"]["final_equity"] == 10010.0
+    assert normalized["metrics"]["total_return_pct"] == 0.1
+    assert normalized["metrics"]["max_drawdown_pct"] == 0.05
+    assert normalized["metrics"]["trade_count"] == 1
+    assert normalized["trades"][0]["side"] == "long"
+    assert normalized["trades"][0]["holding_bars"] == 3
+    assert normalized["trades"][0]["exit_reason"] == "basket_take_profit"
+    assert normalized["equity_curve"][0]["timestamp"] == 1000
+    assert normalized["data_quality"]["manifest_id"] == "manifest-1"
 
 
 def test_catalog_keeps_symbols_without_local_history_for_on_demand_fetch() -> None:

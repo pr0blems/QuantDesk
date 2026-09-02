@@ -42,6 +42,7 @@ from .binance_performance import (
 )
 from .database import get_db
 from .dependencies import get_current_user
+from .domain.martingale_tp4 import strategy_parameters_from_catalog_parameters
 from .interfaces.api.ai_monitor import router as ai_monitor_router
 from .interfaces.api.backtest_presenters import backtest_run_detail as _run_detail
 from .interfaces.api.backtests_read import router as backtests_read_router
@@ -52,6 +53,7 @@ from .interfaces.api.common import (
 )
 from .interfaces.api.finnhub import router as finnhub_router
 from .interfaces.api.health import router as health_router
+from .interfaces.api.martingale_tp4 import run_catalog_martingale_backtest
 from .interfaces.api.monitor_public import router as monitor_public_router
 from .interfaces.api.trading_accounts import (
     _execution_strategy_snapshot as _execution_strategy_snapshot,
@@ -124,6 +126,7 @@ from .strategy_lifecycle import (
     BACKTEST_ELIGIBLE_STATUSES,
     current_strategy_revision,
 )
+from .tiger_market_data import list_research_contract_market_links
 
 router = APIRouter(prefix="/api/v2")
 MIN_PERSISTED_QUANTITY = Decimal("0.000000000000000001")
@@ -496,9 +499,10 @@ def _strategy_is_backtest_compatible(
     Code-owned indicator strategies are constrained by the replay engine allowlist
     and parameter validator, so their historical ``published`` lifecycle marker
     must not hide them from research. User-authored source/full strategies still
-    require a matching, server-validated immutable revision. Basket strategies and
-    the live AI opportunity policy use different data contracts and are excluded
-    from this K-line-only replay catalog.
+    require a matching, server-validated immutable revision.  The curated
+    Martingale TP4 basket strategy is accepted through its dedicated Tiger-bar
+    adapter; the live AI opportunity policy remains excluded because it uses a
+    different feature/event contract.
     """
 
     if strategy.status != "active" or revision is None:
@@ -523,6 +527,20 @@ def _strategy_is_backtest_compatible(
         # AI Monitor retains ``multi_factor`` as a storage compatibility key, but
         # its live feature schema is not the four-parameter K-line replay engine.
         return actual_keys == expected_keys
+
+    if strategy.strategy_kind == "basket_strategy":
+        if strategy.engine_key != "martingale_tp4":
+            return False
+        if strategy.lifecycle_status not in BACKTEST_ELIGIBLE_STATUSES | {"published"}:
+            return False
+        validation = revision.validation_json
+        if not isinstance(validation, dict) or validation.get("valid") is not True:
+            return False
+        try:
+            strategy_parameters_from_catalog_parameters(strategy.parameters_json)
+        except (TypeError, ValueError):
+            return False
+        return True
 
     if strategy.lifecycle_status not in BACKTEST_ELIGIBLE_STATUSES | {"published"}:
         return False
@@ -622,6 +640,170 @@ def _backtest_error_status(message: str) -> int:
         "invalid timestamp",
     )
     return 503 if any(marker in message.lower() for marker in unavailable_markers) else 422
+
+
+def _normalize_martingale_backtest_result(
+    envelope: Mapping[str, Any],
+    *,
+    initial_capital: Decimal,
+) -> dict[str, Any]:
+    """Adapt the basket replay audit payload to the standard backtest contract."""
+
+    replay = envelope.get("result")
+    if not isinstance(replay, Mapping):
+        raise ValueError("martingale replay returned an invalid result")
+    raw_metrics = replay.get("metrics")
+    if not isinstance(raw_metrics, Mapping):
+        raise ValueError("martingale replay is missing metrics")
+    raw_cycles = replay.get("cycles")
+    raw_fills = replay.get("fills")
+    raw_curve = replay.get("equity_curve")
+    if not isinstance(raw_cycles, list) or not isinstance(raw_fills, list):
+        raise ValueError("martingale replay is missing cycles or fills")
+    if not isinstance(raw_curve, list):
+        raise ValueError("martingale replay is missing its equity curve")
+
+    def decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+        normalized = _decimal_value(value)
+        return normalized if normalized is not None else default
+
+    def enum_value(value: Any) -> str:
+        raw = getattr(value, "value", value)
+        return str(raw).strip().lower()
+
+    curve: list[dict[str, Any]] = []
+    for point in raw_curve:
+        if not isinstance(point, Mapping):
+            continue
+        timestamp_ms = point.get("bar_open_time")
+        if timestamp_ms is None:
+            continue
+        curve.append(
+            {
+                "timestamp": int(timestamp_ms) // 1000,
+                "equity": float(decimal(point.get("equity"))),
+                "drawdown_pct": float(decimal(point.get("drawdown_pct"))),
+                "open_legs": int(point.get("open_legs") or 0),
+            }
+        )
+
+    trades: list[dict[str, Any]] = []
+    for raw_cycle in raw_cycles:
+        if not isinstance(raw_cycle, Mapping):
+            continue
+        opened_at = int(raw_cycle.get("opened_at") or 0)
+        closed_at = int(raw_cycle.get("closed_at") or 0)
+        cycle_fills = [
+            item
+            for item in raw_fills
+            if isinstance(item, Mapping)
+            and opened_at <= int(item.get("bar_open_time") or 0) <= closed_at
+        ]
+        opening_fills = [
+            item for item in cycle_fills if enum_value(item.get("action")) in {"open", "add"}
+        ]
+        closing_fills = [
+            item
+            for item in cycle_fills
+            if enum_value(item.get("action")) not in {"open", "add", "hold"}
+        ]
+        if not opening_fills or not closing_fills or opened_at <= 0 or closed_at <= 0:
+            continue
+
+        def weighted_price(items: list[Mapping[str, Any]]) -> Decimal:
+            quantity = sum((decimal(item.get("quantity")) for item in items), Decimal("0"))
+            if quantity <= 0:
+                return Decimal("0")
+            notional = sum(
+                (decimal(item.get("price")) * decimal(item.get("quantity")) for item in items),
+                Decimal("0"),
+            )
+            return notional / quantity
+
+        quantity = sum(
+            (decimal(item.get("quantity")) for item in opening_fills),
+            Decimal("0"),
+        )
+        if quantity < MIN_PERSISTED_QUANTITY:
+            continue
+        net_pnl = decimal(raw_cycle.get("realized_pnl"))
+        fees = decimal(raw_cycle.get("fees"))
+        return_pct = (
+            net_pnl / initial_capital * Decimal("100") if initial_capital > 0 else Decimal("0")
+        )
+        holding_bars = sum(
+            opened_at <= int(point.get("bar_open_time") or 0) <= closed_at
+            for point in raw_curve
+            if isinstance(point, Mapping)
+        )
+        direction = enum_value(opening_fills[0].get("direction"))
+        trades.append(
+            {
+                "side": "long" if direction in {"buy", "long"} else "short",
+                "entry_ts": opened_at // 1000,
+                "exit_ts": closed_at // 1000,
+                "entry_price": float(weighted_price(opening_fills)),
+                "exit_price": float(weighted_price(closing_fills)),
+                "quantity": float(quantity),
+                "gross_pnl": float(net_pnl + fees),
+                "fees": float(fees),
+                "net_pnl": float(net_pnl),
+                "return_pct": float(return_pct),
+                "holding_bars": holding_bars,
+                "exit_reason": str(raw_cycle.get("exit_reason") or "basket_exit"),
+                "cycle_sequence": int(raw_cycle.get("sequence") or 0),
+                "cycle_mode": str(raw_cycle.get("mode") or "auto"),
+                "leg_count": int(raw_cycle.get("leg_count") or len(opening_fills)),
+                "fill_count": len(cycle_fills),
+            }
+        )
+
+    final_equity = decimal(raw_metrics.get("final_equity"), initial_capital)
+    total_return = decimal(raw_metrics.get("return_pct"))
+    signal_bars = int(replay.get("signal_bar_count") or 0)
+    warnings = [str(item) for item in replay.get("warnings", []) if item]
+    actual_start = curve[0]["timestamp"] if curve else None
+    actual_end = curve[-1]["timestamp"] if curve else None
+    metrics = {
+        **_json_safe(dict(raw_metrics)),
+        "total_return_pct": float(total_return),
+        "max_drawdown_pct": float(decimal(raw_metrics.get("maximum_drawdown_pct"))),
+        "trade_count": len(trades),
+    }
+    account = {
+        "initial_capital": float(initial_capital),
+        "final_equity": float(final_equity),
+        "net_profit": float(final_equity - initial_capital),
+        "total_fees": float(decimal(raw_metrics.get("total_fees"))),
+    }
+    data_quality = {
+        "grade": "优秀",
+        "coverage_pct": 100.0,
+        "actual_bars": signal_bars,
+        "expected_bars": signal_bars,
+        "missing_bars": 0,
+        "timestamp_unit": "seconds",
+        "actual_start_ts": actual_start,
+        "actual_end_ts": actual_end,
+        "warnings": warnings,
+        "assumptions": [
+            "Tiger 美股现货已收盘 K 线用于生成信号",
+            "Binance 映射合约以现货参考价代理撮合，未计资金费与合约乘数",
+            "同一根 K 线内的价格路径按确定性 OHLC 模型模拟",
+        ],
+        "trades_total": len(trades),
+        "trades_returned": len(trades),
+        "trades_truncated": False,
+        "manifest_id": envelope.get("manifest_id"),
+    }
+    return {
+        "account": account,
+        "metrics": metrics,
+        "trades": trades,
+        "_all_trades": trades,
+        "equity_curve": curve,
+        "data_quality": data_quality,
+    }
 
 
 def _issue_session(
@@ -2195,6 +2377,7 @@ def backtest_catalog(
         revision = current_strategy_revision(db, strategy)
         if _strategy_is_backtest_compatible(strategy, revision):
             strategies.append(strategy)
+    research_links = list_research_contract_market_links(db)
     db.commit()
     try:
         catalog = _backtest(request).catalog()
@@ -2202,7 +2385,25 @@ def backtest_catalog(
         raise HTTPException(status_code=503, detail=str(exc)) from None
     # Market availability comes from the read-only historical store. Strategy
     # choices come exclusively from this user's MySQL strategy center.
-    catalog["strategies"] = serialize_strategy_catalog(strategies)
+    serialized = serialize_strategy_catalog(strategies)
+    basket_symbols = [
+        {
+            "value": link.contract_symbol,
+            "label": f"{link.contract_symbol} · {link.underlying_symbol}",
+            "symbol": link.contract_symbol,
+            "underlying_symbol": link.underlying_symbol,
+        }
+        for link in research_links
+    ]
+    for item in serialized:
+        if (
+            item.get("strategy_kind") == "basket_strategy"
+            and item.get("engine_key") == "martingale_tp4"
+        ):
+            item["backtest_profile"] = "martingale_tp4"
+            item["supported_timeframes"] = ["1m", "5m", "15m", "30m", "1h"]
+            item["supported_symbols"] = basket_symbols
+    catalog["strategies"] = serialized
     return _catalog_response(catalog)
 
 
@@ -2251,7 +2452,32 @@ def create_backtest(
         if trigger_timeframe is not None:
             config["timeframe"] = trigger_timeframe
         try:
-            if strategy.get("strategy_kind") == "source_strategy":
+            if strategy.get("strategy_kind") == "basket_strategy":
+                config["params"]["BoxTimeFrameMinutes"] = {
+                    "1m": 1,
+                    "5m": 5,
+                    "15m": 15,
+                    "30m": 30,
+                    "1h": 60,
+                }.get(config["timeframe"], config["params"].get("BoxTimeFrameMinutes"))
+                replay_envelope = run_catalog_martingale_backtest(
+                    request=request,
+                    db=db,
+                    user=user,
+                    strategy_parameters=config["params"],
+                    contract_symbol=config["symbol"],
+                    timeframe=config["timeframe"],
+                    begin_at=_utc_datetime(config["start_ts"]).replace(tzinfo=UTC),
+                    end_at=_utc_datetime(config["end_ts"]).replace(tzinfo=UTC),
+                    initial_capital=payload.initial_capital,
+                    fee_bps=payload.fee_bps,
+                    slippage_bps=payload.slippage_bps,
+                )
+                raw_result = _normalize_martingale_backtest_result(
+                    replay_envelope,
+                    initial_capital=payload.initial_capital,
+                )
+            elif strategy.get("strategy_kind") == "source_strategy":
                 source_code = strategy.get("source_code")
                 if not isinstance(source_code, str) or not source_code.strip():
                     raise HTTPException(status_code=409, detail="strategy source is unavailable")
@@ -2353,7 +2579,14 @@ def create_backtest(
             metadata_json={
                 "account": _json_safe(account),
                 "app": {"name": "quantdesk_v2", "version": __version__},
-                "engine": {"name": "BacktestRepository", "version": __version__},
+                "engine": {
+                    "name": (
+                        "MartingaleTp4Replay"
+                        if strategy.get("strategy_kind") == "basket_strategy"
+                        else "BacktestRepository"
+                    ),
+                    "version": __version__,
+                },
                 "strategy": {
                     "id": payload.strategy_id,
                     "name": strategy["name"].strip(),

@@ -73,23 +73,23 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               </div>
             </section>
 
-            <section class="config-section">
+            <section id="capital-section" class="config-section">
               <div class="section-head"><div><span class="section-index">03</span><strong>资金与仓位</strong></div><small>单标的 · 单仓</small></div>
               <div class="field-grid two">
                 <label>初始资金 (USDT)<input id="initial-capital" name="initial_capital" type="number" min="1" step="1" value="10000" required></label>
-                <label>单次仓位 (%)<input id="position-size" name="position_size_pct" type="number" min="0.01" max="100" step="0.01" value="10" required></label>
-                <label>杠杆倍数<input id="leverage" name="leverage" type="number" min="1" max="20" step="1" value="1" required></label>
-                <label>最大持有 (K线)<input id="max-holding" name="max_holding_bars" type="number" min="0" max="50000" step="1" value="120" required></label>
+                <label id="position-field">单次仓位 (%)<input id="position-size" name="position_size_pct" type="number" min="0.01" max="100" step="0.01" value="10" required></label>
+                <label id="leverage-field">杠杆倍数<input id="leverage" name="leverage" type="number" min="1" max="20" step="1" value="1" required></label>
+                <label id="holding-field">最大持有 (K线)<input id="max-holding" name="max_holding_bars" type="number" min="0" max="50000" step="1" value="120" required></label>
               </div>
             </section>
 
-            <section class="config-section">
+            <section id="cost-section" class="config-section">
               <div class="section-head"><div><span class="section-index">04</span><strong>成本与退出</strong></div><small>结果均为净值</small></div>
               <div class="field-grid two">
                 <label>手续费 (bp)<input id="fee" name="fee_bps" type="number" min="0" max="1000" step="0.1" value="4" required></label>
                 <label>滑点 (bp)<input id="slippage" name="slippage_bps" type="number" min="0" max="1000" step="0.1" value="2" required></label>
-                <label>止损 (%)<input id="stop-loss" name="stop_loss_pct" type="number" min="0" max="99.9" step="0.1" value="5" required></label>
-                <label>止盈 (%)<input id="take-profit" name="take_profit_pct" type="number" min="0" max="99.9" step="0.1" value="10" required></label>
+                <label id="stop-field">止损 (%)<input id="stop-loss" name="stop_loss_pct" type="number" min="0" max="99.9" step="0.1" value="5" required></label>
+                <label id="take-profit-field">止盈 (%)<input id="take-profit" name="take_profit_pct" type="number" min="0" max="99.9" step="0.1" value="10" required></label>
               </div>
             </section>
 
@@ -98,7 +98,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div id="strategy-params" class="field-grid two"></div>
             </section>
 
-            <div class="execution-note"><span>成交模型</span><strong>信号收盘确认 → 下一根开盘撮合</strong><small>手续费与双边滑点均计入；杠杆采用简化逐仓强平，不含资金费与阶梯保证金。</small></div>
+            <div id="basket-profile-note" class="execution-note hidden"><span>篮子回放</span><strong>Tiger 现货信号 → 马丁篮子引擎</strong><small>首单、加仓、分级止盈、金额止损与追踪退出均读取当前策略版本；Binance 映射合约仅作为执行参照。</small></div>
+            <div id="standard-execution-note" class="execution-note"><span>成交模型</span><strong>信号收盘确认 → 下一根开盘撮合</strong><small>手续费与双边滑点均计入；杠杆采用简化逐仓强平，不含资金费与阶梯保证金。</small></div>
             <button id="run-backtest" class="run-button" type="submit" disabled><span aria-hidden="true">▶</span><strong>运行回测</strong></button>
           </form>
 
@@ -242,7 +243,6 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (catalogResult.status === "fulfilled") {
       this.catalog = this.normalizeCatalog(catalogResult.value);
       this.renderCatalog();
-      this.q("#run-backtest").disabled = !this.catalog.strategies.length || !this.catalog.symbols.length;
       this.showBanner("");
     } else {
       this.showBanner(`回测目录加载失败：${catalogResult.reason.message}`, "error");
@@ -315,10 +315,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       list.replaceChildren(empty);
     }
 
-    this.populateSelect(this.q("#symbol"), this.catalog.symbols, "选择品种");
-    this.populateSelect(this.q("#timeframe"), this.catalog.timeframes, "选择周期");
     if (!this.strategyId && strategyList.length) this.selectStrategy(String(strategyList[0].id ?? ""));
-    this.syncBounds();
+    else this.syncStrategyProfile(false);
   }
 
   populateSelect(select, options, placeholder) {
@@ -336,7 +334,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   selectStrategy(id) {
-    const changed = Boolean(this.strategyId && this.strategyId !== id);
+    const changed = this.strategyId !== id;
     this.strategyId = id;
     this.qa(".strategy-card").forEach((card) => {
       const active = card.dataset.strategyId === id;
@@ -345,6 +343,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
     const strategy = this.selectedStrategy();
     this.q("#strategy-description").textContent = strategy?.description || "策略参数将随策略中心配置动态加载。";
+    this.syncStrategyProfile(changed);
     this.renderParameters(changed);
   }
 
@@ -352,8 +351,43 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return this.catalog.strategies.find((item) => String(item.id ?? "") === this.strategyId) || null;
   }
 
+  isBasketStrategy() {
+    const strategy = this.selectedStrategy();
+    return strategy?.backtest_profile === "martingale_tp4" || (strategy?.strategy_kind === "basket_strategy" && strategy?.engine_key === "martingale_tp4");
+  }
+
+  syncStrategyProfile(changed = false) {
+    const strategy = this.selectedStrategy();
+    const basket = this.isBasketStrategy();
+    const normalizeOption = (item, fallbackKey) => {
+      if (typeof item === "string") return { value: item, label: item };
+      const value = item?.value ?? item?.symbol ?? item?.timeframe ?? item?.[fallbackKey] ?? "";
+      return { ...item, value: String(value), label: String(item?.label ?? item?.name ?? value) };
+    };
+    const symbols = basket
+      ? (Array.isArray(strategy?.supported_symbols) ? strategy.supported_symbols : []).map((item) => normalizeOption(item, "symbol"))
+      : this.catalog.symbols;
+    const timeframes = basket
+      ? (Array.isArray(strategy?.supported_timeframes) ? strategy.supported_timeframes : ["1m", "5m", "15m", "30m", "1h"]).map((item) => normalizeOption(item, "timeframe"))
+      : this.catalog.timeframes;
+    this.populateSelect(this.q("#symbol"), symbols, basket ? "暂无可用 Tiger/Binance 映射" : "选择品种");
+    this.populateSelect(this.q("#timeframe"), timeframes, "选择周期");
+    if (basket && changed && timeframes.some((item) => item.value === "15m")) this.q("#timeframe").value = "15m";
+
+    ["#position-field", "#leverage-field", "#holding-field", "#stop-field", "#take-profit-field"].forEach((selector) => {
+      this.q(selector).classList.toggle("hidden", basket);
+    });
+    this.q("#basket-profile-note").classList.toggle("hidden", !basket);
+    this.q("#standard-execution-note").classList.toggle("hidden", basket);
+    this.q("#capital-section .section-head small").textContent = basket ? "篮子仓位由策略参数控制" : "单标的 · 单仓";
+    this.q("#cost-section .section-head small").textContent = basket ? "成本可调 · 退出由策略控制" : "结果均为净值";
+    this.q("#run-backtest").disabled = !strategy || !symbols.length || !timeframes.length;
+    this.syncBounds();
+  }
+
   renderParameters(reset = false) {
-    const params = Array.isArray(this.selectedStrategy()?.params) ? this.selectedStrategy().params : [];
+    const params = (Array.isArray(this.selectedStrategy()?.params) ? this.selectedStrategy().params : [])
+      .filter((param) => !this.isBasketStrategy() || param?.key !== "BoxTimeFrameMinutes");
     const section = this.q("#parameter-section");
     section.classList.toggle("hidden", !params.length);
     const container = this.q("#strategy-params");
@@ -396,6 +430,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   resolveBounds() {
+    if (this.isBasketStrategy()) return { min: "", max: this.dateOnly(new Date()) };
     const source = this.catalog.bounds || {};
     const symbol = this.q("#symbol").value;
     const timeframe = this.q("#timeframe").value;
@@ -411,6 +446,19 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   syncBounds() {
+    if (this.isBasketStrategy()) {
+      const start = this.q("#start-date");
+      const end = this.q("#end-date");
+      const today = this.dateOnly(new Date());
+      if (!end.value || end.value > today) end.value = today;
+      if (!start.value || start.value > end.value) start.value = this.shiftMonths(end.value, -3);
+      start.min = "";
+      start.max = today;
+      end.min = "";
+      end.max = today;
+      this.q("#data-bound").textContent = "Tiger 历史 K 线按需同步";
+      return;
+    }
     const { min, max } = this.resolveBounds();
     const start = this.q("#start-date");
     const end = this.q("#end-date");

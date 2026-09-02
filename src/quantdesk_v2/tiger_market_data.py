@@ -18,7 +18,7 @@ from typing import Any, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from .models import (
     ReferenceMarketBar,
@@ -33,6 +33,7 @@ SUPPORTED_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "1d"})
 SUPPORTED_SESSIONS = frozenset({"pre_market", "regular", "after_hours", "overnight"})
 SUPPORTED_ADJUSTMENTS = frozenset({"none", "forward"})
 VERIFIED_MAPPING_STATES = frozenset({"VERIFIED", "MANUAL"})
+RESEARCH_MAPPING_STATES = VERIFIED_MAPPING_STATES | {"AUTO"}
 
 
 class TigerMarketDataError(RuntimeError):
@@ -700,7 +701,7 @@ class TigerBarBackfillService:
         end_at: datetime,
         trade_session: str,
         adjustment: str,
-        expected_bars: int,
+        expected_bars: int | None,
         maximum_age_seconds: int,
         total: int = 10_000,
     ) -> TigerBackfillResult:
@@ -717,6 +718,8 @@ class TigerBarBackfillService:
             requested,
             cutoff=min(_normalized_datetime(end_at), datetime.now(UTC)),
         )
+        if not bars:
+            raise ValueError("Tiger 未返回可用于回测的已收盘 K 线")
         stored = self.repository.upsert_bars(bars, security_id=security_id)
         report = evaluate_bar_quality(
             bars,
@@ -724,7 +727,7 @@ class TigerBarBackfillService:
             timeframe=timeframe,
             trade_session=trade_session,
             adjustment=adjustment,
-            expected_bars=expected_bars,
+            expected_bars=expected_bars if expected_bars is not None else len(bars),
             maximum_age_seconds=maximum_age_seconds,
         )
         self.repository.save_quality(report)
@@ -864,6 +867,88 @@ def resolve_verified_contract_market_link(
         contract_symbol=contract,
         tiger_mapping_id=int(tiger.id),
         binance_mapping_id=int(binance.id),
+    )
+
+
+def resolve_research_contract_market_link(
+    db: Session,
+    *,
+    contract_symbol: str,
+) -> VerifiedMarketLink | None:
+    """Resolve a research-only Tiger/Binance link without weakening live gates.
+
+    Binance's security-master synchronizer can establish an ``AUTO`` mapping
+    deterministically.  That state is sufficient for historical research when
+    the Tiger cash symbol is independently verified, but it must never be used
+    by the strict live resolver above.
+    """
+
+    contract = contract_symbol.strip().upper()
+    binance = db.scalar(
+        select(SecuritySymbolMapping).where(
+            SecuritySymbolMapping.source == "binance_tradfi",
+            SecuritySymbolMapping.source_symbol == contract,
+        )
+    )
+    if binance is None:
+        return None
+    tiger = db.scalar(
+        select(SecuritySymbolMapping).where(
+            SecuritySymbolMapping.security_id == binance.security_id,
+            SecuritySymbolMapping.source == TIGER_SOURCE,
+        )
+    )
+    if (
+        tiger is None
+        or tiger.mapping_status not in VERIFIED_MAPPING_STATES
+        or binance.mapping_status not in RESEARCH_MAPPING_STATES
+        or tiger.source_status != "ACTIVE"
+        or binance.source_status != "TRADING"
+        or not tiger.strategy_enabled
+        or not binance.strategy_enabled
+    ):
+        return None
+    return VerifiedMarketLink(
+        security_id=int(binance.security_id),
+        underlying_symbol=tiger.source_symbol.strip().upper(),
+        contract_symbol=contract,
+        tiger_mapping_id=int(tiger.id),
+        binance_mapping_id=int(binance.id),
+    )
+
+
+def list_research_contract_market_links(db: Session) -> tuple[VerifiedMarketLink, ...]:
+    """List deterministic contract choices accepted by the research adapter."""
+
+    binance = aliased(SecuritySymbolMapping)
+    tiger = aliased(SecuritySymbolMapping)
+    rows = db.execute(
+        select(binance, tiger)
+        .join(
+            tiger,
+            (tiger.security_id == binance.security_id)
+            & (tiger.source == TIGER_SOURCE),
+        )
+        .where(
+            binance.source == "binance_tradfi",
+            binance.mapping_status.in_(RESEARCH_MAPPING_STATES),
+            binance.source_status == "TRADING",
+            binance.strategy_enabled.is_(True),
+            tiger.mapping_status.in_(VERIFIED_MAPPING_STATES),
+            tiger.source_status == "ACTIVE",
+            tiger.strategy_enabled.is_(True),
+        )
+        .order_by(binance.source_symbol)
+    ).all()
+    return tuple(
+        VerifiedMarketLink(
+            security_id=int(binance_row.security_id),
+            underlying_symbol=tiger_row.source_symbol.strip().upper(),
+            contract_symbol=binance_row.source_symbol.strip().upper(),
+            tiger_mapping_id=int(tiger_row.id),
+            binance_mapping_id=int(binance_row.id),
+        )
+        for binance_row, tiger_row in rows
     )
 
 

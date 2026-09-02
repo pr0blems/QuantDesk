@@ -6,6 +6,7 @@ or execute a live basket strategy.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any
@@ -21,6 +22,7 @@ from ...application.martingale_tp4.replay import (
     assess_replay_coverage,
     run_bar_replay,
 )
+from ...application.martingale_tp4.runtime import DEFAULT_SIGNAL_POINT_SIZE
 from ...database import get_db
 from ...dependencies import get_current_user, require_admin_write
 from ...domain.martingale_tp4 import (
@@ -32,6 +34,7 @@ from ...domain.martingale_tp4 import (
     mq4_inputs_from_strategy_parameters,
     parse_mq4_settings_csv,
     preview_configuration_risk,
+    strategy_parameters_from_catalog_parameters,
     strategy_parameters_from_mq4,
 )
 from ...domain.martingale_tp4_engine import EnginePolicy
@@ -51,8 +54,10 @@ from ...tiger_market_data import (
     TigerBarClient,
     TigerMarketDataError,
     TigerMarketDataRepository,
+    VerifiedMarketLink,
     build_tiger_quote_api,
     ensure_tiger_security_mapping,
+    resolve_research_contract_market_link,
     resolve_verified_market_link,
 )
 from .common import add_audit_log
@@ -537,24 +542,18 @@ def _required_quality(
     return row
 
 
-@router.post("/backtests")
-def run_martingale_bar_backtest(
+def _execute_martingale_bar_backtest(
     payload: MartingaleBarReplayRequest,
     request: Request,
-    db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    db: Session,
+    user: User,
+    *,
+    link: VerifiedMarketLink,
 ) -> dict[str, Any]:
     config = payload.config
     market_data = config.market_data
     timeframe = config.parameters.box.timeframe
     trade_session = market_data.trade_sessions[0]
-    link = resolve_verified_market_link(
-        db,
-        underlying_symbol=market_data.underlying_symbol,
-        contract_symbol=market_data.contract_symbol,
-    )
-    if link is None:
-        raise HTTPException(status_code=409, detail="Tiger/Binance market mapping is not verified")
     signal_quality = _required_quality(
         db,
         symbol=market_data.underlying_symbol,
@@ -579,8 +578,8 @@ def run_martingale_bar_backtest(
     end_ms = int(payload.end_at.timestamp() * 1000)
     timeframe_ms = _timeframe_milliseconds(timeframe)
     signal_lookback = max(
-        timedelta(days=14),
-        timedelta(milliseconds=timeframe_ms * payload.warmup_bars * 6),
+        timedelta(days=30),
+        timedelta(milliseconds=timeframe_ms * payload.warmup_bars * 10),
     )
     warmup_begin_ms = int((payload.begin_at - signal_lookback).timestamp() * 1000)
     daily_warmup_days = max(60, config.parameters.box.daily_atr_period * 3)
@@ -715,6 +714,177 @@ def run_martingale_bar_backtest(
         "result": result.audit_payload(),
         "live_trading_changed": False,
     }
+
+
+@router.post("/backtests")
+def run_martingale_bar_backtest(
+    payload: MartingaleBarReplayRequest,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    market_data = payload.config.market_data
+    link = resolve_verified_market_link(
+        db,
+        underlying_symbol=market_data.underlying_symbol,
+        contract_symbol=market_data.contract_symbol,
+    )
+    if link is None:
+        raise HTTPException(status_code=409, detail="Tiger/Binance market mapping is not verified")
+    return _execute_martingale_bar_backtest(
+        payload,
+        request,
+        db,
+        user,
+        link=link,
+    )
+
+
+def run_catalog_martingale_backtest(
+    *,
+    request: Request,
+    db: Session,
+    user: User,
+    strategy_parameters: Mapping[str, Any],
+    contract_symbol: str,
+    timeframe: str,
+    begin_at: datetime,
+    end_at: datetime,
+    initial_capital: Decimal,
+    fee_bps: Decimal,
+    slippage_bps: Decimal,
+) -> dict[str, Any]:
+    """Run the basket engine through the standard Data Backtest workflow.
+
+    The shared page supplies a contract and timeframe.  Basket sizing, ladder,
+    exits and session behavior remain owned by the immutable strategy revision.
+    Missing Tiger bars are fetched and persisted on demand before replay.
+    """
+
+    timeframe_minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
+    if timeframe not in timeframe_minutes:
+        raise HTTPException(
+            status_code=422,
+            detail="马丁 TP4 仅支持 1m、5m、15m、30m、1h 周期",
+        )
+    link = resolve_research_contract_market_link(db, contract_symbol=contract_symbol)
+    if link is None:
+        raise HTTPException(
+            status_code=409,
+            detail="该合约尚未建立可用于研究回测的 Tiger/Binance 标的映射",
+        )
+
+    normalized_parameters = dict(strategy_parameters)
+    normalized_parameters["BoxTimeFrameMinutes"] = timeframe_minutes[timeframe]
+    try:
+        parameters = strategy_parameters_from_catalog_parameters(normalized_parameters)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"马丁 TP4 参数无效：{exc}") from None
+    if parameters.mode != "auto":
+        raise HTTPException(
+            status_code=422,
+            detail="统一数据回测当前支持马丁 TP4 自动模式；恢复/网格模式需要专用手动入场回放",
+        )
+
+    config = MartingaleTp4Config(
+        market_data=MarketDataConfig(
+            underlying_symbol=link.underlying_symbol,
+            contract_symbol=link.contract_symbol,
+            trade_sessions=("regular",),
+            adjustment="none",
+        ),
+        parameters=parameters,
+        live_risk=LiveRiskConfig(
+            max_cycle_loss_pct=Decimal("10"),
+            max_cycle_margin_pct=Decimal("50"),
+            minimum_liquidation_buffer_pct=Decimal("5"),
+            daily_loss_limit_pct=Decimal("10"),
+            additions_enabled=True,
+        ),
+    )
+    replay_request = MartingaleBarReplayRequest(
+        config=config,
+        begin_at=begin_at,
+        end_at=end_at,
+        initial_capital=initial_capital,
+        point_size=DEFAULT_SIGNAL_POINT_SIZE,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        synthetic_spread_points=Decimal("1"),
+        engine_policy=EnginePolicy.RESEARCH_COMPATIBILITY,
+        warmup_bars=250,
+    )
+
+    settings = request.app.state.settings
+    private_key_path = settings.tiger_openapi_private_key_path
+    if (
+        not settings.tiger_openapi_tiger_id.strip()
+        or not settings.tiger_openapi_account.strip()
+        or private_key_path is None
+    ):
+        raise HTTPException(status_code=503, detail="Tiger Open API 尚未配置，无法同步回测 K 线")
+    timeframe_ms = _timeframe_milliseconds(timeframe)
+    signal_lookback = max(
+        timedelta(days=30),
+        timedelta(milliseconds=timeframe_ms * replay_request.warmup_bars * 10),
+    )
+    signal_begin_at = replay_request.begin_at - signal_lookback
+    daily_begin_at = replay_request.begin_at - timedelta(
+        days=max(60, parameters.box.daily_atr_period * 3)
+    )
+    try:
+        quote_api = build_tiger_quote_api(
+            tiger_id=settings.tiger_openapi_tiger_id,
+            account=settings.tiger_openapi_account,
+            private_key_path=private_key_path,
+            sandbox=settings.tiger_openapi_sandbox,
+        )
+        service = TigerBarBackfillService(
+            TigerBarClient(quote_api),
+            TigerMarketDataRepository(db),
+        )
+        service.backfill(
+            security_id=link.security_id,
+            symbol=link.underlying_symbol,
+            timeframe=timeframe,
+            begin_at=signal_begin_at,
+            end_at=replay_request.end_at,
+            trade_session="regular",
+            adjustment="none",
+            expected_bars=None,
+            maximum_age_seconds=config.market_data.maximum_tiger_age_seconds,
+            total=20_000,
+        )
+        if parameters.box.auto_range:
+            service.backfill(
+                security_id=link.security_id,
+                symbol=link.underlying_symbol,
+                timeframe="1d",
+                begin_at=daily_begin_at,
+                end_at=replay_request.end_at,
+                trade_session="regular",
+                adjustment="none",
+                expected_bars=None,
+                maximum_age_seconds=config.market_data.maximum_tiger_age_seconds,
+                total=1_000,
+            )
+    except TigerMarketDataError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail=f"Tiger 历史行情暂不可用（{exc.category}）",
+        ) from None
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    return _execute_martingale_bar_backtest(
+        replay_request,
+        request,
+        db,
+        user,
+        link=link,
+    )
 
 
 @router.post("/tiger-bars/backfill", status_code=status.HTTP_201_CREATED)
