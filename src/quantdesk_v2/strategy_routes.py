@@ -144,7 +144,10 @@ def _template_response(template: StrategyTemplate) -> dict[str, Any]:
         "template_kind": template.template_kind,
         "complete_strategy": True,
         "management_mode": (
-            "strategy_dsl" if template.template_kind == "strategy" else "parameterized_engine"
+            {
+                "strategy": "strategy_dsl",
+                "basket_strategy": "basket_parameters",
+            }.get(template.template_kind, "parameterized_engine")
         ),
         "spec_schema_version": template.spec_schema_version,
         "spec": copy.deepcopy(template.spec_json),
@@ -2125,11 +2128,10 @@ def create_strategy(
                 raise HTTPException(status_code=422, detail=str(exc)) from None
         parameter_schema = copy.deepcopy(template.parameter_schema_json)
         engine_key = template.engine_key
-        strategy_kind = (
-            "full_strategy"
-            if template.template_kind == "strategy"
-            else "builtin_strategy"
-        )
+        strategy_kind = {
+            "strategy": "full_strategy",
+            "basket_strategy": "basket_strategy",
+        }.get(template.template_kind, "builtin_strategy")
     strategy = UserStrategy(
         public_id=str(uuid.uuid4()),
         user_id=user.id,

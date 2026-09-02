@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import Session
 
+from .domain.martingale_tp4 import strategy_parameters_from_catalog_parameters
 from .models import (
     AiMonitorConfig,
     StrategyRevision,
@@ -31,7 +32,90 @@ class StrategyParameterError(ValueError):
     """Raised when persisted or user-supplied strategy parameters are unsafe."""
 
 
+def _martingale_parameter_schema() -> list[dict[str, Any]]:
+    """Flat strategy-center schema with lossless MQ4-compatible values."""
+
+    def number(
+        key: str,
+        label: str,
+        default: int | float,
+        minimum: int | float,
+        maximum: int | float,
+        group: str,
+        *,
+        integer: bool = False,
+        switch: bool = False,
+        options: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {
+            "key": key,
+            "label": label,
+            "type": "integer" if integer or switch else "number",
+            "default": default,
+            "min": minimum,
+            "max": maximum,
+            "group": group,
+        }
+        if switch:
+            item["control"] = "switch"
+        if options is not None:
+            item["options"] = options
+        return item
+
+    return [
+        number("ChooseTrading", "交易模式", 0, 0, 2, "运行模式", integer=True, options=[
+            {"value": 0, "label": "自动突破"},
+            {"value": 1, "label": "恢复模式"},
+            {"value": 2, "label": "网格模式"},
+        ]),
+        number("NewCycle", "允许新周期", 1, 0, 1, "运行模式", switch=True),
+        number("Lot", "初始手数", 0.01, 0.000001, 1_000_000, "仓位递增"),
+        number("Autolot", "自动手数", 0, 0, 1, "仓位递增", switch=True),
+        number("Autolotsize", "自动手数余额单位", 10_000, 0.01, 1_000_000_000, "仓位递增"),
+        number("mm", "手数倍增系数", 2, 0.01, 100, "仓位递增"),
+        number("MaxLot", "单腿最大手数", 100, 0.000001, 1_000_000, "仓位递增"),
+        number("MaxOrders", "最大订单数", 16, 1, 100, "仓位递增", integer=True),
+        number("GridDrift", "切换网格订单数", 100, 1, 100_000, "仓位递增", integer=True),
+        number("Distance", "网格间距（点）", 150, 0.000001, 1_000_000_000, "仓位递增"),
+        number("MaxSpred", "最大点差（点）", 50, 0, 1_000_000_000, "执行约束"),
+        number("TP", "基础止盈（点）", 100, 0.000001, 1_000_000_000, "分级止盈"),
+        number("Kol_Ord_for_TP2", "TP2 起始订单数", 2, 1, 100_000, "分级止盈", integer=True),
+        number("TP2", "TP2（点）", 80, 0.000001, 1_000_000_000, "分级止盈"),
+        number("Kol_Ord_for_TP3", "TP3 起始订单数", 5, 1, 100_000, "分级止盈", integer=True),
+        number("TP3", "TP3（点）", 50, 0.000001, 1_000_000_000, "分级止盈"),
+        number("Kol_Ord_for_TP4", "TP4 起始订单数", 7, 1, 100_000, "分级止盈", integer=True),
+        number("TP4", "TP4（点）", 30, 0.000001, 1_000_000_000, "分级止盈"),
+        number("SL_Dollar", "篮子金额止损", 0, 0, 1_000_000_000, "止损与追踪"),
+        number("TrailStart", "追踪启动（点）", 600, 0, 1_000_000_000, "止损与追踪"),
+        number("TrailDistance", "追踪距离（点）", 100, 0.000001, 1_000_000_000, "止损与追踪"),
+        number("Overlap", "启用首尾覆盖", 1, 0, 1, "首尾覆盖", switch=True),
+        number("OverlapOrderNumber", "覆盖最少订单数", 7, 2, 100_000, "首尾覆盖", integer=True),
+        number("OverlapPercent", "额外覆盖比例（%）", 11, 0, 1000, "首尾覆盖"),
+        number("Start_Hour", "自动周期开始小时", 1, 0, 23, "运行时段", integer=True),
+        number("End_Hour", "自动周期结束小时", 23, 0, 23, "运行时段", integer=True),
+        number("BoxLength", "箱体长度", 22, 2, 999, "突破箱体", integer=True),
+        number("BoxTimeFrameMinutes", "箱体周期", 15, 1, 60, "突破箱体", integer=True, options=[
+            {"value": 1, "label": "1 分钟"},
+            {"value": 5, "label": "5 分钟"},
+            {"value": 15, "label": "15 分钟"},
+            {"value": 30, "label": "30 分钟"},
+            {"value": 60, "label": "1 小时"},
+        ]),
+        number("BoxRange", "固定箱体范围（点）", 30, 0.000001, 1_000_000_000, "突破箱体"),
+        number("AutoBoxRange", "ATR 自适应箱体", 1, 0, 1, "突破箱体", switch=True),
+        number("AutoBoxRangeDailyATRperiod", "日线 ATR 周期", 30, 2, 365, "突破箱体", integer=True),
+        number("AutoBoxRangeDailyATRfactor", "日线 ATR 系数", 0.2, 0.000001, 10, "突破箱体"),
+        number("BoxBufferPips", "箱体缓冲（点）", 5, 0, 1_000_000_000, "突破箱体"),
+        number("Magic", "MQ4 Magic", 201_800, 0, 2_147_483_647, "MQ4 兼容", integer=True),
+        number("Section", "旧版图表区间（点）", 1000, 0, 1_000_000_000, "MQ4 兼容"),
+        number("ShowStat", "保留统计显示设置", 1, 0, 1, "MQ4 兼容", switch=True),
+        number("ShowButton", "保留平仓按钮设置", 1, 0, 1, "MQ4 兼容", switch=True),
+        number("ShowMainSetting", "保留主设置显示", 1, 0, 1, "MQ4 兼容", switch=True),
+    ]
+
+
 ENGINE_PARAMETER_SCHEMAS: dict[str, list[dict[str, Any]]] = {
+    "martingale_tp4": _martingale_parameter_schema(),
     "multi_factor": [
         {
             "key": "fast_period",
@@ -685,6 +769,33 @@ SYSTEM_STRATEGY_DEFINITIONS: tuple[dict[str, Any], ...] = (
         ],
         version=3,
     ),
+    _template(
+        "martingale_tp4_v2",
+        "马丁 TP4",
+        "篮子策略",
+        (
+            "复刻马丁 TP4 的三模式篮子算法：自动模式按 Tiger 行情箱体突破开首单，"
+            "恢复模式在箱体两端反向开腿，网格模式按逆向距离同向加腿，并按订单数切换"
+            "分级止盈、金额止损、追踪和首尾覆盖。当前仅开放回测与 Shadow，不启用真实下单。"
+        ),
+        "martingale_tp4",
+        {
+            item["key"]: item["default"]
+            for item in ENGINE_PARAMETER_SCHEMAS["martingale_tp4"]
+        },
+        {
+            "position_size_pct": 1,
+            "leverage": 2,
+            "fee_bps": 5,
+            "slippage_bps": 3,
+            "stop_loss_pct": 0,
+            "take_profit_pct": 0,
+            "max_holding_bars": 0,
+        },
+        version=2,
+        template_kind="basket_strategy",
+        implementation_version="martingale_tp4_engine_v1",
+    ),
 )
 
 
@@ -736,6 +847,11 @@ def validate_strategy_parameters(
     if engine_key == "rsi_reversal":
         if normalized["oversold"] >= normalized["overbought"]:
             raise StrategyParameterError("超卖线必须小于超买线")
+    if engine_key == "martingale_tp4":
+        try:
+            strategy_parameters_from_catalog_parameters(normalized)
+        except ValueError as exc:
+            raise StrategyParameterError(str(exc)) from None
     return normalized
 
 
@@ -961,18 +1077,19 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
                 "status": "active",
                 "version": 1,
                 "engine_key": template.engine_key,
-                "strategy_kind": (
-                    "full_strategy"
-                    if template.template_kind == "strategy"
-                    else "builtin_strategy"
-                ),
+                "strategy_kind": {
+                    "strategy": "full_strategy",
+                    "basket_strategy": "basket_strategy",
+                }.get(template.template_kind, "builtin_strategy"),
                 "lifecycle_status": "validated",
                 "spec_schema_version": template.spec_schema_version,
                 "spec_json": copy.deepcopy(template.spec_json),
                 "spec_hash": (
                     strategy_spec_hash(template.spec_json) if template.spec_json else None
                 ),
-                "risk_level": "medium",
+                "risk_level": (
+                    "high" if template.template_kind == "basket_strategy" else "medium"
+                ),
                 "parameter_schema_json": copy.deepcopy(template.parameter_schema_json),
                 "parameters_json": copy.deepcopy(template.parameters_json),
                 "risk_defaults_json": copy.deepcopy(template.risk_defaults_json),
@@ -1025,7 +1142,15 @@ def ensure_user_default_strategies(db: Session, user_id: int) -> list[UserStrate
                 else (
                     {"valid": True, "engine": "strategy_runtime_v1"}
                     if strategy.strategy_kind == "full_strategy"
-                    else {"valid": True, "builtin": True}
+                    else (
+                        {
+                            "valid": True,
+                            "engine": "martingale_tp4_engine_v1",
+                            "live_ready": False,
+                        }
+                        if strategy.strategy_kind == "basket_strategy"
+                        else {"valid": True, "builtin": True}
+                    )
                 )
             ),
             "lifecycle_status": strategy.lifecycle_status,

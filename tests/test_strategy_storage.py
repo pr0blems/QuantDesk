@@ -27,8 +27,8 @@ from quantdesk_v2.strategy_catalog import (
     get_user_strategy,
     is_ai_monitor_strategy,
     list_user_strategies,
-    serialize_user_strategy,
     serialize_strategy_catalog,
+    serialize_user_strategy,
     strategy_management_mode,
     strategy_snapshot,
     validate_ai_monitor_strategy_parameters,
@@ -57,6 +57,7 @@ EXPECTED_NAMES = [
     "均线回踩反弹",
     "强势高开",
     "AI 模拟盘 ATR 趋势",
+    "马丁 TP4",
 ]
 
 
@@ -107,7 +108,7 @@ def test_strategy_models_are_commented_json_backed_and_tenant_scoped() -> None:
 def test_system_catalog_has_full_strategy_and_all_builtin_defaults(session: Session) -> None:
     templates = ensure_system_templates(session)
 
-    assert len(SYSTEM_STRATEGY_DEFINITIONS) == 21
+    assert len(SYSTEM_STRATEGY_DEFINITIONS) == 22
     assert sum(item["template_kind"] == "strategy" for item in SYSTEM_STRATEGY_DEFINITIONS) == 1
     assert (
         sum(
@@ -116,6 +117,10 @@ def test_system_catalog_has_full_strategy_and_all_builtin_defaults(session: Sess
         )
         == 20
     )
+    assert sum(
+        item["template_kind"] == "basket_strategy"
+        for item in SYSTEM_STRATEGY_DEFINITIONS
+    ) == 1
     assert [template.name for template in templates] == EXPECTED_NAMES
     assert {template.engine_key for template in templates} == {
         "multi_factor",
@@ -123,6 +128,8 @@ def test_system_catalog_has_full_strategy_and_all_builtin_defaults(session: Sess
         "macd_momentum",
         "rsi_reversal",
         "bollinger_reversion",
+        "strategy_dsl",
+        "martingale_tp4",
     }
     for template in templates:
         if template.template_key == AI_MONITOR_STRATEGY_TEMPLATE_KEY:
@@ -150,8 +157,8 @@ def test_system_catalog_has_full_strategy_and_all_builtin_defaults(session: Sess
     }
     assert "2.5×ATR 固定止盈" in paper_template.description
 
-    assert len(ensure_system_templates(session)) == 21
-    assert session.scalar(select(func.count()).select_from(StrategyTemplate)) == 21
+    assert len(ensure_system_templates(session)) == 22
+    assert session.scalar(select(func.count()).select_from(StrategyTemplate)) == 22
 
 
 def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
@@ -166,9 +173,9 @@ def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
     first = ensure_user_default_strategies(session, user.id)
     second = ensure_user_default_strategies(session, user.id)
 
-    assert len(first) == len(second) == 21
+    assert len(first) == len(second) == 22
     assert [strategy.name for strategy in first] == EXPECTED_NAMES
-    assert len({strategy.source_template_id for strategy in first}) == 21
+    assert len({strategy.source_template_id for strategy in first}) == 22
     assert all(uuid.UUID(strategy.public_id).version == 4 for strategy in first)
     assert all(strategy.created_via == "system_default" for strategy in first)
     serialized = [serialize_user_strategy(strategy) for strategy in first]
@@ -177,13 +184,14 @@ def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
         "managed_parameters",
         "parameterized_engine",
         "strategy_dsl",
+        "basket_parameters",
     }
     assert all(strategy_management_mode(strategy) != "legacy" for strategy in first)
     assert (
         session.scalar(
             select(func.count()).select_from(UserStrategy).where(UserStrategy.user_id == user.id)
         )
-        == 21
+        == 22
     )
     assert (
         session.scalar(
@@ -191,7 +199,7 @@ def test_first_login_copy_is_idempotent_and_creates_initial_revisions(
             .select_from(StrategyRevision)
             .where(StrategyRevision.user_id == user.id)
         )
-        == 21
+        == 22
     )
     assert all(strategy.revisions[0].snapshot_json["name"] == strategy.name for strategy in first)
 
@@ -265,8 +273,8 @@ def test_user_strategy_queries_do_not_cross_tenants(session: Session) -> None:
     alice_strategies = ensure_user_default_strategies(session, alice.id)
     bob_strategies = ensure_user_default_strategies(session, bob.id)
 
-    assert len(list_user_strategies(session, alice.id)) == 21
-    assert len(list_user_strategies(session, bob.id)) == 21
+    assert len(list_user_strategies(session, alice.id)) == 22
+    assert len(list_user_strategies(session, bob.id)) == 22
     assert {item.public_id for item in alice_strategies}.isdisjoint(
         {item.public_id for item in bob_strategies}
     )
@@ -274,9 +282,9 @@ def test_user_strategy_queries_do_not_cross_tenants(session: Session) -> None:
 
     alice_strategies[0].status = "archived"
     session.flush()
-    assert len(list_user_strategies(session, alice.id)) == 20
-    assert len(list_user_strategies(session, alice.id, include_archived=True)) == 21
-    assert len(list_user_strategies(session, bob.id)) == 21
+    assert len(list_user_strategies(session, alice.id)) == 21
+    assert len(list_user_strategies(session, alice.id, include_archived=True)) == 22
+    assert len(list_user_strategies(session, bob.id)) == 22
 
 
 def test_revision_relationship_and_catalog_serialization(session: Session) -> None:
@@ -328,7 +336,7 @@ def test_strategy_migration_follows_quantity_precision_revision() -> None:
     assert module.revision == "0006_strategy_tables"
     assert module.down_revision == "0005_backtest_qty_precision"
     assert len(module.SEED_TEMPLATES) == 18
-    assert [item[1] for item in module.SEED_TEMPLATES] == EXPECTED_NAMES[2:-1]
+    assert [item[1] for item in module.SEED_TEMPLATES] == EXPECTED_NAMES[2:-2]
 
 
 def test_paper_strategy_migration_follows_strategy_tables_revision() -> None:

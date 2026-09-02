@@ -421,6 +421,26 @@ def _entry_decision(
     )
 
 
+def evaluate_risk_reducing_decision(
+    parameters: StrategyParameters,
+    basket: BasketSnapshot,
+    tick: MarketTick,
+    *,
+    policy: EnginePolicy = EnginePolicy.LIVE_SAFE,
+) -> StrategyDecision | None:
+    """Evaluate basket exits without allowing an open or add decision."""
+
+    if not basket.legs:
+        return None
+    return _evaluate_exits(
+        parameters,
+        basket,
+        tick,
+        effective_mode(parameters, len(basket.legs)),
+        policy,
+    )
+
+
 def evaluate_tick(
     parameters: StrategyParameters,
     basket: BasketSnapshot,
@@ -431,11 +451,12 @@ def evaluate_tick(
     manual_direction: Direction | None = None,
     manual_quantity: Decimal | None = None,
     legacy_visible_range_points: Decimal | None = None,
+    _allow_exit_evaluation: bool = True,
 ) -> StrategyDecision:
     """Evaluate one tick and return at most one deterministic intent."""
 
     mode = effective_mode(parameters, len(basket.legs))
-    if basket.legs:
+    if basket.legs and _allow_exit_evaluation:
         exit_decision = _evaluate_exits(parameters, basket, tick, mode, policy)
         if exit_decision is not None:
             return exit_decision

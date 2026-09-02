@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Mapping
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -304,6 +305,29 @@ def strategy_parameters_from_mq4(inputs: Mq4Inputs) -> StrategyParameters:
             ),
         ),
     )
+
+
+def mq4_inputs_from_catalog_parameters(parameters: Mapping[str, Any]) -> Mq4Inputs:
+    """Restore typed MQ4 inputs from the strategy center's numeric JSON schema."""
+
+    raw = dict(parameters)
+    try:
+        timeframe_minutes = int(raw.pop("BoxTimeFrameMinutes"))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("BoxTimeFrameMinutes is required") from exc
+    timeframe = {1: "1m", 5: "5m", 15: "15m", 30: "30m", 60: "1h"}.get(
+        timeframe_minutes
+    )
+    if timeframe is None:
+        raise ValueError("BoxTimeFrameMinutes must be 1, 5, 15, 30, or 60")
+    raw["BoxTimeFrame"] = timeframe
+    return Mq4Inputs.model_validate(raw)
+
+
+def strategy_parameters_from_catalog_parameters(
+    parameters: Mapping[str, Any],
+) -> StrategyParameters:
+    return strategy_parameters_from_mq4(mq4_inputs_from_catalog_parameters(parameters))
 
 
 def mq4_inputs_from_strategy_parameters(parameters: StrategyParameters) -> Mq4Inputs:
