@@ -845,7 +845,7 @@ def test_binance_kline_range_rejects_unbounded_or_unsupported_requests() -> None
     with pytest.raises(ValueError, match="symbol"):
         binance_client.fetch_klines_range("../AAPL", "15m", 0, 1)
     with pytest.raises(ValueError, match="interval"):
-        binance_client.fetch_klines_range("AAPLUSDT", "5m", 0, 1)
+        binance_client.fetch_klines_range("AAPLUSDT", "2m", 0, 1)
     with pytest.raises(ValueError, match="bar limit"):
         binance_client.fetch_klines_range(
             "AAPLUSDT",

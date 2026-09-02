@@ -19,7 +19,15 @@ from .binance_rate_limit import (
 FAPI = "https://fapi.binance.com"
 _ALLOWED_BINANCE_HOSTS = frozenset({"fapi.binance.com"})
 UA = {"User-Agent": "Mozilla/5.0 (quantdesk-local)"}
-_KLINE_INTERVAL_MS = {"15m": 15 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000}
+_KLINE_INTERVAL_MS = {
+    "1m": 60_000,
+    "5m": 5 * 60_000,
+    "15m": 15 * 60_000,
+    "30m": 30 * 60_000,
+    "1h": 60 * 60_000,
+    "4h": 4 * 60 * 60_000,
+    "1d": 24 * 60 * 60_000,
+}
 _BINANCE_KLINE_PAGE_SIZE = 1_500
 _MAX_ON_DEMAND_KLINES = 50_000
 # Preserve the existing public exception name for callers and tests.
