@@ -329,7 +329,7 @@ button:disabled { cursor: wait; opacity: .55; }
 .status-badge.idle { color: var(--ai-gold); }
 .ai-head-actions > .decision-strategy-trigger { min-width: 154px; min-height: 38px; display: grid; justify-items: start; gap: 2px; padding: 5px 10px; border-color: rgba(158, 133, 255, .48); background: rgba(158, 133, 255, .065); text-align: left; }
 .decision-strategy-trigger > span { color: var(--ai-dim); font-size: 10px; line-height: 1; }
-.decision-strategy-trigger > strong { max-width: 190px; overflow: hidden; color: var(--ai-brand); font: 800 11px/1.15 Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.decision-strategy-trigger > strong { max-width: 190px; overflow: hidden; color: var(--ai-brand); font: 800 12px/1.15 Inter, "Microsoft YaHei", sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .ai-head-actions > .decision-strategy-trigger:hover { border-color: var(--ai-brand); background: rgba(158, 133, 255, .13); }
 
 .ai-banner { padding: 9px 16px; border-bottom: 1px solid var(--ai-line); font-size: 15px; }

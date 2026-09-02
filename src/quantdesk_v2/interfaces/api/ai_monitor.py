@@ -60,6 +60,7 @@ from ...models import (
     SecurityFundamentalAnalysis,
     StrategyDeployment,
     StrategyRevision,
+    StrategyTemplate,
     User,
     UserSession,
     UserStrategy,
@@ -80,7 +81,10 @@ from ...schemas import (
 )
 from ...security import CredentialCipher, SecurityError, decode_access_token
 from ...strategy_artifacts import add_run_manifest, record_revision_artifact
-from ...strategy_catalog import ensure_user_default_strategies
+from ...strategy_catalog import (
+    AI_MONITOR_STRATEGY_TEMPLATE_KEY,
+    ensure_user_default_strategies,
+)
 from ...tiger_quotes import (
     TigerDepthClient,
     TigerUsDepthService,
@@ -273,9 +277,7 @@ def _price_comparison_out(
         if tiger_change is not None and tiger_previous_close is not None
         else None
     )
-    tiger_at = _quote_time(tiger.get("source_timestamp")) or _quote_time(
-        tiger.get("fetched_at")
-    )
+    tiger_at = _quote_time(tiger.get("source_timestamp")) or _quote_time(tiger.get("fetched_at"))
     tiger_age = _quote_age_seconds(tiger_at, now)
     tiger_trade_at = _quote_time(tiger_trade.get("source_timestamp")) or _quote_time(
         tiger_trade.get("fetched_at")
@@ -303,7 +305,9 @@ def _price_comparison_out(
         "available": tiger_price is not None or tiger_last_price is not None,
         "price": tiger_price,
         "display_price": tiger_last_price if tiger_last_price is not None else tiger_price,
-        "display_source": "tiger_last_trade" if tiger_last_price is not None else "tiger_level2_midpoint",
+        "display_source": "tiger_last_trade"
+        if tiger_last_price is not None
+        else "tiger_level2_midpoint",
         "last_price": tiger_last_price,
         "previous_close": tiger_previous_close,
         "change": tiger_change,
@@ -361,7 +365,9 @@ def _price_comparison_out(
     threshold_bps = 30.0
     if not binance["available"]:
         state = "execution_unavailable"
-    elif not comparable and (snapshot_reference_price is not None or previous_close_price is not None):
+    elif not comparable and (
+        snapshot_reference_price is not None or previous_close_price is not None
+    ):
         state = "opening_gap_watch"
     elif not comparable:
         state = "reference_unavailable"
@@ -371,17 +377,11 @@ def _price_comparison_out(
         state = "aligned"
     pair_direction = None
     if comparable and basis_bps is not None and abs(basis_bps) >= threshold_bps:
-        pair_direction = (
-            "short_binance_long_spot"
-            if basis_bps > 0
-            else "long_binance_short_spot"
-        )
+        pair_direction = "short_binance_long_spot" if basis_bps > 0 else "long_binance_short_spot"
 
     normalized_direction = str(direction or "").strip().lower()
     normalized_news_score = (
-        max(0.0, min(100.0, float(news_score)))
-        if news_score is not None
-        else None
+        max(0.0, min(100.0, float(news_score))) if news_score is not None else None
     )
     normalized_news_count = max(0, int(news_count or 0))
     normalized_new_news_count = max(0, int(new_news_count or 0))
@@ -488,9 +488,7 @@ def _local_date_utc_window(
 
     offset = timedelta(minutes=timezone_offset_minutes)
     start = (
-        datetime.combine(date_from, datetime_time.min) - offset
-        if date_from is not None
-        else None
+        datetime.combine(date_from, datetime_time.min) - offset if date_from is not None else None
     )
     end = (
         datetime.combine(date_to + timedelta(days=1), datetime_time.min) - offset
@@ -553,9 +551,7 @@ def _authenticate_stream_token(app: Any, token: str) -> int:
         )
         if authenticated_session is None:
             raise unauthorized
-        is_active = db.scalar(
-            select(User.is_active).where(User.id == user_id)
-        )
+        is_active = db.scalar(select(User.is_active).where(User.id == user_id))
         if not is_active:
             raise unauthorized
     return user_id
@@ -595,9 +591,7 @@ def _ai_monitor_revisions(db: Session, user_id: int) -> dict[str, dict[str, Any]
             AiMonitorRun.user_id == user_id
         )
     ).one()
-    news_row = db.execute(
-        select(func.max(News.ts), func.max(News.ai_analyzed_at))
-    ).one()
+    news_row = db.execute(select(func.max(News.ts), func.max(News.ai_analyzed_at))).one()
     market_row = db.execute(
         select(
             func.max(RealtimeMarketFeatureSnapshot.captured_at),
@@ -661,12 +655,7 @@ def _sse_message(
         separators=(",", ":"),
         sort_keys=True,
     )
-    return (
-        f"id: {event_id}\n"
-        f"event: {event}\n"
-        f"retry: {retry_milliseconds}\n"
-        f"data: {payload}\n\n"
-    )
+    return f"id: {event_id}\nevent: {event}\nretry: {retry_milliseconds}\ndata: {payload}\n\n"
 
 
 def _epoch_ms_out(value: Any) -> str | None:
@@ -693,9 +682,7 @@ def _safe_market_data_health(request: Request) -> dict[str, Any]:
     if not isinstance(snapshot, Mapping):
         snapshot = {}
     try:
-        channel_health = (
-            runtime.channel_health_snapshot() if runtime is not None else {}
-        )
+        channel_health = runtime.channel_health_snapshot() if runtime is not None else {}
     except (RuntimeError, ValueError):
         channel_health = {}
     if not isinstance(channel_health, Mapping):
@@ -709,8 +696,7 @@ def _safe_market_data_health(request: Request) -> dict[str, Any]:
     return {
         "websocket_connected": websocket_connected,
         "stream_connected": websocket_connected,
-        "rest_healthy": str(rest.get("status") or "disabled")
-        in {"ready", "degraded"},
+        "rest_healthy": str(rest.get("status") or "disabled") in {"ready", "degraded"},
         "last_event_at": _epoch_ms_out(snapshot.get("last_event_at_ms")),
         "quote": {
             "age_ms": price_health.get("age_ms"),
@@ -723,8 +709,7 @@ def _safe_market_data_health(request: Request) -> dict[str, Any]:
                 "last_message_at": _epoch_ms_out(snapshot.get("last_event_at_ms")),
             },
             "rest": {
-                "healthy": str(rest.get("status") or "disabled")
-                in {"ready", "degraded"},
+                "healthy": str(rest.get("status") or "disabled") in {"ready", "degraded"},
                 "status": rest.get("status") or "disabled",
                 "last_poll_at": _epoch_ms_out(rest.get("last_poll_at_ms")),
             },
@@ -768,6 +753,38 @@ def _config_out(config: AiMonitorConfig | None) -> dict[str, Any]:
     return data
 
 
+def _decision_strategy_identity(db: Session, user_id: int) -> dict[str, Any]:
+    """Return the user-visible managed strategy identity for the header control."""
+
+    strategy = db.scalar(
+        select(UserStrategy)
+        .join(
+            StrategyTemplate,
+            UserStrategy.source_template_id == StrategyTemplate.id,
+        )
+        .where(
+            UserStrategy.user_id == user_id,
+            UserStrategy.status == "active",
+            StrategyTemplate.template_key == AI_MONITOR_STRATEGY_TEMPLATE_KEY,
+        )
+        .order_by(UserStrategy.updated_at.desc(), UserStrategy.id.desc())
+        .limit(1)
+    )
+    if strategy is None:
+        return {
+            "name": "AI 机会决策策略",
+            "version": None,
+            "decision_version": ai_monitor.OPPORTUNITY_DECISION_VERSION,
+        }
+    return {
+        "id": strategy.public_id,
+        "name": strategy.name,
+        "category": strategy.category,
+        "version": int(strategy.version),
+        "decision_version": ai_monitor.OPPORTUNITY_DECISION_VERSION,
+    }
+
+
 def _strategy_live_readiness(db: Session, user_id: int) -> dict[str, Any]:
     """Evaluate the current settlement cohort before any new real-fund entry."""
 
@@ -796,15 +813,11 @@ def _require_strategy_live_readiness(db: Session, user_id: int) -> dict[str, Any
 def _score_policy_out(db: Session, *, can_edit: bool) -> dict[str, Any]:
     policy = ai_monitor.unusual_whales_signal_policy(db)
     setting = db.get(AdminSetting, ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY)
-    weights = {
-        key: round(float(value), 8)
-        for key, value in dict(policy["weights"]).items()
-    }
+    weights = {key: round(float(value), 8) for key, value in dict(policy["weights"]).items()}
     finnhub_setting = db.get(AdminSetting, FINNHUB_USAGE_SETTING_KEY)
     finnhub_value = (
         finnhub_setting.value_json
-        if finnhub_setting is not None
-        and isinstance(finnhub_setting.value_json, Mapping)
+        if finnhub_setting is not None and isinstance(finnhub_setting.value_json, Mapping)
         else {}
     )
     finnhub_enabled = bool(finnhub_value.get("enabled", True))
@@ -872,11 +885,7 @@ def _ai_monitor_live_account(
     if for_update:
         query = query.with_for_update()
     return next(
-        (
-            account
-            for account in db.scalars(query).all()
-            if _is_ai_monitor_live_account(account)
-        ),
+        (account for account in db.scalars(query).all() if _is_ai_monitor_live_account(account)),
         None,
     )
 
@@ -1058,8 +1067,7 @@ def _live_copy_account_out(
             "max_positions": int(config.get("max_positions", 1)),
             "position_size_basis": (
                 str(config.get("position_size_basis"))
-                if config.get("position_size_basis")
-                in {"account_equity", "copy_total_amount"}
+                if config.get("position_size_basis") in {"account_equity", "copy_total_amount"}
                 else "account_equity"
             ),
             "copy_total_amount": float(config.get("copy_total_amount", 1_000)),
@@ -1073,12 +1081,8 @@ def _live_copy_account_out(
             "signal_max_age_seconds": int(
                 config.get("ai_monitor_live_signal_max_age_seconds", 300)
             ),
-            "minimum_combined_score": float(
-                config.get("ai_monitor_live_min_combined_score", 70)
-            ),
-            "regular_session_only": bool(
-                config.get("ai_monitor_live_regular_session_only", True)
-            ),
+            "minimum_combined_score": float(config.get("ai_monitor_live_min_combined_score", 70)),
+            "regular_session_only": bool(config.get("ai_monitor_live_regular_session_only", True)),
             "allow_long": bool(config.get("ai_monitor_live_allow_long", True)),
             "allow_short": bool(config.get("ai_monitor_live_allow_short", True)),
         },
@@ -1159,22 +1163,17 @@ def _manual_follow_history_out(
                 int(candidate.get("id") or 0) <= open_id
                 or candidate.get("action") != "close"
                 or str(candidate.get("symbol") or "").upper() != symbol
-                or str(candidate.get("position_side") or "BOTH").upper()
-                != position_side
+                or str(candidate.get("position_side") or "BOTH").upper() != position_side
             ):
                 continue
-            candidate_evidence = _manual_follow_evidence(
-                candidate.get("entry_basis_json")
-            )
+            candidate_evidence = _manual_follow_evidence(candidate.get("entry_basis_json"))
             candidate_request = candidate.get("request_json")
             same_open = bool(
                 isinstance(candidate_request, Mapping)
                 and int(candidate_request.get("open_intent_id") or 0) == open_id
             )
             same_attempt = bool(
-                attempt_id
-                and str(candidate_evidence.get("manual_attempt_id") or "")
-                == attempt_id
+                attempt_id and str(candidate_evidence.get("manual_attempt_id") or "") == attempt_id
             )
             if same_open or same_attempt:
                 closed = candidate
@@ -1193,20 +1192,15 @@ def _manual_follow_history_out(
         execution = basis.get("execution")
         execution = dict(execution) if isinstance(execution, Mapping) else {}
         response_json = opened.get("response_json")
-        response_json = (
-            dict(response_json) if isinstance(response_json, Mapping) else {}
-        )
+        response_json = dict(response_json) if isinstance(response_json, Mapping) else {}
         close_response = closed.get("response_json") if closed is not None else {}
-        close_response = (
-            dict(close_response) if isinstance(close_response, Mapping) else {}
-        )
+        close_response = dict(close_response) if isinstance(close_response, Mapping) else {}
 
         realized = Decimal("0")
         commission = Decimal("0")
         funding = Decimal("0")
         income_available = history_status in {"available", "partial"} and bool(
-            opened_at is not None
-            and (history_start_at is None or opened_at >= history_start_at)
+            opened_at is not None and (history_start_at is None or opened_at >= history_start_at)
         )
         if opened_at is not None and income_available:
             start_ms = int(opened_at.timestamp() * 1_000) - 5_000
@@ -1226,9 +1220,7 @@ def _manual_follow_history_out(
                 elif income_type == "FUNDING_FEE":
                     funding += amount
 
-        unrealized_value = (
-            _number_or_none(position.get("upnl")) if position is not None else 0.0
-        )
+        unrealized_value = _number_or_none(position.get("upnl")) if position is not None else 0.0
         unrealized = Decimal(str(unrealized_value or 0))
         net = realized + commission + funding + unrealized
         entry_price = _number_or_none(execution.get("entry_price"))
@@ -1236,9 +1228,7 @@ def _manual_follow_history_out(
             entry_price = _number_or_none(
                 response_json.get("avgPrice") or response_json.get("price")
             )
-        exit_price = _number_or_none(
-            close_response.get("avgPrice") or close_response.get("price")
-        )
+        exit_price = _number_or_none(close_response.get("avgPrice") or close_response.get("price"))
         records.append(
             {
                 "id": str(opened.get("public_id") or open_id),
@@ -1251,9 +1241,7 @@ def _manual_follow_history_out(
                 "entry_price": entry_price,
                 "exit_price": exit_price,
                 "mark_price": (
-                    _number_or_none(position.get("mark_price"))
-                    if position is not None
-                    else None
+                    _number_or_none(position.get("mark_price")) if position is not None else None
                 ),
                 "opened_at": opened_at,
                 "closed_at": closed_at,
@@ -1277,9 +1265,7 @@ def _manual_follow_history_out(
     commission = sum(float(item["commission"] or 0) for item in available_records)
     funding = sum(float(item["funding"] or 0) for item in available_records)
     unrealized_pnl = sum(
-        float(item["unrealized_pnl"] or 0)
-        for item in records
-        if item["status"] == "open"
+        float(item["unrealized_pnl"] or 0) for item in records if item["status"] == "open"
     )
     net_pnl = sum(float(item["net_pnl"] or 0) for item in available_records)
     return {
@@ -1293,9 +1279,7 @@ def _manual_follow_history_out(
             "wins": wins,
             "losses": losses,
             "win_rate_pct": (
-                round(wins / len(closed_available) * 100, 2)
-                if closed_available
-                else None
+                round(wins / len(closed_available) * 100, 2) if closed_available else None
             ),
             "realized_pnl": round(realized_pnl, 8),
             "commission": round(commission, 8),
@@ -1357,15 +1341,9 @@ def _live_copy_out(
                 "daily_loss_limit_pct": float(preview["daily_loss_limit_pct"]),
                 "max_drawdown_pct": float(preview["max_drawdown_pct"]),
                 "round_trip_cost_bps": float(preview["round_trip_cost_bps"]),
-                "signal_max_age_seconds": int(
-                    preview["ai_monitor_live_signal_max_age_seconds"]
-                ),
-                "minimum_combined_score": float(
-                    preview["ai_monitor_live_min_combined_score"]
-                ),
-                "regular_session_only": bool(
-                    preview["ai_monitor_live_regular_session_only"]
-                ),
+                "signal_max_age_seconds": int(preview["ai_monitor_live_signal_max_age_seconds"]),
+                "minimum_combined_score": float(preview["ai_monitor_live_min_combined_score"]),
+                "regular_session_only": bool(preview["ai_monitor_live_regular_session_only"]),
                 "allow_long": bool(preview["ai_monitor_live_allow_long"]),
                 "allow_short": bool(preview["ai_monitor_live_allow_short"]),
             },
@@ -1383,14 +1361,9 @@ def _live_copy_out(
     if unresolved_order_count > 0:
         blockers.append("存在状态未知的 Binance 订单，需先完成对账")
     if not bool(strategy_readiness.get("quantitative_ready")):
-        blockers.append(
-            "当前止盈止损策略尚未通过成本后量化准入，禁止新增真实资金订单"
-        )
+        blockers.append("当前止盈止损策略尚未通过成本后量化准入，禁止新增真实资金订单")
     requested_enabled = bool(selected["configured"])
-    enabled = bool(
-        requested_enabled
-        and selected["status"] == "active"
-    )
+    enabled = bool(requested_enabled and selected["status"] == "active")
     return {
         "enabled": enabled,
         "requested_enabled": requested_enabled,
@@ -1407,9 +1380,7 @@ def _live_copy_out(
         "blockers": blockers,
         "strategy_readiness": {
             "settlement_policy_version": ai_monitor.PREDICTION_SETTLEMENT_VERSION,
-            "quantitative_ready": bool(
-                strategy_readiness.get("quantitative_ready")
-            ),
+            "quantitative_ready": bool(strategy_readiness.get("quantitative_ready")),
             "passed_count": int(strategy_readiness.get("passed_count") or 0),
             "total_count": int(strategy_readiness.get("total_count") or 0),
         },
@@ -1509,9 +1480,7 @@ def _stable_gate_checks(value: Any) -> dict[str, bool]:
     """Normalize current and legacy gate check payloads to the stable API shape."""
     if isinstance(value, Mapping):
         return {str(key): bool(passed) for key, passed in value.items()}
-    if isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         checks: dict[str, bool] = {}
         for item in value:
             if not isinstance(item, Mapping):
@@ -1530,13 +1499,7 @@ def _stable_quote_available(quote: Mapping[str, Any]) -> bool:
         ask = Decimal(str(quote.get("ask")))
     except (ArithmeticError, TypeError, ValueError):
         return False
-    return bool(
-        bid.is_finite()
-        and ask.is_finite()
-        and bid > 0
-        and ask > 0
-        and ask >= bid
-    )
+    return bool(bid.is_finite() and ask.is_finite() and bid > 0 and ask > 0 and ask >= bid)
 
 
 def _stable_opportunity_contract(
@@ -1562,14 +1525,10 @@ def _stable_opportunity_contract(
         }
     else:
         quote = dict(evidence.get("quote") or {})
-        option_flow = dict(
-            evidence.get("option_flow") or market_flow.get("option_flow") or {}
-        )
+        option_flow = dict(evidence.get("option_flow") or market_flow.get("option_flow") or {})
         gex = dict(evidence.get("gex") or market_flow.get("gex") or {})
         institutional_flow = dict(
-            evidence.get("institutional_flow")
-            or market_flow.get("institutional_flow")
-            or {}
+            evidence.get("institutional_flow") or market_flow.get("institutional_flow") or {}
         )
         gate_summary = dict(evidence.get("gate_summary") or {})
         score_components = dict(evidence.get("score_components") or {})
@@ -1589,12 +1548,16 @@ def _stable_opportunity_contract(
         # prediction/history responses deliberately skip this branch.
         market_quality = dict(evidence.get("market_quality") or {})
         signal_policy = dict(evidence.get("unusual_whales_policy") or {})
-        policy_mode = str(
-            signal_policy.get("effective_mode")
-            or market_quality.get("policy_mode")
-            or gate_summary.get("policy_mode")
-            or "record"
-        ).strip().lower()
+        policy_mode = (
+            str(
+                signal_policy.get("effective_mode")
+                or market_quality.get("policy_mode")
+                or gate_summary.get("policy_mode")
+                or "record"
+            )
+            .strip()
+            .lower()
+        )
         if market_quality:
             gate_summary = ai_monitor.stable_gate_summary(
                 market_quality,
@@ -1612,9 +1575,7 @@ def _stable_opportunity_contract(
                     market_environment=market_environment,
                     news_trigger=news_trigger,
                     order_book_gate=(
-                        dict(order_book_gate)
-                        if isinstance(order_book_gate, Mapping)
-                        else None
+                        dict(order_book_gate) if isinstance(order_book_gate, Mapping) else None
                     ),
                     require_new_news=bool(news_trigger.get("required", False)),
                 )
@@ -1643,25 +1604,20 @@ def _stable_opportunity_contract(
             "evaluated_at": virtual_gate.get("checked_at"),
             "decision_version": "legacy",
         }
-    gate_summary.setdefault(
-        "status", "passed" if gate_summary.get("passed") else "blocked"
-    )
+    gate_summary.setdefault("status", "passed" if gate_summary.get("passed") else "blocked")
     gate_summary.setdefault("blocking_reasons", [])
     gate_summary.setdefault("warnings", [])
     gate_summary["checks"] = _stable_gate_checks(gate_summary.get("checks"))
     quote_available = _stable_quote_available(quote)
     data_quality.setdefault("quote_available", quote_available)
     blocking_reasons = [
-        str(item)
-        for item in gate_summary.get("blocking_reasons") or []
-        if str(item).strip()
+        str(item) for item in gate_summary.get("blocking_reasons") or [] if str(item).strip()
     ]
     quote_rejection = next(
         (
             reason
             for reason in blocking_reasons
-            if reason.startswith("REFERENCE_")
-            or reason == "SYMBOL_HALTED_OR_COOLDOWN"
+            if reason.startswith("REFERENCE_") or reason == "SYMBOL_HALTED_OR_COOLDOWN"
         ),
         None,
     )
@@ -1686,12 +1642,8 @@ def _stable_opportunity_contract(
         signal_scores = dict(evidence.get("signal_scores") or {})
         score_components = {
             "news": signal_scores.get("news", score_snapshot.get("news")),
-            "technical": signal_scores.get(
-                "indicator", score_snapshot.get("technical")
-            ),
-            "market_flow": signal_scores.get(
-                "market_flow", score_snapshot.get("market_flow")
-            ),
+            "technical": signal_scores.get("indicator", score_snapshot.get("technical")),
+            "market_flow": signal_scores.get("market_flow", score_snapshot.get("market_flow")),
             "option_flow": None,
             "gex": None,
             "institutional_flow": None,
@@ -1720,9 +1672,7 @@ def _stable_opportunity_contract(
         "gex": gex,
         "data_quality": data_quality,
         "version": version,
-        "simulation_entry_gate": (
-            dict(evidence.get("virtual_entry_gate") or {}) or None
-        ),
+        "simulation_entry_gate": (dict(evidence.get("virtual_entry_gate") or {}) or None),
         "signal_snapshot": (
             {
                 "id": snapshot.id,
@@ -1811,9 +1761,7 @@ def _compact_opportunity_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]
             }
         flow = raw_point.get("market_flow_snapshot")
         if isinstance(flow, Mapping):
-            point["market_flow_snapshot"] = {
-                key: flow[key] for key in flow_keys if key in flow
-            }
+            point["market_flow_snapshot"] = {key: flow[key] for key in flow_keys if key in flow}
         history.append(point)
     compact["score_history"] = history
     return compact
@@ -1848,9 +1796,7 @@ def _opportunity_out(
         except (TypeError, ValueError):
             captured_at = 0
         live_flow["observed_at"] = (
-            _utc_out(datetime.fromtimestamp(captured_at, tz=UTC))
-            if captured_at > 0
-            else None
+            _utc_out(datetime.fromtimestamp(captured_at, tz=UTC)) if captured_at > 0 else None
         )
         # ``flow`` is the display contract for current opportunities.  Keep
         # signal-time enhanced domains, but let live Binance depth and taker
@@ -1862,9 +1808,7 @@ def _opportunity_out(
         }
         stable_contract["current_market_flow"] = live_flow
         stable_contract["flow_display_source"] = (
-            "binance_live"
-            if live_flow.get("fresh")
-            else "signal_snapshot"
+            "binance_live" if live_flow.get("fresh") else "signal_snapshot"
         )
     else:
         stable_contract["current_market_flow"] = None
@@ -1877,21 +1821,15 @@ def _opportunity_out(
         }
     prediction_signal_scores = prediction_evidence.get("signal_scores")
     prediction_signal_scores = (
-        dict(prediction_signal_scores)
-        if isinstance(prediction_signal_scores, dict)
-        else {}
+        dict(prediction_signal_scores) if isinstance(prediction_signal_scores, dict) else {}
     )
     prediction_score_snapshot = prediction_evidence.get("score_snapshot")
     prediction_score_snapshot = (
-        dict(prediction_score_snapshot)
-        if isinstance(prediction_score_snapshot, dict)
-        else {}
+        dict(prediction_score_snapshot) if isinstance(prediction_score_snapshot, dict) else {}
     )
     prediction_market_flow = prediction_evidence.get("market_flow")
     prediction_market_flow = (
-        dict(prediction_market_flow)
-        if isinstance(prediction_market_flow, dict)
-        else {}
+        dict(prediction_market_flow) if isinstance(prediction_market_flow, dict) else {}
     )
     prediction_market_flow_score = prediction_signal_scores.get(
         "market_flow",
@@ -1929,20 +1867,14 @@ def _opportunity_out(
         if isinstance(contract_evidence.get("news"), list)
         else []
     )
-    related_news_ids = {
-        str(news_id)
-        for news_id in (item.news_ids_json or [])
-        if str(news_id)
-    }
+    related_news_ids = {str(news_id) for news_id in (item.news_ids_json or []) if str(news_id)}
     related_news_ids.update(
         str(news_item.get("id"))
         for news_item in evidence_news
         if isinstance(news_item, Mapping) and str(news_item.get("id") or "")
     )
     new_news_ids = {
-        str(news_id)
-        for news_id in (news_trigger.get("new_news_ids") or [])
-        if str(news_id)
+        str(news_id) for news_id in (news_trigger.get("new_news_ids") or []) if str(news_id)
     }
     price_comparison = _price_comparison_out(
         live_market,
@@ -1956,9 +1888,7 @@ def _opportunity_out(
         memory_window_hours=int(news_trigger.get("memory_window_hours") or 168),
     )
     prediction_entry_gate = (
-        ai_monitor.prediction_entry_gate_snapshot(prediction)
-        if prediction is not None
-        else None
+        ai_monitor.prediction_entry_gate_snapshot(prediction) if prediction is not None else None
     )
     return {
         **stable_contract,
@@ -1987,8 +1917,7 @@ def _opportunity_out(
         ),
         "prediction_net_directional_return_bps": (
             float(prediction.net_directional_return_bps)
-            if prediction is not None
-            and prediction.net_directional_return_bps is not None
+            if prediction is not None and prediction.net_directional_return_bps is not None
             else None
         ),
         "prediction_exit_price": (
@@ -2043,9 +1972,7 @@ def _opportunity_out(
         "prediction_created_at": (
             _utc_out(prediction.predicted_at) if prediction is not None else None
         ),
-        "prediction_due_at": (
-            _utc_out(prediction.due_at) if prediction is not None else None
-        ),
+        "prediction_due_at": (_utc_out(prediction.due_at) if prediction is not None else None),
         "discovered_at": _utc_out(item.discovered_at),
         "expires_at": _utc_out(item.expires_at),
         "updated_at": _utc_out(item.updated_at),
@@ -2102,9 +2029,7 @@ def _prediction_out(item: AiMonitorPrediction) -> dict[str, Any]:
             else None
         ),
         "protected_bps_at_exit": (
-            float(item.protected_bps_at_exit)
-            if item.protected_bps_at_exit is not None
-            else None
+            float(item.protected_bps_at_exit) if item.protected_bps_at_exit is not None else None
         ),
         "settlement_version": item.settlement_version,
         "readiness_status": item.readiness_status,
@@ -2186,8 +2111,7 @@ def overview(
                 func.sum(AiMonitorPrediction.status == "completed").label("completed"),
             ).where(
                 AiMonitorPrediction.user_id == user.id,
-                AiMonitorPrediction.settlement_version
-                == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
+                AiMonitorPrediction.settlement_version == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
             )
         )
         .mappings()
@@ -2202,6 +2126,7 @@ def overview(
     model_configured = global_ai_model_configured(db, legacy_fallback_user_id=user.id)
     return {
         "config": settings,
+        "decision_strategy": _decision_strategy_identity(db, user.id),
         "scheduler": {
             "enabled": settings["enabled"],
             "active_runs": active_runs,
@@ -2368,9 +2293,7 @@ async def ai_monitor_websocket(websocket: WebSocket) -> None:
                                 "id": next_event_id,
                                 "data": {
                                     "scopes": scopes,
-                                    "revisions": {
-                                        scope: revisions[scope] for scope in scopes
-                                    },
+                                    "revisions": {scope: revisions[scope] for scope in scopes},
                                 },
                             }
                         )
@@ -2450,9 +2373,7 @@ def ai_monitor_events(
                             event_id=next_event_id,
                             data={
                                 "scopes": scopes,
-                                "revisions": {
-                                    scope: revisions[scope] for scope in scopes
-                                },
+                                "revisions": {scope: revisions[scope] for scope in scopes},
                             },
                         )
                 previous = revisions
@@ -2654,9 +2575,7 @@ def get_live_copy_history(
             limit=limit,
         )
 
-    cipher = CredentialCipher(
-        request.app.state.settings.credential_master_key.get_secret_value()
-    )
+    cipher = CredentialCipher(request.app.state.settings.credential_master_key.get_secret_value())
     try:
         api_key = cipher.decrypt(encrypted_key or "")
         api_secret = cipher.decrypt(encrypted_secret or "")
@@ -2692,9 +2611,7 @@ def get_live_copy_history(
         )
 
     history_status = (
-        "available"
-        if history.complete and min(manual_open_times) >= retention_start
-        else "partial"
+        "available" if history.complete and min(manual_open_times) >= retention_start else "partial"
     )
     return _manual_follow_history_out(
         intents,
@@ -2723,10 +2640,7 @@ def manual_follow_live_copy(
     if account is None or account.public_id != payload.account_id:
         raise HTTPException(status_code=409, detail="实盘跟单账户已变化，请刷新后重试")
     account_config = dict(account.config_json or {})
-    if (
-        account.status != "active"
-        or not bool(account_config.get("ai_monitor_live_copy_enabled"))
-    ):
+    if account.status != "active" or not bool(account_config.get("ai_monitor_live_copy_enabled")):
         raise HTTPException(status_code=409, detail="请先开启独立实盘跟单")
     _require_strategy_live_readiness(db, user.id)
 
@@ -3103,9 +3017,7 @@ def update_score_policy(
         .with_for_update()
     )
     if setting is None:
-        complete_config = AdminUnusualWhalesConfigUpdate().model_dump(
-            exclude={"api_key"}
-        )
+        complete_config = AdminUnusualWhalesConfigUpdate().model_dump(exclude={"api_key"})
         setting = AdminSetting(
             key=ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY,
             value_json=complete_config,
@@ -3121,9 +3033,9 @@ def update_score_policy(
                 detail="当前 Unusual Whales 平台配置损坏，请先在管理后台修复",
             )
         try:
-            complete_config = AdminUnusualWhalesConfigUpdate.model_validate(
-                dict(raw)
-            ).model_dump(exclude={"api_key"})
+            complete_config = AdminUnusualWhalesConfigUpdate.model_validate(dict(raw)).model_dump(
+                exclude={"api_key"}
+            )
         except ValueError:
             raise HTTPException(
                 status_code=409,
@@ -3181,9 +3093,7 @@ def update_unusual_whales_usage(
         .with_for_update()
     )
     if setting is None:
-        complete_config = AdminUnusualWhalesConfigUpdate().model_dump(
-            exclude={"api_key"}
-        )
+        complete_config = AdminUnusualWhalesConfigUpdate().model_dump(exclude={"api_key"})
         setting = AdminSetting(
             key=ai_monitor.UNUSUAL_WHALES_SIGNAL_SETTING_KEY,
             value_json=complete_config,
@@ -3199,9 +3109,9 @@ def update_unusual_whales_usage(
                 detail="当前 Unusual Whales 平台配置损坏，请先在管理后台修复",
             )
         try:
-            complete_config = AdminUnusualWhalesConfigUpdate.model_validate(
-                dict(raw)
-            ).model_dump(exclude={"api_key"})
+            complete_config = AdminUnusualWhalesConfigUpdate.model_validate(dict(raw)).model_dump(
+                exclude={"api_key"}
+            )
         except ValueError:
             raise HTTPException(
                 status_code=409,
@@ -3258,9 +3168,7 @@ def update_finnhub_usage(
 
     _require_expected_user(request, admin)
     setting = db.scalar(
-        select(AdminSetting)
-        .where(AdminSetting.key == FINNHUB_USAGE_SETTING_KEY)
-        .with_for_update()
+        select(AdminSetting).where(AdminSetting.key == FINNHUB_USAGE_SETTING_KEY).with_for_update()
     )
     if setting is None:
         previous_enabled = True
@@ -3417,9 +3325,7 @@ def update_config(
     config.minimum_combined_score = Decimal(str(payload.minimum_combined_score))
     config.maximum_market_age_seconds = payload.maximum_market_age_seconds
     config.minimum_feature_quality = Decimal(str(payload.minimum_feature_quality))
-    config.minimum_market_flow_quality = Decimal(
-        str(payload.minimum_market_flow_quality)
-    )
+    config.minimum_market_flow_quality = Decimal(str(payload.minimum_market_flow_quality))
     config.minimum_calibration_samples = payload.minimum_calibration_samples
     config.live_safety_margin_bps = Decimal(str(payload.live_safety_margin_bps))
     config.news_score_weight = Decimal(str(payload.news_score_weight))
@@ -3482,17 +3388,11 @@ def update_cost_config(
         )
         db.add(config)
     config.prediction_fee_enabled = payload.prediction_fee_enabled
-    config.prediction_fee_bps_per_side = Decimal(
-        str(payload.prediction_fee_bps_per_side)
-    )
+    config.prediction_fee_bps_per_side = Decimal(str(payload.prediction_fee_bps_per_side))
     config.prediction_slippage_enabled = payload.prediction_slippage_enabled
-    config.prediction_slippage_bps_per_side = Decimal(
-        str(payload.prediction_slippage_bps_per_side)
-    )
+    config.prediction_slippage_bps_per_side = Decimal(str(payload.prediction_slippage_bps_per_side))
     config.prediction_funding_enabled = payload.prediction_funding_enabled
-    config.prediction_funding_bps_per_8h = Decimal(
-        str(payload.prediction_funding_bps_per_8h)
-    )
+    config.prediction_funding_bps_per_8h = Decimal(str(payload.prediction_funding_bps_per_8h))
     _audit(
         db,
         request,
@@ -3555,9 +3455,7 @@ def indicators(
         "match_policy": ai_monitor.INDICATOR_MATCH_POLICY,
         "templates": ai_monitor.indicator_templates(),
         "conflict_pairs": [],
-        "groups": {
-            key: sorted(values) for key, values in ai_monitor.INDICATOR_GROUPS.items()
-        },
+        "groups": {key: sorted(values) for key, values in ai_monitor.INDICATOR_GROUPS.items()},
         "minimum_core_matches": 2,
         "non_blocking_keys": sorted(ai_monitor.NON_BLOCKING_INDICATOR_KEYS),
     }
@@ -3586,9 +3484,7 @@ def _current_opportunity_projection_page(
 ) -> dict[str, Any]:
     """Compatibility façade over the projection-only application service."""
 
-    return OpportunityProjectionService(
-        SqlAlchemyOpportunityProjectionReader(db)
-    ).current_page(
+    return OpportunityProjectionService(SqlAlchemyOpportunityProjectionReader(db)).current_page(
         user_id=user_id,
         limit=limit,
         page=page,
@@ -3596,16 +3492,13 @@ def _current_opportunity_projection_page(
     )
 
 
-def _historical_opportunity_conditions(
-    *, user_id: int, now: datetime
-) -> tuple[Any, ...]:
+def _historical_opportunity_conditions(*, user_id: int, now: datetime) -> tuple[Any, ...]:
     """Keep only genuinely inactive predictions that still need settlement."""
 
     return (
         AiMonitorOpportunity.user_id == user_id,
         AiMonitorPrediction.user_id == user_id,
-        AiMonitorPrediction.settlement_version
-        == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
+        AiMonitorPrediction.settlement_version == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
         AiMonitorPrediction.status.in_(("pending", "unavailable")),
         or_(
             AiMonitorOpportunity.status.in_(("expired", "dismissed")),
@@ -3614,9 +3507,7 @@ def _historical_opportunity_conditions(
     )
 
 
-def _historical_opportunity_summary(
-    db: Session, *, user_id: int, now: datetime
-) -> dict[str, Any]:
+def _historical_opportunity_summary(db: Session, *, user_id: int, now: datetime) -> dict[str, Any]:
     counts = list(
         db.execute(
             select(
@@ -3719,11 +3610,7 @@ def opportunities(
             AiMonitorOpportunity.id.desc(),
         )
         if scope == "legacy":
-            rows = list(
-                db.execute(
-                    statement.limit(300 if not include_expired else limit)
-                ).all()
-            )
+            rows = list(db.execute(statement.limit(300 if not include_expired else limit)).all())
         else:
             rows = list(db.execute(statement).all())
 
@@ -3755,8 +3642,7 @@ def opportunities(
         if projection_page is not None
         else {
             "total": sum(
-                prediction is not None
-                and prediction.status in {"pending", "unavailable"}
+                prediction is not None and prediction.status in {"pending", "unavailable"}
                 for _opportunity, prediction in rows
             ),
             "pending": sum(
@@ -3794,9 +3680,7 @@ def opportunities(
             for snapshot in db.scalars(
                 select(OpportunityMarketSnapshot).where(
                     OpportunityMarketSnapshot.user_id == user.id,
-                    OpportunityMarketSnapshot.opportunity_id.in_(
-                        [item.id for item in items]
-                    ),
+                    OpportunityMarketSnapshot.opportunity_id.in_([item.id for item in items]),
                 )
             ).all()
         }
@@ -3813,9 +3697,7 @@ def opportunities(
                 request.app.state.database_engine,
                 request.app.state.settings.monitor_symbols_config,
             )
-            live_tickers = repository.latest_tickers(
-                [item.contract_symbol for item in items]
-            )
+            live_tickers = repository.latest_tickers([item.contract_symbol for item in items])
             market_flow_inputs = load_market_flow_input_maps(db, repository)
             market_flow_now = datetime.now(UTC)
             current_market_flows = {
@@ -3878,9 +3760,7 @@ def opportunities(
         ],
         "direction_counts": direction_counts,
         "settlement_counts": settlement_counts,
-        "history_summary": _historical_opportunity_summary(
-            db, user_id=user.id, now=now
-        ),
+        "history_summary": _historical_opportunity_summary(db, user_id=user.id, now=now),
     }
     if scope != "legacy":
         response["pagination"] = (
@@ -3980,9 +3860,7 @@ def opportunity_news(
     if not news_ids:
         return {"items": [], "total": 0}
     items = db.scalars(
-        select(News)
-        .where(News.id.in_(news_ids))
-        .order_by(News.ts.desc(), News.id.desc())
+        select(News).where(News.id.in_(news_ids)).order_by(News.ts.desc(), News.id.desc())
     ).all()
     return {"items": [_news_out(item) for item in items], "total": len(items)}
 
@@ -4006,9 +3884,7 @@ def opportunity_news_analysis_records(
     symbol = str(opportunity.symbol or "").strip().upper()
     symbol_aliases = news_ai._load_security_memory_aliases(db).get(symbol)
     cutoff = utcnow() - timedelta(days=7)
-    opportunity_news_ids = {
-        str(item) for item in (opportunity.news_ids_json or []) if str(item)
-    }
+    opportunity_news_ids = {str(item) for item in (opportunity.news_ids_json or []) if str(item)}
     raw_rows = db.execute(
         select(NewsAiAnalysisRecord, News)
         .join(News, News.id == NewsAiAnalysisRecord.news_id)
@@ -4078,47 +3954,47 @@ def opportunity_news_analysis_records(
             memory_link_status = "context_missing"
         else:
             memory_link_status = "initial"
-        items.append({
-            "id": int(record.id),
-            "symbol": record.symbol,
-            "news_id": record.news_id,
-            "news_title": news.title_zh or news.title,
-            "news_original_title": news.title,
-            "news_summary": news.summary,
-            "news_source": news.source,
-            "news_link": news.link,
-            "news_published_at": int(record.news_published_at),
-            "direction": record.direction,
-            "confidence": float(record.confidence),
-            "relevance": float(record.relevance),
-            "impact_strength": record.impact_strength,
-            "time_horizon": record.time_horizon,
-            "category": record.category,
-            "analysis_reason": record.analysis_reason,
-            "memory_effect": record.memory_effect,
-            "memory_reason": record.memory_reason,
-            "judgment_basis": dict(record.judgment_basis_json or {}),
-            "position_effect": record.position_effect,
-            "position_reason": record.position_reason,
-            "previous_direction": record.previous_direction,
-            "previous_confidence": (
-                float(record.previous_confidence)
-                if record.previous_confidence is not None
-                else None
-            ),
-            "prior_record_id": record.prior_record_id,
-            "context_record_ids": record_context_ids,
-            "symbol_context_record_ids": symbol_context_ids,
-            "symbol_context_count": len(symbol_context_ids),
-            "shared_context_count": len(record_context_ids) - len(symbol_context_ids),
-            "memory_link_status": memory_link_status,
-            "model_name": record.model_name,
-            "analyzed_at": _utc_out(record.analyzed_at),
-            "belongs_to_opportunity": record.news_id in opportunity_news_ids,
-        })
-    current_opportunity_total = sum(
-        1 for item in items if item["belongs_to_opportunity"]
-    )
+        items.append(
+            {
+                "id": int(record.id),
+                "symbol": record.symbol,
+                "news_id": record.news_id,
+                "news_title": news.title_zh or news.title,
+                "news_original_title": news.title,
+                "news_summary": news.summary,
+                "news_source": news.source,
+                "news_link": news.link,
+                "news_published_at": int(record.news_published_at),
+                "direction": record.direction,
+                "confidence": float(record.confidence),
+                "relevance": float(record.relevance),
+                "impact_strength": record.impact_strength,
+                "time_horizon": record.time_horizon,
+                "category": record.category,
+                "analysis_reason": record.analysis_reason,
+                "memory_effect": record.memory_effect,
+                "memory_reason": record.memory_reason,
+                "judgment_basis": dict(record.judgment_basis_json or {}),
+                "position_effect": record.position_effect,
+                "position_reason": record.position_reason,
+                "previous_direction": record.previous_direction,
+                "previous_confidence": (
+                    float(record.previous_confidence)
+                    if record.previous_confidence is not None
+                    else None
+                ),
+                "prior_record_id": record.prior_record_id,
+                "context_record_ids": record_context_ids,
+                "symbol_context_record_ids": symbol_context_ids,
+                "symbol_context_count": len(symbol_context_ids),
+                "shared_context_count": len(record_context_ids) - len(symbol_context_ids),
+                "memory_link_status": memory_link_status,
+                "model_name": record.model_name,
+                "analyzed_at": _utc_out(record.analyzed_at),
+                "belongs_to_opportunity": record.news_id in opportunity_news_ids,
+            }
+        )
+    current_opportunity_total = sum(1 for item in items if item["belongs_to_opportunity"])
     return {
         "symbol": symbol,
         "window_days": 7,
@@ -4332,9 +4208,7 @@ def opportunity_fundamentals(
                 float(analysis.overall_score) if analysis.overall_score is not None else None
             ),
             "confidence_score": (
-                float(analysis.confidence_score)
-                if analysis.confidence_score is not None
-                else None
+                float(analysis.confidence_score) if analysis.confidence_score is not None else None
             ),
             "evidence": dict(analysis.evidence_json or {}),
             "generated_at": _utc_out(analysis.generated_at),
@@ -4348,14 +4222,10 @@ def opportunity_fundamentals(
             "currency": financials.currency,
             "data_status": financials.data_status,
             "coverage_pct": (
-                float(financials.coverage_pct)
-                if financials.coverage_pct is not None
-                else None
+                float(financials.coverage_pct) if financials.coverage_pct is not None else None
             ),
             "revenue_ttm": (
-                float(financials.revenue_ttm)
-                if financials.revenue_ttm is not None
-                else None
+                float(financials.revenue_ttm) if financials.revenue_ttm is not None else None
             ),
             "revenue_growth_yoy_pct": (
                 float(financials.revenue_growth_yoy_pct)
@@ -4373,9 +4243,7 @@ def opportunity_fundamentals(
                 else None
             ),
             "net_margin_pct": (
-                float(financials.net_margin_pct)
-                if financials.net_margin_pct is not None
-                else None
+                float(financials.net_margin_pct) if financials.net_margin_pct is not None else None
             ),
             "operating_cash_flow_ttm": (
                 float(financials.operating_cash_flow_ttm)
@@ -4393,14 +4261,10 @@ def opportunity_fundamentals(
                 else None
             ),
             "total_debt": (
-                float(financials.total_debt)
-                if financials.total_debt is not None
-                else None
+                float(financials.total_debt) if financials.total_debt is not None else None
             ),
             "total_assets": (
-                float(financials.total_assets)
-                if financials.total_assets is not None
-                else None
+                float(financials.total_assets) if financials.total_assets is not None else None
             ),
             "total_liabilities": (
                 float(financials.total_liabilities)
@@ -4413,14 +4277,10 @@ def opportunity_fundamentals(
                 else None
             ),
             "current_ratio": (
-                float(financials.current_ratio)
-                if financials.current_ratio is not None
-                else None
+                float(financials.current_ratio) if financials.current_ratio is not None else None
             ),
             "debt_to_equity": (
-                float(financials.debt_to_equity)
-                if financials.debt_to_equity is not None
-                else None
+                float(financials.debt_to_equity) if financials.debt_to_equity is not None else None
             ),
             "return_on_equity_pct": (
                 float(financials.return_on_equity_pct)
@@ -4428,18 +4288,14 @@ def opportunity_fundamentals(
                 else None
             ),
             "market_cap": (
-                float(financials.market_cap)
-                if financials.market_cap is not None
-                else None
+                float(financials.market_cap) if financials.market_cap is not None else None
             ),
             "enterprise_value": (
                 float(financials.enterprise_value)
                 if financials.enterprise_value is not None
                 else None
             ),
-            "pe_ratio": (
-                float(financials.pe_ratio) if financials.pe_ratio is not None else None
-            ),
+            "pe_ratio": (float(financials.pe_ratio) if financials.pe_ratio is not None else None),
             "price_to_sales_ratio": (
                 float(financials.price_to_sales_ratio)
                 if financials.price_to_sales_ratio is not None
@@ -4451,9 +4307,7 @@ def opportunity_fundamentals(
                 else None
             ),
             "ev_to_ebitda": (
-                float(financials.ev_to_ebitda)
-                if financials.ev_to_ebitda is not None
-                else None
+                float(financials.ev_to_ebitda) if financials.ev_to_ebitda is not None else None
             ),
             "source": financials.source,
             "source_url": financials.source_url,
@@ -4475,8 +4329,7 @@ def prediction_records(
         select(AiMonitorPrediction)
         .where(
             AiMonitorPrediction.user_id == user.id,
-            AiMonitorPrediction.settlement_version
-            == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
+            AiMonitorPrediction.settlement_version == ai_monitor.PREDICTION_SETTLEMENT_VERSION,
         )
         .order_by(AiMonitorPrediction.predicted_at.desc(), AiMonitorPrediction.id.desc())
         .limit(limit)
@@ -4511,11 +4364,7 @@ def opportunity_analytics(
     market_session: Literal[
         "all", "premarket", "regular", "postmarket", "closed", "unknown"
     ] = Query(default="all"),
-    quote_quality: Literal[
-        "all", "passed", "partial", "blocked", "missing"
-    ] = Query(
-        default="all"
-    ),
+    quote_quality: Literal["all", "passed", "partial", "blocked", "missing"] = Query(default="all"),
     event_risk: Literal["all", "clear", "warning", "blocked"] = Query(default="all"),
     exit_reason: str = Query(default="all", max_length=64),
     include_readiness: bool = Query(default=False),
@@ -4602,5 +4451,3 @@ def opportunity_readiness(
 
     current_config = ai_monitor.config_data(db.get(AiMonitorConfig, user.id))
     return ai_monitor.strategy_readiness_report(db, user.id, current_config)
-
-

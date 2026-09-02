@@ -13,6 +13,9 @@ def test_decision_strategy_entry_precedes_scheduler_state() -> None:
     assert entry in SCRIPT
     assert SCRIPT.index(entry) < SCRIPT.index(scheduler)
     assert 'class="decision-strategy-trigger"' in SCRIPT
+    assert "this.state.overview?.decision_strategy" in SCRIPT
+    assert "<strong>${this.escape(strategy.name)}</strong>" in SCRIPT
+    assert "actionable_entry_v11}</strong>" not in SCRIPT
 
 
 def test_decision_strategy_modal_exposes_live_runtime_parameters() -> None:

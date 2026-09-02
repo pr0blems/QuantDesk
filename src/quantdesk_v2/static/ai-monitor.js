@@ -150,7 +150,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260902-live-change">
+      <link rel="stylesheet" href="/assets/ai-monitor.css?v=20260902-strategy-name">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
@@ -1208,12 +1208,22 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     };
   }
 
+  decisionStrategyIdentity() {
+    const strategy = this.state.overview?.decision_strategy || {};
+    return {
+      name: this.firstValue(strategy.name, "AI 机会决策策略"),
+      version: Number.isFinite(Number(strategy.version)) ? Number(strategy.version) : null,
+    };
+  }
+
   renderDecisionStrategyTrigger() {
     const button = this.q("#decision-strategy-button");
     if (!button) return;
     const versions = this.decisionStrategyVersions();
-    button.innerHTML = `<span>决策策略</span><strong>${this.escape(versions.decision)}</strong>`;
-    button.title = `点击查看和修改当前策略参数；特征 ${versions.feature}；权重 ${versions.weights}`;
+    const strategy = this.decisionStrategyIdentity();
+    const revision = strategy.version ? ` · v${strategy.version}` : "";
+    button.innerHTML = `<span>决策策略${revision}</span><strong>${this.escape(strategy.name)}</strong>`;
+    button.title = `${strategy.name}；决策版本 ${versions.decision}；点击查看和修改当前策略参数；特征 ${versions.feature}；权重 ${versions.weights}`;
   }
 
   openDecisionStrategyModal() {
