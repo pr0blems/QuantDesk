@@ -85,6 +85,11 @@ def test_macro_index_and_risk_tooltips_support_hover_and_keyboard_focus() -> Non
     assert ".macro-risk-stack > div:focus-visible > .macro-card-tooltip" in styles
     assert ".macro-card-tooltip { top: calc(100% + 9px)" in styles
     assert ".macro-index-card:hover, .macro-index-card:focus-visible" in styles
+    assert ".macro-market-panel { overflow: visible;" in styles
+    assert ".macro-market-heading { position: relative; z-index: 90;" in styles
+    assert ".macro-market-body { display: block; overflow: visible;" in styles
+    assert "z-index: 80; background: #151a16" in styles
+    assert ".macro-market-footer { position: relative; z-index: 40;" in styles
 
 
 def test_macro_policy_labels_directional_values_as_independent_caps() -> None:

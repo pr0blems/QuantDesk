@@ -337,11 +337,11 @@ button:disabled { cursor: wait; opacity: .55; }
 .ai-banner.error { color: var(--ai-red); background: rgba(255, 120, 136, .06); }
 
 
-.macro-market-panel { border-bottom: 1px solid var(--ai-line); background: #0f120f; }
+.macro-market-panel { overflow: visible; border-bottom: 1px solid var(--ai-line); background: #0f120f; }
 .macro-market-loading { min-height: 78px; display: grid; align-content: center; gap: 3px; padding: 12px 18px; }
 .macro-market-loading span, .macro-market-heading > div > span { color: var(--ai-brand); font: 800 11px/1.3 Consolas, monospace; letter-spacing: .17em; }
 .macro-market-loading strong { font-size: 16px; }
-.macro-market-heading { position: relative; z-index: 20; min-height: 43px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 14px; border-bottom: 1px solid var(--ai-line); background: rgba(20, 23, 20, .92); }
+.macro-market-heading { position: relative; z-index: 90; min-height: 43px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 14px; overflow: visible; border-bottom: 1px solid var(--ai-line); background: rgba(20, 23, 20, .92); }
 .macro-market-heading > div:first-child { min-width: 0; flex: 0 0 auto; display: flex; align-items: baseline; gap: 10px; }
 .macro-market-heading > div:first-child strong { font-size: 17px; }
 .macro-regime { min-width: 188px; display: grid; grid-template-columns: auto auto; align-items: baseline; justify-content: end; gap: 0 8px; padding: 5px 9px; border: 1px solid transparent; color: var(--ai-text); text-align: right; background: transparent; cursor: pointer; }
@@ -371,10 +371,10 @@ button:disabled { cursor: wait; opacity: .55; }
 .macro-countdown.imminent > b { color: var(--ai-gold); }
 .macro-countdown.elapsed > b { color: var(--ai-muted); }
 @keyframes macro-live-pulse { 0% { box-shadow: 0 0 0 0 rgba(91, 214, 170, .30); } 75%, 100% { box-shadow: 0 0 0 7px rgba(91, 214, 170, 0); } }
-.macro-market-body { display: block; background: var(--ai-line); }
-.macro-index-grid { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--ai-line); }
+.macro-market-body { display: block; overflow: visible; background: var(--ai-line); }
+.macro-index-grid { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; overflow: visible; background: var(--ai-line); }
 .macro-index-card { position: relative; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto auto; align-items: end; gap: 1px 8px; padding: 7px 10px; outline: 0; background: #121512; cursor: help; transition: background .16s ease, box-shadow .16s ease; }
-.macro-index-card:hover, .macro-index-card:focus-visible { z-index: 30; background: #151a16; box-shadow: inset 0 0 0 1px rgba(173, 156, 255, .62); }
+.macro-index-card:hover, .macro-index-card:focus-visible { z-index: 80; background: #151a16; box-shadow: inset 0 0 0 1px rgba(173, 156, 255, .62); }
 .macro-index-card header { min-width: 0; display: flex; align-items: baseline; gap: 6px; grid-column: 1 / 3; }
 .macro-index-card header strong { font-size: 13px; }
 .macro-index-card header small { overflow: hidden; color: var(--ai-dim); font: 11px Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
@@ -388,7 +388,7 @@ button:disabled { cursor: wait; opacity: .55; }
 .negative { color: var(--ai-red) !important; }
 .flat { color: var(--ai-gold) !important; }
 .macro-risk-stack { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--ai-line); }
-.macro-risk-heading { flex: 1 1 620px; align-self: stretch; grid-template-columns: repeat(4, minmax(105px, 1fr)); }
+.macro-risk-heading { flex: 1 1 620px; align-self: stretch; grid-template-columns: repeat(4, minmax(105px, 1fr)); overflow: visible; }
 .macro-risk-heading > div { min-height: 38px; padding-top: 4px; padding-bottom: 4px; }
 .macro-risk-stack > div { position: relative; min-width: 0; display: grid; align-content: center; gap: 1px; padding: 7px 20px 7px 9px; outline: 0; background: #121512; cursor: help; transition: background .16s ease, box-shadow .16s ease; }
 .macro-risk-stack > div:hover, .macro-risk-stack > div:focus-visible { z-index: 30; background: #151a16; box-shadow: inset 0 0 0 1px rgba(173, 156, 255, .62); }
