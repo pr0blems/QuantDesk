@@ -9,8 +9,8 @@ const adminSourceDir = resolve(__dirname, "../src/quantdesk_v2/static");
 
 function adminUiPlugin(): Plugin {
   const adminHtml = readFileSync(resolve(adminSourceDir, "admin.html"), "utf8")
-    .replaceAll("/assets/admin.css?v=20260805-5", "/next/admin/admin.css")
-    .replaceAll("/assets/admin.js?v=20260805-9", "/next/admin/admin.js")
+    .replace(/\/assets\/admin\.css\?v=[^"]+/, "/next/admin/admin.css")
+    .replace(/\/assets\/admin\.js\?v=[^"]+/, "/next/admin/admin.js")
     .replaceAll('href="/admin"', 'href="/next/admin/"');
   const adminScript = readFileSync(resolve(adminSourceDir, "admin.js"), "utf8")
     .replaceAll('"/admin/login"', '"/next/admin/"')

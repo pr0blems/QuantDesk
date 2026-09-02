@@ -42,8 +42,9 @@ reports/
 *.tmp
 /config/api_keys.json
 
-# Local design verification notes
-/design-qa.md
+# Local design verification notes and browser screenshots
+**/design-qa.md
+/.codex-artifacts/
 /.codex-runtime/
 
 # Machine-specific launchers and editor/OS metadata

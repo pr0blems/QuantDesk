@@ -352,6 +352,8 @@ def strategy_management_mode(strategy: UserStrategy) -> str:
         return "python_source"
     if strategy.strategy_kind == "full_strategy":
         return "strategy_dsl"
+    if strategy.strategy_kind == "basket_strategy":
+        return "basket_parameters"
     return "parameterized_engine"
 
 

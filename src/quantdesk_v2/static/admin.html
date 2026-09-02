@@ -315,6 +315,15 @@
   </main>
 
   <div id="toast" class="toast hidden" role="status"></div>
+  <dialog id="stock-detail-dialog" class="stock-detail-dialog" aria-labelledby="stock-detail-title" aria-describedby="stock-detail-subtitle">
+    <div class="stock-detail-shell">
+      <header class="stock-detail-head">
+        <div><span>SECURITY RESEARCH PROFILE</span><h2 id="stock-detail-title">证券详情</h2><p id="stock-detail-subtitle">证券主数据与基础面资料</p></div>
+        <button id="stock-detail-close" type="button" aria-label="关闭证券详情">×</button>
+      </header>
+      <div id="stock-detail-body" class="stock-detail-body"></div>
+    </div>
+  </dialog>
   <dialog id="source-dialog" class="editor-dialog">
     <form id="source-form">
       <div class="editor-head"><div><span>INTELLIGENCE SOURCE</span><h2 id="source-dialog-title">新增舆情来源</h2><p>来源名称创建后作为稳定标识，不支持直接改名。</p></div><button id="source-dialog-close" type="button" aria-label="关闭">×</button></div>
@@ -336,6 +345,6 @@
     </form>
   </dialog>
   <dialog id="confirm-dialog"><form method="dialog"><span class="dialog-mark">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p><div><button value="cancel">取消</button><button id="confirm-accept" class="danger" value="confirm">确认执行</button></div></form></dialog>
-  <script src="/assets/admin.js?v=20260831-1" defer></script>
+  <script src="/assets/admin.js?v=20260901-1" defer></script>
 </body>
 </html>

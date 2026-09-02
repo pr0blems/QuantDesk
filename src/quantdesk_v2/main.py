@@ -30,6 +30,7 @@ from .database import build_engine, engine
 from .deployment_routes import router as deployment_router
 from .finnhub import FinnhubClient, FinnhubMarketStatusService, FinnhubWebhookReceiver
 from .finnhub_quotes import FINNHUB_USAGE_SETTING_KEY, FinnhubUsQuoteService
+from .interfaces.api.martingale_tp4 import router as martingale_tp4_router
 from .interfaces.api.public_news import router as public_news_router
 from .macro_market import (
     MACRO_PROXY_SYMBOLS,
@@ -410,6 +411,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(admin_router)
     app.include_router(strategy_router)
+    app.include_router(martingale_tp4_router)
     app.include_router(control_router)
     app.include_router(deployment_router)
     app.include_router(public_news_router)

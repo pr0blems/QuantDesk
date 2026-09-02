@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -84,6 +84,20 @@ class Settings(BaseSettings):
     tiger_quote_cache_seconds: float = 2.0
     tiger_quote_stale_seconds: int = 900
     tiger_news_cache_seconds: float = 60.0
+    # Official Tiger Open API credentials are used only for historical bars
+    # and the US trading calendar.  The RSA private key stays on disk and is
+    # never serialized into application state or returned by an API.
+    tiger_openapi_tiger_id: str = ""
+    tiger_openapi_account: str = ""
+    tiger_openapi_private_key_path: Path | None = None
+    tiger_openapi_sandbox: bool = False
+
+    @field_validator("tiger_openapi_private_key_path", mode="before")
+    @classmethod
+    def _normalize_optional_tiger_private_key_path(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     # News-source rows contain the endpoint and polling policy, never this secret.
     unusual_whales_api_key: SecretStr = SecretStr("")
@@ -299,6 +313,20 @@ class Settings(BaseSettings):
             )
         if not 10 <= self.tiger_news_cache_seconds <= 600:
             raise RuntimeError("TIGER_NEWS_CACHE_SECONDS must be between 10 and 600")
+        openapi_values = (
+            self.tiger_openapi_tiger_id.strip(),
+            self.tiger_openapi_account.strip(),
+            self.tiger_openapi_private_key_path,
+        )
+        if any(openapi_values) and not all(openapi_values):
+            raise RuntimeError(
+                "TIGER_OPENAPI_TIGER_ID, TIGER_OPENAPI_ACCOUNT and "
+                "TIGER_OPENAPI_PRIVATE_KEY_PATH must be configured together"
+            )
+        if self.tiger_openapi_private_key_path is not None:
+            private_key_path = self.tiger_openapi_private_key_path.expanduser()
+            if not private_key_path.is_file():
+                raise RuntimeError("TIGER_OPENAPI_PRIVATE_KEY_PATH must be a readable file")
 
     @staticmethod
     def _validate_binance_origin(name: str, value: str, allowed_hosts: set[str]) -> None:

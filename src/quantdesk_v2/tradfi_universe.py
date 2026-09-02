@@ -302,6 +302,9 @@ def sync_tradfi_contracts(
         if mapping.mapping_status == "REVIEW_REQUIRED":
             review_required += 1
         if exchange == "US" and underlying_type == "EQUITY":
+            from .tiger_market_data import ensure_tiger_security_mapping
+
+            ensure_tiger_security_mapping(db, security, now=now)
             profile_candidates.add(int(security.id))
 
     missing = suspended = 0
@@ -422,6 +425,9 @@ def sync_missing_company_profiles(
                         "synced_at": utcnow().isoformat(),
                     }
                     mapping.source_metadata_json = metadata
+                from .tiger_market_data import ensure_tiger_security_mapping
+
+                ensure_tiger_security_mapping(db, security)
                 db.commit()
                 counts["synced"] += 1
             except FinnhubClientError as exc:

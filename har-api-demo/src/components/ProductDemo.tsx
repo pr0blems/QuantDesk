@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { CommunitySnapshot, DepthLevel, NewsItem, NewsSnapshot, OrderBookSnapshot } from "../types";
+import { useStockSnapshot } from "../hooks/useStockSnapshot";
+import type { StockTrade } from "../hooks/useStockSnapshot";
 import { MarketDataBoard } from "./MarketDataBoard";
+
+const StockHarPanels = lazy(() => import("./StockHarPanels").then((module) => ({ default: module.StockHarPanels })));
 
 type Stock = {
   symbol: string;
@@ -12,6 +16,7 @@ type Stock = {
   changeRate: number;
   afterHours: number;
   afterRate: number;
+  sessionLabel?: string;
   open: number;
   high: number;
   low: number;
@@ -22,6 +27,11 @@ type Stock = {
 };
 
 const stocks: Stock[] = [
+  {
+    symbol: "GPRO", name: "GoPro", exchange: "NYSE", price: 0.8762, change: 0.2763, changeRate: 46.06,
+    afterHours: 1.61, afterRate: 83.77, sessionLabel: "盘前", open: 0.61, high: 0.88, low: 0.6002, volume: "2.20亿", volumeValue: 220002853, color: "#1f7eea",
+    series: [0.57,0.59,0.61,0.60,0.62,0.65,0.67,0.70,0.73,0.69,0.71,0.68,0.67,0.69,0.70,0.68,0.67,0.69,0.71,0.74,0.72,0.75,0.78,0.76,0.79,0.80,0.77,0.75,0.78,0.81,0.79,0.82,0.84,0.83,0.86,0.88,0.8762],
+  },
   {
     symbol: "PYPL", name: "PayPal Holdings", exchange: "NASDAQ", price: 53.66, change: -7.81, changeRate: -12.71,
     afterHours: 53.73, afterRate: 0.13, open: 53.74, high: 54.76, low: 52.62, volume: "3634万", volumeValue: 36340502, color: "#168bd2",
@@ -65,9 +75,12 @@ function Watchlist({ selected, onSelect }: { selected: Stock; onSelect: (stock: 
   return <aside className="pulse-watchlist">
     <div className="pulse-section-title"><h2>自选</h2><div><button aria-label="添加自选" type="button">＋</button><button aria-label="更多自选操作" type="button"><Icon name="more" /></button></div></div>
     <div className="pulse-watch-rows">
-      {stocks.map((stock) => <button className={selected.symbol === stock.symbol ? "active" : ""} onClick={() => onSelect(stock)} key={stock.symbol} type="button">
-        <MiniLogo stock={stock}/><span><strong>{stock.symbol}</strong><small>{stock.name}</small></span><span className="pulse-watch-price"><strong>{stock.price.toLocaleString("en-US", { maximumFractionDigits: 2 })}</strong><small className={stock.changeRate >= 0 ? "positive" : "negative"}>{stock.changeRate > 0 ? "+" : ""}{stock.changeRate.toFixed(2)}%</small></span>
-      </button>)}
+      {stocks.map((stock) => {
+        const display = selected.symbol === stock.symbol ? selected : stock;
+        return <button className={selected.symbol === stock.symbol ? "active" : ""} onClick={() => onSelect(stock)} key={stock.symbol} type="button">
+          <MiniLogo stock={display}/><span><strong>{display.symbol}</strong><small>{display.name}</small></span><span className="pulse-watch-price"><strong>{display.price.toLocaleString("en-US", { maximumFractionDigits: 2 })}</strong><small className={display.changeRate >= 0 ? "positive" : "negative"}>{display.changeRate > 0 ? "+" : ""}{display.changeRate.toFixed(2)}%</small></span>
+        </button>;
+      })}
     </div>
     <button className="pulse-manage" type="button"><span>▣</span> 管理自选</button>
   </aside>;
@@ -153,7 +166,7 @@ function LegacyPriceChart({ stock, period, onPeriod }: { stock: Stock; period: s
   const volumeBars = Array.from({ length: 58 }, (_, index) => 10 + ((index * 17 + index * index * 3) % 42));
   return <section className="pulse-chart-panel">
     <div className="pulse-price-head">
-      <div><h1>{stock.name} <span>{stock.symbol} · {stock.exchange}</span></h1><div className="pulse-price-row"><strong>${stock.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><b className={stock.change >= 0 ? "positive" : "negative"}>{stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}&nbsp;&nbsp;{stock.changeRate > 0 ? "+" : ""}{stock.changeRate.toFixed(2)}%</b><span>已收盘</span><em>盘后</em><strong className="after-price">{stock.afterHours.toFixed(2)}</strong><b className="positive">{stock.afterRate > 0 ? "+" : ""}{stock.afterRate.toFixed(2)}%</b></div></div>
+      <div><h1>{stock.name} <span>{stock.symbol} · {stock.exchange}</span></h1><div className="pulse-price-row"><strong>${stock.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><b className={stock.change >= 0 ? "positive" : "negative"}>{stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}&nbsp;&nbsp;{stock.changeRate > 0 ? "+" : ""}{stock.changeRate.toFixed(2)}%</b><span>已收盘</span><em>{stock.sessionLabel ?? "盘后"}</em><strong className="after-price">{stock.afterHours.toFixed(2)}</strong><b className="positive">{stock.afterRate > 0 ? "+" : ""}{stock.afterRate.toFixed(2)}%</b></div></div>
       <div className="pulse-head-actions"><button aria-label="添加收藏" type="button"><Icon name="star" /></button><button aria-label="更多操作" type="button"><Icon name="more" /></button></div>
     </div>
     <div className="pulse-chart-toolbar"><div>{periods.map((item) => <button className={period === item ? "active" : ""} onClick={() => onPeriod(item)} key={item} type="button">{item}</button>)}</div><dl><div><dt>开</dt><dd>{stock.open.toFixed(2)}</dd></div><div><dt>高</dt><dd className="negative">{stock.high.toFixed(2)}</dd></div><div><dt>低</dt><dd className="positive">{stock.low.toFixed(2)}</dd></div><div><dt>量</dt><dd>{stock.volume}</dd></div></dl></div>
@@ -202,7 +215,7 @@ function PriceChart({ stock, period, onPeriod }: { stock: Stock; period: string;
 
   return <section className="pulse-chart-panel">
     <div className="pulse-price-head">
-      <div><h1>{stock.name} <span>{stock.symbol} · {stock.exchange}</span></h1><div className="pulse-price-row"><strong>${stock.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><b className={stock.change >= 0 ? "positive" : "negative"}>{stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}&nbsp;&nbsp;{stock.changeRate > 0 ? "+" : ""}{stock.changeRate.toFixed(2)}%</b><span>已收盘</span><em>盘后</em><strong className="after-price">{stock.afterHours.toFixed(2)}</strong><b className="positive">{stock.afterRate > 0 ? "+" : ""}{stock.afterRate.toFixed(2)}%</b></div></div>
+      <div><h1>{stock.name} <span>{stock.symbol} · {stock.exchange}</span></h1><div className="pulse-price-row"><strong>${stock.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><b className={stock.change >= 0 ? "positive" : "negative"}>{stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}&nbsp;&nbsp;{stock.changeRate > 0 ? "+" : ""}{stock.changeRate.toFixed(2)}%</b><span>已收盘</span><em>{stock.sessionLabel ?? "盘后"}</em><strong className="after-price">{stock.afterHours.toFixed(2)}</strong><b className="positive">{stock.afterRate > 0 ? "+" : ""}{stock.afterRate.toFixed(2)}%</b></div></div>
       <div className="pulse-head-actions"><button aria-label="添加收藏" type="button"><Icon name="star" /></button><button aria-label="更多操作" type="button"><Icon name="more" /></button></div>
     </div>
     <div className="pulse-chart-toolbar"><div>{periods.map((item) => <button className={period === item ? "active" : ""} onClick={() => { onPeriod(item); setHoveredIndex(null); }} key={item} type="button">{item}</button>)}</div><dl><div><dt>开</dt><dd>{stock.open.toFixed(2)}</dd></div><div><dt>高</dt><dd className="negative">{stock.high.toFixed(2)}</dd></div><div><dt>低</dt><dd className="positive">{stock.low.toFixed(2)}</dd></div><div><dt>量</dt><dd>{stock.volume}</dd></div></dl></div>
@@ -409,7 +422,7 @@ function KlineChart({ stock, period, onPeriod }: { stock: Stock; period: string;
 
   return <section className="pulse-chart-panel">
     <div className="pulse-price-head">
-      <div><h1>{stock.name} <span>{stock.symbol} · {stock.exchange}</span></h1><div className="pulse-price-row"><strong>${stock.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><b className={stock.change >= 0 ? "positive" : "negative"}>{stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}&nbsp;&nbsp;{stock.changeRate > 0 ? "+" : ""}{stock.changeRate.toFixed(2)}%</b><span>已收盘</span><em>盘后</em><strong className="after-price">{stock.afterHours.toFixed(2)}</strong><b className="positive">{stock.afterRate > 0 ? "+" : ""}{stock.afterRate.toFixed(2)}%</b></div></div>
+      <div><h1>{stock.name} <span>{stock.symbol} · {stock.exchange}</span></h1><div className="pulse-price-row"><strong>${stock.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><b className={stock.change >= 0 ? "positive" : "negative"}>{stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}&nbsp;&nbsp;{stock.changeRate > 0 ? "+" : ""}{stock.changeRate.toFixed(2)}%</b><span>已收盘</span><em>{stock.sessionLabel ?? "盘后"}</em><strong className="after-price">{stock.afterHours.toFixed(2)}</strong><b className="positive">{stock.afterRate > 0 ? "+" : ""}{stock.afterRate.toFixed(2)}%</b></div></div>
       <div className="pulse-head-actions"><button aria-label="添加收藏" type="button"><Icon name="star" /></button><button aria-label="更多操作" type="button"><Icon name="more" /></button></div>
     </div>
     <div className="pulse-chart-toolbar pulse-kline-toolbar"><div>{klinePeriods.map((item) => <button className={config.id === item.id ? "active" : ""} onClick={() => onPeriod(item.id)} key={item.id} type="button">{item.label}</button>)}</div><dl><div><dt>开</dt><dd>{stock.open.toFixed(2)}</dd></div><div><dt>高</dt><dd className="negative">{stock.high.toFixed(2)}</dd></div><div><dt>低</dt><dd className="positive">{stock.low.toFixed(2)}</dd></div><div><dt>量</dt><dd>{stock.volume}</dd></div></dl></div>
@@ -432,7 +445,7 @@ function InsightRail({ stock, collapsed, onToggle }: { stock: Stock; collapsed: 
   const bullets = [
     { title: "股价大幅下挫", body: `${stock.symbol} 当日变动 ${stock.changeRate.toFixed(2)}%，收于 ${stock.price.toFixed(2)}，价格处于日内偏弱区间。` },
     { title: "成交量显著放大", body: `成交量 ${stock.volume}，结合日内振幅观察，市场分歧与换手明显。` },
-    { title: "盘后出现企稳迹象", body: `盘后价格 ${stock.afterHours.toFixed(2)}，变动 ${stock.afterRate.toFixed(2)}%，短线抛压有所缓解。` },
+    { title: `${stock.sessionLabel ?? "盘后"}出现企稳迹象`, body: `${stock.sessionLabel ?? "盘后"}价格 ${stock.afterHours.toFixed(2)}，变动 ${stock.afterRate.toFixed(2)}%，短线抛压有所缓解。` },
     { title: "宏观与新闻风险", body: "利率预期和地缘冲突仍在抬升避险情绪，需结合最新新闻持续跟踪。" },
   ];
   return <aside className={`pulse-insight ${collapsed ? "collapsed" : ""}`}>
@@ -448,7 +461,7 @@ function CompactDepthRows({ levels, side }: { levels: DepthLevel[]; side: "ask" 
 function OrderBook({ stock, orderBook, onExpand }: { stock: Stock; orderBook: OrderBookSnapshot | null; onExpand: () => void }) {
   if (!orderBook) {
     const message = stock.exchange === "INDEX" ? "指数不提供普通证券买卖盘" : "当前 HAR 未捕获该标的的盘口快照";
-    return <section className="pulse-data-panel pulse-book-unavailable"><div className="pulse-data-title"><div><h2>40档盘口</h2><small>{stock.symbol}</small></div></div><div className="pulse-book-empty"><i>—</i><strong>{stock.symbol} 暂无盘口</strong><p>{message}</p><small>切换回 PYPL 可查看真实 Blue Ocean 40 档数据</small></div></section>;
+    return <section className="pulse-data-panel pulse-book-unavailable"><div className="pulse-data-title"><div><h2>40档盘口</h2><small>{stock.symbol}</small></div></div><div className="pulse-book-empty"><i>—</i><strong>{stock.symbol} 暂无盘口</strong><p>{message}</p><small>GPRO 与 PYPL 已捕获真实 40 档盘口样本</small></div></section>;
   }
   return <section className="pulse-data-panel"><div className="pulse-data-title"><div><h2>40档盘口</h2><small>{orderBook.source}</small></div><button aria-label="展开40档盘口" onClick={onExpand} title="展开40档盘口" type="button"><Icon name="expand" /></button></div><div className="pulse-book-head"><span>卖盘 (Ask)</span><span>价格</span><span>数量</span></div><CompactDepthRows levels={orderBook.ask.slice(0, 3)} side="ask"/><div className="pulse-book-head bid"><span>买盘 (Bid)</span><span>价格</span><span>数量</span></div><CompactDepthRows levels={orderBook.bid.slice(0, 3)} side="bid"/><button className="pulse-depth-entry" onClick={onExpand} type="button">查看买40 / 卖40 <span>→</span></button></section>;
 }
@@ -464,9 +477,15 @@ function DepthModal({ orderBook, view, onView, onClose }: { orderBook: OrderBook
   return <div className="pulse-depth-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className={"pulse-depth-modal view-" + view} role="dialog" aria-modal="true" aria-labelledby="pulse-depth-title"><header><div><h2 id="pulse-depth-title">{orderBook.symbol} · 40档盘口</h2><p>{orderBook.source} · 买{orderBook.bid.length} / 卖{orderBook.ask.length} · 离线快照 {time}</p></div><button aria-label="关闭40档盘口" onClick={onClose} type="button">×</button></header><div className="pulse-depth-toolbar"><div role="group" aria-label="盘口显示方式">{[["both","双边"],["ask","仅卖"],["bid","仅买"]].map(([value, label]) => <button className={view === value ? "active" : ""} onClick={() => onView(value as "both" | "ask" | "bid")} key={value} type="button">{label}</button>)}</div><span>价格 / 数量 / 委托笔数</span></div><main>{view !== "bid" ? <DepthSide levels={orderBook.ask} side="ask"/> : null}{view !== "ask" ? <DepthSide levels={orderBook.bid} side="bid"/> : null}</main></div></div>;
 }
 
-function Trades() {
-  const trades = [["15:59:58","53.66","100","▼"],["15:59:57","53.66","200","▼"],["15:59:56","53.65","300","▼"],["15:59:55","53.66","150","▲"],["15:59:54","53.66","250","▼"],["15:59:53","53.66","400","▼"],["15:59:52","53.67","100","▲"]];
-  return <section className="pulse-data-panel"><div className="pulse-data-title"><h2>分时成交</h2><Icon name="expand" /></div><div className="pulse-trade-row head"><span>时间</span><span>价格</span><span>数量</span><span>方向</span></div>{trades.map((row) => <div className="pulse-trade-row" key={row[0]}><span>{row[0]}</span><strong className="negative">{row[1]}</strong><span>{row[2]}</span><b className={row[3] === "▲" ? "positive" : "negative"}>{row[3]}</b></div>)}</section>;
+function Trades({ trades, source }: { trades?: StockTrade[]; source?: string }) {
+  const rows = trades?.length ? trades.slice(-8).reverse().map((trade, index) => ({
+    id: `${trade.time}-${trade.price}-${trade.volume}-${index}`,
+    time: new Date(trade.time).toLocaleTimeString("zh-CN", { timeZone: "America/New_York", hour12: false }),
+    price: trade.price.toFixed(4),
+    volume: trade.volume.toLocaleString("en-US"),
+    direction: trade.type === "+" ? "▲" : trade.type === "-" ? "▼" : "·",
+  })) : [["15:59:58","53.66","100","▼"],["15:59:57","53.66","200","▼"],["15:59:56","53.65","300","▼"],["15:59:55","53.66","150","▲"],["15:59:54","53.66","250","▼"],["15:59:53","53.66","400","▼"],["15:59:52","53.67","100","▲"]].map((row, index) => ({ id: `${row[0]}-${index}`, time: row[0], price: row[1], volume: row[2], direction: row[3] }));
+  return <section className="pulse-data-panel"><div className="pulse-data-title"><div><h2>逐笔成交</h2>{source ? <small>{source}</small> : null}</div><Icon name="expand" /></div><div className="pulse-trade-row head"><span>时间</span><span>价格</span><span>数量</span><span>方向</span></div>{rows.map((row) => <div className="pulse-trade-row" key={row.id}><span>{row.time}</span><strong className={row.direction === "▲" ? "positive" : row.direction === "▼" ? "negative" : ""}>{row.price}</strong><span>{row.volume}</span><b className={row.direction === "▲" ? "positive" : row.direction === "▼" ? "negative" : ""}>{row.direction}</b></div>)}</section>;
 }
 
 function newsTime(item: NewsItem) {
@@ -507,7 +526,37 @@ export function ProductDemo({ orderBooks, newsSnapshots, communitySnapshots, onO
   const [depthOpen, setDepthOpen] = useState(false);
   const [depthView, setDepthView] = useState<"both" | "ask" | "bid">("both");
   const [newsOpen, setNewsOpen] = useState(false);
-  const selectedOrderBook = orderBooks.find((book) => book.symbol === stock.symbol) ?? null;
+  const supportsStockApi = !stock.symbol.startsWith(".");
+  const stockSnapshotState = useStockSnapshot(stock.symbol, supportsStockApi && activeNav === "个股");
+  const liveSnapshot = stockSnapshotState.data?.symbol === stock.symbol ? stockSnapshotState.data : null;
+  const displayStock = useMemo<Stock>(() => {
+    if (!liveSnapshot) return stock;
+    const quote = liveSnapshot.quote;
+    const hour = quote.hourTrading;
+    return {
+      ...stock,
+      name: liveSnapshot.name || stock.name,
+      exchange: quote.exchange || stock.exchange,
+      price: quote.latestPrice ?? stock.price,
+      change: quote.change ?? stock.change,
+      changeRate: typeof quote.changeRate === "number" ? quote.changeRate * 100 : stock.changeRate,
+      afterHours: hour?.latestPrice ?? stock.afterHours,
+      afterRate: typeof hour?.changeRate === "number" ? hour.changeRate * 100 : stock.afterRate,
+      sessionLabel: hour?.tag ?? stock.sessionLabel,
+      open: quote.open ?? stock.open,
+      high: quote.high ?? stock.high,
+      low: quote.low ?? stock.low,
+      volumeValue: quote.volume ?? stock.volumeValue,
+      volume: compactVolume(quote.volume ?? stock.volumeValue),
+    };
+  }, [liveSnapshot, stock]);
+  const selectedOrderBook = liveSnapshot?.orderBook.ask.length && liveSnapshot.orderBook.bid.length ? {
+    symbol: stock.symbol,
+    source: liveSnapshot.orderBook.source + (liveSnapshot.source === "live" ? " · LIVE" : liveSnapshot.source === "snapshot" ? " · HAR" : " · PARTIAL"),
+    timestamp: liveSnapshot.orderBook.timestamp,
+    ask: liveSnapshot.orderBook.ask,
+    bid: liveSnapshot.orderBook.bid,
+  } satisfies OrderBookSnapshot : orderBooks.find((book) => book.symbol === stock.symbol) ?? null;
   const selectedNews = newsSnapshots.find((snapshot) => snapshot.symbol === stock.symbol) ?? null;
   const selectedCommunity = communitySnapshots.find((snapshot) => snapshot.symbol === stock.symbol) ?? null;
   const toastTimer = useRef<number | null>(null);
@@ -535,8 +584,9 @@ export function ProductDemo({ orderBooks, newsSnapshots, communitySnapshots, onO
       <div className="pulse-header-actions"><button className="pulse-offline" onClick={() => showToast(import.meta.env.VITE_MARKET_LIVE_ENABLED === "true" ? "三大指数每秒实时刷新；其余模块展示 HAR 脱敏快照" : "当前展示 HAR 脱敏快照，不连接线上服务")} type="button"><i/>{import.meta.env.VITE_MARKET_LIVE_ENABLED === "true" ? "混合数据" : "离线演示"}</button><button className="pulse-code-button" aria-label="打开接口目录" onClick={() => activeNav === "接口数据" ? document.getElementById("market-interface-catalog")?.scrollIntoView({ behavior: "smooth", block: "start" }) : onOpenCatalog()} title="打开接口目录" type="button"><Icon name="code"/></button></div>
     </header>
     {activeNav === "接口数据" ? <MarketDataBoard/> : <>
-      <div className="pulse-primary-grid"><Watchlist selected={stock} onSelect={(next) => { setStock(next); showToast(`已切换到 ${next.symbol}`); }}/><KlineChart stock={stock} period={period} onPeriod={(next) => { setPeriod(next); showToast(`已切换到 ${klinePeriods.find((item) => item.id === next)?.label ?? next}`); }}/><InsightRail stock={stock} collapsed={collapsed} onToggle={() => setCollapsed((value) => !value)}/></div>
-      <div className="pulse-data-grid"><OrderBook stock={stock} orderBook={selectedOrderBook} onExpand={() => setDepthOpen(true)}/><Trades/><NewsPanel snapshot={selectedNews} bookmarked={bookmarked} onBookmark={(id) => setBookmarked((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id])} onMore={() => setNewsOpen(true)}/><SentimentPanel snapshot={selectedCommunity} onMore={() => showToast("讨论数和热门话题来自接口；倾向基于最新帖子样本估算")}/><IpoPanel onMore={() => showToast("IPO 数据来自 trade.skytigris.cn")}/></div>
+      <div className="pulse-primary-grid"><Watchlist selected={displayStock} onSelect={(next) => { setStock(next); showToast(`已切换到 ${next.symbol}`); }}/><KlineChart stock={displayStock} period={period} onPeriod={(next) => { setPeriod(next); showToast(`已切换到 ${klinePeriods.find((item) => item.id === next)?.label ?? next}`); }}/><InsightRail stock={displayStock} collapsed={collapsed} onToggle={() => setCollapsed((value) => !value)}/></div>
+      {supportsStockApi ? <Suspense fallback={<section className="stock-facts-panel stock-loading"><strong>正在载入个股分析模块…</strong></section>}><StockHarPanels symbol={stock.symbol} name={stock.name} snapshot={liveSnapshot} status={stockSnapshotState.status} error={stockSnapshotState.error} lastCheckedAt={stockSnapshotState.lastCheckedAt} unchangedCount={stockSnapshotState.unchangedCount}/></Suspense> : null}
+      <div className="pulse-data-grid"><OrderBook stock={displayStock} orderBook={selectedOrderBook} onExpand={() => setDepthOpen(true)}/><Trades trades={liveSnapshot?.trades} source={supportsStockApi ? `/stock_info/trade_tick/${stock.symbol}` : undefined}/><NewsPanel snapshot={selectedNews} bookmarked={bookmarked} onBookmark={(id) => setBookmarked((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id])} onMore={() => setNewsOpen(true)}/><SentimentPanel snapshot={selectedCommunity} onMore={() => showToast("讨论数和热门话题来自接口；倾向基于最新帖子样本估算")}/><IpoPanel onMore={() => showToast("IPO 数据来自 trade.skytigris.cn")}/></div>
     </>}
     {depthOpen && selectedOrderBook ? <DepthModal orderBook={selectedOrderBook} view={depthView} onView={setDepthView} onClose={() => setDepthOpen(false)}/> : null}
     {newsOpen && selectedNews ? <NewsModal snapshot={selectedNews} onClose={() => setNewsOpen(false)}/> : null}

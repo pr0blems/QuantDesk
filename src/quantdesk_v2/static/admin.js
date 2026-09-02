@@ -25,6 +25,7 @@ let toastTimer = null;
 let cleanupPayload = null;
 let newsSources = [];
 let newsAiPollTimer = null;
+let stockDetailTrigger = null;
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -344,8 +345,102 @@ async function loadStockLibrary() {
     const syncAction = item.profile_sync_supported
       ? `<button data-stock-sync="${escapeHtml(item.symbol)}">同步资料</button>`
       : '<span class="pill">无需 Finnhub</span>';
-    return `<tr><td><strong>${escapeHtml(item.symbol)}</strong><small>${escapeHtml(item.exchange)} · ${escapeHtml(contract)}</small></td><td><strong>${escapeHtml(chineseName)}</strong><small>${escapeHtml(chineseIndustry || "暂无中文行业资料")}</small>${englishName ? `<small>${escapeHtml(englishName)}${englishIndustry ? ` · ${escapeHtml(englishIndustry)}` : ""}</small>` : ""}</td><td><span class="pill">${escapeHtml(item.security_type)}</span><small>${escapeHtml(mapping.underlying_type || "-")} · ${escapeHtml(gate)}</small></td><td><span class="pill ${verifyClass}">${verifyLabel}</span><small>Binance ${escapeHtml(sourceStatus)}</small></td><td>${marketCap}</td><td>${score ? `<strong>${escapeHtml(score)}</strong>` : ""}<small>${escapeHtml(analysisSummary)}</small></td><td>${formatTime(item.updated_at)}</td><td>${syncAction}</td></tr>`;
+    return `<tr><td><strong>${escapeHtml(item.symbol)}</strong><small>${escapeHtml(item.exchange)} · ${escapeHtml(contract)}</small></td><td><button class="stock-detail-trigger" type="button" data-stock-detail="${escapeHtml(item.symbol)}" aria-label="查看 ${escapeHtml(chineseName)} 详情"><strong>${escapeHtml(chineseName)}</strong></button><small>${escapeHtml(chineseIndustry || "暂无中文行业资料")}</small>${englishName ? `<small>${escapeHtml(englishName)}${englishIndustry ? ` · ${escapeHtml(englishIndustry)}` : ""}</small>` : ""}</td><td><span class="pill">${escapeHtml(item.security_type)}</span><small>${escapeHtml(mapping.underlying_type || "-")} · ${escapeHtml(gate)}</small></td><td><span class="pill ${verifyClass}">${verifyLabel}</span><small>Binance ${escapeHtml(sourceStatus)}</small></td><td>${marketCap}</td><td>${score ? `<strong>${escapeHtml(score)}</strong>` : ""}<small>${escapeHtml(analysisSummary)}</small></td><td>${formatTime(item.updated_at)}</td><td>${syncAction}</td></tr>`;
   }).join("") : '<tr><td class="empty" colspan="8">资料库为空，请点击“同步 Binance 合约”。</td></tr>';
+}
+
+function stockDetailVerification(status) {
+  return {
+    VERIFIED: { label: "已核验", className: "active" },
+    AUTO_VERIFIED: { label: "已核验", className: "active" },
+    REVIEW_REQUIRED: { label: "需要复核", className: "warning" },
+  }[status] || { label: "待补充", className: "pending" };
+}
+
+function stockDetailEvidence(value) {
+  if (!value || typeof value !== "object") return '<p class="stock-detail-empty">暂无结构化证据。</p>';
+  const entries = Object.entries(value).slice(0, 16);
+  if (!entries.length) return '<p class="stock-detail-empty">暂无结构化证据。</p>';
+  return `<dl class="stock-evidence-list">${entries.map(([key, item]) => {
+    const content = typeof item === "string" ? item : JSON.stringify(item);
+    return `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(content)}</dd></div>`;
+  }).join("")}</dl>`;
+}
+
+function renderStockDetail(data) {
+  const profile = data.profile || {};
+  const analysis = data.analysis || {};
+  const mappings = data.mappings || [];
+  const sources = data.research_sources || [];
+  const verification = stockDetailVerification(data.verification_status);
+  const displayName = data.company_name_zh || profile.legal_name || data.company_name || data.symbol;
+  const englishName = data.company_name_zh ? (profile.legal_name || data.company_name || "") : "";
+  const industries = [profile.sector_zh, profile.industry_zh].filter(Boolean).join(" · ")
+    || [profile.sector, profile.industry].filter(Boolean).join(" · ")
+    || "暂无行业资料";
+  const marketCap = profile.market_cap == null ? "待补充" : compactNumber(Number(profile.market_cap) * 1000000);
+  const website = safeLink(profile.website);
+  const score = analysis.overall_score == null ? "--" : Number(analysis.overall_score).toFixed(1);
+  const confidence = analysis.confidence_score == null ? "--" : `${(Number(analysis.confidence_score) * 100).toFixed(1)}%`;
+  $("#stock-detail-title").textContent = `${data.symbol} · ${displayName}`;
+  $("#stock-detail-subtitle").textContent = [englishName, industries].filter(Boolean).join(" · ");
+  $("#stock-detail-body").innerHTML = `
+    <section class="stock-detail-summary">
+      <article><span>证券类型</span><strong>${escapeHtml(data.security_type || "--")}</strong><small>${escapeHtml(data.exchange || "--")} · ${escapeHtml(data.country || "--")}</small></article>
+      <article><span>核验状态</span><strong><i class="pill ${verification.className}">${verification.label}</i></strong><small>${data.is_active ? "主数据启用中" : "主数据已停用"}</small></article>
+      <article><span>市值 / 基金规模</span><strong>${escapeHtml(marketCap)}</strong><small>资料来源 ${escapeHtml(profile.source || "--")}</small></article>
+      <article><span>基础面评分</span><strong>${escapeHtml(score)}</strong><small>置信度 ${escapeHtml(confidence)}</small></article>
+    </section>
+    <section class="stock-detail-grid">
+      <article class="stock-detail-card">
+        <header><span>COMPANY PROFILE</span><h3>公司资料</h3></header>
+        <dl class="stock-detail-fields">
+          <div><dt>证券代码</dt><dd>${escapeHtml(data.symbol || "--")}</dd></div>
+          <div><dt>CIK</dt><dd>${escapeHtml(data.cik || "--")}</dd></div>
+          <div><dt>行业</dt><dd>${escapeHtml(industries)}</dd></div>
+          <div><dt>资料更新时间</dt><dd>${formatTime(profile.source_updated_at || data.updated_at)}</dd></div>
+          <div class="full"><dt>官方网站</dt><dd>${website === "#" ? "--" : `<a href="${website}" target="_blank" rel="noopener noreferrer">${escapeHtml(profile.website)}</a>`}</dd></div>
+        </dl>
+      </article>
+      <article class="stock-detail-card">
+        <header><span>BINANCE CONTRACT MAP</span><h3>合约关联</h3></header>
+        <div class="stock-mapping-list">${mappings.length ? mappings.map((mapping) => `
+          <div>
+            <strong>${escapeHtml(mapping.source_symbol || mapping.normalized_symbol || "--")}</strong>
+            <span class="pill ${mapping.source_status === "TRADING" ? "active" : "warning"}">${escapeHtml(mapping.source_status || "UNKNOWN")}</span>
+            <small>${escapeHtml(mapping.source || "--")} · ${escapeHtml(mapping.contract_type || "--")} · ${escapeHtml(mapping.underlying_type || "--")}</small>
+            <small>监控 ${mapping.monitor_enabled ? "开" : "关"} · 策略 ${mapping.strategy_enabled ? "开" : "关"} · 实盘 ${mapping.live_trading_enabled ? "开" : "关"}</small>
+          </div>`).join("") : '<p class="stock-detail-empty">尚未关联外部合约。</p>'}</div>
+      </article>
+      <article class="stock-detail-card stock-detail-wide">
+        <header><span>FUNDAMENTAL ANALYSIS</span><h3>基础面分析</h3><small>${escapeHtml(analysis.analysis_version || "尚未生成")} · ${escapeHtml(analysis.as_of_date || "--")}</small></header>
+        <div class="stock-analysis-copy"><div><h4>业务摘要</h4><p>${escapeHtml(analysis.business_summary || "暂无业务分析摘要。")}</p></div><div><h4>风险分析</h4><p>${escapeHtml(analysis.risk_analysis || "暂无风险分析。")}</p></div></div>
+        ${stockDetailEvidence(analysis.evidence)}
+      </article>
+      <article class="stock-detail-card stock-detail-wide">
+        <header><span>RESEARCH SOURCES</span><h3>研究来源</h3><small>${sources.length} 条</small></header>
+        <div class="stock-research-list">${sources.length ? sources.map((source) => {
+          const url = safeLink(source.url);
+          const title = escapeHtml(source.title || "未命名资料");
+          return `<article><div>${url === "#" ? `<strong>${title}</strong>` : `<a href="${url}" target="_blank" rel="noopener noreferrer">${title}</a>`}<small>${escapeHtml(source.publisher || source.source_type || "--")} · ${formatTime(source.published_at)}</small></div><p>${escapeHtml(source.content_summary || "暂无摘要")}</p></article>`;
+        }).join("") : '<p class="stock-detail-empty">暂无研究来源。</p>'}</div>
+      </article>
+    </section>`;
+}
+
+async function openStockDetail(symbol, trigger) {
+  const dialog = $("#stock-detail-dialog");
+  stockDetailTrigger = trigger || document.activeElement;
+  $("#stock-detail-title").textContent = `${symbol} · 正在加载`;
+  $("#stock-detail-subtitle").textContent = "正在读取证券主数据与基础面资料";
+  $("#stock-detail-body").innerHTML = '<div class="stock-detail-loading" role="status">正在加载详情…</div>';
+  if (!dialog.open) dialog.showModal();
+  try {
+    renderStockDetail(await api(`/stock-library/${encodeURIComponent(symbol)}`));
+  } catch (error) {
+    $("#stock-detail-title").textContent = `${symbol} · 加载失败`;
+    $("#stock-detail-body").innerHTML = `<div class="stock-detail-error" role="alert"><strong>暂时无法读取证券详情</strong><p>${escapeHtml(error.message)}</p><button type="button" data-stock-detail-retry="${escapeHtml(symbol)}">重新加载</button></div>`;
+  }
 }
 
 async function importStockLibrary() {
@@ -864,8 +959,23 @@ function bindEvents() {
   ["stock-library-filter", "alerts-filter", "news-filter", "symbols-filter", "users-filter", "audit-filter"].forEach((id) => $("#" + id).addEventListener("submit", (event) => { event.preventDefault(); loadView(); }));
   $("#stock-library-import").addEventListener("click", () => importStockLibrary().catch((error) => toast(error.message, "error")));
   $("#stock-library-table").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-stock-sync]");
-    if (button) syncStockProfile(button.dataset.stockSync).catch((error) => toast(error.message, "error"));
+    const detailButton = event.target.closest("[data-stock-detail]");
+    if (detailButton) {
+      openStockDetail(detailButton.dataset.stockDetail, detailButton);
+      return;
+    }
+    const syncButton = event.target.closest("[data-stock-sync]");
+    if (syncButton) syncStockProfile(syncButton.dataset.stockSync).catch((error) => toast(error.message, "error"));
+  });
+  $("#stock-detail-close").addEventListener("click", () => $("#stock-detail-dialog").close());
+  $("#stock-detail-dialog").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) event.currentTarget.close();
+    const retryButton = event.target.closest("[data-stock-detail-retry]");
+    if (retryButton) openStockDetail(retryButton.dataset.stockDetailRetry, stockDetailTrigger);
+  });
+  $("#stock-detail-dialog").addEventListener("close", () => {
+    if (stockDetailTrigger?.isConnected) stockDetailTrigger.focus();
+    stockDetailTrigger = null;
   });
   $("#rules-form").addEventListener("submit", async (event) => {
     event.preventDefault();

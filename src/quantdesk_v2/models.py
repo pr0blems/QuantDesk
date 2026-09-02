@@ -2349,11 +2349,12 @@ class StrategyTemplate(Base):
         CheckConstraint("version > 0", name="positive_version"),
         CheckConstraint(
             "engine_key IN ('multi_factor', 'ma_cross', 'macd_momentum', "
-            "'rsi_reversal', 'bollinger_reversion', 'strategy_dsl')",
+            "'rsi_reversal', 'bollinger_reversion', 'strategy_dsl', 'martingale_tp4')",
             name="supported_engine",
         ),
         CheckConstraint(
-            "template_kind IN ('strategy', 'builtin_strategy')", name="valid_template_kind"
+            "template_kind IN ('strategy', 'builtin_strategy', 'basket_strategy')",
+            name="valid_template_kind",
         ),
         UniqueConstraint("template_key", name="uq_strategy_templates_template_key"),
         Index("ix_strategy_templates_active_sort", "is_active", "sort_order"),
@@ -2442,11 +2443,13 @@ class UserStrategy(Base):
         ),
         CheckConstraint(
             "engine_key IN ('multi_factor', 'ma_cross', 'macd_momentum', "
-            "'rsi_reversal', 'bollinger_reversion', 'strategy_dsl', 'python_source')",
+            "'rsi_reversal', 'bollinger_reversion', 'strategy_dsl', 'python_source', "
+            "'martingale_tp4')",
             name="supported_engine",
         ),
         CheckConstraint(
-            "strategy_kind IN ('full_strategy', 'source_strategy', 'builtin_strategy')",
+            "strategy_kind IN ('full_strategy', 'source_strategy', 'builtin_strategy', "
+            "'basket_strategy')",
             name="valid_strategy_kind",
         ),
         CheckConstraint(
@@ -3946,6 +3949,330 @@ class SecuritySymbolMapping(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
     )
+
+
+class ReferenceMarketBar(Base):
+    """Source-qualified cash-market bar; never mixed with Binance klines."""
+
+    __tablename__ = "reference_market_bars"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "asset_class",
+            "symbol",
+            "timeframe",
+            "trade_session",
+            "adjustment",
+            "open_time",
+            name="uq_reference_market_bars_identity",
+        ),
+        Index(
+            "ix_reference_market_bars_lookup",
+            "source",
+            "symbol",
+            "timeframe",
+            "trade_session",
+            "open_time",
+        ),
+        {
+            "comment": "Source-qualified reference-market OHLCV bars",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    security_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("securities.id", ondelete="RESTRICT"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    trade_session: Mapped[str] = mapped_column(String(24), nullable=False)
+    adjustment: Mapped[str] = mapped_column(String(16), nullable=False)
+    open_time: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    close_time: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    open: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    volume: Mapped[Decimal] = mapped_column(Numeric(30, 8), nullable=False)
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(30, 8))
+    received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    source_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class ReferenceMarketDataQuality(Base):
+    """Latest fail-closed quality decision for one reference bar stream."""
+
+    __tablename__ = "reference_market_data_quality"
+    __table_args__ = (
+        CheckConstraint("status IN ('usable', 'blocked')", name="valid_status"),
+        UniqueConstraint(
+            "source",
+            "symbol",
+            "timeframe",
+            "trade_session",
+            "adjustment",
+            name="uq_reference_market_data_quality_identity",
+        ),
+        Index(
+            "ix_reference_market_data_quality_status",
+            "source",
+            "status",
+            "evaluated_at",
+        ),
+        {
+            "comment": "Auditable quality gate for reference market data",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    trade_session: Mapped[str] = mapped_column(String(24), nullable=False)
+    adjustment: Mapped[str] = mapped_column(String(16), nullable=False)
+    expected_bars: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    actual_bars: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    gap_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    invalid_ohlc_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    newest_closed_time: Mapped[int | None] = mapped_column(BigInteger)
+    age_seconds: Mapped[int | None] = mapped_column(BigInteger)
+    completeness_ratio: Mapped[Decimal] = mapped_column(
+        Numeric(12, 8), default=Decimal("0"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), default="blocked", nullable=False)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class StrategyMarketDataManifest(Base):
+    """Immutable identity for one Tiger/Binance paired research data set."""
+
+    __tablename__ = "strategy_market_data_manifests"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_strategy_market_data_manifests_public_id"),
+        UniqueConstraint("content_sha256", name="uq_strategy_market_data_manifests_hash"),
+        Index(
+            "ix_strategy_market_data_manifests_source_symbol",
+            "signal_source",
+            "underlying_symbol",
+            "timeframe",
+            "created_at",
+        ),
+        {
+            "comment": "Immutable market-data lineage for basket strategy research",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    signal_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    underlying_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    trade_session: Mapped[str] = mapped_column(String(24), nullable=False)
+    adjustment: Mapped[str] = mapped_column(String(16), nullable=False)
+    begin_time: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_time: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    row_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    quality_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    storage_uri: Mapped[str | None] = mapped_column(String(512))
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class StrategyBasketCycle(Base):
+    """Durable aggregate root for one multi-leg Martingale TP4 cycle."""
+
+    __tablename__ = "strategy_basket_cycles"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('arming', 'opening', 'open', 'adding', 'exiting', 'closed', "
+            "'recovery_required', 'failed_closed')",
+            name="valid_state",
+        ),
+        CheckConstraint("mode IN ('auto', 'recovery', 'grid')", name="valid_mode"),
+        ForeignKeyConstraint(
+            ["deployment_id", "user_id"],
+            ["strategy_deployments.id", "strategy_deployments.user_id"],
+            name="fk_strategy_basket_cycles_deployment_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_revision_id", "user_id"],
+            ["strategy_revisions.id", "strategy_revisions.user_id"],
+            name="fk_strategy_basket_cycles_revision_tenant",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_basket_cycles_public_id"),
+        UniqueConstraint("active_key", name="uq_strategy_basket_cycles_active_key"),
+        UniqueConstraint("id", "user_id", name="uq_strategy_basket_cycles_id_user_id"),
+        Index(
+            "ix_strategy_basket_cycles_deployment_state",
+            "deployment_id",
+            "state",
+            "updated_at",
+        ),
+        {
+            "comment": "Durable multi-leg basket strategy cycle",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    deployment_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    strategy_revision_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    underlying_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    cycle_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    box_high: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    box_low: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    box_time: Mapped[int | None] = mapped_column(BigInteger)
+    gross_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    net_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    weighted_cost: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    unrealized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    reserved_risk: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    max_risk: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    active_key: Mapped[str | None] = mapped_column(String(191))
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class StrategyBasketLeg(Base):
+    __tablename__ = "strategy_basket_legs"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('open', 'add', 'hedge', 'overlap_close', 'reduce', 'exit')",
+            name="valid_action",
+        ),
+        CheckConstraint("direction IN ('long', 'short')", name="valid_direction"),
+        CheckConstraint(
+            "state IN ('planned', 'approved', 'submitted', 'partially_filled', 'filled', "
+            "'cancelled', 'rejected', 'failed')",
+            name="valid_state",
+        ),
+        ForeignKeyConstraint(
+            ["cycle_id", "user_id"],
+            ["strategy_basket_cycles.id", "strategy_basket_cycles.user_id"],
+            name="fk_strategy_basket_legs_cycle_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "cycle_id", "leg_index", "action", name="uq_strategy_basket_legs_action"
+        ),
+        UniqueConstraint("client_order_id", name="uq_strategy_basket_legs_client_order"),
+        Index("ix_strategy_basket_legs_cycle_state", "cycle_id", "state", "created_at"),
+        {
+            "comment": "One planned or executed leg in a basket cycle",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    cycle_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    leg_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
+    planned_quantity: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
+    filled_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    trigger_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    planned_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    average_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    intent_id: Mapped[str | None] = mapped_column(String(64))
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64))
+    client_order_id: Mapped[str | None] = mapped_column(String(64))
+    fee: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    funding: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(30, 12), default=Decimal("0"), nullable=False
+    )
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class StrategyBasketEvent(Base):
+    """Append-only audit event for basket state changes and operator actions."""
+
+    __tablename__ = "strategy_basket_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["cycle_id", "user_id"],
+            ["strategy_basket_cycles.id", "strategy_basket_cycles.user_id"],
+            name="fk_strategy_basket_events_cycle_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_basket_events_public_id"),
+        UniqueConstraint(
+            "cycle_id", "sequence_no", name="uq_strategy_basket_events_sequence"
+        ),
+        Index("ix_strategy_basket_events_cycle_time", "cycle_id", "occurred_at"),
+        {
+            "comment": "Append-only basket strategy event ledger",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False
+    )
+    cycle_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(64))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class CompanyProfile(Base):

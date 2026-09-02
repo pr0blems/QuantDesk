@@ -12,6 +12,28 @@ export type MarketBreadth = {
   up: number;
   flat: number;
   down: number;
+  serverTime?: number;
+};
+
+export type FearGreedIndex = {
+  latestValue: number;
+  prevDayValue: number;
+  prevWeekValue: number;
+  prevMonthValue: number;
+  type?: "US" | "CC";
+  symbol?: string;
+  latestTimestamp?: number;
+  latestTime?: string;
+  latestComparedValue?: number;
+  serverTime?: number;
+  items?: FearGreedHistoryPoint[];
+};
+
+export type FearGreedHistoryPoint = {
+  timestamp: number;
+  value: number;
+  comparedTimestamp: number;
+  comparedValue: number;
 };
 
 type ApiIndex = {
@@ -30,6 +52,8 @@ type MarketApiPayload = {
   indices?: ApiIndex[];
   thumb?: Record<string, ApiThumbnail>;
   upDownSummary?: Partial<MarketBreadth>;
+  fearGreedIndex?: Partial<FearGreedIndex>;
+  cryptoFearGreedIndex?: Partial<FearGreedIndex>;
 };
 
 export type MarketRefreshState = {
@@ -42,6 +66,9 @@ export type MarketRefreshState = {
   checkCount: number;
   unchangedCount: number;
   retryDelayMs: number;
+  breadthSource: "snapshot" | "live";
+  fearGreedSource: "snapshot" | "live";
+  cryptoFearGreedSource: "snapshot" | "live";
   error: string | null;
 };
 
@@ -54,7 +81,7 @@ function flattenIndices(indices: ApiIndex[] = []) {
   return indices.flatMap((item) => item.indices ?? [item]);
 }
 
-function mergeQuotes(current: RefreshableIndexQuote[], payload: MarketApiPayload) {
+function mergeQuotes(current: RefreshableIndexQuote[], payload: MarketApiPayload, resetSeries: boolean) {
   const updates = new Map(flattenIndices(payload.indices).filter((item) => item.symbol).map((item) => [item.symbol as string, item]));
   let changed = false;
   const quotes = current.map((quote) => {
@@ -66,22 +93,48 @@ function mergeQuotes(current: RefreshableIndexQuote[], payload: MarketApiPayload
     const priceChanged = latest !== quote.latest;
     const series = remoteSeries?.length
       ? remoteSeries
-      : priceChanged
-        ? [...quote.series.slice(-78), latest]
-        : quote.series;
-    if (priceChanged || previous !== quote.previous || series !== quote.series) changed = true;
+      : resetSeries
+        ? [latest]
+        : [...quote.series.slice(-119), latest];
+    if (priceChanged || previous !== quote.previous) changed = true;
     return { ...quote, latest, previous, series };
   });
   return { quotes, changed };
 }
 
-export function useMarketRefresh(initialQuotes: RefreshableIndexQuote[], initialBreadth: MarketBreadth) {
+function mergeFearGreed(current: FearGreedIndex, update?: Partial<FearGreedIndex>) {
+  if (!update) return current;
+  return {
+    latestValue: update.latestValue ?? current.latestValue,
+    prevDayValue: update.prevDayValue ?? current.prevDayValue,
+    prevWeekValue: update.prevWeekValue ?? current.prevWeekValue,
+    prevMonthValue: update.prevMonthValue ?? current.prevMonthValue,
+    type: update.type ?? current.type,
+    symbol: update.symbol ?? current.symbol,
+    latestTimestamp: update.latestTimestamp ?? current.latestTimestamp,
+    latestTime: update.latestTime ?? current.latestTime,
+    latestComparedValue: update.latestComparedValue ?? current.latestComparedValue,
+    serverTime: update.serverTime ?? current.serverTime,
+    items: update.items?.length ? update.items : current.items,
+  };
+}
+
+export function useMarketRefresh(
+  initialQuotes: RefreshableIndexQuote[],
+  initialBreadth: MarketBreadth,
+  initialFearGreed: FearGreedIndex,
+  initialCryptoFearGreed: FearGreedIndex,
+) {
   const [quotes, setQuotes] = useState(initialQuotes);
   const [breadth, setBreadth] = useState(initialBreadth);
+  const [fearGreed, setFearGreed] = useState(initialFearGreed);
+  const [cryptoFearGreed, setCryptoFearGreed] = useState(initialCryptoFearGreed);
   const [enabled, setEnabled] = useState(true);
   const [visible, setVisible] = useState(() => typeof document === "undefined" || !document.hidden);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const quotesRef = useRef(initialQuotes);
+  const breadthRef = useRef(initialBreadth);
+  const hasReceivedLiveDataRef = useRef(false);
   const [state, setState] = useState<MarketRefreshState>({
     enabled: true,
     source: liveConfigured ? "live" : "snapshot",
@@ -92,6 +145,9 @@ export function useMarketRefresh(initialQuotes: RefreshableIndexQuote[], initial
     checkCount: 0,
     unchangedCount: 0,
     retryDelayMs: ONE_SECOND,
+    breadthSource: "snapshot",
+    fearGreedSource: "snapshot",
+    cryptoFearGreedSource: "snapshot",
     error: null,
   });
 
@@ -146,17 +202,27 @@ export function useMarketRefresh(initialQuotes: RefreshableIndexQuote[], initial
         const response = await fetch(liveEndpoint, { signal: requestController.signal, headers: { Accept: "application/json" }, cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const payload = await response.json() as MarketApiPayload;
-        const merged = mergeQuotes(quotesRef.current, payload);
-        const dataChanged = merged.changed;
+        const merged = mergeQuotes(quotesRef.current, payload, !hasReceivedLiveDataRef.current);
+        hasReceivedLiveDataRef.current = true;
         quotesRef.current = merged.quotes;
         setQuotes(merged.quotes);
+        let breadthChanged = false;
         if (payload.upDownSummary) {
-          setBreadth((current) => ({
-            up: payload.upDownSummary?.up ?? current.up,
-            flat: payload.upDownSummary?.flat ?? current.flat,
-            down: payload.upDownSummary?.down ?? current.down,
-          }));
+          const nextBreadth = {
+            up: payload.upDownSummary.up ?? breadthRef.current.up,
+            flat: payload.upDownSummary.flat ?? breadthRef.current.flat,
+            down: payload.upDownSummary.down ?? breadthRef.current.down,
+            serverTime: payload.upDownSummary.serverTime ?? breadthRef.current.serverTime,
+          };
+          breadthChanged = nextBreadth.up !== breadthRef.current.up
+            || nextBreadth.flat !== breadthRef.current.flat
+            || nextBreadth.down !== breadthRef.current.down;
+          breadthRef.current = nextBreadth;
+          setBreadth(nextBreadth);
         }
+        const dataChanged = merged.changed || breadthChanged;
+        if (payload.fearGreedIndex) setFearGreed((current) => mergeFearGreed(current, payload.fearGreedIndex));
+        if (payload.cryptoFearGreedIndex) setCryptoFearGreed((current) => mergeFearGreed(current, payload.cryptoFearGreedIndex));
         failureCount = 0;
         setState((current) => ({
           ...current,
@@ -168,6 +234,9 @@ export function useMarketRefresh(initialQuotes: RefreshableIndexQuote[], initial
           checkCount: current.checkCount + 1,
           unchangedCount: dataChanged ? 0 : current.unchangedCount + 1,
           retryDelayMs: ONE_SECOND,
+          breadthSource: payload.upDownSummary ? "live" : "snapshot",
+          fearGreedSource: payload.fearGreedIndex ? "live" : "snapshot",
+          cryptoFearGreedSource: payload.cryptoFearGreedIndex ? "live" : "snapshot",
           error: null,
         }));
         schedule(ONE_SECOND, check);
@@ -205,5 +274,5 @@ export function useMarketRefresh(initialQuotes: RefreshableIndexQuote[], initial
     refreshNow: () => setRefreshNonce((current) => current + 1),
   }), []);
 
-  return { quotes, breadth, state, actions, liveConfigured };
+  return { quotes, breadth, fearGreed, cryptoFearGreed, state, actions, liveConfigured };
 }

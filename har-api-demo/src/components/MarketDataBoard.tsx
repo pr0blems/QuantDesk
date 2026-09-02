@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { useMarketRefresh } from "../hooks/useMarketRefresh";
-import type { MarketBreadth, RefreshableIndexQuote } from "../hooks/useMarketRefresh";
+import type { FearGreedIndex, MarketBreadth, RefreshableIndexQuote } from "../hooks/useMarketRefresh";
+
+const FearGreedComparison = lazy(() => import("./FearGreedComparison").then((module) => ({ default: module.FearGreedComparison })));
 
 type IndexQuote = RefreshableIndexQuote;
 
@@ -41,7 +43,29 @@ const indexQuotes: IndexQuote[] = [
   },
 ];
 
-const initialBreadth: MarketBreadth = { up: 2262, flat: 1262, down: 3705 };
+const initialBreadth: MarketBreadth = { up: 2252, flat: 1208, down: 3771, serverTime: 1788243054686 };
+const initialFearGreed: FearGreedIndex = {
+  type: "US",
+  latestValue: 59.79,
+  prevDayValue: 63.72,
+  prevWeekValue: 62.4,
+  prevMonthValue: 53.98,
+  symbol: ".SPX",
+  latestTimestamp: 1788148800000,
+  latestTime: "2026-08-31 19:45 EDT",
+  latestComparedValue: 7686.14,
+};
+const initialCryptoFearGreed: FearGreedIndex = {
+  type: "CC",
+  latestValue: 70,
+  prevDayValue: 61,
+  prevWeekValue: 73,
+  prevMonthValue: 26,
+  symbol: "BTC.USD.CC",
+  latestTimestamp: 1788242400000,
+  latestTime: "2026-09-01 14:00 CST",
+  latestComparedValue: 79142.88,
+};
 
 const concepts: SectorCard[] = [
   { name: "热门中概股", change: "-1.41%", leader: { symbol: "CHA", name: "霸王茶姬", change: "+4.35%" } },
@@ -96,6 +120,7 @@ const interfaceGroups = [
     items: [
       ["GET", "/v2/market", "市场聚合", "登录态"],
       ["GET", "/market/v2/indices", "全球指数", "登录态"],
+      ["GET", "/api/global/fear_greed_index?type=US|CC", "美股/虚拟币恐贪指数", "登录态"],
       ["GET", "/discovery/api/v4/activities/market/list", "明星异动", "登录态"],
       ["GET", "/ipos", "新股日历", "登录态"],
       ["POST", "/stock_info/brief/all", "批量简行情", "登录态"],
@@ -103,6 +128,19 @@ const interfaceGroups = [
       ["POST", "/stock_info/thumbnail/all", "批量缩略走势", "登录态"],
       ["GET", "/api/etf/market", "ETF市场", "登录态"],
       ["POST", "/api/stock/US/rank/dividend", "股息排行", "登录态"],
+    ],
+  },
+  {
+    title: "个股深度与资金",
+    items: [
+      ["POST", "/stock_info/detail", "个股详细行情", "登录态"],
+      ["GET", "/stock_info/ask_bid/arca/GPRO?props=askBidDepth", "40档深度盘口", "行情权限"],
+      ["GET", "/stock_info/ask_bid/arca/GPRO?props=askBidHist", "买卖40档快照", "行情权限"],
+      ["GET", "/stock_info/trade_tick/GPRO", "逐笔成交与统计", "登录态"],
+      ["GET", "/stock_info/trade_price_list/GPRO", "成交价分布", "登录态"],
+      ["GET", "/stock_info/fund_related/GPRO?withPublicityFund=1", "当日资金与筹码", "登录态"],
+      ["GET", "/stock_info/fund_related/GPRO?withFundFlowTrend=1", "分时资金流向", "登录态"],
+      ["GET", "/stock_info/fund_related/GPRO?withPositionChange=1", "5日大单变化", "登录态"],
     ],
   },
   {
@@ -124,20 +162,22 @@ function SourceBadge({ children }: { children: string }) {
   return <code className="market-source">{children}</code>;
 }
 
-function Sparkline({ quote }: { quote: IndexQuote }) {
+function Sparkline({ quote, source }: { quote: IndexQuote; source: "snapshot" | "live" }) {
   const width = 260;
   const height = 70;
   const min = Math.min(...quote.series);
   const max = Math.max(...quote.series);
-  const range = Math.max(max - min, 1);
+  const hasRange = max > min;
   const points = quote.series.map((value, index) => {
     const x = index / Math.max(quote.series.length - 1, 1) * width;
-    const y = 5 + (max - value) / range * (height - 10);
+    const y = hasRange ? 5 + (max - value) / (max - min) * (height - 10) : height / 2;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(" ");
   const isUp = quote.latest >= quote.previous;
-  return <svg className={isUp ? "market-spark positive-line" : "market-spark negative-line"} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${quote.name} 行情缩略走势，共 ${quote.series.length} 个采样点`}>
+  const seriesLabel = source === "live" ? "启动后实时采样走势" : "HAR 缩略走势";
+  return <svg className={isUp ? "market-spark positive-line" : "market-spark negative-line"} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${quote.name} ${seriesLabel}，共 ${quote.series.length} 个采样点`}>
     <polyline points={points} />
+    {quote.series.length === 1 ? <circle cx={width / 2} cy={height / 2} r="2.5" /> : null}
   </svg>;
 }
 
@@ -148,7 +188,7 @@ function IndexCard({ quote, source }: { quote: IndexQuote; source: "snapshot" | 
     <header><div><strong>{quote.name}</strong><span>{quote.symbol}</span></div><span className={`market-live-dot ${source}`}>{source === "live" ? "LIVE" : "HAR 200"}</span></header>
     <div className="market-index-value">{quote.latest.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
     <div className={changeClass(change)}>{change >= 0 ? "+" : ""}{change.toFixed(2)} &nbsp; {rate >= 0 ? "+" : ""}{rate.toFixed(2)}%</div>
-    <Sparkline quote={quote} />
+    <Sparkline quote={quote} source={source} />
   </article>;
 }
 
@@ -157,8 +197,10 @@ function formatRefreshTime(value: number | null) {
   return new Date(value).toLocaleTimeString("zh-CN", { hour12: false });
 }
 
-function LiveMarketStrip() {
-  const { quotes, breadth, state, actions, liveConfigured } = useMarketRefresh(indexQuotes, initialBreadth);
+type MarketRefreshResult = ReturnType<typeof useMarketRefresh>;
+
+function LiveMarketStrip({ market }: { market: MarketRefreshResult }) {
+  const { quotes, breadth, state, actions, liveConfigured } = market;
   const totalBreadth = breadth.up + breadth.flat + breadth.down;
   const upWidth = breadth.up / Math.max(totalBreadth, 1) * 100;
   const flatWidth = breadth.flat / Math.max(totalBreadth, 1) * 100;
@@ -191,13 +233,60 @@ function LiveMarketStrip() {
     <section className="market-indices" aria-label="三大指数">
       {quotes.map((quote) => <IndexCard key={quote.symbol} quote={quote} source={state.source} />)}
       <article className="market-breadth-card">
-        <header><strong>市场宽度</strong><SourceBadge>/v2/market</SourceBadge></header>
+        <header><strong>市场宽度</strong><div><span className={`market-live-dot ${state.breadthSource}`}>{state.breadthSource === "live" ? "LIVE" : "HAR 快照"}</span><SourceBadge>/v2/market</SourceBadge></div></header>
         <div className="market-breadth-numbers"><span><b className="positive">{breadth.up.toLocaleString("en-US")}</b>上涨</span><span><b>{breadth.flat.toLocaleString("en-US")}</b>平盘</span><span><b className="negative">{breadth.down.toLocaleString("en-US")}</b>下跌</span></div>
         <div className="market-breadth-bar"><i style={{ width: `${upWidth}%` }} /><i style={{ width: `${flatWidth}%` }} /><i /></div>
-        <small>上涨占比 {upWidth.toFixed(1)}% · 下跌占比 {(breadth.down / Math.max(totalBreadth, 1) * 100).toFixed(1)}%</small>
+        <small>上涨占比 {upWidth.toFixed(1)}% · 下跌占比 {(breadth.down / Math.max(totalBreadth, 1) * 100).toFixed(1)}% · 接口响应 {formatRefreshTime(breadth.serverTime ?? null)}</small>
       </article>
     </section>
   </>;
+}
+
+function fearGreedLabel(value: number) {
+  if (value >= 75) return "极度贪婪";
+  if (value >= 55) return "贪婪";
+  if (value >= 45) return "中性";
+  if (value >= 25) return "恐惧";
+  return "极度恐惧";
+}
+
+function FearGreedCard({
+  usData,
+  cryptoData,
+  usSource,
+  cryptoSource,
+}: {
+  usData: FearGreedIndex;
+  cryptoData: FearGreedIndex;
+  usSource: "snapshot" | "live";
+  cryptoSource: "snapshot" | "live";
+}) {
+  const [view, setView] = useState<"US" | "CC">("US");
+  const data = view === "US" ? usData : cryptoData;
+  const source = view === "US" ? usSource : cryptoSource;
+  const angle = Math.max(-90, Math.min(90, data.latestValue / 100 * 180 - 90));
+  const dayDelta = data.latestValue - data.prevDayValue;
+  const summary = source === "live"
+    ? `较前一日${dayDelta >= 0 ? "上升" : "下降"} ${Math.abs(dayDelta).toFixed(2)} 点 · 数据时间 ${data.latestTime ?? "--"}`
+    : `显示 HAR 抓包值 · 数据时间 ${data.latestTime ?? "--"}`;
+
+  return <section className="market-panel market-fear">
+    <header className="market-panel-head">
+      <div><h2>恐贪指数</h2><span className={`market-live-dot ${source}`}>{source === "live" ? "LIVE" : "HAR 快照"}</span><SourceBadge>/fear_greed_index</SourceBadge></div>
+      <div className="market-tabs" role="tablist" aria-label="恐贪指数市场">
+        <button className={view === "US" ? "active" : ""} onClick={() => setView("US")} role="tab" aria-selected={view === "US"} type="button">美股</button>
+        <button className={view === "CC" ? "active" : ""} onClick={() => setView("CC")} role="tab" aria-selected={view === "CC"} type="button">虚拟币</button>
+      </div>
+    </header>
+    <div className="market-fear-gauge" style={{ "--fear-angle": `${angle.toFixed(1)}deg` } as CSSProperties}><div><strong>{data.latestValue.toFixed(2)}</strong><span>{fearGreedLabel(data.latestValue)}</span></div></div>
+    <dl>
+      <div><dt>前一日</dt><dd>{data.prevDayValue.toFixed(2)}</dd></div>
+      <div><dt>一周前</dt><dd>{data.prevWeekValue.toFixed(2)}</dd></div>
+      <div><dt>一个月前</dt><dd>{data.prevMonthValue.toFixed(2)}</dd></div>
+    </dl>
+    <p>{summary}</p>
+    <p className="market-fear-response">接口响应 {formatRefreshTime(data.serverTime ?? null)} · 参数 type={view}</p>
+  </section>;
 }
 
 function SectorGrid({ items }: { items: SectorCard[] }) {
@@ -210,6 +299,7 @@ function SectorGrid({ items }: { items: SectorCard[] }) {
 
 export function MarketDataBoard() {
   const hasLiveIndices = import.meta.env.VITE_MARKET_LIVE_ENABLED === "true";
+  const market = useMarketRefresh(indexQuotes, initialBreadth, initialFearGreed, initialCryptoFearGreed);
   const [sectorView, setSectorView] = useState<"concept" | "industry">("concept");
   const [rankingView, setRankingView] = useState<"premarket" | "etf" | "dividend">("premarket");
   const selectedRanking = useMemo(() => {
@@ -222,19 +312,19 @@ export function MarketDataBoard() {
   return <main className="market-board">
     <section className="market-hero">
       <div>
-        <span className="market-eyebrow">US MARKET · {hasLiveIndices ? "三大指数实时 · 其余 HAR 快照" : "HAR 抓包快照"}</span>
+        <span className="market-eyebrow">US MARKET · {hasLiveIndices ? "三大指数与双市场恐贪实时" : "HAR 抓包快照"}</span>
         <h1>可用接口数据工作台</h1>
         <p>展示新 HAR 中已确认业务成功的市场、行情、ETF、新股与异动数据。所有内容均已脱敏，不在前端保存 App 令牌。</p>
       </div>
       <div className="market-summary-metrics">
-        <div><strong>13</strong><span>可用数据接口</span></div>
-        <div><strong>9</strong><span>核心接口</span></div>
+        <div><strong>22</strong><span>可用数据接口</span></div>
+        <div><strong>18</strong><span>核心接口</span></div>
         <div><strong>4</strong><span>辅助接口</span></div>
         <button type="button" onClick={scrollToInterfaces}>查看接口目录 <span>→</span></button>
       </div>
     </section>
 
-    <LiveMarketStrip />
+    <LiveMarketStrip market={market} />
 
     <div className="market-main-grid">
       <section className="market-panel market-sectors">
@@ -248,17 +338,17 @@ export function MarketDataBoard() {
         <SectorGrid items={sectorView === "concept" ? concepts : industries} />
       </section>
 
-      <section className="market-panel market-fear">
-        <header className="market-panel-head"><div><h2>恐贪指数</h2><SourceBadge>/v2/market</SourceBadge></div></header>
-        <div className="market-fear-gauge" style={{ "--fear-angle": "49deg" } as CSSProperties}><div><strong>64</strong><span>贪婪</span></div></div>
-        <dl>
-          <div><dt>前一日</dt><dd>68.33</dd></div>
-          <div><dt>一周前</dt><dd>63.02</dd></div>
-          <div><dt>一个月前</dt><dd>48.20</dd></div>
-        </dl>
-        <p>乐观情绪扩散，但较前一日有所降温。</p>
-      </section>
+      <FearGreedCard
+        usData={market.fearGreed}
+        cryptoData={market.cryptoFearGreed}
+        usSource={market.state.fearGreedSource}
+        cryptoSource={market.state.cryptoFearGreedSource}
+      />
     </div>
+
+    <Suspense fallback={<section className="market-panel fear-comparison empty"><h2>美股恐贪 × 标普500</h2><p>正在加载历史对比分析…</p></section>}>
+      <FearGreedComparison data={market.fearGreed} source={market.state.fearGreedSource} />
+    </Suspense>
 
     <div className="market-main-grid lower">
       <section className="market-panel market-ranking">
@@ -295,9 +385,9 @@ export function MarketDataBoard() {
     </section>
 
     <section className="market-panel market-interfaces" id="market-interface-catalog">
-      <header className="market-panel-head"><div><h2>接口可用性</h2><span>HAR 响应成功不等于公开 API；12 个接口依赖登录态或客户端上下文。</span></div><span className="market-public-badge">1 个免登录</span></header>
+      <header className="market-panel-head"><div><h2>接口可用性</h2><span>HAR 响应成功不等于公开 API；21 个接口依赖登录态、行情权限或客户端上下文。</span></div><span className="market-public-badge">1 个免登录</span></header>
       {interfaceGroups.map((group) => <div className="market-interface-group" key={group.title}><h3>{group.title}</h3><div>{group.items.map(([method, path, purpose, auth]) => <article key={`${method}-${path}`}><span className={`market-method ${method.toLowerCase()}`}>{method}</span><code>{path}</code><strong>{purpose}</strong><em className={auth === "免登录" ? "public" : ""}>{auth}</em></article>)}</div></div>)}
-      <footer><span>未捕获：WebSocket、40档盘口、完整K线、新闻正文、个股社区情绪</span><button onClick={scrollToInterfaces} type="button">当前目录：13 个 →</button></footer>
+      <footer><span>本次新增：40档盘口、逐笔成交、资金流向、5日大单、成交价与筹码分布；仍未捕获完整K线和新闻正文。</span><button onClick={scrollToInterfaces} type="button">当前目录：22 个 →</button></footer>
     </section>
   </main>;
 }
