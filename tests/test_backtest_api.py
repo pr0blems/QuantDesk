@@ -17,7 +17,14 @@ from quantdesk_v2.backtest import BacktestRepository, BacktestUnavailable
 from quantdesk_v2.config import Settings
 from quantdesk_v2.database import get_db
 from quantdesk_v2.main import create_app
-from quantdesk_v2.models import AuditLog, BacktestRun, BacktestTrade, User, UserStrategy
+from quantdesk_v2.models import (
+    AuditLog,
+    BacktestRun,
+    BacktestTrade,
+    StrategyRevision,
+    User,
+    UserStrategy,
+)
 
 
 class FakeBacktestRepository:
@@ -246,6 +253,57 @@ def backtest_payload() -> dict:
     }
 
 
+def test_builtin_indicator_strategy_is_a_manual_backtest_choice() -> None:
+    strategy = UserStrategy(
+        status="active",
+        version=1,
+        engine_key="ma_cross",
+        strategy_kind="builtin_strategy",
+        lifecycle_status="published",
+        parameter_schema_json=[{"key": "fast_period"}, {"key": "slow_period"}],
+    )
+    revision = StrategyRevision(version=1, lifecycle_status="published")
+
+    assert api._strategy_is_backtest_compatible(strategy, revision) is True
+
+
+def test_live_ai_policy_is_not_misrepresented_as_a_kline_backtest() -> None:
+    strategy = UserStrategy(
+        status="active",
+        version=11,
+        engine_key="multi_factor",
+        strategy_kind="builtin_strategy",
+        lifecycle_status="published",
+        parameter_schema_json=[
+            {"key": "minimum_news_score"},
+            {"key": "minimum_combined_score"},
+        ],
+    )
+    revision = StrategyRevision(version=11, lifecycle_status="published")
+
+    assert api._strategy_is_backtest_compatible(strategy, revision) is False
+
+
+def test_validated_published_full_strategy_remains_backtestable() -> None:
+    strategy = UserStrategy(
+        status="active",
+        version=1,
+        engine_key="strategy_dsl",
+        strategy_kind="full_strategy",
+        lifecycle_status="published",
+        spec_json={"schema_version": 1},
+        spec_hash="same-spec",
+    )
+    revision = StrategyRevision(
+        version=1,
+        lifecycle_status="published",
+        spec_hash="same-spec",
+        validation_json={"valid": True},
+    )
+
+    assert api._strategy_is_backtest_compatible(strategy, revision) is True
+
+
 def test_catalog_keeps_symbols_without_local_history_for_on_demand_fetch() -> None:
     catalog = api._catalog_response(
         {
@@ -455,7 +513,7 @@ def test_backtest_run_is_saved_audited_and_isolated_by_user(
             assert audit.resource_type == "backtest_run"
 
 
-def test_backtest_catalog_only_exposes_current_users_full_strategies(
+def test_backtest_catalog_exposes_current_users_supported_manual_choices(
     monkeypatch, mysql_test_engine: Engine
 ) -> None:
     client, test_session = build_test_client(mysql_test_engine)
@@ -467,10 +525,13 @@ def test_backtest_catalog_only_exposes_current_users_full_strategies(
         catalog_response = client.get("/api/v2/backtests/catalog", headers=headers)
         assert catalog_response.status_code == 200
         strategies = catalog_response.json()["strategies"]
-        assert len(strategies) == 1
-        assert strategies[0]["strategy_kind"] == "full_strategy"
-        assert strategies[0]["lifecycle_status"] == "validated"
-        assert strategies[0]["name"] == "多周期趋势回踩延续"
+        assert len(strategies) > 1
+        by_name = {item["name"]: item for item in strategies}
+        assert "多周期趋势回踩延续" in by_name
+        assert by_name["多周期趋势回踩延续"]["strategy_kind"] == "full_strategy"
+        assert "MA 金叉" in by_name
+        assert by_name["MA 金叉"]["strategy_kind"] == "builtin_strategy"
+        assert "AI 机会决策策略" not in by_name
 
         with test_session() as db:
             legacy = db.scalar(
@@ -480,9 +541,9 @@ def test_backtest_catalog_only_exposes_current_users_full_strategies(
 
         payload = backtest_payload()
         payload["strategy_id"] = legacy.public_id
-        rejected = client.post("/api/v2/backtests", headers=headers, json=payload)
-        assert rejected.status_code == 422
-        assert "回测资格" in rejected.json()["detail"]
+        response = client.post("/api/v2/backtests", headers=headers, json=payload)
+        assert response.status_code == 201
+        assert repository.configs[-1]["strategy_id"] == "ma_cross"
 
 
 def test_full_strategy_uses_multitimeframe_repository_path(

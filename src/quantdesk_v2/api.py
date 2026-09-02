@@ -26,7 +26,13 @@ from sqlalchemy.orm import Session
 from . import __version__, battle
 from .ai_model_config import get_global_ai_model_config
 from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
-from .backtest import BacktestRepository, BacktestUnavailable
+from .backtest import (
+    STRATEGY_TEMPLATES as BACKTEST_STRATEGY_TEMPLATES,
+)
+from .backtest import (
+    BacktestRepository,
+    BacktestUnavailable,
+)
 from .binance_client import BinanceAccountClientError
 from .binance_performance import (
     build_binance_performance,
@@ -124,6 +130,14 @@ MIN_PERSISTED_QUANTITY = Decimal("0.000000000000000001")
 MAX_CONCURRENT_BACKTESTS = 2
 MAX_CONCURRENT_BACKTESTS_PER_USER = 2
 MAX_PERSISTED_TRADES = 10_000
+_BACKTEST_BUILTIN_PARAMETER_KEYS = {
+    str(template["id"]): frozenset(
+        str(definition["key"])
+        for definition in template.get("params", [])
+        if isinstance(definition, Mapping) and definition.get("key")
+    )
+    for template in BACKTEST_STRATEGY_TEMPLATES
+}
 _backtest_guard = Lock()
 _active_backtest_users: dict[int, int] = {}
 _active_backtest_count = 0
@@ -471,6 +485,64 @@ def _strategy_from_catalog(catalog: dict[str, Any], strategy_id: str) -> dict[st
                     break
                 return strategy
     raise HTTPException(status_code=422, detail="unknown backtest strategy")
+
+
+def _strategy_is_backtest_compatible(
+    strategy: UserStrategy,
+    revision: StrategyRevision | None,
+) -> bool:
+    """Return whether the standard deterministic replay can execute this revision.
+
+    Code-owned indicator strategies are constrained by the replay engine allowlist
+    and parameter validator, so their historical ``published`` lifecycle marker
+    must not hide them from research. User-authored source/full strategies still
+    require a matching, server-validated immutable revision. Basket strategies and
+    the live AI opportunity policy use different data contracts and are excluded
+    from this K-line-only replay catalog.
+    """
+
+    if strategy.status != "active" or revision is None:
+        return False
+    if revision.version != strategy.version:
+        return False
+    if revision.lifecycle_status != strategy.lifecycle_status:
+        return False
+
+    if strategy.strategy_kind == "builtin_strategy":
+        expected_keys = _BACKTEST_BUILTIN_PARAMETER_KEYS.get(strategy.engine_key)
+        if expected_keys is None:
+            return False
+        schema = strategy.parameter_schema_json
+        if not isinstance(schema, list):
+            return False
+        actual_keys = {
+            str(definition["key"])
+            for definition in schema
+            if isinstance(definition, Mapping) and definition.get("key")
+        }
+        # AI Monitor retains ``multi_factor`` as a storage compatibility key, but
+        # its live feature schema is not the four-parameter K-line replay engine.
+        return actual_keys == expected_keys
+
+    if strategy.lifecycle_status not in BACKTEST_ELIGIBLE_STATUSES | {"published"}:
+        return False
+    validation = revision.validation_json
+    if not isinstance(validation, dict) or validation.get("valid") is not True:
+        return False
+    if strategy.strategy_kind == "full_strategy":
+        return (
+            isinstance(strategy.spec_json, dict)
+            and bool(strategy.spec_hash)
+            and revision.spec_hash == strategy.spec_hash
+        )
+    if strategy.strategy_kind == "source_strategy":
+        return (
+            isinstance(strategy.source_code, str)
+            and bool(strategy.source_code.strip())
+            and bool(strategy.source_hash)
+            and revision.source_hash == strategy.source_hash
+        )
+    return False
 
 
 def _strategy_version(strategy: dict[str, Any]) -> str:
@@ -2118,21 +2190,11 @@ def backtest_catalog(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    strategies = [
-        strategy
-        for strategy in ensure_user_default_strategies(db, user.id)
-        if strategy.status == "active"
-        and strategy.strategy_kind in {"full_strategy", "source_strategy"}
-        and strategy.lifecycle_status in BACKTEST_ELIGIBLE_STATUSES
-        and (
-            isinstance(strategy.spec_json, dict)
-            or (
-                strategy.strategy_kind == "source_strategy"
-                and isinstance(strategy.source_code, str)
-                and bool(strategy.source_code.strip())
-            )
-        )
-    ]
+    strategies = []
+    for strategy in ensure_user_default_strategies(db, user.id):
+        revision = current_strategy_revision(db, strategy)
+        if _strategy_is_backtest_compatible(strategy, revision):
+            strategies.append(strategy)
     db.commit()
     try:
         catalog = _backtest(request).catalog()
@@ -2155,23 +2217,12 @@ def create_backtest(
     ensure_user_default_strategies(db, user_id)
     selected = get_user_strategy(db, user_id, payload.strategy_id)
     selected_revision = current_strategy_revision(db, selected) if selected is not None else None
-    if selected is not None and not (
-        selected.status == "active"
-        and selected.strategy_kind in {"full_strategy", "source_strategy"}
-        and selected_revision is not None
-        and selected_revision.lifecycle_status in BACKTEST_ELIGIBLE_STATUSES
-        and (
-            isinstance(selected.spec_json, dict)
-            or (
-                selected.strategy_kind == "source_strategy"
-                and isinstance(selected.source_code, str)
-                and bool(selected.source_code.strip())
-            )
-        )
+    if selected is not None and not _strategy_is_backtest_compatible(
+        selected, selected_revision
     ):
         raise HTTPException(
             status_code=422,
-            detail="只有已通过校验并取得回测资格的当前策略修订才能运行回测",
+            detail="当前策略不兼容标准 K 线回测，请先完成校验或使用对应的专用回测入口",
         )
     database_strategy = strategy_to_catalog_item(selected) if selected is not None else None
     selected_strategy_id = selected.id if database_strategy is not None else None
