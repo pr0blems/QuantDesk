@@ -151,6 +151,32 @@ def test_tp4_uses_direction_order_count_in_grid_mode() -> None:
     assert decision.evidence["take_profit_points"] == "30"
 
 
+def test_short_take_profit_uses_executable_ask_not_bid() -> None:
+    parameters = strategy_parameters_from_mq4(
+        Mq4Inputs(ChooseTrading="grid", TP="100", MaxSpred="50")
+    )
+    basket = BasketSnapshot(
+        legs=(_leg(0, Direction.SELL, "1", "100"),)
+    )
+
+    before_target = evaluate_tick(
+        parameters,
+        basket,
+        _tick("98.99", "99.01"),
+        account_balance=Decimal("10000"),
+    )
+    at_target = evaluate_tick(
+        parameters,
+        basket,
+        _tick("98.98", "99.00"),
+        account_balance=Decimal("10000"),
+    )
+
+    assert before_target.action == DecisionAction.HOLD
+    assert at_target.action == DecisionAction.CLOSE_DIRECTION
+    assert at_target.reason_code == "basket_take_profit"
+
+
 def test_overlap_11_means_last_leg_covers_111_percent_of_first_loss() -> None:
     parameters = strategy_parameters_from_mq4(
         Mq4Inputs(ChooseTrading="grid", OverlapOrderNumber=2, OverlapPercent="11")

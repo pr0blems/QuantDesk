@@ -303,16 +303,19 @@ def _evaluate_direction_exit(
         breakeven=breakeven,
         take_profit_points=tp_points,
     )
+    executable_close_price = tick.bid if direction == Direction.BUY else tick.ask
     trailing_hit = trailing_target is not None and (
-        tick.bid <= trailing_target if direction == Direction.BUY else tick.bid >= trailing_target
+        executable_close_price <= trailing_target
+        if direction == Direction.BUY
+        else executable_close_price >= trailing_target
     )
     if trailing_hit:
         if policy == EnginePolicy.RESEARCH_COMPATIBILITY:
             gap = Decimal("100") * tick.point_size
             trailing_hit = (
-                tick.bid > trailing_target - gap
+                executable_close_price > trailing_target - gap
                 if direction == Direction.BUY
-                else tick.bid < trailing_target + gap
+                else executable_close_price < trailing_target + gap
             )
         if trailing_hit and not _exit_blocked_by_legacy_spread(parameters, tick, policy):
             return StrategyDecision(
@@ -322,7 +325,11 @@ def _evaluate_direction_exit(
                 direction=direction,
                 target_price=trailing_target,
             )
-    take_profit_hit = tick.bid >= target if direction == Direction.BUY else tick.bid <= target
+    take_profit_hit = (
+        executable_close_price >= target
+        if direction == Direction.BUY
+        else executable_close_price <= target
+    )
     if take_profit_hit and not _exit_blocked_by_legacy_spread(parameters, tick, policy):
         return StrategyDecision(
             action=DecisionAction.CLOSE_ALL if close_all else DecisionAction.CLOSE_DIRECTION,
@@ -395,8 +402,10 @@ def _entry_decision(
     direction: Direction,
     account_balance: Decimal,
     manual_quantity: Decimal | None = None,
+    *,
+    enforce_spread: bool = True,
 ) -> StrategyDecision:
-    if tick.spread_points > parameters.execution.max_spread_points:
+    if enforce_spread and tick.spread_points > parameters.execution.max_spread_points:
         return _hold(
             "entry_spread_too_wide",
             mode,
@@ -452,6 +461,7 @@ def evaluate_tick(
     manual_quantity: Decimal | None = None,
     legacy_visible_range_points: Decimal | None = None,
     _allow_exit_evaluation: bool = True,
+    _enforce_entry_spread: bool = True,
 ) -> StrategyDecision:
     """Evaluate one tick and return at most one deterministic intent."""
 
@@ -482,6 +492,7 @@ def evaluate_tick(
             manual_direction,
             account_balance,
             manual_quantity,
+            enforce_spread=_enforce_entry_spread,
         )
 
     if mode == "auto":
@@ -502,6 +513,7 @@ def evaluate_tick(
                     mode,
                     Direction.BUY,
                     account_balance,
+                    enforce_spread=_enforce_entry_spread,
                 )
             if tick.bid < basket.box_low and basket.previous_bid >= basket.box_low:
                 return _entry_decision(
@@ -513,6 +525,7 @@ def evaluate_tick(
                     mode,
                     Direction.SELL,
                     account_balance,
+                    enforce_spread=_enforce_entry_spread,
                 )
             return _hold("auto_box_not_crossed", mode)
         if len(basket.legs) >= parameters.sizing.max_orders:
@@ -530,6 +543,7 @@ def evaluate_tick(
                 mode,
                 Direction.BUY,
                 account_balance,
+                enforce_spread=_enforce_entry_spread,
             )
         if last.direction == Direction.BUY and tick.bid < basket.box_low:
             return _entry_decision(
@@ -541,6 +555,7 @@ def evaluate_tick(
                 mode,
                 Direction.SELL,
                 account_balance,
+                enforce_spread=_enforce_entry_spread,
             )
         return _hold("auto_reverse_boundary_not_reached", mode)
 
@@ -567,6 +582,7 @@ def evaluate_tick(
             mode,
             direction,
             account_balance,
+            enforce_spread=_enforce_entry_spread,
         )
 
     for direction in (Direction.BUY, Direction.SELL):
@@ -590,5 +606,6 @@ def evaluate_tick(
                 mode,
                 direction,
                 account_balance,
+                enforce_spread=_enforce_entry_spread,
             )
     return _hold("grid_distance_not_reached", mode)

@@ -12,4 +12,6 @@ def test_martingale_control_plane_exposes_research_routes_without_trade_route() 
     assert "/api/v2/basket-strategies/martingale-tp4/mq4/export" in paths
     assert "/api/v2/basket-strategies/martingale-tp4/backtests" in paths
     assert "/api/v2/basket-strategies/martingale-tp4/tiger-bars/backfill" in paths
+    assert "/api/v2/basket-strategies/martingale-tp4/shadow/cycles" in paths
+    assert "/api/v2/basket-strategies/martingale-tp4/shadow/cycles/{cycle_id}" in paths
     assert not any(path.endswith(("/execute", "/order", "/arm")) for path in paths)

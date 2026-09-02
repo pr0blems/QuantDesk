@@ -11,6 +11,7 @@ from quantdesk_v2.domain.martingale_tp4 import (
     mq4_inputs_from_strategy_parameters,
     parse_mq4_settings_csv,
     preview_configuration_risk,
+    strategy_parameters_from_catalog_parameters,
     strategy_parameters_from_mq4,
 )
 
@@ -130,3 +131,53 @@ def test_configuration_normalizes_market_symbols() -> None:
 
     assert config.market_data.underlying_symbol == "AMD"
     assert config.market_data.contract_symbol == "AMDUSDT"
+
+
+def test_strategy_center_parameters_restore_mq4_mode_switches_and_timeframe() -> None:
+    parameters = {
+        "ChooseTrading": 2,
+        "NewCycle": 1,
+        "Lot": 0.01,
+        "Autolot": 0,
+        "Autolotsize": 10000,
+        "mm": 2,
+        "MaxLot": 100,
+        "MaxOrders": 16,
+        "GridDrift": 100,
+        "MaxSpred": 50,
+        "Distance": 150,
+        "TP": 100,
+        "Kol_Ord_for_TP2": 2,
+        "TP2": 80,
+        "Kol_Ord_for_TP3": 5,
+        "TP3": 50,
+        "Kol_Ord_for_TP4": 7,
+        "TP4": 30,
+        "SL_Dollar": 0,
+        "TrailStart": 600,
+        "TrailDistance": 100,
+        "Overlap": 1,
+        "OverlapOrderNumber": 7,
+        "OverlapPercent": 11,
+        "Start_Hour": 1,
+        "End_Hour": 23,
+        "Magic": 201800,
+        "Section": 1000,
+        "ShowStat": 1,
+        "ShowButton": 1,
+        "ShowMainSetting": 1,
+        "BoxLength": 22,
+        "BoxTimeFrameMinutes": 60,
+        "BoxRange": 30,
+        "AutoBoxRange": 1,
+        "AutoBoxRangeDailyATRperiod": 30,
+        "AutoBoxRangeDailyATRfactor": 0.2,
+        "BoxBufferPips": 5,
+    }
+
+    restored = strategy_parameters_from_catalog_parameters(parameters)
+
+    assert restored.mode == "grid"
+    assert restored.new_cycle is True
+    assert restored.box.timeframe == "1h"
+    assert restored.overlap.enabled is True

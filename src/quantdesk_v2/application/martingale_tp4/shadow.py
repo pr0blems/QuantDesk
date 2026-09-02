@@ -157,6 +157,84 @@ def _gate_action(action: DecisionAction) -> str:
     return "hold"
 
 
+def _live_cycle_loss_exit(
+    config: MartingaleTp4Config,
+    basket: BasketSnapshot,
+    account_balance: Decimal,
+) -> StrategyDecision | None:
+    if not basket.legs:
+        return None
+    basket_pnl = sum((item.unrealized_pnl for item in basket.legs), Decimal("0"))
+    maximum_loss = account_balance * config.live_risk.max_cycle_loss_pct / Decimal("100")
+    if basket_pnl > -maximum_loss:
+        return None
+    return StrategyDecision(
+        action=DecisionAction.CLOSE_ALL,
+        reason_code="live_cycle_loss_limit",
+        effective_mode=config.parameters.mode,
+        evidence={
+            "basket_pnl": str(basket_pnl),
+            "maximum_loss": str(maximum_loss),
+            "account_balance": str(account_balance),
+        },
+    )
+
+
+def _new_risk_limit_reason(
+    config: MartingaleTp4Config,
+    basket: BasketSnapshot,
+    decision: StrategyDecision,
+    binance: BinanceExecutionQuote | None,
+    *,
+    account_balance: Decimal,
+    leverage: Decimal,
+    execution_point_size: Decimal,
+) -> tuple[str, dict[str, Any]] | None:
+    if decision.action == DecisionAction.ADD and not config.live_risk.additions_enabled:
+        return "live_additions_disabled", {}
+    if (
+        decision.action not in {DecisionAction.OPEN, DecisionAction.ADD}
+        or decision.quantity is None
+        or decision.direction is None
+        or binance is None
+    ):
+        return None
+    execution_spread_points = (binance.ask - binance.bid) / execution_point_size
+    if execution_spread_points > config.parameters.execution.max_spread_points:
+        return (
+            "binance_execution_spread_too_wide",
+            {
+                "execution_spread_points": str(execution_spread_points),
+                "maximum_spread_points": str(
+                    config.parameters.execution.max_spread_points
+                ),
+                "execution_point_size": str(execution_point_size),
+            },
+        )
+    entry_price = binance.ask if decision.direction == Direction.BUY else binance.bid
+    current_notional = sum(
+        (item.entry_price * item.quantity for item in basket.legs), Decimal("0")
+    )
+    projected_notional = current_notional + entry_price * decision.quantity
+    evidence = {
+        "current_notional": str(current_notional),
+        "projected_notional": str(projected_notional),
+        "leverage": str(leverage),
+    }
+    maximum_notional = config.live_risk.max_cycle_notional
+    if maximum_notional is not None and projected_notional > maximum_notional:
+        evidence["maximum_notional"] = str(maximum_notional)
+        return "live_cycle_notional_limit", evidence
+    projected_margin_pct = (
+        projected_notional / leverage / account_balance * Decimal("100")
+    )
+    evidence["projected_margin_pct"] = str(projected_margin_pct)
+    evidence["maximum_margin_pct"] = str(config.live_risk.max_cycle_margin_pct)
+    if projected_margin_pct > config.live_risk.max_cycle_margin_pct:
+        return "live_cycle_margin_limit", evidence
+    return None
+
+
 def evaluate_shadow_tick(
     config: MartingaleTp4Config,
     basket: BasketSnapshot,
@@ -170,6 +248,8 @@ def evaluate_shadow_tick(
     deployment_scope: str,
     event_id: str,
     now: datetime | None = None,
+    leverage: Decimal = Decimal("1"),
+    execution_point_size: Decimal | None = None,
     manual_direction: Direction | None = None,
     manual_quantity: Decimal | None = None,
 ) -> ShadowEvaluation:
@@ -180,19 +260,26 @@ def evaluate_shadow_tick(
         raise ValueError("point_size must be positive")
     if account_balance <= 0:
         raise ValueError("account_balance must be positive")
+    if leverage <= 0:
+        raise ValueError("leverage must be positive")
+    execution_tick_size = execution_point_size or point_size
+    if execution_tick_size <= 0:
+        raise ValueError("execution_point_size must be positive")
 
     marked = mark_basket(basket, binance) if binance is not None else basket
-    source_decision: StrategyDecision | None = None
+    source_decision: StrategyDecision | None = _live_cycle_loss_exit(
+        config, marked, account_balance
+    )
 
     # Risk-reducing decisions are based on the venue that owns the exposure.
-    if marked.legs and binance is not None:
+    if source_decision is None and marked.legs and binance is not None:
         source_decision = evaluate_risk_reducing_decision(
             config.parameters,
             marked,
             MarketTick(
                 bid=binance.bid,
                 ask=binance.ask,
-                point_size=point_size,
+                point_size=execution_tick_size,
                 hour=hour,
             ),
             policy=EnginePolicy.LIVE_SAFE,
@@ -214,6 +301,7 @@ def evaluate_shadow_tick(
             manual_direction=manual_direction,
             manual_quantity=manual_quantity,
             _allow_exit_evaluation=False,
+            _enforce_entry_spread=False,
         )
     if source_decision is None:
         source_decision = StrategyDecision(
@@ -240,6 +328,15 @@ def evaluate_shadow_tick(
         now=evaluated_at,
     )
     decision = source_decision
+    risk_limit = _new_risk_limit_reason(
+        config,
+        marked,
+        source_decision,
+        binance,
+        account_balance=account_balance,
+        leverage=leverage,
+        execution_point_size=execution_tick_size,
+    )
     if action in {"open", "add"} and not gate.allowed:
         decision = _hold(
             "market_data_gate_blocked_new_risk",
@@ -248,6 +345,17 @@ def evaluate_shadow_tick(
                 "intended_action": source_decision.action.value,
                 "intended_reason_code": source_decision.reason_code,
                 "gate_reason_codes": list(gate.reason_codes),
+            },
+        )
+    elif risk_limit is not None:
+        reason_code, evidence = risk_limit
+        decision = _hold(
+            reason_code,
+            source_decision,
+            evidence={
+                "intended_action": source_decision.action.value,
+                "intended_reason_code": source_decision.reason_code,
+                **evidence,
             },
         )
 

@@ -38,6 +38,10 @@ from ...domain.martingale_tp4_engine import EnginePolicy
 from ...models import (
     ReferenceMarketDataQuality,
     Security,
+    StrategyBasketCycle,
+    StrategyBasketEvent,
+    StrategyBasketLeg,
+    StrategyDeployment,
     StrategyMarketDataManifest,
     User,
 )
@@ -196,6 +200,145 @@ def _quality_out(row: ReferenceMarketDataQuality | None) -> dict[str, Any] | Non
         "status": row.status,
         "reason_codes": list(row.reason_codes_json or []),
         "evaluated_at": row.evaluated_at,
+    }
+
+
+def _cycle_out(row: StrategyBasketCycle) -> dict[str, Any]:
+    return {
+        "id": row.public_id,
+        "deployment_id": row.deployment_id,
+        "strategy_revision_id": row.strategy_revision_id,
+        "underlying_symbol": row.underlying_symbol,
+        "contract_symbol": row.contract_symbol,
+        "mode": row.mode,
+        "cycle_sequence": row.cycle_seq,
+        "state": row.state,
+        "box_high": str(row.box_high) if row.box_high is not None else None,
+        "box_low": str(row.box_low) if row.box_low is not None else None,
+        "box_time": row.box_time,
+        "gross_quantity": str(row.gross_quantity),
+        "net_quantity": str(row.net_quantity),
+        "weighted_cost": str(row.weighted_cost) if row.weighted_cost is not None else None,
+        "realized_pnl": str(row.realized_pnl),
+        "unrealized_pnl": str(row.unrealized_pnl),
+        "reserved_risk": str(row.reserved_risk),
+        "max_risk": str(row.max_risk),
+        "version": row.version,
+        "opened_at": row.opened_at,
+        "closed_at": row.closed_at,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _leg_out(row: StrategyBasketLeg) -> dict[str, Any]:
+    return {
+        "leg_index": row.leg_index,
+        "action": row.action,
+        "direction": row.direction,
+        "position_side": row.position_side,
+        "planned_quantity": str(row.planned_quantity),
+        "filled_quantity": str(row.filled_quantity),
+        "planned_price": str(row.planned_price) if row.planned_price is not None else None,
+        "average_fill_price": (
+            str(row.average_fill_price) if row.average_fill_price is not None else None
+        ),
+        "fee": str(row.fee),
+        "funding": str(row.funding),
+        "realized_pnl": str(row.realized_pnl),
+        "state": row.state,
+        "reason_code": row.reason_code,
+        "created_at": row.created_at,
+        "filled_at": row.filled_at,
+    }
+
+
+@router.get("/shadow/cycles")
+def list_martingale_shadow_cycles(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    deployment_id: str | None = None,
+    active_only: bool = False,
+    limit: int = 50,
+) -> dict[str, Any]:
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    statement = select(StrategyBasketCycle).where(
+        StrategyBasketCycle.user_id == user.id
+    )
+    if deployment_id is not None:
+        deployment = db.scalar(
+            select(StrategyDeployment).where(
+                StrategyDeployment.user_id == user.id,
+                StrategyDeployment.public_id == deployment_id,
+                StrategyDeployment.mode == "shadow",
+            )
+        )
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="Shadow deployment not found")
+        statement = statement.where(
+            StrategyBasketCycle.deployment_id == deployment.id
+        )
+    if active_only:
+        statement = statement.where(StrategyBasketCycle.active_key.is_not(None))
+    rows = db.scalars(
+        statement.order_by(StrategyBasketCycle.created_at.desc()).limit(limit)
+    ).all()
+    return {
+        "items": [_cycle_out(row) for row in rows],
+        "network_write": False,
+        "live_ready": False,
+    }
+
+
+@router.get("/shadow/cycles/{cycle_id}")
+def get_martingale_shadow_cycle(
+    cycle_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    cycle = db.scalar(
+        select(StrategyBasketCycle).where(
+            StrategyBasketCycle.user_id == user.id,
+            StrategyBasketCycle.public_id == cycle_id,
+        )
+    )
+    if cycle is None:
+        raise HTTPException(status_code=404, detail="Shadow basket cycle not found")
+    legs = db.scalars(
+        select(StrategyBasketLeg)
+        .where(
+            StrategyBasketLeg.user_id == user.id,
+            StrategyBasketLeg.cycle_id == cycle.id,
+        )
+        .order_by(StrategyBasketLeg.created_at, StrategyBasketLeg.id)
+    ).all()
+    events = db.scalars(
+        select(StrategyBasketEvent)
+        .where(
+            StrategyBasketEvent.user_id == user.id,
+            StrategyBasketEvent.cycle_id == cycle.id,
+        )
+        .order_by(StrategyBasketEvent.sequence_no.desc())
+        .limit(100)
+    ).all()
+    return {
+        "cycle": _cycle_out(cycle),
+        "legs": [_leg_out(row) for row in legs],
+        "events": [
+            {
+                "id": row.public_id,
+                "sequence": row.sequence_no,
+                "event_type": row.event_type,
+                "actor_type": row.actor_type,
+                "reason_code": row.reason_code,
+                "payload": row.payload_json,
+                "occurred_at": row.occurred_at,
+            }
+            for row in events
+        ],
+        "network_write": False,
+        "live_ready": False,
     }
 
 
