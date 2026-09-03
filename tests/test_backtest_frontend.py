@@ -132,3 +132,28 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'start.min = min || "";' in script
     assert '<aside class="history-panel">' not in script
     assert 'id="refresh-history"' not in script
+
+
+def test_backtest_exposes_calculation_pipeline_and_progressive_replay() -> None:
+    script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
+
+    for contract in (
+        'id="running-result" class="running-result hidden"',
+        'data-running-step="0"',
+        'data-running-step="4"',
+        "服务端正在逐根执行策略、撮合订单并计算账户权益。",
+        "收到结果后，将按真实历史时间轴逐根回放。",
+        "await this.replayResult(detail, generation);",
+        "drawReplayFrame(visibleCount)",
+        "state.candles.slice(0, visibleCount)",
+        "正在回放 ${this.integer(visibleCount)} / ${this.integer(state.candles.length)} 根 K 线",
+        'id="trade-cycle-rail" class="trade-cycle-rail hidden"',
+        'id="trade-replay-status" class="trade-replay-status hidden"',
+    ):
+        assert contract in script
+
+    assert ".stage-layout.has-result" in stylesheet
+    assert "grid-template-columns: minmax(0, 1fr) minmax(320px, 372px)" in stylesheet
+    assert ".trade-cycle-rail {" in stylesheet
+    assert "position: sticky" in stylesheet

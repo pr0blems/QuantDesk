@@ -29,6 +29,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       dragViewStart: 0,
     };
     this.priceChartFrame = 0;
+    this.computationProgressTimer = 0;
+    this.computationProgressValue = 0;
+    this.resultReplayFrame = 0;
+    this.resultReplayState = null;
     this.handleStrategiesChanged = () => { this.started = false; };
     this.renderShell();
   }
@@ -38,7 +42,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     window.addEventListener("quantdesk:strategies-changed", this.handleStrategiesChanged);
     if ("ResizeObserver" in window && !this.resizeObserver) {
       this.resizeObserver = new ResizeObserver(() => {
-        if (this.activeDetail) this.drawCharts(this.unpackDetail(this.activeDetail).result);
+        if (this.resultReplayState) this.drawReplayFrame(this.resultReplayState.visibleCandles);
+        else if (this.activeDetail) this.drawCharts(this.unpackDetail(this.activeDetail).result);
       });
       this.resizeObserver.observe(this.q("#chart-panel"));
     }
@@ -53,7 +58,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-6">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-progress-replay-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -152,6 +157,26 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   <div class="empty-checks"><span>01 参数可复现</span><span>02 成本可配置</span><span>03 数据质量可见</span></div>
                 </div>
 
+                <div id="running-result" class="running-result hidden" aria-live="polite">
+                  <div class="running-orbit" aria-hidden="true"><i></i><i></i><i></i></div>
+                  <div class="running-copy">
+                    <span>BACKTEST PIPELINE</span>
+                    <h2 id="running-title">正在准备历史行情</h2>
+                    <p id="running-description">正在提交参数并检查可用数据区间。</p>
+                  </div>
+                  <div class="running-progress" role="progressbar" aria-label="回测计算阶段" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="running-progress-bar"></i></div>
+                  <div class="running-progress-meta"><strong id="running-progress-value">0%</strong><span id="running-progress-count">等待服务端响应</span></div>
+                  <ol class="running-steps">
+                    <li data-running-step="0" class="active"><b>01</b><span>准备行情</span><small>读取 K 线与交易规则</small></li>
+                    <li data-running-step="1"><b>02</b><span>指标预热</span><small>建立策略所需窗口</small></li>
+                    <li data-running-step="2"><b>03</b><span>策略计算</span><small>服务端逐根执行策略</small></li>
+                    <li data-running-step="3"><b>04</b><span>可视化回放</span><small>K 线与成交点逐步呈现</small></li>
+                    <li data-running-step="4"><b>05</b><span>结果结算</span><small>核对费用、盈亏与回撤</small></li>
+                  </ol>
+                  <div class="running-preview"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+                  <p class="running-note">计算阶段显示服务端当前工作状态；收到结果后，将按真实历史时间轴逐根回放。</p>
+                </div>
+
                 <div id="result-content" class="result-content hidden">
                   <div class="result-title">
                     <div><span id="result-kicker">BACKTEST COMPLETE</span><h2 id="result-name">--</h2><p id="result-period">--</p></div>
@@ -176,12 +201,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                     <div id="quality-message" class="quality-message"></div>
                   </section>
 
-                  <section class="result-panel trades-panel">
-                    <div class="panel-head"><div><strong>交易周期</strong><span id="trade-summary">--</span></div><span id="trade-count" class="count-badge">0 组</span></div>
-                    <div id="trade-table" class="trade-table"></div>
-                  </section>
                 </div>
               </div>
+              <aside id="trade-cycle-rail" class="trade-cycle-rail hidden" aria-label="交易周期">
+                <section class="result-panel trades-panel">
+                  <div class="panel-head"><div><strong>交易周期</strong><span id="trade-summary">--</span></div><span id="trade-count" class="count-badge">0 组</span></div>
+                  <div id="trade-replay-status" class="trade-replay-status hidden">等待 K 线回放到成交时刻</div>
+                  <div id="trade-table" class="trade-table"></div>
+                </section>
+              </aside>
             </div>
           </section>
         </div>
@@ -308,6 +336,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   pause() {
     // 回测任务在服务端完成；切换页面不取消已提交的计算。
+    this.stopComputationProgress();
+    this.stopResultReplay();
   }
 
   resetSession() {
@@ -322,6 +352,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.activeDetail = null;
     this.lotCalculatorQuote = null;
     this.lotCalculatorRequest += 1;
+    this.stopComputationProgress();
+    this.stopResultReplay();
     this.resetPriceChartState();
     this.strategyId = "";
     this.category = "全部";
@@ -361,7 +393,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.closeHistory();
     this.closeLotCalculator();
     this.q("#empty-result").classList.remove("hidden");
+    this.q("#running-result").classList.add("hidden");
     this.q("#result-content").classList.add("hidden");
+    this.q("#trade-cycle-rail").classList.add("hidden");
+    this.q(".stage-layout").classList.remove("has-result");
     this.q("#open-history").disabled = false;
     this.q("#reload-history").disabled = false;
     this.q("#active-run-meta").textContent = "选择策略并配置参数";
@@ -1067,24 +1102,34 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (this.runningBacktest || !this.validate()) return;
     const generation = this.sessionGeneration;
     this.runningBacktest = true;
+    this.activeDetail = null;
+    this.stopResultReplay();
     this.showBanner("");
     this.setRunButton(true);
     this.setStageStatus("计算中", "loading");
-    this.q("#active-run-meta").textContent = `${this.q("#symbol").value} · ${this.q("#timeframe").value} · 正在回放历史行情`;
+    this.q("#active-run-meta").textContent = `${this.q("#symbol").value} · ${this.q("#timeframe").value} · 服务端正在计算`;
+    this.showComputationProgress();
     try {
       let detail = await this.api("", { method: "POST", body: JSON.stringify(this.payload()) });
       if (generation !== this.sessionGeneration) return;
       const id = this.runId(detail);
       if (!detail?.result && id) detail = await this.api(`/${encodeURIComponent(id)}`);
       if (generation !== this.sessionGeneration) return;
+      this.stopComputationProgress();
       this.activeDetail = detail;
-      this.renderResult(detail);
+      await this.replayResult(detail, generation);
+      if (generation !== this.sessionGeneration) return;
       await this.loadHistory(false, generation);
       if (generation !== this.sessionGeneration) return;
       this.setStageStatus("已完成", "success");
       this.showBanner("回测完成。请先检查数据质量和最大回撤，再判断策略表现。", "success");
     } catch (error) {
       if (generation !== this.sessionGeneration) return;
+      this.stopComputationProgress();
+      this.stopResultReplay();
+      this.q("#running-title").textContent = "回测未完成";
+      this.q("#running-description").textContent = error.message;
+      this.q("#running-result").classList.remove("hidden");
       this.setStageStatus("运行失败", "error");
       this.showBanner(`回测失败：${error.message}`, "error");
     } finally {
@@ -1175,14 +1220,18 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     }
   }
 
-  renderResult(detail = {}) {
+  renderResult(detail = {}, options = {}) {
     const unpacked = this.unpackDetail(detail);
     const run = unpacked.run;
     const result = unpacked.result;
     const account = result.account || {};
     const metrics = result.metrics || {};
     this.q("#empty-result").classList.add("hidden");
+    this.q("#running-result").classList.add("hidden");
     this.q("#result-content").classList.remove("hidden");
+    this.q("#trade-cycle-rail").classList.remove("hidden");
+    this.q(".stage-layout").classList.add("has-result");
+    this.q("#result-kicker").textContent = options.deferCharts ? "BACKTEST REPLAY" : "BACKTEST COMPLETE";
     const strategy = run.strategy_name || this.catalog.strategies.find((item) => String(item.id) === String(run.strategy_id))?.name || run.strategy_id || "策略回测";
     this.q("#result-name").textContent = `${strategy} · ${run.symbol || "--"}`;
     this.q("#result-period").textContent = `${this.dateOnly(run.start_date || run.start_at) || "--"} 至 ${this.dateOnly(run.end_date || run.end_at) || "--"} · ${run.timeframe || "--"} · 初始资金 ${this.money(account.initial_capital ?? run.initial_capital)}`;
@@ -1194,7 +1243,164 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.renderMetrics(metrics, account);
     this.renderQuality(result.data_quality || {});
     this.renderTrades(Array.isArray(result.trades) ? result.trades : [], result.data_quality || {});
+    if (!options.deferCharts) window.requestAnimationFrame(() => this.drawCharts(result));
+  }
+
+  showComputationProgress() {
+    this.stopComputationProgress();
+    this.q("#empty-result").classList.add("hidden");
+    this.q("#result-content").classList.add("hidden");
+    this.q("#trade-cycle-rail").classList.add("hidden");
+    this.q(".stage-layout").classList.remove("has-result");
+    this.q("#running-result").classList.remove("hidden");
+    this.q("#running-title").textContent = "正在准备历史行情";
+    this.q("#running-description").textContent = "正在提交参数并检查可用数据区间。";
+    this.computationProgressValue = 4;
+    this.updateRunProgress(4, 0, "等待服务端响应");
+    const startedAt = performance.now();
+    this.computationProgressTimer = window.setInterval(() => {
+      const elapsed = performance.now() - startedAt;
+      const stage = elapsed < 1400 ? 0 : elapsed < 3300 ? 1 : 2;
+      const ceiling = stage === 0 ? 24 : stage === 1 ? 47 : 78;
+      const increment = stage === 2 ? .7 : 1.3;
+      this.computationProgressValue = Math.min(ceiling, this.computationProgressValue + increment);
+      const titles = ["正在准备历史行情", "正在预热策略指标", "正在执行策略计算"];
+      const descriptions = [
+        "正在读取 K 线、合约规格与策略参数。",
+        "正在补齐指标预热窗口并检查数据连续性。",
+        "服务端正在逐根执行策略、撮合订单并计算账户权益。",
+      ];
+      this.q("#running-title").textContent = titles[stage];
+      this.q("#running-description").textContent = descriptions[stage];
+      this.updateRunProgress(this.computationProgressValue, stage, `已计算 ${Math.max(1, Math.round(elapsed / 1000))} 秒`);
+    }, 180);
+  }
+
+  stopComputationProgress() {
+    if (this.computationProgressTimer) window.clearInterval(this.computationProgressTimer);
+    this.computationProgressTimer = 0;
+  }
+
+  updateRunProgress(value, activeStep, detail) {
+    const safeValue = Math.max(0, Math.min(100, Number(value) || 0));
+    const progress = this.q(".running-progress");
+    if (!progress) return;
+    progress.setAttribute("aria-valuenow", String(Math.round(safeValue)));
+    this.q("#running-progress-bar").style.width = `${safeValue}%`;
+    this.q("#running-progress-value").textContent = `${Math.round(safeValue)}%`;
+    this.q("#running-progress-count").textContent = detail;
+    this.qa("[data-running-step]").forEach((step) => {
+      const index = Number(step.dataset.runningStep);
+      step.classList.toggle("active", index === activeStep);
+      step.classList.toggle("complete", index < activeStep);
+    });
+  }
+
+  async replayResult(detail, generation = this.sessionGeneration) {
+    const { result } = this.unpackDetail(detail);
+    const candles = Array.isArray(result.price_candles) ? result.price_candles : (result.data_quality?.price_candles || []);
+    const trades = Array.isArray(result.trades) ? result.trades : [];
+    const curve = this.normalizeCurve(result.equity_curve || result.curve || []);
+    this.renderResult(detail, { deferCharts: true });
+    this.q("#result-kicker").textContent = "BACKTEST REPLAY";
+    this.q("#trade-replay-status").classList.remove("hidden");
+    this.setStageStatus("逐根回放", "loading");
+    this.resetPriceChartState();
+    if (!candles.length) {
+      this.drawCharts(result);
+      this.finishResultReplay(result);
+      return;
+    }
+    const duration = Math.max(5200, Math.min(10000, 3600 + candles.length * 4));
+    const startedAt = performance.now();
+    await new Promise((resolve) => {
+      this.resultReplayState = { result, candles, trades, curve, visibleCandles: 1, lastPaintAt: 0, resolve };
+      const tick = (now) => {
+        const state = this.resultReplayState;
+        if (!state || generation !== this.sessionGeneration) {
+          resolve();
+          return;
+        }
+        const ratio = Math.min(1, (now - startedAt) / duration);
+        const eased = 1 - Math.pow(1 - ratio, 2.2);
+        state.visibleCandles = Math.max(1, Math.min(candles.length, Math.ceil(candles.length * eased)));
+        if (now - state.lastPaintAt >= 45 || ratio >= 1) {
+          state.lastPaintAt = now;
+          this.drawReplayFrame(state.visibleCandles);
+        }
+        if (ratio >= 1) {
+          this.resultReplayFrame = 0;
+          this.resultReplayState = null;
+          resolve();
+          return;
+        }
+        this.resultReplayFrame = window.requestAnimationFrame(tick);
+      };
+      this.resultReplayFrame = window.requestAnimationFrame(tick);
+    });
+    if (generation !== this.sessionGeneration) return;
+    this.finishResultReplay(result);
+  }
+
+  drawReplayFrame(visibleCount) {
+    const state = this.resultReplayState;
+    if (!state) return;
+    const visibleCandles = state.candles.slice(0, visibleCount);
+    const lastCandle = visibleCandles[visibleCandles.length - 1] || {};
+    const lastTs = this.chartTimestamp(lastCandle.ts ?? lastCandle.timestamp ?? lastCandle.open_time);
+    const visibleTrades = state.trades.filter((trade) => {
+      const entryTs = this.chartTimestamp(trade?.entry_ts ?? trade?.entry_at ?? trade?.entry_time);
+      return !Number.isFinite(entryTs) || entryTs <= lastTs;
+    }).map((trade) => {
+      const exitTs = this.chartTimestamp(trade?.exit_ts ?? trade?.exit_at ?? trade?.exit_time);
+      if (!Number.isFinite(exitTs) || exitTs <= lastTs) return trade;
+      return {
+        ...trade,
+        exit_ts: null,
+        exit_at: null,
+        exit_time: null,
+        closed_at: null,
+        exit_price: null,
+        pnl: null,
+        net_pnl: null,
+        profit: null,
+        return_pct: null,
+        pnl_pct: null,
+        account_return_pct: null,
+        exit_reason: null,
+        executions: Array.isArray(trade.executions)
+          ? trade.executions.filter((execution) => this.chartTimestamp(execution?.timestamp) <= lastTs)
+          : trade.executions,
+      };
+    });
+    const curveCount = Math.max(2, Math.min(state.curve.length, Math.ceil(state.curve.length * visibleCount / state.candles.length)));
+    this.drawLineChart(this.q("#equity-chart"), state.curve.slice(0, curveCount), "equity");
+    this.drawLineChart(this.q("#drawdown-chart"), state.curve.slice(0, curveCount), "drawdown");
+    this.drawPriceChart(this.q("#price-chart"), visibleCandles, visibleTrades);
+    this.renderTrades(visibleTrades, { ...(state.result.data_quality || {}), trades_total: visibleTrades.length, trades_truncated: false });
+    this.q("#trade-replay-status").textContent = visibleTrades.length
+      ? `已回放 ${visibleTrades.length} 个交易周期`
+      : "等待 K 线回放到首个成交时刻";
+    this.setStageStatus(`逐根回放 ${this.integer(visibleCount)} / ${this.integer(state.candles.length)}`, "loading");
+    this.q("#active-run-meta").textContent = `正在回放 ${this.integer(visibleCount)} / ${this.integer(state.candles.length)} 根 K 线`;
+    this.updateRunProgress(80 + visibleCount / state.candles.length * 18, 3, `K 线 ${this.integer(visibleCount)} / ${this.integer(state.candles.length)} · 成交周期 ${this.integer(visibleTrades.length)}`);
+  }
+
+  finishResultReplay(result) {
+    this.stopResultReplay(false);
+    this.q("#result-kicker").textContent = "BACKTEST COMPLETE";
+    this.q("#trade-replay-status").classList.add("hidden");
+    this.renderTrades(Array.isArray(result.trades) ? result.trades : [], result.data_quality || {});
+    this.updateRunProgress(100, 4, "回放与结算完成");
     window.requestAnimationFrame(() => this.drawCharts(result));
+  }
+
+  stopResultReplay(resolvePending = true) {
+    if (this.resultReplayFrame) window.cancelAnimationFrame(this.resultReplayFrame);
+    this.resultReplayFrame = 0;
+    const pending = this.resultReplayState;
+    this.resultReplayState = null;
+    if (resolvePending && pending?.resolve) pending.resolve();
   }
 
   renderMetrics(metrics, account) {
