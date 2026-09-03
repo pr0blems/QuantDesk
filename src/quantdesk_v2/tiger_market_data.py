@@ -34,6 +34,7 @@ SUPPORTED_SESSIONS = frozenset({"pre_market", "regular", "after_hours", "overnig
 SUPPORTED_ADJUSTMENTS = frozenset({"none", "forward"})
 VERIFIED_MAPPING_STATES = frozenset({"VERIFIED", "MANUAL"})
 RESEARCH_MAPPING_STATES = VERIFIED_MAPPING_STATES | {"AUTO"}
+RESEARCH_SECURITY_STATES = frozenset({"AUTO_VERIFIED", "VERIFIED"})
 
 
 class TigerMarketDataError(RuntimeError):
@@ -756,19 +757,32 @@ def ensure_tiger_security_mapping(
             SecuritySymbolMapping.source_symbol == symbol,
         )
     )
-    verified = security.exchange == "US" and security.verification_status == "VERIFIED"
+    research_eligible = (
+        security.exchange == "US"
+        and security.is_active
+        and security.security_type in {"COMMON_STOCK", "ETF"}
+        and security.verification_status in RESEARCH_SECURITY_STATES
+    )
+    strictly_verified = research_eligible and security.verification_status == "VERIFIED"
+    mapping_status = (
+        "VERIFIED"
+        if strictly_verified
+        else "AUTO"
+        if research_eligible
+        else "REVIEW_REQUIRED"
+    )
     if row is None:
         row = SecuritySymbolMapping(
             security_id=security.id,
             source=TIGER_SOURCE,
             source_symbol=symbol,
             normalized_symbol=symbol,
-            mapping_status="VERIFIED" if verified else "REVIEW_REQUIRED",
+            mapping_status=mapping_status,
             mapping_method="security_master_symbol",
             source_status="ACTIVE",
             underlying_type="US_EQUITY",
             monitor_enabled=True,
-            strategy_enabled=verified,
+            strategy_enabled=research_eligible,
             live_trading_enabled=False,
             source_metadata_json={"provider": "Tiger Open API"},
             first_seen_at=observed_at,
@@ -781,10 +795,10 @@ def ensure_tiger_security_mapping(
         row.security_id = security.id
         row.normalized_symbol = symbol
         if row.mapping_status != "MANUAL":
-            row.mapping_status = "VERIFIED" if verified else "REVIEW_REQUIRED"
+            row.mapping_status = mapping_status
         row.source_status = "ACTIVE"
         row.monitor_enabled = True
-        row.strategy_enabled = verified
+        row.strategy_enabled = research_eligible
         row.last_seen_at = observed_at
         row.updated_at = observed_at
     db.flush()
@@ -877,10 +891,10 @@ def resolve_research_contract_market_link(
 ) -> VerifiedMarketLink | None:
     """Resolve a research-only Tiger/Binance link without weakening live gates.
 
-    Binance's security-master synchronizer can establish an ``AUTO`` mapping
-    deterministically.  That state is sufficient for historical research when
-    the Tiger cash symbol is independently verified, but it must never be used
-    by the strict live resolver above.
+    The security-master synchronizer can establish both sides of the mapping
+    deterministically.  That ``AUTO`` state is sufficient for historical
+    research because Tiger still validates the symbol while fetching bars, but
+    it must never be used by the strict live resolver above.
     """
 
     contract = contract_symbol.strip().upper()
@@ -900,7 +914,7 @@ def resolve_research_contract_market_link(
     )
     if (
         tiger is None
-        or tiger.mapping_status not in VERIFIED_MAPPING_STATES
+        or tiger.mapping_status not in RESEARCH_MAPPING_STATES
         or binance.mapping_status not in RESEARCH_MAPPING_STATES
         or tiger.source_status != "ACTIVE"
         or binance.source_status != "TRADING"
@@ -934,7 +948,7 @@ def list_research_contract_market_links(db: Session) -> tuple[VerifiedMarketLink
             binance.mapping_status.in_(RESEARCH_MAPPING_STATES),
             binance.source_status == "TRADING",
             binance.strategy_enabled.is_(True),
-            tiger.mapping_status.in_(VERIFIED_MAPPING_STATES),
+            tiger.mapping_status.in_(RESEARCH_MAPPING_STATES),
             tiger.source_status == "ACTIVE",
             tiger.strategy_enabled.is_(True),
         )

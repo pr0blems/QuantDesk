@@ -4,6 +4,10 @@ from sqlalchemy.orm import Session
 
 from quantdesk_v2.models import Base, Security, SecuritySymbolMapping, utcnow
 from quantdesk_v2.stock_library import normalize_contract_symbol
+from quantdesk_v2.tiger_market_data import (
+    list_research_contract_market_links,
+    resolve_verified_contract_market_link,
+)
 from quantdesk_v2.tradfi_universe import (
     parse_tradfi_contracts,
     sync_tradfi_contracts,
@@ -158,6 +162,40 @@ def test_packaged_contract_keeps_existing_strategy_and_live_admission() -> None:
         assert (
             mapping.source_metadata_json["_admission_origin"]
             == "legacy_packaged_universe"
+        )
+    finally:
+        db.close()
+
+
+def test_packaged_us_contract_is_available_for_tiger_research_without_live_approval() -> None:
+    db = _stock_library_session()
+    try:
+        sync_tradfi_contracts(
+            db,
+            {"symbols": [_contract("AAPLUSDT", "EQUITY")]},
+            preapproved_symbols=("AAPLUSDT",),
+        )
+
+        tiger_mapping = db.scalar(
+            select(SecuritySymbolMapping).where(
+                SecuritySymbolMapping.source == "tiger_openapi"
+            )
+        )
+        assert tiger_mapping is not None
+        assert tiger_mapping.mapping_status == "AUTO"
+        assert tiger_mapping.strategy_enabled is True
+        assert tiger_mapping.live_trading_enabled is False
+
+        links = list_research_contract_market_links(db)
+        assert [(row.contract_symbol, row.underlying_symbol) for row in links] == [
+            ("AAPLUSDT", "AAPL")
+        ]
+        assert (
+            resolve_verified_contract_market_link(
+                db,
+                contract_symbol="AAPLUSDT",
+            )
+            is None
         )
     finally:
         db.close()

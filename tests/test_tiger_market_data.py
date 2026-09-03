@@ -5,12 +5,13 @@ from decimal import Decimal
 
 import pytest
 
-from quantdesk_v2.models import SecuritySymbolMapping
+from quantdesk_v2.models import Security, SecuritySymbolMapping
 from quantdesk_v2.tiger_market_data import (
     TigerBar,
     TigerBarClient,
     TigerTradingCalendarClient,
     closed_tiger_bars,
+    ensure_tiger_security_mapping,
     evaluate_bar_quality,
     resolve_research_contract_market_link,
     resolve_verified_contract_market_link,
@@ -115,6 +116,81 @@ def test_research_mapping_accepts_auto_binance_without_weakening_live_resolver()
     assert research is not None
     assert research.underlying_symbol == "AAPL"
     assert research.contract_symbol == "AAPLUSDT"
+
+
+def test_research_mapping_accepts_auto_tiger_without_weakening_live_resolver() -> None:
+    binance, tiger = _mapping_pair()
+    tiger.mapping_status = "AUTO"
+    strict = resolve_verified_contract_market_link(
+        _MappingSession(binance, tiger),  # type: ignore[arg-type]
+        contract_symbol="AAPLUSDT",
+    )
+    binance, tiger = _mapping_pair()
+    tiger.mapping_status = "AUTO"
+    research = resolve_research_contract_market_link(
+        _MappingSession(binance, tiger),  # type: ignore[arg-type]
+        contract_symbol="AAPLUSDT",
+    )
+
+    assert strict is None
+    assert research is not None
+
+
+class _TigerMappingSession:
+    def __init__(self) -> None:
+        self.mapping: SecuritySymbolMapping | None = None
+
+    def scalar(self, _statement):
+        return self.mapping
+
+    def add(self, mapping: SecuritySymbolMapping) -> None:
+        self.mapping = mapping
+
+    def flush(self) -> None:
+        return None
+
+
+def test_auto_verified_us_security_is_admitted_for_tiger_research_only() -> None:
+    security = Security(
+        id=10,
+        symbol="AAPL",
+        exchange="US",
+        security_type="COMMON_STOCK",
+        is_active=True,
+        verification_status="AUTO_VERIFIED",
+    )
+    session = _TigerMappingSession()
+
+    mapping = ensure_tiger_security_mapping(  # type: ignore[arg-type]
+        session,
+        security,
+        now=datetime(2026, 9, 3, tzinfo=UTC),
+    )
+
+    assert mapping.mapping_status == "AUTO"
+    assert mapping.strategy_enabled is True
+    assert mapping.live_trading_enabled is False
+
+
+def test_unverified_security_remains_blocked_from_tiger_research() -> None:
+    security = Security(
+        id=11,
+        symbol="UNKNOWN",
+        exchange="US",
+        security_type="UNKNOWN",
+        is_active=True,
+        verification_status="REVIEW_REQUIRED",
+    )
+    session = _TigerMappingSession()
+
+    mapping = ensure_tiger_security_mapping(  # type: ignore[arg-type]
+        session,
+        security,
+        now=datetime(2026, 9, 3, tzinfo=UTC),
+    )
+
+    assert mapping.mapping_status == "REVIEW_REQUIRED"
+    assert mapping.strategy_enabled is False
 
 
 def test_tiger_bar_client_uses_official_source_semantics() -> None:
