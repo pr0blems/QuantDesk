@@ -10,6 +10,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.history = [];
     this.historyLoaded = false;
     this.activeDetail = null;
+    this.lotCalculatorQuote = null;
+    this.lotCalculatorRequest = 0;
     this.strategyId = "";
     this.category = "全部";
     this.resizeObserver = null;
@@ -51,7 +53,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-trade-groups-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -194,6 +196,40 @@ class BacktestWorkbench extends window.QuantDeskPageController {
             <footer class="history-dialog-foot">回测数据仅用于研究；加载记录不会重新运行策略，也不会触发交易。</footer>
           </section>
         </div>
+
+        <div id="lot-calculator-dialog" class="calculator-dialog-backdrop hidden" role="presentation">
+          <section class="lot-calculator-dialog" role="dialog" aria-modal="true" aria-labelledby="lot-calculator-title">
+            <header class="calculator-dialog-head">
+              <div><span>POSITION CALCULATOR</span><h2 id="lot-calculator-title">仓位与止盈计算器</h2><p>按当前合约价格、初始手数和 Binance 杠杆估算。</p></div>
+              <button id="close-lot-calculator" class="calculator-close" type="button" aria-label="关闭仓位与止盈计算器">×</button>
+            </header>
+            <div class="calculator-dialog-body">
+              <div id="calculator-loading" class="calculator-loading">正在读取 Binance 最新合约价格…</div>
+              <div id="calculator-content" class="hidden">
+                <div class="calculator-context">
+                  <div><span>交易品种</span><strong id="calculator-symbol">--</strong></div>
+                  <div><span>最新价格</span><strong id="calculator-price">--</strong><small id="calculator-source">--</small></div>
+                  <label>目标保证金收益率（ROE）<div class="calculator-input-suffix"><input id="calculator-target-roe" type="number" min="0.01" max="1000" step="0.1" value="10"><span>%</span></div></label>
+                </div>
+                <div id="calculator-facts" class="calculator-facts"></div>
+                <div class="calculator-explanation">
+                  <strong id="calculator-summary">--</strong>
+                  <p id="calculator-note">--</p>
+                </div>
+                <div class="calculator-points">
+                  <div class="calculator-points-head"><div><span>推荐基础止盈</span><strong id="calculator-base-points">--</strong></div><small>由当前价格和目标 ROE 倒算，并沿用马丁 TP4 默认比例</small></div>
+                  <div id="calculator-point-preview" class="calculator-point-preview"></div>
+                </div>
+                <div class="calculator-actions">
+                  <button id="apply-tp-points" type="button">应用分级止盈</button>
+                  <button id="apply-all-points" class="primary" type="button">一键应用全部点数</button>
+                </div>
+                <p class="calculator-disclaimer">估算未包含资金费率和强平阶梯；费用结果按当前回测手续费与滑点做双边近似扣减。</p>
+              </div>
+              <div id="calculator-error" class="calculator-error hidden"></div>
+            </div>
+          </section>
+        </div>
       </main>`;
   }
 
@@ -233,7 +269,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
     this.shadowRoot.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !this.q("#history-dialog").classList.contains("hidden")) this.closeHistory();
+      if (event.key === "Escape" && !this.q("#lot-calculator-dialog").classList.contains("hidden")) this.closeLotCalculator();
     });
+    this.q("#close-lot-calculator").addEventListener("click", () => this.closeLotCalculator());
+    this.q("#lot-calculator-dialog").addEventListener("click", (event) => {
+      if (event.target === this.q("#lot-calculator-dialog")) this.closeLotCalculator();
+    });
+    this.q("#calculator-target-roe").addEventListener("input", () => this.renderLotCalculator());
+    this.q("#apply-tp-points").addEventListener("click", () => this.applyCalculatedPoints("take-profit"));
+    this.q("#apply-all-points").addEventListener("click", () => this.applyCalculatedPoints("all"));
     this.q("#reset-params").addEventListener("click", () => this.renderParameters(true));
     this.qa("[data-months]").forEach((button) => button.addEventListener("click", () => this.applyRange(button.dataset.months)));
     this.bindPriceChartEvents();
@@ -260,6 +304,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.history = [];
     this.historyLoaded = false;
     this.activeDetail = null;
+    this.lotCalculatorQuote = null;
+    this.lotCalculatorRequest += 1;
     this.resetPriceChartState();
     this.strategyId = "";
     this.category = "全部";
@@ -297,6 +343,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
     this.renderHistory();
     this.closeHistory();
+    this.closeLotCalculator();
     this.q("#empty-result").classList.remove("hidden");
     this.q("#result-content").classList.add("hidden");
     this.q("#open-history").disabled = false;
@@ -523,7 +570,21 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const existing = reset ? {} : Object.fromEntries(this.qa("[data-param-key]").map((input) => [input.dataset.paramKey, input.type === "checkbox" ? input.checked : input.value]));
     const fields = params.map((param) => {
       const label = this.node("label");
-      label.append(this.node("span", "field-label", param.label || param.key));
+      const fieldName = this.node("span", "field-label", param.label || param.key);
+      if (this.isBasketStrategy() && param.key === "Lot") {
+        const heading = this.node("span", "field-label-row");
+        const calculatorButton = this.node("button", "lot-calculator-trigger", "计算器");
+        calculatorButton.type = "button";
+        calculatorButton.setAttribute("aria-label", "打开初始手数计算器");
+        calculatorButton.addEventListener("click", (event) => {
+          event.preventDefault();
+          void this.openLotCalculator();
+        });
+        heading.append(fieldName, calculatorButton);
+        label.append(heading);
+      } else {
+        label.append(fieldName);
+      }
       const type = String(param.type || "number").toLowerCase();
       let input;
       if (Array.isArray(param.options)) {
@@ -561,6 +622,136 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       return label;
     });
     container.replaceChildren(...fields);
+  }
+
+  strategyParamInput(key) {
+    return this.qa("[data-param-key]").find((input) => input.dataset.paramKey === key) || null;
+  }
+
+  closeLotCalculator() {
+    this.q("#lot-calculator-dialog")?.classList.add("hidden");
+  }
+
+  async openLotCalculator() {
+    const symbol = this.q("#symbol").value.trim().toUpperCase();
+    const lotInput = this.strategyParamInput("Lot");
+    if (!this.isBasketStrategy() || !lotInput || !symbol) {
+      this.showBanner("请先选择马丁篮子策略和有效交易品种。", "error");
+      return;
+    }
+    const dialog = this.q("#lot-calculator-dialog");
+    dialog.classList.remove("hidden");
+    this.q("#calculator-loading").classList.remove("hidden");
+    this.q("#calculator-content").classList.add("hidden");
+    this.q("#calculator-error").classList.add("hidden");
+    const requestId = ++this.lotCalculatorRequest;
+    try {
+      const quote = await this.api(`/position-calculator?symbol=${encodeURIComponent(symbol)}`);
+      if (requestId !== this.lotCalculatorRequest || dialog.classList.contains("hidden")) return;
+      this.lotCalculatorQuote = quote;
+      this.q("#calculator-loading").classList.add("hidden");
+      this.q("#calculator-content").classList.remove("hidden");
+      this.renderLotCalculator();
+      this.q("#calculator-target-roe").focus();
+    } catch (error) {
+      if (requestId !== this.lotCalculatorRequest) return;
+      this.q("#calculator-loading").classList.add("hidden");
+      const errorBox = this.q("#calculator-error");
+      errorBox.textContent = error.message || "仓位计算器暂时不可用";
+      errorBox.classList.remove("hidden");
+    }
+  }
+
+  lotCalculatorValues() {
+    const quote = this.lotCalculatorQuote || {};
+    const price = Number(quote.price);
+    const lot = Number(this.strategyParamInput("Lot")?.value);
+    const leverage = Number(this.q("#leverage").value);
+    const targetRoePct = Number(this.q("#calculator-target-roe").value);
+    const pointSize = Number(quote.strategy_point_size || 0.01);
+    if (![price, lot, leverage, targetRoePct, pointSize].every((value) => Number.isFinite(value) && value > 0)) return null;
+    const oneLotNotional = price;
+    const oneLotMargin = oneLotNotional / leverage;
+    const positionNotional = oneLotNotional * lot;
+    const positionMargin = positionNotional / leverage;
+    const targetProfit = positionMargin * targetRoePct / 100;
+    const priceMovePct = targetRoePct / leverage;
+    const priceMove = price * priceMovePct / 100;
+    const basePoints = Math.max(1, Math.ceil(priceMove / pointSize));
+    const roundTripCostRate = (Number(this.q("#fee").value || 0) + Number(this.q("#slippage").value || 0)) * 2 / 10000;
+    const estimatedNetProfit = targetProfit - positionNotional * roundTripCostRate;
+    return { price, lot, leverage, targetRoePct, pointSize, oneLotNotional, oneLotMargin, positionNotional, positionMargin, targetProfit, estimatedNetProfit, priceMovePct, priceMove, basePoints };
+  }
+
+  calculatedPointSettings(basePoints) {
+    const scaled = (ratio, minimum = 1) => Math.max(minimum, Math.round(basePoints * ratio));
+    return {
+      TP: scaled(1),
+      TP2: scaled(0.8),
+      TP3: scaled(0.5),
+      TP4: scaled(0.3),
+      Distance: scaled(1.5),
+      MaxSpred: scaled(0.5),
+      TrailStart: scaled(6),
+      TrailDistance: scaled(1),
+      BoxRange: scaled(0.3),
+      BoxBufferPips: scaled(0.05),
+    };
+  }
+
+  calculatorFact(label, value, note = "") {
+    const fact = this.node("div", "calculator-fact");
+    fact.append(this.node("span", "", label), this.node("strong", "", value));
+    if (note) fact.append(this.node("small", "", note));
+    return fact;
+  }
+
+  renderLotCalculator() {
+    const values = this.lotCalculatorValues();
+    if (!values) return;
+    const quote = this.lotCalculatorQuote;
+    const settings = this.calculatedPointSettings(values.basePoints);
+    this.q("#calculator-symbol").textContent = quote.symbol || this.q("#symbol").value;
+    this.q("#calculator-price").textContent = `${this.price(values.price)} USDT`;
+    this.q("#calculator-source").textContent = `Binance 最新价 · 策略 1 点=${this.price(values.pointSize)} USDT`;
+    this.q("#calculator-facts").replaceChildren(
+      this.calculatorFact("1 手名义价值", this.money(values.oneLotNotional), `${values.leverage}x 保证金 ${this.money(values.oneLotMargin)} · ${this.number(values.targetRoePct, 2)}% ROE 约赚 ${this.money(values.oneLotMargin * values.targetRoePct / 100)}`),
+      this.calculatorFact(`${this.quantity(values.lot)} 手名义价值`, this.money(values.positionNotional), `开仓保证金 ${this.money(values.positionMargin)}`),
+      this.calculatorFact(`目标盈利 ${this.number(values.targetRoePct, 2)}%`, this.signedMoney(values.targetProfit), `${values.leverage}x 保证金 ROE`),
+      this.calculatorFact("预计扣成本后", this.signedMoney(values.estimatedNetProfit), "双边手续费与滑点估算"),
+      this.calculatorFact("标的价格需变动", `${this.number(values.priceMovePct, 4)}%`, `约 ${this.price(values.priceMove)} USDT`),
+      this.calculatorFact("推荐基础止盈", `${settings.TP} 点`, `目标价差约 ${this.price(settings.TP * values.pointSize)} USDT`),
+    );
+    this.q("#calculator-summary").textContent = `${values.leverage}x 杠杆下，保证金盈利 ${this.number(values.targetRoePct, 2)}% 约为 ${this.money(values.targetProfit)}。`;
+    this.q("#calculator-note").textContent = `对应标的价格约需变动 ${this.number(values.priceMovePct, 4)}%，即 ${this.price(values.priceMove)} USDT；当前 ${this.quantity(values.lot)} 手预计占用保证金 ${this.money(values.positionMargin)}。`;
+    this.q("#calculator-base-points").textContent = `${settings.TP} 点`;
+    this.q("#calculator-point-preview").replaceChildren(...[
+      ["TP", settings.TP], ["TP2", settings.TP2], ["TP3", settings.TP3], ["TP4", settings.TP4],
+      ["网格间距", settings.Distance], ["最大点差", settings.MaxSpred], ["追踪启动", settings.TrailStart], ["追踪距离", settings.TrailDistance],
+    ].map(([label, value]) => {
+      const item = this.node("span");
+      item.append(this.node("small", "", label), this.node("strong", "", `${value} 点`));
+      return item;
+    }));
+  }
+
+  applyCalculatedPoints(scope) {
+    const values = this.lotCalculatorValues();
+    if (!values) return;
+    const settings = this.calculatedPointSettings(values.basePoints);
+    const takeProfitKeys = new Set(["TP", "TP2", "TP3", "TP4"]);
+    let applied = 0;
+    Object.entries(settings).forEach(([key, value]) => {
+      if (scope === "take-profit" && !takeProfitKeys.has(key)) return;
+      const input = this.strategyParamInput(key);
+      if (!input) return;
+      input.value = String(value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      applied += 1;
+    });
+    this.closeLotCalculator();
+    this.showBanner(scope === "take-profit" ? `已写入 ${applied} 项分级止盈点数。` : `已写入 ${applied} 项止盈、网格与追踪点数。`, "success");
+    this.strategyParamInput("TP")?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   resolveBounds() {

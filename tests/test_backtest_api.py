@@ -661,9 +661,48 @@ def test_backtest_endpoints_require_authentication(mysql_test_engine: Engine) ->
     client, _ = build_test_client(mysql_test_engine)
     with client:
         assert client.get("/api/v2/backtests/catalog").status_code == 401
+        assert (
+            client.get("/api/v2/backtests/position-calculator?symbol=BTCUSDT").status_code
+            == 401
+        )
         assert client.get("/api/v2/backtests").status_code == 401
         assert client.get("/api/v2/backtests/1").status_code == 401
         assert client.post("/api/v2/backtests", json=backtest_payload()).status_code == 401
+
+
+def test_backtest_position_calculator_returns_live_price_and_contract_rules(
+    mysql_test_engine: Engine,
+) -> None:
+    client, _ = build_test_client(mysql_test_engine)
+    client.app.state.backtest_position_calculator_price_provider = (
+        lambda symbol: Decimal("500.25") if symbol == "MUUSDT" else Decimal("0")
+    )
+    client.app.state.backtest_contract_rules_provider = lambda symbol: {
+        "symbol": symbol,
+        "tick_size": Decimal("0.01"),
+        "market_step_size": Decimal("0.01"),
+        "min_quantity": Decimal("0.01"),
+        "min_notional": Decimal("5"),
+    }
+
+    with client:
+        headers = register_and_login(client, "position-calculator-researcher")
+        response = client.get(
+            "/api/v2/backtests/position-calculator?symbol=MUUSDT",
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "MUUSDT"
+    assert payload["price"] == 500.25
+    assert payload["source"] == "test_provider"
+    assert payload["strategy_point_size"] == 0.01
+    assert payload["exchange_tick_size"] == 0.01
+    assert payload["quantity_step"] == 0.01
+    assert payload["min_quantity"] == 0.01
+    assert payload["min_notional"] == 5.0
+    assert payload["observed_at"].endswith("Z")
 
 
 def test_backtest_guard_matches_the_two_worker_browser_contract() -> None:

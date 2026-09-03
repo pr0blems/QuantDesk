@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from . import __version__, battle
 from .ai_model_config import get_global_ai_model_config
 from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
+from .application.martingale_tp4.runtime import DEFAULT_SIGNAL_POINT_SIZE
 from .backtest import (
     STRATEGY_TEMPLATES as BACKTEST_STRATEGY_TEMPLATES,
 )
@@ -2547,6 +2548,60 @@ def update_monitor_watchlist(
     _audit(db, request, "monitor.watchlist.update", user.id, "user", str(user.id))
     db.commit()
     return user.monitor_watchlist
+
+
+@router.get("/backtests/position-calculator")
+def backtest_position_calculator(
+    request: Request,
+    symbol: str = Query(
+        min_length=2,
+        max_length=32,
+        pattern=r"^[A-Z0-9][A-Z0-9._:/-]*$",
+    ),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return the live Binance reference price used by the lot calculator.
+
+    The calculator is informational only.  Returning the strategy point size
+    separately from the exchange tick size prevents the browser from silently
+    treating one Binance tick as one legacy MQ4 strategy point.
+    """
+
+    normalized = symbol.strip().upper()
+    state = request.app.state
+    provider = getattr(state, "backtest_position_calculator_price_provider", None)
+    try:
+        if callable(provider):
+            raw_price = provider(normalized)
+            source = "test_provider"
+        else:
+            client = getattr(state, "binance_trading_client", None)
+            if client is None:
+                raise BinanceAccountClientError("unavailable")
+            raw_price = client.ticker_price(normalized)
+            source = "binance_fapi_latest_price"
+        price = Decimal(str(raw_price))
+        if not price.is_finite() or price <= 0:
+            raise ValueError("invalid price")
+    except (BinanceAccountClientError, InvalidOperation, TypeError, ValueError):
+        raise HTTPException(
+            status_code=503,
+            detail="暂时无法读取该合约的 Binance 最新价格，请稍后重试",
+        ) from None
+
+    rules = _backtest_contract_rules(request, normalized)
+    return {
+        "symbol": normalized,
+        "price": float(price),
+        "source": source,
+        "observed_at": _utc_iso(utcnow()),
+        "strategy_point_size": float(DEFAULT_SIGNAL_POINT_SIZE),
+        "exchange_tick_size": rules.get("tick_size"),
+        "quantity_step": rules.get("market_step_size"),
+        "min_quantity": rules.get("min_quantity"),
+        "min_notional": rules.get("min_notional"),
+        "max_leverage": rules.get("max_leverage", 20),
+    }
 
 
 @router.get("/backtests/catalog")

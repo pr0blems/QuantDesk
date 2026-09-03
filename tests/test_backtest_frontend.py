@@ -34,8 +34,20 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="history-list" class="history-list"',
         "this.closeHistory();",
         '["实际数据源", sourceLabel]',
+        'this.node("button", "lot-calculator-trigger", "计算器")',
+        'id="lot-calculator-dialog" class="calculator-dialog-backdrop hidden"',
+        'id="calculator-target-roe"',
+        '/position-calculator?symbol=',
+        'this.applyCalculatedPoints("take-profit")',
+        'this.applyCalculatedPoints("all")',
+        '一键应用全部点数',
+        '保证金盈利',
     ):
         assert contract in script
+
+    assert "const priceMovePct = targetRoePct / leverage;" in script
+    assert 'const takeProfitKeys = new Set(["TP", "TP2", "TP3", "TP4"]);' in script
+    assert 'TrailStart: scaled(6)' in script
 
     assert 'id="standard-execution-note"' in script
     assert 'id="price-chart"' in script
