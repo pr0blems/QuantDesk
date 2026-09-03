@@ -53,7 +53,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-5">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-6">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -237,6 +237,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   <button id="apply-tp-points" type="button">应用分级止盈</button>
                   <button id="apply-all-points" class="primary" type="button">一键应用全部设置</button>
                 </div>
+                <p id="calculator-apply-status" class="calculator-apply-status" role="status" aria-live="polite"></p>
                 <p class="calculator-disclaimer">估算未包含资金费率和强平阶梯；费用结果按当前回测手续费与滑点做双边近似扣减。</p>
               </div>
               <div id="calculator-error" class="calculator-error hidden"></div>
@@ -658,6 +659,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#calculator-lot").value = lotInput.value;
     this.q("#calculator-leverage").value = this.q("#leverage").value;
     this.q("#calculator-base-points").value = this.strategyParamInput("TP")?.value || "100";
+    this.q("#calculator-apply-status").textContent = "";
     dialog.classList.remove("hidden");
     this.q("#calculator-loading").classList.remove("hidden");
     this.q("#calculator-content").classList.add("hidden");
@@ -870,9 +872,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (!values) return;
     if (scope === "position") {
       if (!this.applyCalculatorPositionSettings()) return;
-      this.closeLotCalculator();
-      this.showBanner(`已写入初始手数 ${this.quantity(values.lot)} 和 Binance ${values.leverage}x 杠杆。`, "success");
-      this.strategyParamInput("Lot")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      const message = `已写入初始手数 ${this.quantity(values.lot)} 和 Binance ${values.leverage}x 杠杆；点击右上角 × 关闭。`;
+      this.q("#calculator-apply-status").textContent = message;
+      this.showBanner(message, "success");
       return;
     }
     const settings = this.calculatorPointSettings();
@@ -887,9 +889,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       applied += 1;
     });
     if (scope === "all") this.applyCalculatorPositionSettings();
-    this.closeLotCalculator();
-    this.showBanner(scope === "take-profit" ? `已写入 ${applied} 项分级止盈点数。` : `已写入手数、杠杆和 ${applied} 项可编辑点数。`, "success");
-    this.strategyParamInput("TP")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const message = scope === "take-profit"
+      ? `已写入 ${applied} 项分级止盈点数；点击右上角 × 关闭。`
+      : `已写入手数、杠杆和 ${applied} 项可编辑点数；点击右上角 × 关闭。`;
+    this.q("#calculator-apply-status").textContent = message;
+    this.showBanner(message, "success");
   }
 
   resolveBounds() {

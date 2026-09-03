@@ -42,6 +42,7 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="calculator-market-change" class="neutral"',
         'class="calculator-summary-table" aria-label="多空止盈价格与收益计算"',
         '<tbody id="calculator-summary"></tbody>',
+        'id="calculator-apply-status" class="calculator-apply-status" role="status" aria-live="polite"',
         'data-calculator-param-key="TP"',
         '/position-calculator?symbol=',
         'this.applyCalculatedPoints("position")',
@@ -67,6 +68,10 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'id="calculator-target-roe"' not in script
     assert 'this.q("#lot-calculator-dialog").addEventListener("click"' not in script
     assert 'event.key === "Escape" && !this.q("#lot-calculator-dialog")' not in script
+    apply_block = script.split("  applyCalculatedPoints(scope) {", 1)[1].split("\n  resolveBounds()", 1)[0]
+    assert "this.closeLotCalculator();" not in apply_block
+    assert "scrollIntoView" not in apply_block
+    assert "点击右上角 × 关闭" in apply_block
     assert "const priceMove = basePoints * pointSize;" in script
     assert "const priceMovePct = priceMove / price * 100;" in script
     assert "const longTakeProfitPrice = price + priceMove;" in script

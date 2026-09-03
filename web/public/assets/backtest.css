@@ -326,6 +326,8 @@ button { cursor: pointer; }
 .calculator-actions button { min-height: 39px; padding: 7px 14px; border: 1px solid #3c5065; border-radius: 3px; color: #b8c8d5; background: #0b1927; font-weight: 750; }
 .calculator-actions button.primary { border-color: #56d8b1; color: #061c18; background: #45d3a8; }
 .calculator-actions button:hover { filter: brightness(1.12); }
+.calculator-apply-status { margin: 9px 0 0; padding: 8px 10px; border: 1px solid rgba(74, 211, 166, .3); color: #73dfbd; background: rgba(20, 78, 64, .14); font-size: 11.5px; line-height: 1.45; text-align: right; }
+.calculator-apply-status:empty { display: none; }
 .calculator-disclaimer { margin: 10px 0 0; color: #5f7487; font-size: 10.5px; line-height: 1.5; text-align: right; }
 .calculator-error { min-height: 120px; display: grid; place-items: center; padding: 20px; border: 1px solid rgba(255, 93, 112, .35); color: #ff8998; background: rgba(107, 28, 43, .13); text-align: center; }
 
