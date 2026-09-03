@@ -18,6 +18,10 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="data-availability"',
         'id="available-range"',
         'id="available-bars"',
+        'type="search" list="symbol-options"',
+        'id="symbol-options"',
+        "this.handleSymbolSearch()",
+        "请输入并选择列表中的有效交易品种",
         "首次回测将按需同步；完成后显示具体范围",
     ):
         assert contract in script
@@ -34,5 +38,7 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert "this.syncBounds(basket && changed);" in script
     assert "this.shiftMonths(end.value, -1)" in script
     assert "this.renderAvailability(bounds);" in script
+    assert "this.populateSymbolSearch(symbols" in script
+    assert 'input.disabled = !this.symbolOptions.length;' in script
     assert 'new Intl.NumberFormat("zh-CN").format(bars)' in script
     assert 'start.min = min || "";' in script

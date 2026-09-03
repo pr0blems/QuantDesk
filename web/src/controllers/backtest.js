@@ -6,6 +6,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.runningBacktest = false;
     this.sessionGeneration = 0;
     this.catalog = { strategies: [], symbols: [], timeframes: [], bounds: {} };
+    this.symbolOptions = [];
     this.history = [];
     this.activeDetail = null;
     this.strategyId = "";
@@ -61,7 +62,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
             <section class="config-section">
               <div class="section-head"><div><span class="section-index">02</span><strong>市场与区间</strong></div><small id="data-bound">等候行情目录</small></div>
               <div class="field-grid two">
-                <label>交易品种<select id="symbol" name="symbol" required><option value="">加载中…</option></select></label>
+                <label>交易品种<input id="symbol" name="symbol" type="search" list="symbol-options" placeholder="加载中…" autocomplete="off" spellcheck="false" required><datalist id="symbol-options"></datalist></label>
                 <label>数据周期<select id="timeframe" name="timeframe" required><option value="">加载中…</option></select></label>
               </div>
               <div id="data-availability" class="data-availability" role="status" aria-live="polite">
@@ -189,7 +190,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (this.dataset.bound === "1") return;
     this.dataset.bound = "1";
     this.q("#backtest-form").addEventListener("submit", (event) => this.runBacktest(event));
-    this.q("#symbol").addEventListener("change", () => this.syncBounds());
+    this.q("#symbol").addEventListener("input", () => this.handleSymbolSearch());
+    this.q("#symbol").addEventListener("change", () => this.handleSymbolSearch(true));
     this.q("#timeframe").addEventListener("change", () => this.syncBounds());
     this.q("#refresh-history").addEventListener("click", () => this.loadHistory(true));
     this.q("#reset-params").addEventListener("click", () => this.renderParameters(true));
@@ -213,6 +215,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.loading = false;
     this.runningBacktest = false;
     this.catalog = { strategies: [], symbols: [], timeframes: [], bounds: {} };
+    this.symbolOptions = [];
     this.history = [];
     this.activeDetail = null;
     this.strategyId = "";
@@ -228,11 +231,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#available-range").textContent = "正在读取…";
     this.q("#available-bars").textContent = "按当前品种与周期统计";
     this.q("#data-availability").classList.remove("empty");
-    for (const id of ["#symbol", "#timeframe"]) {
-      const option = this.node("option", "", "登录后加载…");
-      option.value = "";
-      this.q(id).replaceChildren(option);
-    }
+    const symbolInput = this.q("#symbol");
+    symbolInput.value = "";
+    symbolInput.placeholder = "登录后加载…";
+    symbolInput.disabled = true;
+    symbolInput.setCustomValidity("");
+    this.q("#symbol-options").replaceChildren();
+    const timeframeOption = this.node("option", "", "登录后加载…");
+    timeframeOption.value = "";
+    this.q("#timeframe").replaceChildren(timeframeOption);
     for (const id of ["#start-date", "#end-date"]) {
       const input = this.q(id);
       input.value = "";
@@ -346,6 +353,43 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     else if (options.length) select.value = options[0].value;
   }
 
+  populateSymbolSearch(options, placeholder) {
+    const input = this.q("#symbol");
+    const previous = input.value.trim().toUpperCase();
+    this.symbolOptions = options
+      .map((option) => ({ ...option, value: String(option.value || "").trim().toUpperCase() }))
+      .filter((option) => option.value);
+    const nodes = this.symbolOptions.map((option) => {
+      const node = this.node("option");
+      node.value = option.value;
+      node.label = option.label === option.value ? option.value : `${option.value} · ${option.label}`;
+      return node;
+    });
+    this.q("#symbol-options").replaceChildren(...nodes);
+    input.placeholder = placeholder;
+    input.disabled = !this.symbolOptions.length;
+    if (this.symbolOptions.some((item) => item.value === previous)) input.value = previous;
+    else input.value = this.symbolOptions[0]?.value || "";
+    input.setCustomValidity("");
+  }
+
+  handleSymbolSearch(commit = false) {
+    const input = this.q("#symbol");
+    const normalized = input.value.trim().toUpperCase();
+    if (input.value !== normalized) input.value = normalized;
+    const matched = this.symbolOptions.find((item) => item.value === normalized);
+    input.setCustomValidity(matched ? "" : "请输入并选择列表中的有效交易品种");
+    if (matched) {
+      if (commit) input.value = matched.value;
+      this.syncBounds();
+      return;
+    }
+    this.q("#available-range").textContent = normalized ? "未找到匹配的交易品种" : "请输入或选择交易品种";
+    this.q("#available-bars").textContent = "可输入股票名称或合约代码进行搜索";
+    this.q("#data-bound").textContent = "等待选择有效品种";
+    this.q("#data-availability").classList.add("empty");
+  }
+
   selectStrategy(id) {
     const changed = this.strategyId !== id;
     this.strategyId = id;
@@ -383,7 +427,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const timeframes = basket
       ? (Array.isArray(strategy?.supported_timeframes) ? strategy.supported_timeframes : ["1m", "5m", "15m", "30m", "1h"]).map((item) => normalizeOption(item, "timeframe"))
       : this.catalog.timeframes;
-    this.populateSelect(this.q("#symbol"), symbols, basket ? "暂无可用 Tiger/Binance 映射" : "选择品种");
+    this.populateSymbolSearch(symbols, basket ? "搜索 Tiger/Binance 映射" : "输入名称或代码搜索");
     this.populateSelect(this.q("#timeframe"), timeframes, "选择周期");
     if (basket && changed && timeframes.some((item) => item.value === "15m")) this.q("#timeframe").value = "15m";
 
