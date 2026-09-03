@@ -902,10 +902,32 @@ def run_catalog_martingale_backtest(
     fallback_reason = (
         "binance_selected_by_user"
         if source_mode == "binance"
-        else "tiger_openapi_not_configured"
+        else "tiger_historical_data_unavailable"
     )
-    if source_mode == "tiger" and not tiger_configured:
-        raise HTTPException(status_code=503, detail="Tiger Open API 尚未配置，请改用自动选择或 Binance")
+
+    def tiger_data_unusable(exc: HTTPException) -> bool:
+        detail = str(exc.detail)
+        return detail.startswith("Tiger ") or "replay data coverage is blocked" in detail
+
+    # Tiger's quote/depth/news authorization used by AI Monitor is not the same
+    # credential as the official Open API used to backfill historical OHLCV.
+    # Existing, already-qualified Tiger bars remain valid even when the Open API
+    # credential is not present, so always try the local historical store first.
+    if source_mode != "binance":
+        try:
+            return _execute_martingale_bar_backtest(
+                replay_request,
+                request,
+                db,
+                user,
+                link=link,
+            )
+        except HTTPException as exc:
+            if not tiger_data_unusable(exc):
+                raise
+            db.rollback()
+            fallback_reason = f"tiger_cached_data_unusable:{exc.detail}"
+
     if source_mode != "binance" and tiger_configured:
         try:
             quote_api = build_tiger_quote_api(
@@ -946,11 +968,6 @@ def run_catalog_martingale_backtest(
         except TigerMarketDataError as exc:
             db.rollback()
             fallback_reason = f"tiger_openapi_unavailable:{exc.category}"
-            if source_mode == "tiger":
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Tiger 历史行情暂不可用：{exc.category}",
-                ) from None
         except ValueError as exc:
             db.rollback()
             raise HTTPException(status_code=422, detail=str(exc)) from None
@@ -964,15 +981,19 @@ def run_catalog_martingale_backtest(
                     link=link,
                 )
             except HTTPException as exc:
-                detail = str(exc.detail)
-                tiger_data_unusable = (
-                    detail.startswith("Tiger ")
-                    or "replay data coverage is blocked" in detail
-                )
-                if source_mode == "tiger" or not tiger_data_unusable:
+                if not tiger_data_unusable(exc):
                     raise
                 db.rollback()
-                fallback_reason = f"tiger_data_unusable:{detail}"
+                fallback_reason = f"tiger_data_unusable:{exc.detail}"
+
+    if source_mode != "binance" and not tiger_configured:
+        # The HAR-derived Tiger integration provides live quote, depth and news
+        # data, but it has no trustworthy historical OHLCV endpoint.  Keep the
+        # user's Tiger preference and transparently use the verified Binance
+        # mapping for the missing historical segment instead of failing the run.
+        fallback_reason = (
+            "tiger_openapi_not_configured_and_cached_history_unavailable"
+        )
 
     if backtest_repository is None:
         raise HTTPException(

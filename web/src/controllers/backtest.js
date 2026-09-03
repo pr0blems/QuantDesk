@@ -51,7 +51,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-chart-interaction-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-margin-fields-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -84,7 +84,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                 <label id="market-source-field">行情数据源
                   <select id="market-data-source" name="market_data_source">
                     <option value="auto">自动选择（Tiger 优先，失败转 Binance）</option>
-                    <option value="tiger">仅使用 Tiger 历史行情</option>
+                    <option value="tiger">Tiger 历史优先（不足转 Binance）</option>
                     <option value="binance">仅使用 Binance 合约行情</option>
                   </select>
                   <small id="market-source-help" class="field-help">自动模式会优先读取 Tiger，缺失或不可用时直接使用 Binance。</small>
@@ -224,6 +224,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#symbol").addEventListener("input", () => this.handleSymbolSearch());
     this.q("#symbol").addEventListener("change", () => this.handleSymbolSearch(true));
     this.q("#timeframe").addEventListener("change", () => this.syncBounds());
+    this.q("#market-data-source").addEventListener("change", () => this.updateMarketSourceHelp());
     this.q("#open-history").addEventListener("click", () => this.openHistory());
     this.q("#reload-history").addEventListener("click", () => this.loadHistory(true));
     this.q("#close-history").addEventListener("click", () => this.closeHistory());
@@ -484,7 +485,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     sourceSelect.disabled = !basket;
     if (basket) {
       if (changed || !["auto", "tiger", "binance"].includes(sourceSelect.value)) sourceSelect.value = "auto";
-      sourceHelp.textContent = "自动模式优先读取 Tiger；数据缺失、接口不可用或未配置时直接回退 Binance。";
+      this.updateMarketSourceHelp();
     } else {
       sourceSelect.value = "binance";
       sourceHelp.textContent = "当前策略固定使用 Binance 合约历史 K 线。";
@@ -499,6 +500,18 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#cost-section .section-head small").textContent = basket ? "成本可调 · 退出由策略控制" : "结果均为净值";
     this.q("#run-backtest").disabled = !strategy || !symbols.length || !timeframes.length;
     this.syncBounds(basket && changed);
+  }
+
+  updateMarketSourceHelp() {
+    const sourceSelect = this.q("#market-data-source");
+    const sourceHelp = this.q("#market-source-help");
+    if (sourceSelect.disabled || sourceSelect.value === "binance") {
+      sourceHelp.textContent = "当前策略固定使用 Binance 合约历史 K 线。";
+    } else if (sourceSelect.value === "tiger") {
+      sourceHelp.textContent = "优先使用已入库或官方 Open API 回补的 Tiger 历史 K 线；不足时使用已验证的 Binance 映射合约。";
+    } else {
+      sourceHelp.textContent = "自动模式优先读取 Tiger；历史 K 线缺失、接口不可用或未配置时直接回退 Binance。";
+    }
   }
 
   renderParameters(reset = false) {
@@ -924,21 +937,36 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const table = this.node("table");
     const thead = this.node("thead");
     const headRow = this.node("tr");
-    ["开仓时间", "方向", "开仓 → 平仓", "仓位", "净盈亏", "收益率", "持有", "退出原因"].forEach((title) => headRow.append(this.node("th", "", title)));
+    ["开仓时间", "方向", "开仓 → 平仓", "仓位", "开仓保证金", "杠杆", "剩余可用金额", "净盈亏", "账户收益率", "保证金 ROE", "持有", "退出原因"].forEach((title) => headRow.append(this.node("th", "", title)));
     thead.append(headRow);
     const tbody = this.node("tbody");
     trades.slice(-100).reverse().forEach((trade) => {
       const row = this.node("tr");
       const sideValue = String(trade.side ?? trade.direction ?? "").toLowerCase();
       const isLong = ["long", "buy", "1", "多"].includes(sideValue) || Number(trade.side) > 0;
+      const isBasket = Boolean(trade.is_mixed_basket)
+        || String(trade.position_structure ?? "").toLowerCase() === "mixed_basket"
+        || ["basket", "mixed", "双向", "篮子"].includes(sideValue);
       const pnl = Number(trade.net_pnl ?? trade.pnl ?? trade.profit ?? 0);
+      const priceSummary = isBasket
+        ? [
+            Number(trade.long_quantity) > 0 ? `多 ${this.quantity(trade.long_quantity)}：${this.price(trade.long_entry_price)} → ${this.price(trade.long_exit_price)}` : "",
+            Number(trade.short_quantity) > 0 ? `空 ${this.quantity(trade.short_quantity)}：${this.price(trade.short_entry_price)} → ${this.price(trade.short_exit_price)}` : "",
+          ].filter(Boolean).join(" · ")
+        : `${this.price(trade.entry_price ?? trade.open_price)} → ${this.price(trade.exit_price ?? trade.close_price)}`;
+      const initialMargin = trade.initial_margin ?? trade.peak_initial_margin ?? trade.margin;
+      const availableBalance = trade.remaining_available_balance ?? trade.minimum_available_balance ?? trade.available_balance;
       const values = [
         [this.shortDate(trade.entry_time ?? trade.entry_at ?? trade.opened_at ?? trade.entry_ts, true), "muted"],
-        [isLong ? "做多" : "做空", isLong ? "positive" : "negative"],
-        [`${this.price(trade.entry_price ?? trade.open_price)} → ${this.price(trade.exit_price ?? trade.close_price)}`, "prices"],
+        [isBasket ? "双向篮子" : isLong ? "做多" : "做空", isBasket ? "basket-side" : isLong ? "positive" : "negative"],
+        [priceSummary, isBasket ? "prices basket-prices" : "prices"],
         [this.quantity(trade.quantity ?? trade.qty ?? trade.position_size), ""],
+        [this.money(initialMargin), ""],
+        [`${this.integer(trade.leverage ?? 1)}x`, ""],
+        [this.money(availableBalance), this.toneClass(availableBalance)],
         [this.signedMoney(pnl), this.toneClass(pnl)],
-        [this.percent(trade.return_pct ?? trade.pnl_pct, true), this.toneClass(trade.return_pct ?? trade.pnl_pct)],
+        [this.percent(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), this.toneClass(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct)],
+        [this.percent(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), this.toneClass(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct)],
         [`${this.integer(trade.holding_bars ?? trade.bars_held ?? trade.duration_bars)} 根`, "muted"],
         [this.exitReason(trade.exit_reason ?? trade.reason), "muted"],
       ];
@@ -1174,17 +1202,25 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       const pnl = Number(trade.net_pnl ?? trade.pnl ?? trade.profit ?? 0);
       const sideValue = String(trade.side ?? trade.direction ?? "").toLowerCase();
       const isLong = ["long", "buy", "1", "多"].includes(sideValue) || Number(trade.side) > 0;
-      title = target.kind === "entry" ? `${isLong ? "做多" : "做空"}开仓` : `${isLong ? "做多" : "做空"}平仓`;
+      const isBasket = Boolean(trade.is_mixed_basket)
+        || String(trade.position_structure ?? "").toLowerCase() === "mixed_basket"
+        || ["basket", "mixed", "双向", "篮子"].includes(sideValue);
+      title = isBasket ? "双向篮子成交" : target.kind === "entry" ? `${isLong ? "做多" : "做空"}开仓` : `${isLong ? "做多" : "做空"}平仓`;
       tone = pnl > 0 ? "profit" : pnl < 0 ? "loss" : "";
       rows.push(
         ["成交时间", this.shortDate(target.time, true)],
-        [isLong ? "买入开仓价" : "卖出开仓价", this.price(trade.entry_price ?? trade.open_price)],
-        [isLong ? "卖出平仓价" : "买入平仓价", this.price(trade.exit_price ?? trade.close_price)],
+        [isBasket ? "多头开仓 → 平仓" : isLong ? "买入开仓价" : "卖出开仓价", isBasket ? `${this.price(trade.long_entry_price)} → ${this.price(trade.long_exit_price)}` : this.price(trade.entry_price ?? trade.open_price)],
+        [isBasket ? "空头开仓 → 平仓" : isLong ? "卖出平仓价" : "买入平仓价", isBasket ? `${this.price(trade.short_entry_price)} → ${this.price(trade.short_exit_price)}` : this.price(trade.exit_price ?? trade.close_price)],
         ["成交数量", this.quantity(trade.quantity ?? trade.qty ?? trade.position_size)],
+        ["开仓保证金", this.money(trade.initial_margin ?? trade.peak_initial_margin ?? trade.margin)],
+        ["杠杆倍率", `${this.integer(trade.leverage ?? 1)}x`],
+        ["剩余可用金额", this.money(trade.remaining_available_balance ?? trade.minimum_available_balance ?? trade.available_balance)],
+        ["平仓后可用金额", this.money(trade.available_balance_after_close ?? trade.available_balance)],
         ["毛盈亏", this.signedMoney(trade.gross_pnl), Number(trade.gross_pnl) > 0 ? "profit" : Number(trade.gross_pnl) < 0 ? "loss" : ""],
         ["手续费", this.signedMoney(-Math.abs(Number(trade.fees ?? trade.fee ?? 0)))],
         ["净盈亏", this.signedMoney(pnl), tone],
-        ["收益率", this.percent(trade.return_pct ?? trade.pnl_pct, true), tone],
+        ["账户收益率", this.percent(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), tone],
+        ["保证金 ROE", this.percent(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), tone],
         ["退出原因", this.exitReason(trade.exit_reason ?? trade.reason)],
       );
     } else {
@@ -1572,6 +1608,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       liquidation: "强制平仓",
       max_holding_bars: "达到最长持有",
       end_of_data: "数据结束",
+      basket_take_profit: "篮子止盈",
+      basket_stop_loss: "篮子止损",
+      basket_trailing_stop: "篮子追踪止盈",
     };
     return labels[value] || value || "策略退出";
   }

@@ -1437,13 +1437,24 @@ def _run_engine(
                 "exit_price": _finite_or_zero(exit_price),
                 "quantity": _finite_or_zero(position["quantity"]),
                 "notional": _result_number(position["notional"], 8),
+                "initial_margin": _result_number(margin, 8),
                 "leverage": config["leverage"],
+                "remaining_available_balance": _result_number(
+                    position["remaining_available_balance"], 8
+                ),
+                "available_balance_after_close": _result_number(balance, 8),
                 "liquidation_price": _finite_or_zero(position["liquidation_price"]),
                 "gross_pnl": _result_number(gross_pnl, 8),
                 "net_pnl": _result_number(net_pnl, 8),
                 "fees": _result_number(fees, 8),
                 "liquidation_fee": _result_number(liquidation_fee, 8),
                 "return_pct": _result_number(net_pnl / margin * 100, 8) if margin else None,
+                "margin_return_pct": (
+                    _result_number(net_pnl / margin * 100, 8) if margin else None
+                ),
+                "account_return_pct": _result_number(
+                    net_pnl / initial_capital * 100, 8
+                ),
                 "holding_bars": max(1, int(position["holding_bars"])),
                 "exit_reason": reason,
                 "exit_decision": (
@@ -1498,6 +1509,7 @@ def _run_engine(
             rejected_order_count += 1
             return
         notional = actual_notional
+        margin = notional / config["leverage"]
         entry_fee = notional * fee_rate
         balance -= entry_fee
         total_fees += entry_fee
@@ -1517,6 +1529,8 @@ def _run_engine(
             "entry_price": entry_price,
             "quantity": quantity,
             "notional": notional,
+            "initial_margin": margin,
+            "remaining_available_balance": max(0.0, balance - margin),
             "liquidation_price": _liquidation_price(
                 entry_price,
                 direction,

@@ -742,6 +742,7 @@ def _normalize_martingale_backtest_result(
         )
 
     trades: list[dict[str, Any]] = []
+    running_available_balance = initial_capital
     for raw_cycle in raw_cycles:
         if not isinstance(raw_cycle, Mapping):
             continue
@@ -774,35 +775,100 @@ def _normalize_martingale_backtest_result(
             )
             return notional / quantity
 
-        quantity = sum(
-            (decimal(item.get("quantity")) for item in opening_fills),
-            Decimal("0"),
-        )
+        long_opening_fills = [
+            item
+            for item in opening_fills
+            if enum_value(item.get("direction")) in {"buy", "long"}
+        ]
+        short_opening_fills = [
+            item
+            for item in opening_fills
+            if enum_value(item.get("direction")) in {"sell", "short"}
+        ]
+        long_closing_fills = [
+            item
+            for item in closing_fills
+            if enum_value(item.get("direction")) in {"buy", "long"}
+        ]
+        short_closing_fills = [
+            item
+            for item in closing_fills
+            if enum_value(item.get("direction")) in {"sell", "short"}
+        ]
+        quantity = sum((decimal(item.get("quantity")) for item in opening_fills), Decimal("0"))
         if quantity < MIN_PERSISTED_QUANTITY:
             continue
         net_pnl = decimal(raw_cycle.get("realized_pnl"))
         fees = decimal(raw_cycle.get("fees"))
+        cycle_leverage = max(
+            1,
+            int(raw_cycle.get("leverage") or raw_metrics.get("leverage") or 1),
+        )
+        opening_notional = sum(
+            (decimal(item.get("price")) * decimal(item.get("quantity")) for item in opening_fills),
+            Decimal("0"),
+        )
+        initial_margin = decimal(
+            raw_cycle.get("peak_initial_margin"),
+            opening_notional / Decimal(cycle_leverage),
+        )
+        available_balance_after_close = decimal(
+            raw_cycle.get("available_balance_after_close"),
+            running_available_balance + net_pnl,
+        )
+        minimum_available_balance = decimal(
+            raw_cycle.get("minimum_available_balance"),
+            max(Decimal("0"), running_available_balance - initial_margin),
+        )
+        running_available_balance = available_balance_after_close
         return_pct = (
             net_pnl / initial_capital * Decimal("100") if initial_capital > 0 else Decimal("0")
+        )
+        margin_return_pct = (
+            net_pnl / initial_margin * Decimal("100") if initial_margin > 0 else Decimal("0")
         )
         holding_bars = sum(
             opened_at <= int(point.get("bar_open_time") or 0) <= closed_at
             for point in raw_curve
             if isinstance(point, Mapping)
         )
+        mixed_directions = bool(long_opening_fills and short_opening_fills)
         direction = enum_value(opening_fills[0].get("direction"))
         trades.append(
             {
+                # Keep the persisted side compatible with the long/short database
+                # constraint; mixed basket semantics live in metadata below.
                 "side": "long" if direction in {"buy", "long"} else "short",
+                "is_mixed_basket": mixed_directions,
+                "position_structure": "mixed_basket" if mixed_directions else "single_direction",
                 "entry_ts": opened_at // 1000,
                 "exit_ts": closed_at // 1000,
                 "entry_price": float(weighted_price(opening_fills)),
                 "exit_price": float(weighted_price(closing_fills)),
                 "quantity": float(quantity),
+                "long_quantity": float(
+                    sum((decimal(item.get("quantity")) for item in long_opening_fills), Decimal("0"))
+                ),
+                "short_quantity": float(
+                    sum((decimal(item.get("quantity")) for item in short_opening_fills), Decimal("0"))
+                ),
+                "long_entry_price": float(weighted_price(long_opening_fills)),
+                "long_exit_price": float(weighted_price(long_closing_fills)),
+                "short_entry_price": float(weighted_price(short_opening_fills)),
+                "short_exit_price": float(weighted_price(short_closing_fills)),
+                "initial_margin": float(initial_margin),
+                "peak_initial_margin": float(initial_margin),
+                "leverage": cycle_leverage,
+                "minimum_available_balance": float(minimum_available_balance),
+                "remaining_available_balance": float(minimum_available_balance),
+                "available_balance": float(available_balance_after_close),
+                "available_balance_after_close": float(available_balance_after_close),
                 "gross_pnl": float(net_pnl + fees),
                 "fees": float(fees),
                 "net_pnl": float(net_pnl),
                 "return_pct": float(return_pct),
+                "account_return_pct": float(return_pct),
+                "margin_return_pct": float(margin_return_pct),
                 "holding_bars": holding_bars,
                 "exit_reason": str(raw_cycle.get("exit_reason") or "basket_exit"),
                 "cycle_sequence": int(raw_cycle.get("sequence") or 0),

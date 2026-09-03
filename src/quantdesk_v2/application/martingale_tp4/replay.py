@@ -24,7 +24,7 @@ from ...domain.martingale_tp4_engine import (
 )
 from ...tiger_market_data import TigerBar
 
-REPLAY_ENGINE_VERSION = "martingale_tp4_bar_replay_v1"
+REPLAY_ENGINE_VERSION = "martingale_tp4_bar_replay_v2"
 BOX_ALGORITHM_VERSION = "mq4_stateful_adaptive_box_v2"
 FILL_MODEL_VERSION = "tiger_ohlc_path_v1"
 
@@ -100,6 +100,12 @@ class ReplayCycle:
     realized_pnl: Decimal
     fees: Decimal
     exit_reason: str
+    leverage: int
+    peak_initial_margin: Decimal
+    minimum_available_balance: Decimal
+    available_balance_after_close: Decimal
+    long_leg_count: int
+    short_leg_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,6 +526,10 @@ def run_bar_replay(
     cycle_leg_count = 0
     cycle_pnl = Decimal("0")
     cycle_fees = Decimal("0")
+    cycle_peak_initial_margin = Decimal("0")
+    cycle_min_available_balance = initial_capital
+    cycle_long_leg_count = 0
+    cycle_short_leg_count = 0
     next_leg_index = 0
     manual_used = False
     peak_equity = initial_capital
@@ -569,6 +579,8 @@ def run_bar_replay(
         nonlocal balance, cycle_fees, cycle_leg_count, next_leg_index
         nonlocal favorable_high, favorable_low, cycle_opened_at, cycle_mode
         nonlocal rejected_order_count
+        nonlocal cycle_peak_initial_margin, cycle_min_available_balance
+        nonlocal cycle_long_leg_count, cycle_short_leg_count
         if decision.direction is None or decision.quantity is None:
             raise RuntimeError("entry decision is incomplete")
         base_price = ask if decision.direction == Direction.BUY else bid
@@ -599,6 +611,18 @@ def run_bar_replay(
             opened_at=bar_time,
         )
         open_legs.append(leg)
+        current_initial_margin = sum(
+            (item.entry_price * item.quantity for item in open_legs), Decimal("0")
+        ) / Decimal(leverage)
+        cycle_peak_initial_margin = max(cycle_peak_initial_margin, current_initial_margin)
+        cycle_min_available_balance = min(
+            cycle_min_available_balance,
+            max(Decimal("0"), balance - current_initial_margin),
+        )
+        if decision.direction == Direction.BUY:
+            cycle_long_leg_count += 1
+        else:
+            cycle_short_leg_count += 1
         fills.append(
             ReplayFill(
                 sequence=len(fills) + 1,
@@ -629,6 +653,8 @@ def run_bar_replay(
         nonlocal balance, cycle_pnl, cycle_fees, cycle_opened_at, cycle_leg_count
         nonlocal active_box, next_leg_index, favorable_high, favorable_low
         nonlocal liquidation_fees
+        nonlocal cycle_peak_initial_margin, cycle_min_available_balance
+        nonlocal cycle_long_leg_count, cycle_short_leg_count
         if decision.action == DecisionAction.CLOSE_ALL:
             selected = list(open_legs)
         elif decision.action == DecisionAction.CLOSE_DIRECTION:
@@ -684,6 +710,12 @@ def run_bar_replay(
                     realized_pnl=cycle_pnl,
                     fees=cycle_fees,
                     exit_reason=decision.reason_code,
+                    leverage=leverage,
+                    peak_initial_margin=cycle_peak_initial_margin,
+                    minimum_available_balance=cycle_min_available_balance,
+                    available_balance_after_close=balance,
+                    long_leg_count=cycle_long_leg_count,
+                    short_leg_count=cycle_short_leg_count,
                 )
             )
             cycle_opened_at = None
@@ -694,6 +726,10 @@ def run_bar_replay(
             cycle_leg_count = 0
             cycle_pnl = Decimal("0")
             cycle_fees = Decimal("0")
+            cycle_peak_initial_margin = Decimal("0")
+            cycle_min_available_balance = balance
+            cycle_long_leg_count = 0
+            cycle_short_leg_count = 0
 
     for bar_index, bar in enumerate(signal):
         if bar_index < first_evaluation_index:

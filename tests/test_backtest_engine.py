@@ -200,6 +200,14 @@ def test_signal_is_filled_at_next_open_and_costs_are_charged_both_sides(
     assert result["trades"][0]["entry_ts"] == BASE_TS + 4 * HOUR
     assert result["trades"][0]["exit_ts"] == BASE_TS + 5 * HOUR
     assert result["trades"][0]["fees"] > 0
+    assert result["trades"][0]["initial_margin"] > 0
+    assert result["trades"][0]["leverage"] == 1
+    assert result["trades"][0]["remaining_available_balance"] >= 0
+    assert result["trades"][0]["available_balance_after_close"] == pytest.approx(
+        result["account"]["final_equity"]
+    )
+    assert result["trades"][0]["margin_return_pct"] == result["trades"][0]["return_pct"]
+    assert math.isfinite(result["trades"][0]["account_return_pct"])
     assert result["account"]["total_fees"] == result["trades"][0]["fees"]
     assert result["metrics"]["trade_count"] == 1
     assert math.isfinite(result["metrics"]["annualized_return_pct"])

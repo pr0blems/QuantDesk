@@ -343,6 +343,7 @@ def test_martingale_replay_is_normalized_for_standard_backtest_persistence() -> 
                     "profit_factor": None,
                     "total_fees": "2",
                     "maximum_drawdown_pct": "0.05",
+                    "leverage": "10",
                 },
                 "cycles": [
                     {
@@ -354,6 +355,12 @@ def test_martingale_replay_is_normalized_for_standard_backtest_persistence() -> 
                         "realized_pnl": "10",
                         "fees": "2",
                         "exit_reason": "basket_take_profit",
+                        "leverage": 10,
+                        "peak_initial_margin": "10",
+                        "minimum_available_balance": "9990",
+                        "available_balance_after_close": "10010",
+                        "long_leg_count": 1,
+                        "short_leg_count": 0,
                     }
                 ],
                 "fills": [
@@ -405,10 +412,75 @@ def test_martingale_replay_is_normalized_for_standard_backtest_persistence() -> 
     assert normalized["trades"][0]["side"] == "long"
     assert normalized["trades"][0]["holding_bars"] == 3
     assert normalized["trades"][0]["exit_reason"] == "basket_take_profit"
+    assert normalized["trades"][0]["initial_margin"] == 10.0
+    assert normalized["trades"][0]["leverage"] == 10
+    assert normalized["trades"][0]["available_balance_after_close"] == 10010.0
+    assert normalized["trades"][0]["account_return_pct"] == 0.1
+    assert normalized["trades"][0]["margin_return_pct"] == 100.0
     assert normalized["equity_curve"][0]["timestamp"] == 1000
     assert normalized["data_quality"]["manifest_id"] == "manifest-1"
     assert normalized["data_quality"]["source"] == "binance_fapi"
     assert any("Binance 映射合约" in item for item in normalized["data_quality"]["warnings"])
+
+
+def test_martingale_mixed_cycle_is_not_mislabelled_as_one_long_trade() -> None:
+    normalized = api._normalize_martingale_backtest_result(
+        {
+            "result": {
+                "signal_bar_count": 2,
+                "metrics": {
+                    "initial_capital": "1000",
+                    "final_equity": "900",
+                    "return_pct": "-10",
+                    "total_fees": "0",
+                    "maximum_drawdown_pct": "10",
+                    "leverage": "10",
+                },
+                "cycles": [
+                    {
+                        "sequence": 1,
+                        "opened_at": 1_000_000,
+                        "closed_at": 1_060_000,
+                        "mode": "grid",
+                        "leg_count": 2,
+                        "realized_pnl": "-100",
+                        "fees": "0",
+                        "exit_reason": "end_of_data",
+                        "leverage": 10,
+                        "peak_initial_margin": "30",
+                        "minimum_available_balance": "970",
+                        "available_balance_after_close": "900",
+                        "long_leg_count": 1,
+                        "short_leg_count": 1,
+                    }
+                ],
+                "fills": [
+                    {"bar_open_time": 1_000_000, "action": "open", "direction": "buy", "quantity": "1", "price": "100"},
+                    {"bar_open_time": 1_000_000, "action": "add", "direction": "sell", "quantity": "2", "price": "100"},
+                    {"bar_open_time": 1_060_000, "action": "close_all", "direction": "buy", "quantity": "1", "price": "110"},
+                    {"bar_open_time": 1_060_000, "action": "close_all", "direction": "sell", "quantity": "2", "price": "110"},
+                ],
+                "equity_curve": [
+                    {"bar_open_time": 1_000_000, "equity": "1000", "drawdown_pct": "0", "open_legs": 2},
+                    {"bar_open_time": 1_060_000, "equity": "900", "drawdown_pct": "10", "open_legs": 0},
+                ],
+                "warnings": [],
+            }
+        },
+        initial_capital=Decimal("1000"),
+    )
+
+    trade = normalized["trades"][0]
+    assert trade["side"] == "long"
+    assert trade["is_mixed_basket"] is True
+    assert trade["position_structure"] == "mixed_basket"
+    assert trade["long_quantity"] == 1.0
+    assert trade["short_quantity"] == 2.0
+    assert trade["long_entry_price"] == 100.0
+    assert trade["short_exit_price"] == 110.0
+    assert trade["initial_margin"] == 30.0
+    assert trade["available_balance_after_close"] == 900.0
+    assert trade["return_pct"] == -10.0
 
 
 def test_catalog_keeps_symbols_without_local_history_for_on_demand_fetch() -> None:

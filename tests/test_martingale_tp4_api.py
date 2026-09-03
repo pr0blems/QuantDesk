@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+from fastapi import HTTPException
+
 import quantdesk_v2.interfaces.api.martingale_tp4 as martingale_api
 from quantdesk_v2.interfaces.api.martingale_tp4 import router
 from quantdesk_v2.strategy_catalog import ENGINE_PARAMETER_SCHEMAS
@@ -42,8 +44,14 @@ def test_catalog_backtest_uses_mapped_binance_bars_when_tiger_is_unconfigured(
     captured = {}
 
     def execute(payload, request, db, user, **kwargs):
+        source_name = kwargs.get("source_name", "tiger_openapi")
+        if source_name == "tiger_openapi":
+            raise HTTPException(
+                status_code=409,
+                detail="Tiger 15m data quality has not been evaluated",
+            )
         captured.update(kwargs)
-        return {"market_data_source": kwargs["source_name"]}
+        return {"market_data_source": source_name}
 
     monkeypatch.setattr(martingale_api, "_execute_martingale_bar_backtest", execute)
     calls = []
@@ -74,7 +82,7 @@ def test_catalog_backtest_uses_mapped_binance_bars_when_tiger_is_unconfigured(
 
     result = martingale_api.run_catalog_martingale_backtest(
         request=request,
-        db=object(),
+        db=SimpleNamespace(rollback=lambda: None),
         user=object(),
         strategy_parameters=parameters,
         contract_symbol="AAOIUSDT",
@@ -89,8 +97,144 @@ def test_catalog_backtest_uses_mapped_binance_bars_when_tiger_is_unconfigured(
 
     assert result["market_data_source"] == "binance_fapi"
     assert calls == [("AAOIUSDT", "15m", 20_000), ("AAOIUSDT", "1d", 1_000)]
-    assert captured["source_quality"]["fallback_reason"] == "tiger_openapi_not_configured"
+    assert captured["source_quality"]["fallback_reason"] == (
+        "tiger_openapi_not_configured_and_cached_history_unavailable"
+    )
     assert captured["signal_bars_override"][0].source_version == "binance_fapi_mapped_v1"
+
+
+def test_catalog_backtest_uses_cached_tiger_bars_without_openapi_credentials(
+    monkeypatch,
+) -> None:
+    link = VerifiedMarketLink(
+        security_id=7,
+        underlying_symbol="AAOI",
+        contract_symbol="AAOIUSDT",
+        tiger_mapping_id=11,
+        binance_mapping_id=12,
+    )
+    monkeypatch.setattr(
+        martingale_api,
+        "resolve_research_contract_market_link",
+        lambda db, *, contract_symbol: link,
+    )
+    calls = []
+
+    def execute(payload, request, db, user, **kwargs):
+        calls.append(kwargs)
+        return {"market_data_source": kwargs.get("source_name", "tiger_openapi")}
+
+    monkeypatch.setattr(martingale_api, "_execute_martingale_bar_backtest", execute)
+
+    class Repository:
+        def load_market_candles(self, *_args, **_kwargs):
+            raise AssertionError("Binance must not be called when cached Tiger bars are usable")
+
+    settings = SimpleNamespace(
+        tiger_openapi_tiger_id="",
+        tiger_openapi_account="",
+        tiger_openapi_private_key_path=None,
+        tiger_openapi_sandbox=False,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)))
+    parameters = {
+        item["key"]: item["default"] for item in ENGINE_PARAMETER_SCHEMAS["martingale_tp4"]
+    }
+
+    result = martingale_api.run_catalog_martingale_backtest(
+        request=request,
+        db=SimpleNamespace(rollback=lambda: None),
+        user=object(),
+        strategy_parameters=parameters,
+        contract_symbol="AAOIUSDT",
+        timeframe="15m",
+        begin_at=datetime(2026, 8, 1, tzinfo=UTC),
+        end_at=datetime(2026, 8, 3, tzinfo=UTC),
+        initial_capital=Decimal("10000"),
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        market_data_source="tiger",
+        backtest_repository=Repository(),
+    )
+
+    assert result["market_data_source"] == "tiger_openapi"
+    assert len(calls) == 1
+    assert "signal_bars_override" not in calls[0]
+
+
+def test_catalog_tiger_preference_falls_back_to_binance_when_history_is_unavailable(
+    monkeypatch,
+) -> None:
+    link = VerifiedMarketLink(
+        security_id=7,
+        underlying_symbol="AAOI",
+        contract_symbol="AAOIUSDT",
+        tiger_mapping_id=11,
+        binance_mapping_id=12,
+    )
+    monkeypatch.setattr(
+        martingale_api,
+        "resolve_research_contract_market_link",
+        lambda db, *, contract_symbol: link,
+    )
+    captured = {}
+
+    def execute(payload, request, db, user, **kwargs):
+        source_name = kwargs.get("source_name", "tiger_openapi")
+        if source_name == "tiger_openapi":
+            raise HTTPException(
+                status_code=409,
+                detail="Tiger 15m data quality has not been evaluated",
+            )
+        captured.update(kwargs)
+        return {"market_data_source": source_name}
+
+    monkeypatch.setattr(martingale_api, "_execute_martingale_bar_backtest", execute)
+
+    class Repository:
+        def load_market_candles(self, symbol, timeframe, start_ts, end_ts, *, max_bars):
+            return [
+                SimpleNamespace(
+                    ts=start_ts,
+                    open=100,
+                    high=101,
+                    low=99,
+                    close=100.5,
+                    volume=10,
+                )
+            ], {"source": "binance_fapi", "actual_bars": 1}
+
+    settings = SimpleNamespace(
+        tiger_openapi_tiger_id="",
+        tiger_openapi_account="",
+        tiger_openapi_private_key_path=None,
+        tiger_openapi_sandbox=False,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)))
+    parameters = {
+        item["key"]: item["default"] for item in ENGINE_PARAMETER_SCHEMAS["martingale_tp4"]
+    }
+
+    result = martingale_api.run_catalog_martingale_backtest(
+        request=request,
+        db=SimpleNamespace(rollback=lambda: None),
+        user=object(),
+        strategy_parameters=parameters,
+        contract_symbol="AAOIUSDT",
+        timeframe="15m",
+        begin_at=datetime(2026, 8, 1, tzinfo=UTC),
+        end_at=datetime(2026, 8, 3, tzinfo=UTC),
+        initial_capital=Decimal("10000"),
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        market_data_source="tiger",
+        backtest_repository=Repository(),
+    )
+
+    assert result["market_data_source"] == "binance_fapi"
+    assert captured["source_quality"]["fallback_reason"] == (
+        "tiger_openapi_not_configured_and_cached_history_unavailable"
+    )
 
 
 def test_catalog_backtest_honors_explicit_binance_source(monkeypatch) -> None:

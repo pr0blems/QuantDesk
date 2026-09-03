@@ -147,6 +147,12 @@ def test_auto_replay_opens_on_box_breakout_and_closes_at_basket_tp() -> None:
     assert len(result.cycles) == 1
     assert result.cycles[0].exit_reason == "basket_take_profit"
     assert result.cycles[0].realized_pnl == Decimal("0.012")
+    assert result.cycles[0].leverage == 1
+    assert result.cycles[0].peak_initial_margin == Decimal("1.0120")
+    assert result.cycles[0].minimum_available_balance == Decimal("9998.9880")
+    assert result.cycles[0].available_balance_after_close == Decimal("10000.0120")
+    assert result.cycles[0].long_leg_count == 1
+    assert result.cycles[0].short_leg_count == 0
     assert [item.action for item in result.fills] == ["open", "close_all"]
     assert result.metrics["winning_cycles"] == 1
 
