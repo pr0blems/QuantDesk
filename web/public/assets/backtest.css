@@ -90,6 +90,8 @@ button { cursor: pointer; }
 .data-availability.empty strong, .data-availability.empty small { color: var(--bt-dim); }
 .range-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 8px; }
 .range-presets button { min-width: 0; padding-inline: 3px; }
+.range-feedback { display: block; min-height: 17px; margin-top: 6px; color: var(--bt-dim); font-size: 11.2px; line-height: 1.45; }
+.range-feedback.limited { color: #c8a95d; }
 .text-button { border: 0; color: #6f93b7; background: transparent; }
 .text-button:hover { color: var(--bt-brand); }
 

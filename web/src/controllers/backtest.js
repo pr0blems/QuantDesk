@@ -75,8 +75,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                 <label>结束日期<input id="end-date" name="end_date" type="date" required></label>
               </div>
               <div class="range-presets" aria-label="快速回测区间">
-                <button type="button" data-months="3">近 3 月</button><button type="button" data-months="6">6 个月</button><button type="button" data-months="12">近 1 年</button><button type="button" data-months="all">可用最大</button>
+                <button type="button" data-months="3" aria-pressed="false">近 3 月</button><button type="button" data-months="6" aria-pressed="false">6 个月</button><button type="button" data-months="12" aria-pressed="false">近 1 年</button><button type="button" data-months="all" aria-pressed="false">可用最大</button>
               </div>
+              <small id="range-feedback" class="range-feedback" role="status" aria-live="polite">点击快捷区间可调整回测日期</small>
             </section>
 
             <section id="capital-section" class="config-section">
@@ -246,6 +247,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       input.removeAttribute("min");
       input.removeAttribute("max");
     }
+    this.q("#range-feedback").textContent = "点击快捷区间可调整回测日期";
+    this.q("#range-feedback").classList.remove("limited");
+    this.qa("[data-months]").forEach((button) => {
+      button.classList.remove("active");
+      button.setAttribute("aria-pressed", "false");
+    });
     this.renderHistory();
     this.q("#empty-result").classList.remove("hidden");
     this.q("#result-content").classList.add("hidden");
@@ -531,6 +538,13 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const bounds = this.resolveBounds();
     const { min, max } = bounds;
     this.renderAvailability(bounds);
+    this.qa("[data-months]").forEach((button) => {
+      button.classList.remove("active");
+      button.setAttribute("aria-pressed", "false");
+    });
+    const feedback = this.q("#range-feedback");
+    feedback.textContent = min && max ? `当前历史库存覆盖 ${min} — ${max}` : "点击快捷区间可调整回测日期";
+    feedback.classList.remove("limited");
     if (this.isBasketStrategy()) {
       const start = this.q("#start-date");
       const end = this.q("#end-date");
@@ -571,9 +585,26 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   applyRange(months) {
     const { min, max } = this.resolveBounds();
     const end = max || this.q("#end-date").value || this.dateOnly(new Date());
+    const requestedStart = months === "all" ? (min || this.shiftMonths(end, -12)) : this.shiftMonths(end, -Number(months));
+    const start = this.maxDate(min, requestedStart);
     this.q("#end-date").value = end;
-    this.q("#start-date").value = months === "all" ? this.maxDate(min, this.shiftMonths(end, -12)) : this.maxDate(min, this.shiftMonths(end, -Number(months)));
-    this.qa("[data-months]").forEach((button) => button.classList.toggle("active", button.dataset.months === String(months)));
+    this.q("#start-date").value = start;
+    this.qa("[data-months]").forEach((button) => {
+      const active = button.dataset.months === String(months);
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    const labels = { 3: "近 3 月", 6: "6 个月", 12: "近 1 年", all: "可用最大" };
+    const clipped = months !== "all" && Boolean(min && requestedStart && requestedStart < min);
+    const feedback = this.q("#range-feedback");
+    feedback.classList.toggle("limited", clipped);
+    if (clipped) {
+      feedback.textContent = `${labels[months] || "所选区间"}超出历史库存，已自动使用最大可用范围 ${start} — ${end}`;
+    } else if (months === "all" && !min) {
+      feedback.textContent = `暂无明确的历史起点，暂按最近 1 年 ${start} — ${end}`;
+    } else {
+      feedback.textContent = `已切换至${labels[months] || "所选区间"}：${start} — ${end}`;
+    }
   }
 
   collectParams() {

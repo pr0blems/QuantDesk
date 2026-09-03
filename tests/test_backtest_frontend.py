@@ -20,8 +20,10 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="available-bars"',
         'type="search" list="symbol-options"',
         'id="symbol-options"',
+        'id="range-feedback"',
         "this.handleSymbolSearch()",
         "请输入并选择列表中的有效交易品种",
+        "超出历史库存，已自动使用最大可用范围",
         "首次回测将按需同步；完成后显示具体范围",
     ):
         assert contract in script
@@ -37,6 +39,8 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'input.step = param.step != null ? String(param.step) : "any";' in script
     assert "this.syncBounds(basket && changed);" in script
     assert "this.shiftMonths(end.value, -1)" in script
+    assert 'const requestedStart = months === "all" ? (min || this.shiftMonths(end, -12))' in script
+    assert 'button.setAttribute("aria-pressed", String(active));' in script
     assert "this.renderAvailability(bounds);" in script
     assert "this.populateSymbolSearch(symbols" in script
     assert 'input.disabled = !this.symbolOptions.length;' in script
