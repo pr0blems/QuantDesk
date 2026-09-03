@@ -35,7 +35,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260809-font1_6x-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-data-range-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -63,6 +63,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div class="field-grid two">
                 <label>交易品种<select id="symbol" name="symbol" required><option value="">加载中…</option></select></label>
                 <label>数据周期<select id="timeframe" name="timeframe" required><option value="">加载中…</option></select></label>
+              </div>
+              <div id="data-availability" class="data-availability" role="status" aria-live="polite">
+                <span>可用数据范围</span>
+                <strong id="available-range">正在读取…</strong>
+                <small id="available-bars">按当前品种与周期统计</small>
               </div>
               <div class="field-grid two date-fields">
                 <label>开始日期<input id="start-date" name="start_date" type="date" required></label>
@@ -215,6 +220,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#strategy-params").replaceChildren();
     this.q("#parameter-section").classList.add("hidden");
     this.q("#data-bound").textContent = "等待行情目录";
+    this.q("#available-range").textContent = "正在读取…";
+    this.q("#available-bars").textContent = "按当前品种与周期统计";
+    this.q("#data-availability").classList.remove("empty");
     for (const id of ["#symbol", "#timeframe"]) {
       const option = this.node("option", "", "登录后加载…");
       option.value = "";
@@ -435,7 +443,6 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   resolveBounds() {
-    if (this.isBasketStrategy()) return { min: "", max: this.dateOnly(new Date()) };
     const source = this.catalog.bounds || {};
     const symbol = this.q("#symbol").value;
     const timeframe = this.q("#timeframe").value;
@@ -447,30 +454,54 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     else if (source[`${symbol}:${timeframe}`]) bound = source[`${symbol}:${timeframe}`];
     const min = this.dateOnly(bound?.min_date ?? bound?.start_date ?? bound?.start ?? source.min_date ?? source.start_date ?? source.start);
     const max = this.dateOnly(bound?.max_date ?? bound?.end_date ?? bound?.end ?? source.max_date ?? source.end_date ?? source.end);
-    return { min, max };
+    const barsValue = Number(bound?.bars);
+    const bars = Number.isFinite(barsValue) && barsValue >= 0 ? barsValue : null;
+    return { min, max, bars };
+  }
+
+  renderAvailability({ min = "", max = "", bars = null } = {}) {
+    const symbol = this.q("#symbol").value;
+    const timeframe = this.q("#timeframe").value;
+    const container = this.q("#data-availability");
+    if (min && max) {
+      this.q("#available-range").textContent = `${min} — ${max}`;
+      this.q("#available-bars").textContent = `${bars == null ? "数量待校验" : `${new Intl.NumberFormat("zh-CN").format(bars)} 根`} · ${timeframe || "--"} K 线 · 当前历史库存`;
+      container.classList.remove("empty");
+      this.q("#data-bound").textContent = bars == null ? "已有历史数据" : `${this.compactNumber(bars)} 根可用`;
+      return;
+    }
+    this.q("#available-range").textContent = symbol && timeframe ? "暂无已缓存的数据范围" : "请选择品种与周期";
+    this.q("#available-bars").textContent = this.isBasketStrategy()
+      ? "首次回测将按需同步；完成后显示具体范围"
+      : "运行回测时将按行情库存动态校验";
+    container.classList.add("empty");
+    this.q("#data-bound").textContent = this.isBasketStrategy() ? "历史 K 线按需同步" : "按行情库存动态校验";
   }
 
   syncBounds(resetBasketRange = false) {
+    const bounds = this.resolveBounds();
+    const { min, max } = bounds;
+    this.renderAvailability(bounds);
     if (this.isBasketStrategy()) {
       const start = this.q("#start-date");
       const end = this.q("#end-date");
       const today = this.dateOnly(new Date());
-      if (!end.value || end.value > today) end.value = today;
+      const availableEnd = max || today;
+      if (!end.value || end.value > availableEnd || (min && end.value < min)) end.value = availableEnd;
       // A basket replay needs daily ATR history before its evaluation window.
       // Start new basket selections with a shorter research window so the
       // default request leaves enough warmup, while keeping longer ranges
       // available through the explicit range controls.
       if (resetBasketRange || !start.value || start.value > end.value) {
-        start.value = this.shiftMonths(end.value, -1);
+        start.value = this.maxDate(min, this.shiftMonths(end.value, -1));
       }
-      start.min = "";
-      start.max = today;
-      end.min = "";
-      end.max = today;
-      this.q("#data-bound").textContent = "Tiger 历史 K 线按需同步";
+      if (min && start.value < min) start.value = min;
+      start.min = min || "";
+      start.max = availableEnd;
+      end.min = min || "";
+      end.max = availableEnd;
       return;
     }
-    const { min, max } = this.resolveBounds();
     const start = this.q("#start-date");
     const end = this.q("#end-date");
     start.min = min || "";
@@ -481,12 +512,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       end.value = !end.value || end.value > max || (min && end.value < min) ? max : end.value;
       const defaultStart = this.shiftMonths(max, -3);
       start.value = !start.value || start.value > end.value || (min && start.value < min) ? this.maxDate(min, defaultStart) : start.value;
-      this.q("#data-bound").textContent = min ? `可用 ${min} — ${max}` : `数据截至 ${max}`;
     } else {
       const today = this.dateOnly(new Date());
       if (!end.value) end.value = today;
       if (!start.value) start.value = this.shiftMonths(today, -3);
-      this.q("#data-bound").textContent = "按行情库存动态校验";
     }
   }
 

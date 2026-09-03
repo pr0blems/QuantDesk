@@ -15,7 +15,10 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         "strategy?.supported_timeframes",
         'param?.key !== "BoxTimeFrameMinutes"',
         'id="basket-profile-note"',
-        "Tiger 历史 K 线按需同步",
+        'id="data-availability"',
+        'id="available-range"',
+        'id="available-bars"',
+        "首次回测将按需同步；完成后显示具体范围",
     ):
         assert contract in script
 
@@ -25,3 +28,6 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'input.step = param.step != null ? String(param.step) : "any";' in script
     assert "this.syncBounds(basket && changed);" in script
     assert "this.shiftMonths(end.value, -1)" in script
+    assert "this.renderAvailability(bounds);" in script
+    assert 'new Intl.NumberFormat("zh-CN").format(bars)' in script
+    assert 'start.min = min || "";' in script
