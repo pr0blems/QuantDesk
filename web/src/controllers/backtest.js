@@ -53,7 +53,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-2">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -209,6 +209,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                 <div class="calculator-context">
                   <div><span>交易品种</span><strong id="calculator-symbol">--</strong></div>
                   <div><span>最新价格</span><strong id="calculator-price">--</strong><small id="calculator-source">--</small></div>
+                </div>
+                <div class="calculator-adjustments">
+                  <label>初始手数<input id="calculator-lot" type="number" min="0.000001" step="any" value="0.01"></label>
+                  <label>Binance 杠杆<select id="calculator-leverage"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option><option value="5">5x</option><option value="10">10x</option><option value="20">20x</option></select></label>
                   <label>目标保证金收益率（ROE）<div class="calculator-input-suffix"><input id="calculator-target-roe" type="number" min="0.01" max="1000" step="0.1" value="10"><span>%</span></div></label>
                 </div>
                 <div id="calculator-facts" class="calculator-facts"></div>
@@ -217,12 +221,13 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   <p id="calculator-note">--</p>
                 </div>
                 <div class="calculator-points">
-                  <div class="calculator-points-head"><div><span>推荐基础止盈</span><strong id="calculator-base-points">--</strong></div><small>由当前价格和目标 ROE 倒算，并沿用马丁 TP4 默认比例</small></div>
+                  <div class="calculator-points-head"><label><span>推荐基础止盈 TP</span><div class="calculator-point-control"><input id="calculator-base-points" data-calculator-param-key="TP" type="number" min="0" step="any"><span>点</span></div></label><small>所有数值均可手动修改；调整基础 TP 时会按马丁 TP4 默认比例更新其余推荐值</small></div>
                   <div id="calculator-point-preview" class="calculator-point-preview"></div>
                 </div>
                 <div class="calculator-actions">
+                  <button id="apply-position-settings" type="button">应用手数与杠杆</button>
                   <button id="apply-tp-points" type="button">应用分级止盈</button>
-                  <button id="apply-all-points" class="primary" type="button">一键应用全部点数</button>
+                  <button id="apply-all-points" class="primary" type="button">一键应用全部设置</button>
                 </div>
                 <p class="calculator-disclaimer">估算未包含资金费率和强平阶梯；费用结果按当前回测手续费与滑点做双边近似扣减。</p>
               </div>
@@ -275,7 +280,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#lot-calculator-dialog").addEventListener("click", (event) => {
       if (event.target === this.q("#lot-calculator-dialog")) this.closeLotCalculator();
     });
+    this.q("#calculator-lot").addEventListener("input", () => this.renderLotCalculator());
+    this.q("#calculator-leverage").addEventListener("change", () => this.renderLotCalculator());
     this.q("#calculator-target-roe").addEventListener("input", () => this.renderLotCalculator());
+    this.q("#calculator-base-points").addEventListener("input", () => this.updateCalculatorPointRatios());
+    this.q("#apply-position-settings").addEventListener("click", () => this.applyCalculatedPoints("position"));
     this.q("#apply-tp-points").addEventListener("click", () => this.applyCalculatedPoints("take-profit"));
     this.q("#apply-all-points").addEventListener("click", () => this.applyCalculatedPoints("all"));
     this.q("#reset-params").addEventListener("click", () => this.renderParameters(true));
@@ -640,6 +649,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       return;
     }
     const dialog = this.q("#lot-calculator-dialog");
+    this.q("#calculator-lot").value = lotInput.value;
+    this.q("#calculator-leverage").value = this.q("#leverage").value;
     dialog.classList.remove("hidden");
     this.q("#calculator-loading").classList.remove("hidden");
     this.q("#calculator-content").classList.add("hidden");
@@ -665,8 +676,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   lotCalculatorValues() {
     const quote = this.lotCalculatorQuote || {};
     const price = Number(quote.price);
-    const lot = Number(this.strategyParamInput("Lot")?.value);
-    const leverage = Number(this.q("#leverage").value);
+    const lot = Number(this.q("#calculator-lot").value);
+    const leverage = Number(this.q("#calculator-leverage").value);
     const targetRoePct = Number(this.q("#calculator-target-roe").value);
     const pointSize = Number(quote.strategy_point_size || 0.01);
     if (![price, lot, leverage, targetRoePct, pointSize].every((value) => Number.isFinite(value) && value > 0)) return null;
@@ -706,6 +717,41 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return fact;
   }
 
+  calculatorPointField(key, label, value) {
+    const field = this.node("label", "calculator-point-field");
+    const input = this.node("input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "any";
+    input.value = String(value);
+    input.dataset.calculatorParamKey = key;
+    field.append(this.node("small", "", label));
+    const control = this.node("div", "calculator-point-control");
+    control.append(input, this.node("span", "", "点"));
+    field.append(control);
+    return field;
+  }
+
+  updateCalculatorPointRatios() {
+    const basePoints = Number(this.q("#calculator-base-points").value);
+    if (!Number.isFinite(basePoints) || basePoints < 0) return;
+    const settings = this.calculatedPointSettings(basePoints);
+    Object.entries(settings).forEach(([key, value]) => {
+      if (key === "TP") return;
+      const input = this.q(`[data-calculator-param-key="${key}"]`);
+      if (input) input.value = String(value);
+    });
+  }
+
+  calculatorPointSettings() {
+    const settings = {};
+    this.qa("[data-calculator-param-key]").forEach((input) => {
+      const value = Number(input.value);
+      if (Number.isFinite(value) && value >= 0) settings[input.dataset.calculatorParamKey] = value;
+    });
+    return settings;
+  }
+
   renderLotCalculator() {
     const values = this.lotCalculatorValues();
     if (!values) return;
@@ -724,21 +770,37 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     );
     this.q("#calculator-summary").textContent = `${values.leverage}x 杠杆下，保证金盈利 ${this.number(values.targetRoePct, 2)}% 约为 ${this.money(values.targetProfit)}。`;
     this.q("#calculator-note").textContent = `对应标的价格约需变动 ${this.number(values.priceMovePct, 4)}%，即 ${this.price(values.priceMove)} USDT；当前 ${this.quantity(values.lot)} 手预计占用保证金 ${this.money(values.positionMargin)}。`;
-    this.q("#calculator-base-points").textContent = `${settings.TP} 点`;
+    this.q("#calculator-base-points").value = String(settings.TP);
     this.q("#calculator-point-preview").replaceChildren(...[
-      ["TP", settings.TP], ["TP2", settings.TP2], ["TP3", settings.TP3], ["TP4", settings.TP4],
-      ["网格间距", settings.Distance], ["最大点差", settings.MaxSpred], ["追踪启动", settings.TrailStart], ["追踪距离", settings.TrailDistance],
-    ].map(([label, value]) => {
-      const item = this.node("span");
-      item.append(this.node("small", "", label), this.node("strong", "", `${value} 点`));
-      return item;
-    }));
+      ["TP2", "TP2", settings.TP2], ["TP3", "TP3", settings.TP3], ["TP4", "TP4", settings.TP4],
+      ["Distance", "网格间距", settings.Distance], ["MaxSpred", "最大点差", settings.MaxSpred],
+      ["TrailStart", "追踪启动", settings.TrailStart], ["TrailDistance", "追踪距离", settings.TrailDistance],
+      ["BoxRange", "箱体范围", settings.BoxRange], ["BoxBufferPips", "箱体缓冲", settings.BoxBufferPips],
+    ].map(([key, label, value]) => this.calculatorPointField(key, label, value)));
+  }
+
+  applyCalculatorPositionSettings() {
+    const values = this.lotCalculatorValues();
+    const lotInput = this.strategyParamInput("Lot");
+    if (!values || !lotInput) return false;
+    lotInput.value = String(values.lot);
+    lotInput.dispatchEvent(new Event("input", { bubbles: true }));
+    this.q("#leverage").value = String(values.leverage);
+    this.q("#leverage").dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
   }
 
   applyCalculatedPoints(scope) {
     const values = this.lotCalculatorValues();
     if (!values) return;
-    const settings = this.calculatedPointSettings(values.basePoints);
+    if (scope === "position") {
+      if (!this.applyCalculatorPositionSettings()) return;
+      this.closeLotCalculator();
+      this.showBanner(`已写入初始手数 ${this.quantity(values.lot)} 和 Binance ${values.leverage}x 杠杆。`, "success");
+      this.strategyParamInput("Lot")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    const settings = this.calculatorPointSettings();
     const takeProfitKeys = new Set(["TP", "TP2", "TP3", "TP4"]);
     let applied = 0;
     Object.entries(settings).forEach(([key, value]) => {
@@ -749,8 +811,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       input.dispatchEvent(new Event("input", { bubbles: true }));
       applied += 1;
     });
+    if (scope === "all") this.applyCalculatorPositionSettings();
     this.closeLotCalculator();
-    this.showBanner(scope === "take-profit" ? `已写入 ${applied} 项分级止盈点数。` : `已写入 ${applied} 项止盈、网格与追踪点数。`, "success");
+    this.showBanner(scope === "take-profit" ? `已写入 ${applied} 项分级止盈点数。` : `已写入手数、杠杆和 ${applied} 项可编辑点数。`, "success");
     this.strategyParamInput("TP")?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
