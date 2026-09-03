@@ -3653,6 +3653,12 @@ export interface components {
              * @constant
              */
             margin_mode: "isolated";
+            /**
+             * Market Data Source
+             * @default auto
+             * @enum {string}
+             */
+            market_data_source: "auto" | "tiger" | "binance";
             /** Max Holding Bars */
             max_holding_bars: number;
             /** Params */

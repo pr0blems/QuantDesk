@@ -814,6 +814,7 @@ def run_catalog_martingale_backtest(
     maintenance_margin_rate: Decimal = Decimal("0.005"),
     liquidation_fee_rate: Decimal = Decimal("0"),
     backtest_repository: BacktestRepository | None = None,
+    market_data_source: str = "auto",
 ) -> dict[str, Any]:
     """Run the basket engine through the standard Data Backtest workflow.
 
@@ -834,6 +835,9 @@ def run_catalog_martingale_backtest(
             status_code=409,
             detail="该合约尚未建立可用于研究回测的 Tiger/Binance 标的映射",
         )
+    source_mode = str(market_data_source or "auto").strip().lower()
+    if source_mode not in {"auto", "tiger", "binance"}:
+        raise HTTPException(status_code=422, detail="行情数据源必须是自动选择、Tiger 或 Binance")
 
     normalized_parameters = dict(strategy_parameters)
     normalized_parameters["BoxTimeFrameMinutes"] = timeframe_minutes[timeframe]
@@ -895,8 +899,14 @@ def run_catalog_martingale_backtest(
     daily_begin_at = replay_request.begin_at - timedelta(
         days=max(60, parameters.box.daily_atr_period * 3)
     )
-    fallback_reason = "tiger_openapi_not_configured"
-    if tiger_configured:
+    fallback_reason = (
+        "binance_selected_by_user"
+        if source_mode == "binance"
+        else "tiger_openapi_not_configured"
+    )
+    if source_mode == "tiger" and not tiger_configured:
+        raise HTTPException(status_code=503, detail="Tiger Open API 尚未配置，请改用自动选择或 Binance")
+    if source_mode != "binance" and tiger_configured:
         try:
             quote_api = build_tiger_quote_api(
                 tiger_id=settings.tiger_openapi_tiger_id,
@@ -936,17 +946,33 @@ def run_catalog_martingale_backtest(
         except TigerMarketDataError as exc:
             db.rollback()
             fallback_reason = f"tiger_openapi_unavailable:{exc.category}"
+            if source_mode == "tiger":
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Tiger 历史行情暂不可用：{exc.category}",
+                ) from None
         except ValueError as exc:
             db.rollback()
             raise HTTPException(status_code=422, detail=str(exc)) from None
         else:
-            return _execute_martingale_bar_backtest(
-                replay_request,
-                request,
-                db,
-                user,
-                link=link,
-            )
+            try:
+                return _execute_martingale_bar_backtest(
+                    replay_request,
+                    request,
+                    db,
+                    user,
+                    link=link,
+                )
+            except HTTPException as exc:
+                detail = str(exc.detail)
+                tiger_data_unusable = (
+                    detail.startswith("Tiger ")
+                    or "replay data coverage is blocked" in detail
+                )
+                if source_mode == "tiger" or not tiger_data_unusable:
+                    raise
+                db.rollback()
+                fallback_reason = f"tiger_data_unusable:{detail}"
 
     if backtest_repository is None:
         raise HTTPException(

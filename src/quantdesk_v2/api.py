@@ -2545,6 +2545,7 @@ def create_backtest(
                     strategy_parameters=config["params"],
                     contract_symbol=config["symbol"],
                     timeframe=config["timeframe"],
+                    market_data_source=payload.market_data_source,
                     begin_at=_utc_datetime(config["start_ts"]).replace(tzinfo=UTC),
                     end_at=_utc_datetime(config["end_ts"]).replace(tzinfo=UTC),
                     initial_capital=payload.initial_capital,

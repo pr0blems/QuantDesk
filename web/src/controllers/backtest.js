@@ -8,6 +8,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.catalog = { strategies: [], symbols: [], timeframes: [], bounds: {} };
     this.symbolOptions = [];
     this.history = [];
+    this.historyLoaded = false;
     this.activeDetail = null;
     this.strategyId = "";
     this.category = "全部";
@@ -36,7 +37,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-futures-replay-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-source-history-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -64,6 +65,16 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div class="field-grid two">
                 <label>交易品种<input id="symbol" name="symbol" type="search" list="symbol-options" placeholder="加载中…" autocomplete="off" spellcheck="false" required><datalist id="symbol-options"></datalist></label>
                 <label>数据周期<select id="timeframe" name="timeframe" required><option value="">加载中…</option></select></label>
+              </div>
+              <div class="field-grid data-source-fields">
+                <label id="market-source-field">行情数据源
+                  <select id="market-data-source" name="market_data_source">
+                    <option value="auto">自动选择（Tiger 优先，失败转 Binance）</option>
+                    <option value="tiger">仅使用 Tiger 历史行情</option>
+                    <option value="binance">仅使用 Binance 合约行情</option>
+                  </select>
+                  <small id="market-source-help" class="field-help">自动模式会优先读取 Tiger，缺失或不可用时直接使用 Binance。</small>
+                </label>
               </div>
               <div id="data-availability" class="data-availability" role="status" aria-live="polite">
                 <span>可用数据范围</span>
@@ -105,7 +116,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div id="strategy-params" class="field-grid two"></div>
             </section>
 
-            <div id="basket-profile-note" class="execution-note hidden"><span>篮子回放</span><strong>Tiger 现货信号 → 马丁篮子引擎</strong><small>首单、加仓、分级止盈、金额止损、逐仓杠杆与强平均纳入回放；Binance 映射合约作为执行规则参照。</small></div>
+            <div id="basket-profile-note" class="execution-note hidden"><span>篮子回放</span><strong>可选 Tiger / Binance 行情 → 马丁篮子引擎</strong><small>自动模式优先使用 Tiger，无法使用时直接回退 Binance；首单、加仓、分级止盈、金额止损、逐仓杠杆与强平均纳入回放。</small></div>
             <div id="standard-execution-note" class="execution-note"><span>Binance 逐仓模型</span><strong>信号收盘确认 → 下一根开盘撮合</strong><small>手续费、双边滑点、合约价格/数量步进、最小名义价值、止盈止损与强平均计入；暂不含资金费。</small></div>
             <button id="run-backtest" class="run-button" type="submit" disabled><span aria-hidden="true">▶</span><strong>运行回测</strong></button>
           </form>
@@ -113,7 +124,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
           <section class="result-stage">
             <div class="stage-toolbar">
               <div><strong>回测结果</strong><span id="stage-status" class="stage-status idle"><i></i>等待运行</span></div>
-              <div class="toolbar-meta"><span id="active-run-meta">选择策略并配置参数</span><button id="refresh-history" type="button">刷新历史</button></div>
+              <div class="toolbar-meta"><span id="active-run-meta">选择策略并配置参数</span><button id="open-history" type="button">历史回测数据</button></div>
             </div>
 
             <div class="stage-layout">
@@ -155,13 +166,18 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   </section>
                 </div>
               </div>
-
-              <aside class="history-panel">
-                <div class="history-head"><div><strong>最近回测</strong><span>当前用户 · 最近 12 次</span></div><span id="history-count">0</span></div>
-                <div id="history-list" class="history-list"><div class="history-empty">暂无回测记录</div></div>
-                <div class="research-tip"><strong>研究建议</strong><p>收益不是唯一结论。优先检查最大回撤、交易样本数和成本敏感度，再决定是否进入模拟盘。</p></div>
-              </aside>
             </div>
+          </section>
+        </div>
+
+        <div id="history-dialog" class="history-dialog-backdrop hidden" role="presentation">
+          <section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-dialog-title">
+            <header class="history-dialog-head">
+              <div><span>BACKTEST ARCHIVE</span><h2 id="history-dialog-title">历史回测数据</h2><p>选择一条记录后加载对应的完整回测结果。</p></div>
+              <div class="history-dialog-actions"><span id="history-count">0 条</span><button id="reload-history" type="button">刷新</button><button id="close-history" class="dialog-close" type="button" aria-label="关闭历史回测数据">×</button></div>
+            </header>
+            <div id="history-list" class="history-list"><div class="history-empty">点击后正在读取历史回测数据…</div></div>
+            <footer class="history-dialog-foot">回测数据仅用于研究；加载记录不会重新运行策略，也不会触发交易。</footer>
           </section>
         </div>
       </main>`;
@@ -194,7 +210,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#symbol").addEventListener("input", () => this.handleSymbolSearch());
     this.q("#symbol").addEventListener("change", () => this.handleSymbolSearch(true));
     this.q("#timeframe").addEventListener("change", () => this.syncBounds());
-    this.q("#refresh-history").addEventListener("click", () => this.loadHistory(true));
+    this.q("#open-history").addEventListener("click", () => this.openHistory());
+    this.q("#reload-history").addEventListener("click", () => this.loadHistory(true));
+    this.q("#close-history").addEventListener("click", () => this.closeHistory());
+    this.q("#history-dialog").addEventListener("click", (event) => {
+      if (event.target === this.q("#history-dialog")) this.closeHistory();
+    });
+    this.shadowRoot.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !this.q("#history-dialog").classList.contains("hidden")) this.closeHistory();
+    });
     this.q("#reset-params").addEventListener("click", () => this.renderParameters(true));
     this.qa("[data-months]").forEach((button) => button.addEventListener("click", () => this.applyRange(button.dataset.months)));
   }
@@ -218,6 +242,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.catalog = { strategies: [], symbols: [], timeframes: [], bounds: {} };
     this.symbolOptions = [];
     this.history = [];
+    this.historyLoaded = false;
     this.activeDetail = null;
     this.strategyId = "";
     this.category = "全部";
@@ -254,9 +279,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       button.setAttribute("aria-pressed", "false");
     });
     this.renderHistory();
+    this.closeHistory();
     this.q("#empty-result").classList.remove("hidden");
     this.q("#result-content").classList.add("hidden");
-    this.q("#refresh-history").disabled = false;
+    this.q("#open-history").disabled = false;
+    this.q("#reload-history").disabled = false;
     this.q("#active-run-meta").textContent = "选择策略并配置参数";
     this.showBanner("");
     this.setStageStatus("等待运行", "idle");
@@ -265,7 +292,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   async bootstrap(generation = this.sessionGeneration) {
     this.setStageStatus("正在读取", "loading");
-    const [catalogResult, historyResult] = await Promise.allSettled([this.api("/catalog"), this.api("?limit=12")]);
+    const catalogResult = await Promise.resolve(this.api("/catalog")).then(
+      (value) => ({ status: "fulfilled", value }),
+      (reason) => ({ status: "rejected", reason }),
+    );
     if (generation !== this.sessionGeneration) return;
     if (catalogResult.status === "fulfilled") {
       this.catalog = this.normalizeCatalog(catalogResult.value);
@@ -275,10 +305,6 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       this.showBanner(`回测目录加载失败：${catalogResult.reason.message}`, "error");
       this.q("#strategy-list").replaceChildren(this.node("div", "rail-loading error-text", "我的策略暂不可用"));
       this.started = false;
-    }
-    if (historyResult.status === "fulfilled") {
-      this.history = Array.isArray(historyResult.value?.items) ? historyResult.value.items : [];
-      this.renderHistory();
     }
     this.setStageStatus(catalogResult.status === "fulfilled" ? "等待运行" : "目录不可用", catalogResult.status === "fulfilled" ? "idle" : "error");
   }
@@ -437,6 +463,16 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.populateSymbolSearch(symbols, basket ? "搜索 Tiger/Binance 映射" : "输入名称或代码搜索");
     this.populateSelect(this.q("#timeframe"), timeframes, "选择周期");
     if (basket && changed && timeframes.some((item) => item.value === "15m")) this.q("#timeframe").value = "15m";
+    const sourceSelect = this.q("#market-data-source");
+    const sourceHelp = this.q("#market-source-help");
+    sourceSelect.disabled = !basket;
+    if (basket) {
+      if (changed || !["auto", "tiger", "binance"].includes(sourceSelect.value)) sourceSelect.value = "auto";
+      sourceHelp.textContent = "自动模式优先读取 Tiger；数据缺失、接口不可用或未配置时直接回退 Binance。";
+    } else {
+      sourceSelect.value = "binance";
+      sourceHelp.textContent = "当前策略固定使用 Binance 合约历史 K 线。";
+    }
 
     ["#position-field", "#holding-field", "#stop-field", "#take-profit-field"].forEach((selector) => {
       this.q(selector).classList.toggle("hidden", basket);
@@ -622,6 +658,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       strategy_id: this.strategyId,
       symbol: this.q("#symbol").value,
       timeframe: this.q("#timeframe").value,
+      market_data_source: this.q("#market-data-source").value,
       start_date: this.q("#start-date").value,
       end_date: this.q("#end-date").value,
       initial_capital: Number(this.q("#initial-capital").value),
@@ -695,27 +732,41 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   async loadHistory(showFeedback = false, generation = this.sessionGeneration) {
-    const button = this.q("#refresh-history");
-    button.disabled = true;
+    const buttons = [this.q("#open-history"), this.q("#reload-history")].filter(Boolean);
+    buttons.forEach((button) => { button.disabled = true; });
+    this.q("#history-list").replaceChildren(this.node("div", "history-empty", "正在读取历史回测数据…"));
     try {
       const data = await this.api("?limit=12");
       if (generation !== this.sessionGeneration) return;
       this.history = Array.isArray(data?.items) ? data.items : [];
+      this.historyLoaded = true;
       this.renderHistory();
-      if (showFeedback) this.showBanner("最近回测记录已刷新。", "success");
+      if (showFeedback) this.showBanner("历史回测数据已刷新。", "success");
     } catch (error) {
       if (generation !== this.sessionGeneration) return;
+      this.q("#history-list").replaceChildren(this.node("div", "history-empty error-text", `历史回测数据读取失败：${error.message}`));
       if (showFeedback) this.showBanner(`历史记录刷新失败：${error.message}`, "error");
     } finally {
-      if (generation === this.sessionGeneration) button.disabled = false;
+      if (generation === this.sessionGeneration) buttons.forEach((button) => { button.disabled = false; });
     }
+  }
+
+  openHistory() {
+    const dialog = this.q("#history-dialog");
+    dialog.classList.remove("hidden");
+    this.q("#close-history").focus();
+    if (!this.historyLoaded) void this.loadHistory(false);
+  }
+
+  closeHistory() {
+    this.q("#history-dialog")?.classList.add("hidden");
   }
 
   renderHistory() {
     const list = this.q("#history-list");
-    this.q("#history-count").textContent = String(this.history.length);
+    this.q("#history-count").textContent = `${this.history.length} 条`;
     if (!this.history.length) {
-      list.replaceChildren(this.node("div", "history-empty", "暂无回测记录，首次运行后会保存在这里。"));
+      list.replaceChildren(this.node("div", "history-empty", this.historyLoaded ? "暂无回测记录，首次运行后会保存在这里。" : "打开窗口后读取历史回测数据。"));
       return;
     }
     list.replaceChildren(...this.history.map((item) => {
@@ -746,6 +797,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       if (generation !== this.sessionGeneration) return;
       this.activeDetail = detail;
       this.renderResult(detail);
+      this.closeHistory();
       this.setStageStatus("历史结果", "success");
       this.showBanner("");
     } catch (error) {
@@ -800,6 +852,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderQuality(quality) {
     const object = typeof quality === "object" && quality ? quality : { message: String(quality || "") };
+    const rawSource = String(object.source || object.market_data_source || "").toLowerCase();
+    const sourceLabel = rawSource.includes("tiger") ? "Tiger" : rawSource.includes("binance") ? "Binance" : (rawSource || "--");
     let coverage = Number(object.coverage_pct ?? object.coverage ?? object.completeness_pct);
     if (Number.isFinite(coverage) && coverage <= 1) coverage *= 100;
     const missing = Number(object.missing_bars ?? object.missing ?? object.gaps ?? 0);
@@ -810,6 +864,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     gradeNode.textContent = grade;
     gradeNode.className = `quality-grade ${grade === "需注意" ? "warning" : "good"}`;
     const facts = [
+      ["实际数据源", sourceLabel],
       ["行情覆盖率", Number.isFinite(coverage) ? `${coverage.toFixed(2)}%` : "已完成检查"],
       ["实际 K 线", this.integer(actual)],
       ["预期 K 线", this.integer(expected)],

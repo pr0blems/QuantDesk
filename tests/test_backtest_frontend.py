@@ -25,6 +25,14 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         "请输入并选择列表中的有效交易品种",
         "超出历史库存，已自动使用最大可用范围",
         "首次回测将按需同步；完成后显示具体范围",
+        'id="market-data-source" name="market_data_source"',
+        "自动选择（Tiger 优先，失败转 Binance）",
+        'market_data_source: this.q("#market-data-source").value',
+        'id="open-history" type="button">历史回测数据</button>',
+        'id="history-dialog" class="history-dialog-backdrop hidden"',
+        'id="history-list" class="history-list"',
+        "this.closeHistory();",
+        '["实际数据源", sourceLabel]',
     ):
         assert contract in script
 
@@ -46,3 +54,5 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'input.disabled = !this.symbolOptions.length;' in script
     assert 'new Intl.NumberFormat("zh-CN").format(bars)' in script
     assert 'start.min = min || "";' in script
+    assert '<aside class="history-panel">' not in script
+    assert 'id="refresh-history"' not in script

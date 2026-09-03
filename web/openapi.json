@@ -1469,6 +1469,16 @@
             "title": "Margin Mode",
             "type": "string"
           },
+          "market_data_source": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "tiger",
+              "binance"
+            ],
+            "title": "Market Data Source",
+            "type": "string"
+          },
           "max_holding_bars": {
             "maximum": 50000.0,
             "minimum": 0.0,
