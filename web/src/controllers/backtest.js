@@ -1297,7 +1297,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   async replayResult(detail, generation = this.sessionGeneration) {
-    const { result } = this.unpackDetail(detail);
+    const { result, run } = this.unpackDetail(detail);
     const candles = Array.isArray(result.price_candles) ? result.price_candles : (result.data_quality?.price_candles || []);
     const trades = Array.isArray(result.trades) ? result.trades : [];
     const curve = this.normalizeCurve(result.equity_curve || result.curve || []);
@@ -1308,7 +1308,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.resetPriceChartState();
     if (!candles.length) {
       this.drawCharts(result);
-      this.finishResultReplay(result);
+      this.finishResultReplay(result, run);
       return;
     }
     const duration = Math.max(5200, Math.min(10000, 3600 + candles.length * 4));
@@ -1339,7 +1339,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       this.resultReplayFrame = window.requestAnimationFrame(tick);
     });
     if (generation !== this.sessionGeneration) return;
-    this.finishResultReplay(result);
+    this.finishResultReplay(result, run);
   }
 
   drawReplayFrame(visibleCount) {
@@ -1386,11 +1386,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.updateRunProgress(80 + visibleCount / state.candles.length * 18, 3, `K 线 ${this.integer(visibleCount)} / ${this.integer(state.candles.length)} · 成交周期 ${this.integer(visibleTrades.length)}`);
   }
 
-  finishResultReplay(result) {
+  finishResultReplay(result, run = {}) {
     this.stopResultReplay(false);
     this.q("#result-kicker").textContent = "BACKTEST COMPLETE";
     this.q("#trade-replay-status").classList.add("hidden");
     this.renderTrades(Array.isArray(result.trades) ? result.trades : [], result.data_quality || {});
+    this.q("#active-run-meta").textContent = `完成于 ${this.shortDate(run.completed_at || run.updated_at || run.created_at, true)}`;
     this.updateRunProgress(100, 4, "回放与结算完成");
     window.requestAnimationFrame(() => this.drawCharts(result));
   }
