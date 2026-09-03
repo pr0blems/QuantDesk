@@ -203,8 +203,17 @@ def test_signal_is_filled_at_next_open_and_costs_are_charged_both_sides(
     assert result["account"]["total_fees"] == result["trades"][0]["fees"]
     assert result["metrics"]["trade_count"] == 1
     assert math.isfinite(result["metrics"]["annualized_return_pct"])
-    assert len(result["data_quality"]["assumptions"]) == 7
-    assert set(result) == {"account", "metrics", "equity_curve", "trades", "data_quality"}
+    assert len(result["data_quality"]["assumptions"]) == 8
+    assert set(result) == {
+        "account",
+        "metrics",
+        "equity_curve",
+        "price_candles",
+        "trades",
+        "data_quality",
+    }
+    assert len(result["price_candles"]) == len(closes)
+    assert result["price_candles"][0]["ts"] == BASE_TS
     _assert_json_safe(result)
 
 
@@ -247,6 +256,31 @@ def test_same_bar_stop_and_take_uses_conservative_stop(repository_factory) -> No
     }
 
 
+def test_binance_contract_filters_reject_subminimum_order(repository_factory) -> None:
+    closes = [10, 10, 10, 12, 13, 14]
+    repository, _ = repository_factory(closes)
+    rules = {
+        "source": "test_exchange_info",
+        "symbol": "TESTUSDT",
+        "tick_size": 0.01,
+        "market_step_size": 0.1,
+        "min_quantity": 0.1,
+        "max_quantity": 1_000,
+        "min_notional": 1_000_000,
+        "max_leverage": 20,
+        "maintenance_margin_rate": 0.005,
+        "maintenance_amount": 0,
+        "liquidation_fee_rate": 0.0125,
+        "market_take_bound": 0.05,
+    }
+
+    result = repository.run(_config(len(closes), contract_rules=rules))
+
+    assert result["trades"] == []
+    assert result["metrics"]["rejected_order_count"] >= 1
+    assert result["metrics"]["contract_rules"]["source"] == "test_exchange_info"
+
+
 def test_liquidation_uses_fixed_mmr_and_adverse_exit_precedes_take_profit(
     repository_factory,
 ) -> None:
@@ -279,8 +313,8 @@ def test_liquidation_uses_fixed_mmr_and_adverse_exit_precedes_take_profit(
     assert trade["exit_price"] == pytest.approx(expected_liquidation_price)
     assert result["metrics"]["liquidation_count"] == 1
     assert result["metrics"]["maintenance_margin_rate_pct"] == 0.5
-    assert result["metrics"]["liquidation_model"] == "isolated_fixed_mmr_ohlc"
-    assert any("0.5%" in item for item in result["data_quality"]["assumptions"])
+    assert result["metrics"]["liquidation_model"] == "binance_isolated_contract_snapshot_ohlc"
+    assert any("一级维持保证金率" in item for item in result["data_quality"]["assumptions"])
 
 
 def test_stop_above_liquidation_is_executed_first(repository_factory) -> None:

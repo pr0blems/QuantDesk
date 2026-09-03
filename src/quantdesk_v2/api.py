@@ -608,7 +608,61 @@ def _engine_config(payload: BacktestRunRequest, strategy: dict[str, Any]) -> dic
         "stop_loss_pct": float(payload.stop_loss_pct),
         "take_profit_pct": float(payload.take_profit_pct),
         "max_holding_bars": payload.max_holding_bars,
+        "margin_mode": payload.margin_mode,
         "params": params,
+    }
+
+
+def _backtest_contract_rules(request: Request, symbol: str) -> dict[str, Any]:
+    """Capture the current public Binance execution filters for a replay.
+
+    Exchange filters are deterministic inputs once stored with the run.  The
+    exact account leverage brackets are a signed USER_DATA resource, so the
+    research engine uses the platform's supported tier-1 isolated MMR and
+    labels that limitation instead of pretending the ignored exchangeInfo
+    ``maintMarginPercent`` field is authoritative.
+    """
+
+    state = request.app.state
+    provider = getattr(state, "backtest_contract_rules_provider", None)
+    rules: Any = None
+    source = "platform_fallback"
+    try:
+        if callable(provider):
+            rules = provider(symbol)
+            source = "binance_fapi_exchange_info"
+        elif getattr(getattr(state, "settings", None), "app_env", "") != "test":
+            client = getattr(state, "binance_trading_client", None)
+            if client is not None:
+                rules = client.symbol_rules(symbol)
+                source = "binance_fapi_exchange_info"
+    except (BinanceAccountClientError, TypeError, ValueError):
+        rules = None
+
+    def numeric(name: str, default: float | None = None) -> float | None:
+        value = rules.get(name) if isinstance(rules, Mapping) else getattr(rules, name, None)
+        if value is None:
+            return default
+        try:
+            normalized = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return default
+        return float(normalized) if normalized.is_finite() and normalized >= 0 else default
+
+    return {
+        "source": source,
+        "symbol": symbol,
+        "tick_size": numeric("tick_size"),
+        "market_step_size": numeric("market_step_size"),
+        "min_quantity": numeric("min_quantity"),
+        "max_quantity": numeric("max_quantity"),
+        "min_notional": numeric("min_notional"),
+        "liquidation_fee_rate": numeric("liquidation_fee_rate", 0.0),
+        "market_take_bound": numeric("market_take_bound", 0.0),
+        "max_leverage": 20,
+        "maintenance_margin_rate": 0.005,
+        "maintenance_amount": 0.0,
+        "maintenance_margin_source": "platform_tier1_isolated",
     }
 
 
@@ -761,6 +815,11 @@ def _normalize_martingale_backtest_result(
     final_equity = decimal(raw_metrics.get("final_equity"), initial_capital)
     total_return = decimal(raw_metrics.get("return_pct"))
     signal_bars = int(replay.get("signal_bar_count") or 0)
+    price_candles = [
+        _json_safe(dict(item))
+        for item in (envelope.get("price_candles") or [])
+        if isinstance(item, Mapping)
+    ]
     warnings = [str(item) for item in replay.get("warnings", []) if item]
     market_data_source = str(envelope.get("market_data_source") or "tiger_openapi")
     if market_data_source == "binance_fapi":
@@ -808,6 +867,10 @@ def _normalize_martingale_backtest_result(
         "trades_returned": len(trades),
         "trades_truncated": False,
         "manifest_id": envelope.get("manifest_id"),
+        "price_candles_total": signal_bars,
+        "price_candles_returned": len(price_candles),
+        "price_candles_truncated": len(price_candles) < signal_bars,
+        "price_candles": price_candles,
     }
     return {
         "account": account,
@@ -815,6 +878,7 @@ def _normalize_martingale_backtest_result(
         "trades": trades,
         "_all_trades": trades,
         "equity_curve": curve,
+        "price_candles": price_candles,
         "data_quality": data_quality,
     }
 
@@ -2461,6 +2525,7 @@ def create_backtest(
                 raise HTTPException(status_code=503, detail=str(exc)) from None
             strategy = _strategy_from_catalog(catalog, payload.strategy_id)
         config = _engine_config(payload, strategy)
+        config["contract_rules"] = _backtest_contract_rules(request, config["symbol"])
         trigger_timeframe = _strategy_trigger_timeframe(strategy)
         if trigger_timeframe is not None:
             config["timeframe"] = trigger_timeframe
@@ -2485,6 +2550,13 @@ def create_backtest(
                     initial_capital=payload.initial_capital,
                     fee_bps=payload.fee_bps,
                     slippage_bps=payload.slippage_bps,
+                    leverage=payload.leverage,
+                    maintenance_margin_rate=Decimal(
+                        str(config["contract_rules"]["maintenance_margin_rate"])
+                    ),
+                    liquidation_fee_rate=Decimal(
+                        str(config["contract_rules"]["liquidation_fee_rate"])
+                    ),
                     backtest_repository=repository,
                 )
                 raw_result = _normalize_martingale_backtest_result(
@@ -2548,6 +2620,8 @@ def create_backtest(
                 "end_ts": config["end_ts"],
                 "params": _json_safe(config["params"]),
                 "engine_key": config["strategy_id"],
+                "margin_mode": config["margin_mode"],
+                "contract_rules": _json_safe(config["contract_rules"]),
             }
         )
         timestamp_unit = str(data_quality.get("timestamp_unit") or "seconds")

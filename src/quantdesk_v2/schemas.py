@@ -1546,6 +1546,7 @@ class BacktestRunRequest(BaseModel):
     initial_capital: Decimal = Field(ge=1, le=Decimal("1000000000000"), max_digits=30)
     position_size_pct: Decimal = Field(ge=Decimal("0.01"), le=100, max_digits=10, decimal_places=6)
     leverage: int = Field(ge=1, le=20)
+    margin_mode: Literal["isolated"] = "isolated"
     fee_bps: Decimal = Field(ge=0, le=1000, max_digits=10, decimal_places=6)
     slippage_bps: Decimal = Field(ge=0, le=1000, max_digits=10, decimal_places=6)
     stop_loss_pct: Decimal = Field(ge=0, le=Decimal("99.9"), max_digits=10, decimal_places=6)

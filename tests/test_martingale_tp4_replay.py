@@ -373,3 +373,37 @@ def test_forced_close_equity_deducts_each_fee_exactly_once() -> None:
     assert result.metrics["final_equity"] == Decimal("9999.99800")
     assert result.equity_curve[-1]["equity"] == result.metrics["final_equity"]
     assert result.equity_curve[-1]["open_legs"] == 0
+
+
+def test_basket_replay_applies_selected_leverage_to_margin_capacity() -> None:
+    config = _config(
+        Mq4Inputs(
+            ChooseTrading="grid",
+            AutoBoxRange=False,
+            BoxLength=2,
+            Lot="200",
+            MaxLot="500",
+            TP="1000",
+            TrailStart=0,
+        )
+    )
+    signal = tuple(_bar(index) for index in range(4))
+    common = {
+        "initial_capital": Decimal("10000"),
+        "point_size": Decimal("0.01"),
+        "costs": ReplayCosts(
+            fee_bps=Decimal("0"),
+            slippage_bps=Decimal("0"),
+            synthetic_spread_points=Decimal("0"),
+        ),
+        "manual_entry_direction": "buy",
+        "manual_entry_time": signal[2].open_time,
+    }
+
+    rejected = run_bar_replay(config, signal, (), leverage=1, **common)
+    accepted = run_bar_replay(config, signal, (), leverage=2, **common)
+
+    assert rejected.metrics["rejected_order_count"] >= 1
+    assert rejected.metrics["open_fill_count"] == 0
+    assert accepted.metrics["leverage"] == 2
+    assert accepted.metrics["open_fill_count"] == 1

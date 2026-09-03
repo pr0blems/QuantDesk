@@ -54,6 +54,8 @@ class FuturesSymbolRules:
     max_quantity: Decimal
     tick_size: Decimal
     min_notional: Decimal
+    liquidation_fee_rate: Decimal = Decimal("0")
+    market_take_bound: Decimal = Decimal("0")
 
     def quantity(self, raw: Decimal) -> Decimal:
         if not raw.is_finite() or raw <= 0:
@@ -338,10 +340,26 @@ class BinanceUsdMTradingClient:
                     min_notional=self._positive_decimal(
                         notional_filter.get("notional") or notional_filter.get("minNotional") or "5"
                     ),
+                    liquidation_fee_rate=self._non_negative_decimal(
+                        row.get("liquidationFee") or "0"
+                    ),
+                    market_take_bound=self._non_negative_decimal(
+                        row.get("marketTakeBound") or "0"
+                    ),
                 )
             except (TypeError, ValueError):
                 continue
         return output
+
+    @staticmethod
+    def _non_negative_decimal(value: Any) -> Decimal:
+        try:
+            result = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("value must be a non-negative decimal") from exc
+        if not result.is_finite() or result < 0:
+            raise ValueError("value must be a non-negative decimal")
+        return result
 
     def _public(self, path: str) -> dict[str, Any] | list[Any]:
         return self._request("GET", f"{self.base_url}{path}", {})

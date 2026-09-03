@@ -6,6 +6,7 @@ or execute a live basket strategy.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -103,6 +104,9 @@ class MartingaleBarReplayRequest(_StrictRequest):
     begin_at: datetime
     end_at: datetime
     initial_capital: Decimal = Field(gt=0)
+    leverage: int = Field(default=1, ge=1, le=20)
+    maintenance_margin_rate: Decimal = Field(default=Decimal("0.005"), ge=0, lt=Decimal("0.5"))
+    liquidation_fee_rate: Decimal = Field(default=Decimal("0"), ge=0, le=Decimal("0.1"))
     point_size: Decimal = Field(gt=0)
     fee_bps: Decimal = Field(default=Decimal("5"), ge=0, le=1000)
     slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=1000)
@@ -662,6 +666,9 @@ def _execute_martingale_bar_backtest(
             ),
             evaluation_begin_time=begin_ms,
             evaluation_end_time=end_ms,
+            leverage=payload.leverage,
+            maintenance_margin_rate=payload.maintenance_margin_rate,
+            liquidation_fee_rate=payload.liquidation_fee_rate,
         )
     except (ReplayDataError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
@@ -739,9 +746,27 @@ def _execute_martingale_bar_backtest(
         },
     )
     db.commit()
+    chart_bars = [
+        bar for bar in signal_bars if begin_ms <= int(bar.open_time) <= end_ms
+    ]
+    bucket_size = max(1, math.ceil(len(chart_bars) / 1_200)) if chart_bars else 1
+    price_candles: list[dict[str, Any]] = []
+    for index in range(0, len(chart_bars), bucket_size):
+        bucket = chart_bars[index : index + bucket_size]
+        price_candles.append(
+            {
+                "ts": int(bucket[0].open_time) // 1_000,
+                "open": float(bucket[0].open),
+                "high": float(max(item.high for item in bucket)),
+                "low": float(min(item.low for item in bucket)),
+                "close": float(bucket[-1].close),
+                "volume": float(sum((item.volume for item in bucket), Decimal("0"))),
+            }
+        )
     return {
         "manifest_id": manifest.public_id,
         "result": result.audit_payload(),
+        "price_candles": price_candles,
         "market_data_source": source_name,
         "market_data_quality": quality_payload,
         "live_trading_changed": False,
@@ -785,6 +810,9 @@ def run_catalog_martingale_backtest(
     initial_capital: Decimal,
     fee_bps: Decimal,
     slippage_bps: Decimal,
+    leverage: int = 1,
+    maintenance_margin_rate: Decimal = Decimal("0.005"),
+    liquidation_fee_rate: Decimal = Decimal("0"),
     backtest_repository: BacktestRepository | None = None,
 ) -> dict[str, Any]:
     """Run the basket engine through the standard Data Backtest workflow.
@@ -840,6 +868,9 @@ def run_catalog_martingale_backtest(
         begin_at=begin_at,
         end_at=end_at,
         initial_capital=initial_capital,
+        leverage=leverage,
+        maintenance_margin_rate=maintenance_margin_rate,
+        liquidation_fee_rate=liquidation_fee_rate,
         point_size=DEFAULT_SIGNAL_POINT_SIZE,
         fee_bps=fee_bps,
         slippage_bps=slippage_bps,

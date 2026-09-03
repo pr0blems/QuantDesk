@@ -118,6 +118,7 @@ def backtest_run_detail(run: BacktestRun) -> dict[str, Any]:
             "trade_count": run.trade_count,
         }
     )
+    data_quality = _json_safe(run.data_quality_json or {})
     returned_count = metadata.get("response_trade_count")
     if not isinstance(returned_count, int):
         returned_count = (run.data_quality_json or {}).get("trades_returned")
@@ -131,7 +132,12 @@ def backtest_run_detail(run: BacktestRun) -> dict[str, Any]:
             "account": account,
             "metrics": metrics,
             "equity_curve": _json_safe(run.equity_curve_json or []),
+            "price_candles": (
+                data_quality.get("price_candles", [])
+                if isinstance(data_quality, dict)
+                else []
+            ),
             "trades": [backtest_trade_response(trade) for trade in response_trades],
-            "data_quality": _json_safe(run.data_quality_json or {}),
+            "data_quality": data_quality,
         },
     }

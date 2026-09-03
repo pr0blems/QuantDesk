@@ -23,6 +23,11 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         assert contract in script
 
     assert 'id="standard-execution-note"' in script
+    assert 'id="price-chart"' in script
+    assert "drawPriceChart(" in script
+    assert 'id="leverage" name="leverage" required' in script
+    assert '<option value="20">20x</option>' in script
+    assert 'margin_mode: "isolated"' in script
     assert 'id="position-field"' in script
     assert 'id="stop-field"' in script
     assert 'input.step = param.step != null ? String(param.step) : "any";' in script

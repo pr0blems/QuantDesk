@@ -35,7 +35,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-data-range-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-futures-replay-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -83,7 +83,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div class="field-grid two">
                 <label>初始资金 (USDT)<input id="initial-capital" name="initial_capital" type="number" min="1" step="1" value="10000" required></label>
                 <label id="position-field">单次仓位 (%)<input id="position-size" name="position_size_pct" type="number" min="0.01" max="100" step="0.01" value="10" required></label>
-                <label id="leverage-field">杠杆倍数<input id="leverage" name="leverage" type="number" min="1" max="20" step="1" value="1" required></label>
+                <label id="leverage-field">Binance 杠杆<select id="leverage" name="leverage" required><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option><option value="5">5x</option><option value="10">10x</option><option value="20">20x</option></select></label>
                 <label id="holding-field">最大持有 (K线)<input id="max-holding" name="max_holding_bars" type="number" min="0" max="50000" step="1" value="120" required></label>
               </div>
             </section>
@@ -103,8 +103,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div id="strategy-params" class="field-grid two"></div>
             </section>
 
-            <div id="basket-profile-note" class="execution-note hidden"><span>篮子回放</span><strong>Tiger 现货信号 → 马丁篮子引擎</strong><small>首单、加仓、分级止盈、金额止损与追踪退出均读取当前策略版本；Binance 映射合约仅作为执行参照。</small></div>
-            <div id="standard-execution-note" class="execution-note"><span>成交模型</span><strong>信号收盘确认 → 下一根开盘撮合</strong><small>手续费与双边滑点均计入；杠杆采用简化逐仓强平，不含资金费与阶梯保证金。</small></div>
+            <div id="basket-profile-note" class="execution-note hidden"><span>篮子回放</span><strong>Tiger 现货信号 → 马丁篮子引擎</strong><small>首单、加仓、分级止盈、金额止损、逐仓杠杆与强平均纳入回放；Binance 映射合约作为执行规则参照。</small></div>
+            <div id="standard-execution-note" class="execution-note"><span>Binance 逐仓模型</span><strong>信号收盘确认 → 下一根开盘撮合</strong><small>手续费、双边滑点、合约价格/数量步进、最小名义价值、止盈止损与强平均计入；暂不含资金费。</small></div>
             <button id="run-backtest" class="run-button" type="submit" disabled><span aria-hidden="true">▶</span><strong>运行回测</strong></button>
           </form>
 
@@ -134,6 +134,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                     <div class="panel-head"><div><strong>权益与回撤</strong><span>净值曲线与水下回撤同步观察</span></div><div id="chart-legend" class="chart-legend"><span class="equity-dot">权益</span><span class="drawdown-dot">回撤</span></div></div>
                     <div class="equity-chart-wrap"><canvas id="equity-chart" aria-label="回测权益曲线"></canvas></div>
                     <div class="drawdown-chart-wrap"><canvas id="drawdown-chart" aria-label="回测回撤曲线"></canvas></div>
+                  </section>
+
+                  <section id="price-panel" class="result-panel price-panel">
+                    <div class="panel-head"><div><strong>K 线与成交点</strong><span>显示实际回放行情、开仓与平仓位置</span></div><div class="trade-marker-legend"><span class="long-marker">多开</span><span class="short-marker">空开</span><span class="exit-marker">平仓</span></div></div>
+                    <div class="price-chart-wrap"><canvas id="price-chart" aria-label="回测 K 线与买卖点"></canvas></div>
                   </section>
 
                   <section id="quality-panel" class="result-panel quality-panel">
@@ -382,12 +387,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.populateSelect(this.q("#timeframe"), timeframes, "选择周期");
     if (basket && changed && timeframes.some((item) => item.value === "15m")) this.q("#timeframe").value = "15m";
 
-    ["#position-field", "#leverage-field", "#holding-field", "#stop-field", "#take-profit-field"].forEach((selector) => {
+    ["#position-field", "#holding-field", "#stop-field", "#take-profit-field"].forEach((selector) => {
       this.q(selector).classList.toggle("hidden", basket);
     });
     this.q("#basket-profile-note").classList.toggle("hidden", !basket);
     this.q("#standard-execution-note").classList.toggle("hidden", basket);
-    this.q("#capital-section .section-head small").textContent = basket ? "篮子仓位由策略参数控制" : "单标的 · 单仓";
+    this.q("#capital-section .section-head small").textContent = basket ? "篮子仓位由策略参数控制 · Binance 逐仓" : "Binance 逐仓 · 单标的单仓";
     this.q("#cost-section .section-head small").textContent = basket ? "成本可调 · 退出由策略控制" : "结果均为净值";
     this.q("#run-backtest").disabled = !strategy || !symbols.length || !timeframes.length;
     this.syncBounds(basket && changed);
@@ -547,6 +552,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       initial_capital: Number(this.q("#initial-capital").value),
       position_size_pct: Number(this.q("#position-size").value),
       leverage: Number(this.q("#leverage").value),
+      margin_mode: "isolated",
       fee_bps: Number(this.q("#fee").value),
       slippage_bps: Number(this.q("#slippage").value),
       stop_loss_pct: Number(this.q("#stop-loss").value),
@@ -801,6 +807,116 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const curve = this.normalizeCurve(result.equity_curve || result.curve || []);
     this.drawLineChart(this.q("#equity-chart"), curve, "equity");
     this.drawLineChart(this.q("#drawdown-chart"), curve, "drawdown");
+    this.drawPriceChart(
+      this.q("#price-chart"),
+      result.price_candles || result.data_quality?.price_candles || [],
+      Array.isArray(result.trades) ? result.trades : [],
+    );
+  }
+
+  drawPriceChart(canvas, rawCandles, trades) {
+    if (!canvas) return;
+    const width = Math.floor(canvas.clientWidth);
+    const height = Math.floor(canvas.clientHeight);
+    if (!width || !height) return;
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(width * ratio);
+    canvas.height = Math.floor(height * ratio);
+    const context = canvas.getContext("2d");
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+
+    const timestamp = (value) => {
+      if (value == null) return NaN;
+      if (typeof value === "string" && !/^\d+(\.\d+)?$/.test(value)) return Date.parse(value) / 1000;
+      const numeric = Number(value);
+      return numeric > 100000000000 ? numeric / 1000 : numeric;
+    };
+    const candles = (Array.isArray(rawCandles) ? rawCandles : []).map((item) => ({
+      ts: timestamp(item?.ts ?? item?.timestamp ?? item?.open_time),
+      open: Number(item?.open), high: Number(item?.high), low: Number(item?.low),
+      close: Number(item?.close), volume: Number(item?.volume || 0),
+    })).filter((item) => Number.isFinite(item.ts) && [item.open, item.high, item.low, item.close].every(Number.isFinite));
+    if (!candles.length) {
+      context.fillStyle = "#64778d";
+      context.fillText("当前历史记录没有保存 K 线快照，请重新运行一次回测", 18, 31);
+      return;
+    }
+
+    const padding = { left: 12, right: 66, top: 16, bottom: 28 };
+    const plotWidth = Math.max(1, width - padding.left - padding.right);
+    const plotHeight = Math.max(1, height - padding.top - padding.bottom);
+    const lows = candles.map((item) => item.low);
+    const highs = candles.map((item) => item.high);
+    let minPrice = Math.min(...lows);
+    let maxPrice = Math.max(...highs);
+    const pricePadding = (maxPrice - minPrice || Math.abs(maxPrice) * .01 || 1) * .08;
+    minPrice -= pricePadding;
+    maxPrice += pricePadding;
+    const priceRange = maxPrice - minPrice || 1;
+    const firstTs = candles[0].ts;
+    const lastTs = candles[candles.length - 1].ts;
+    const timeRange = lastTs - firstTs || 1;
+    const xTime = (ts) => padding.left + Math.max(0, Math.min(1, (ts - firstTs) / timeRange)) * plotWidth;
+    const yPrice = (price) => padding.top + (maxPrice - price) / priceRange * plotHeight;
+
+    context.strokeStyle = "rgba(126, 154, 181, .14)";
+    context.fillStyle = "#657b91";
+    context.lineWidth = 1;
+    for (let line = 0; line <= 4; line += 1) {
+      const price = maxPrice - priceRange * line / 4;
+      const y = yPrice(price);
+      context.beginPath(); context.moveTo(padding.left, y); context.lineTo(width - padding.right, y); context.stroke();
+      context.fillText(this.price(price), width - padding.right + 7, y + 4);
+    }
+
+    const candleWidth = Math.max(.7, Math.min(7, plotWidth / candles.length * .68));
+    candles.forEach((item) => {
+      const x = xTime(item.ts);
+      const rising = item.close >= item.open;
+      context.strokeStyle = rising ? "#31d4a0" : "#f06478";
+      context.fillStyle = context.strokeStyle;
+      context.beginPath(); context.moveTo(x, yPrice(item.high)); context.lineTo(x, yPrice(item.low)); context.stroke();
+      const top = yPrice(Math.max(item.open, item.close));
+      const bottom = yPrice(Math.min(item.open, item.close));
+      context.fillRect(x - candleWidth / 2, top, candleWidth, Math.max(1, bottom - top));
+    });
+
+    const marker = (ts, price, color, kind, label) => {
+      if (!Number.isFinite(ts) || !Number.isFinite(price) || ts < firstTs || ts > lastTs) return;
+      const x = xTime(ts);
+      const y = yPrice(price);
+      context.save();
+      context.fillStyle = color;
+      context.strokeStyle = "#07111b";
+      context.lineWidth = 1.5;
+      context.beginPath();
+      if (kind === "up") {
+        context.moveTo(x, y - 8); context.lineTo(x - 6, y + 3); context.lineTo(x + 6, y + 3);
+      } else if (kind === "down") {
+        context.moveTo(x, y + 8); context.lineTo(x - 6, y - 3); context.lineTo(x + 6, y - 3);
+      } else {
+        context.arc(x, y, 4.5, 0, Math.PI * 2);
+      }
+      context.closePath(); context.fill(); context.stroke();
+      context.fillStyle = color;
+      context.font = "bold 11px sans-serif";
+      context.fillText(label, x + 7, y + (kind === "down" ? 11 : -7));
+      context.restore();
+    };
+    trades.forEach((trade) => {
+      const side = String(trade?.side ?? trade?.direction ?? "").toLowerCase();
+      const isLong = ["long", "buy", "1", "多"].includes(side) || Number(trade?.side) > 0;
+      marker(timestamp(trade?.entry_ts ?? trade?.entry_at ?? trade?.entry_time), Number(trade?.entry_price), isLong ? "#31d4a0" : "#f06478", isLong ? "up" : "down", isLong ? "多" : "空");
+      marker(timestamp(trade?.exit_ts ?? trade?.exit_at ?? trade?.exit_time), Number(trade?.exit_price), "#e6b850", "exit", "平");
+    });
+
+    context.fillStyle = "#657b91";
+    const dateLabel = (seconds) => new Date(seconds * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+    context.fillText(dateLabel(firstTs), padding.left, height - 8);
+    const endLabel = dateLabel(lastTs);
+    context.fillText(endLabel, Math.max(padding.left, width - padding.right - context.measureText(endLabel).width), height - 8);
   }
 
   normalizeCurve(raw) {

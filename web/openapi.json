@@ -849,7 +849,7 @@
             "type": "number"
           },
           "market_flow_score_weight": {
-            "default": 20,
+            "default": 30,
             "maximum": 100.0,
             "minimum": 0.0,
             "title": "Market Flow Score Weight",
@@ -934,7 +934,7 @@
             "type": "integer"
           },
           "news_score_weight": {
-            "default": 45,
+            "default": 20,
             "maximum": 100.0,
             "minimum": 0.0,
             "title": "News Score Weight",
@@ -955,7 +955,7 @@
             "type": "integer"
           },
           "technical_score_weight": {
-            "default": 35,
+            "default": 50,
             "maximum": 100.0,
             "minimum": 0.0,
             "title": "Technical Score Weight",
@@ -1462,6 +1462,12 @@
             "minimum": 1.0,
             "title": "Leverage",
             "type": "integer"
+          },
+          "margin_mode": {
+            "const": "isolated",
+            "default": "isolated",
+            "title": "Margin Mode",
+            "type": "string"
           },
           "max_holding_bars": {
             "maximum": 50000.0,
@@ -2278,6 +2284,131 @@
         "title": "BinanceTradingState",
         "type": "object"
       },
+      "BoxConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_range": {
+            "default": true,
+            "title": "Auto Range",
+            "type": "boolean"
+          },
+          "buffer_points": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "5",
+            "title": "Buffer Points"
+          },
+          "daily_atr_factor": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 10.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0.2",
+            "title": "Daily Atr Factor"
+          },
+          "daily_atr_period": {
+            "default": 30,
+            "maximum": 365.0,
+            "minimum": 2.0,
+            "title": "Daily Atr Period",
+            "type": "integer"
+          },
+          "fixed_range_points": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "30",
+            "title": "Fixed Range Points"
+          },
+          "length": {
+            "default": 22,
+            "maximum": 999.0,
+            "minimum": 2.0,
+            "title": "Length",
+            "type": "integer"
+          },
+          "timeframe": {
+            "default": "15m",
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "30m",
+              "1h"
+            ],
+            "title": "Timeframe",
+            "type": "string"
+          }
+        },
+        "title": "BoxConfig",
+        "type": "object"
+      },
+      "CompatibilityConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "display": {
+            "$ref": "#/components/schemas/LegacyDisplayConfig",
+            "default": {
+              "show_buttons_close": true,
+              "show_main_setting": true,
+              "show_stat": true
+            }
+          },
+          "magic": {
+            "default": 201800,
+            "minimum": 0.0,
+            "title": "Magic",
+            "type": "integer"
+          },
+          "section_points": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "1000",
+            "title": "Section Points"
+          },
+          "section_policy": {
+            "default": "disabled",
+            "enum": [
+              "disabled",
+              "legacy_external_range"
+            ],
+            "title": "Section Policy",
+            "type": "string"
+          }
+        },
+        "title": "CompatibilityConfig",
+        "type": "object"
+      },
       "DashboardPerformanceCalendar": {
         "properties": {
           "active_days": {
@@ -2611,6 +2742,35 @@
           "confirmed"
         ],
         "title": "DeploymentTransitionRequest",
+        "type": "object"
+      },
+      "EnginePolicy": {
+        "enum": [
+          "research_compatibility",
+          "live_safe"
+        ],
+        "title": "EnginePolicy",
+        "type": "string"
+      },
+      "ExecutionConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "max_spread_points": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "50",
+            "title": "Max Spread Points"
+          }
+        },
+        "title": "ExecutionConfig",
         "type": "object"
       },
       "FinnhubUsQuoteOut": {
@@ -3088,6 +3248,56 @@
         "title": "KillSwitchCommandRequest",
         "type": "object"
       },
+      "LadderConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "distance_points": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "150",
+            "title": "Distance Points"
+          },
+          "grid_drift_order_count": {
+            "default": 100,
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Grid Drift Order Count",
+            "type": "integer"
+          }
+        },
+        "title": "LadderConfig",
+        "type": "object"
+      },
+      "LegacyDisplayConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "show_buttons_close": {
+            "default": true,
+            "title": "Show Buttons Close",
+            "type": "boolean"
+          },
+          "show_main_setting": {
+            "default": true,
+            "title": "Show Main Setting",
+            "type": "boolean"
+          },
+          "show_stat": {
+            "default": true,
+            "title": "Show Stat",
+            "type": "boolean"
+          }
+        },
+        "title": "LegacyDisplayConfig",
+        "type": "object"
+      },
       "LiveAccountArmRequest": {
         "additionalProperties": false,
         "properties": {
@@ -3456,6 +3666,96 @@
         "title": "LiveAccountStrategyUpdate",
         "type": "object"
       },
+      "LiveRiskConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "additions_enabled": {
+            "default": true,
+            "title": "Additions Enabled",
+            "type": "boolean"
+          },
+          "daily_loss_limit_pct": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Daily Loss Limit Pct"
+          },
+          "max_cycle_loss_pct": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Max Cycle Loss Pct"
+          },
+          "max_cycle_margin_pct": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Max Cycle Margin Pct"
+          },
+          "max_cycle_notional": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Cycle Notional"
+          },
+          "minimum_liquidation_buffer_pct": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Minimum Liquidation Buffer Pct"
+          }
+        },
+        "required": [
+          "max_cycle_loss_pct",
+          "max_cycle_margin_pct",
+          "minimum_liquidation_buffer_pct",
+          "daily_loss_limit_pct"
+        ],
+        "title": "LiveRiskConfig",
+        "type": "object"
+      },
       "LoginRequest": {
         "properties": {
           "client_type": {
@@ -3508,6 +3808,437 @@
         "title": "LogoutRequest",
         "type": "object"
       },
+      "MarketDataConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "adjustment": {
+            "default": "none",
+            "enum": [
+              "none",
+              "forward"
+            ],
+            "title": "Adjustment",
+            "type": "string"
+          },
+          "contract_symbol": {
+            "maxLength": 32,
+            "minLength": 5,
+            "title": "Contract Symbol",
+            "type": "string"
+          },
+          "execution_source": {
+            "const": "binance",
+            "default": "binance",
+            "title": "Execution Source",
+            "type": "string"
+          },
+          "maximum_basis_bps": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 10000.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "100",
+            "title": "Maximum Basis Bps"
+          },
+          "maximum_binance_age_seconds": {
+            "default": 5,
+            "maximum": 120.0,
+            "minimum": 1.0,
+            "title": "Maximum Binance Age Seconds",
+            "type": "integer"
+          },
+          "maximum_clock_skew_seconds": {
+            "default": 10,
+            "maximum": 300.0,
+            "minimum": 0.0,
+            "title": "Maximum Clock Skew Seconds",
+            "type": "integer"
+          },
+          "maximum_tiger_age_seconds": {
+            "default": 15,
+            "maximum": 900.0,
+            "minimum": 1.0,
+            "title": "Maximum Tiger Age Seconds",
+            "type": "integer"
+          },
+          "signal_source": {
+            "const": "tiger",
+            "default": "tiger",
+            "title": "Signal Source",
+            "type": "string"
+          },
+          "trade_sessions": {
+            "default": [
+              "regular"
+            ],
+            "items": {
+              "enum": [
+                "pre_market",
+                "regular",
+                "after_hours",
+                "overnight"
+              ],
+              "type": "string"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Trade Sessions",
+            "type": "array"
+          },
+          "underlying_symbol": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Underlying Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "underlying_symbol",
+          "contract_symbol"
+        ],
+        "title": "MarketDataConfig",
+        "type": "object"
+      },
+      "MartingaleBarReplayRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "begin_at": {
+            "format": "date-time",
+            "title": "Begin At",
+            "type": "string"
+          },
+          "config": {
+            "$ref": "#/components/schemas/MartingaleTp4Config"
+          },
+          "end_at": {
+            "format": "date-time",
+            "title": "End At",
+            "type": "string"
+          },
+          "engine_policy": {
+            "$ref": "#/components/schemas/EnginePolicy",
+            "default": "research_compatibility"
+          },
+          "fee_bps": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "5",
+            "title": "Fee Bps"
+          },
+          "initial_capital": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Initial Capital"
+          },
+          "leverage": {
+            "default": 1,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Leverage",
+            "type": "integer"
+          },
+          "liquidation_fee_rate": {
+            "anyOf": [
+              {
+                "maximum": 0.1,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0",
+            "title": "Liquidation Fee Rate"
+          },
+          "maintenance_margin_rate": {
+            "anyOf": [
+              {
+                "exclusiveMaximum": 0.5,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0.005",
+            "title": "Maintenance Margin Rate"
+          },
+          "manual_entry_direction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manual Entry Direction"
+          },
+          "manual_entry_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manual Entry Time"
+          },
+          "point_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Point Size"
+          },
+          "slippage_bps": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "2",
+            "title": "Slippage Bps"
+          },
+          "synthetic_spread_points": {
+            "anyOf": [
+              {
+                "maximum": 100000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "1",
+            "title": "Synthetic Spread Points"
+          },
+          "warmup_bars": {
+            "default": 250,
+            "maximum": 1000.0,
+            "minimum": 30.0,
+            "title": "Warmup Bars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "config",
+          "begin_at",
+          "end_at",
+          "initial_capital",
+          "point_size"
+        ],
+        "title": "MartingaleBarReplayRequest",
+        "type": "object"
+      },
+      "MartingaleRiskPreviewRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "account_equity": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Account Equity"
+          },
+          "config": {
+            "$ref": "#/components/schemas/MartingaleTp4Config"
+          },
+          "leverage": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 125.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Leverage"
+          },
+          "reference_price": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "title": "Reference Price"
+          }
+        },
+        "required": [
+          "config",
+          "account_equity",
+          "reference_price",
+          "leverage"
+        ],
+        "title": "MartingaleRiskPreviewRequest",
+        "type": "object"
+      },
+      "MartingaleTp4Config": {
+        "additionalProperties": false,
+        "properties": {
+          "engine_key": {
+            "const": "martingale_tp4",
+            "default": "martingale_tp4",
+            "title": "Engine Key",
+            "type": "string"
+          },
+          "live_risk": {
+            "$ref": "#/components/schemas/LiveRiskConfig"
+          },
+          "market": {
+            "const": "BINANCE_TRADIFI_PERPETUAL",
+            "default": "BINANCE_TRADIFI_PERPETUAL",
+            "title": "Market",
+            "type": "string"
+          },
+          "market_data": {
+            "$ref": "#/components/schemas/MarketDataConfig"
+          },
+          "parameters": {
+            "$ref": "#/components/schemas/StrategyParameters",
+            "default": {
+              "box": {
+                "auto_range": true,
+                "buffer_points": "5",
+                "daily_atr_factor": "0.2",
+                "daily_atr_period": 30,
+                "fixed_range_points": "30",
+                "length": 22,
+                "timeframe": "15m"
+              },
+              "compatibility": {
+                "display": {
+                  "show_buttons_close": true,
+                  "show_main_setting": true,
+                  "show_stat": true
+                },
+                "magic": 201800,
+                "section_points": "1000",
+                "section_policy": "disabled"
+              },
+              "execution": {
+                "max_spread_points": "50"
+              },
+              "ladder": {
+                "distance_points": "150",
+                "grid_drift_order_count": 100
+              },
+              "mode": "auto",
+              "new_cycle": true,
+              "overlap": {
+                "enabled": true,
+                "excess_percent": "11",
+                "min_orders": 7
+              },
+              "session": {
+                "end_hour": 23,
+                "start_hour": 1,
+                "timezone": "exchange"
+              },
+              "sizing": {
+                "autolot": false,
+                "autolot_balance_unit": "10000",
+                "initial_lot": "0.01",
+                "lot_multiplier": "2",
+                "max_lot": "100",
+                "max_orders": 16
+              },
+              "stop": {
+                "basket_loss_currency": "0"
+              },
+              "take_profit": {
+                "base_points": "100",
+                "tier2_min_orders": 2,
+                "tier2_points": "80",
+                "tier3_min_orders": 5,
+                "tier3_points": "50",
+                "tier4_min_orders": 7,
+                "tier4_points": "30"
+              },
+              "trailing": {
+                "distance_points": "100",
+                "start_points": "600"
+              }
+            }
+          },
+          "schema_version": {
+            "const": 2,
+            "default": 2,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "strategy_kind": {
+            "const": "basket_strategy",
+            "default": "basket_strategy",
+            "title": "Strategy Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "market_data",
+          "live_risk"
+        ],
+        "title": "MartingaleTp4Config",
+        "type": "object"
+      },
       "MessageOut": {
         "properties": {
           "message": {
@@ -3535,6 +4266,465 @@
         "title": "MonitorWatchlistUpdate",
         "type": "object"
       },
+      "Mq4CsvImportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "defaults": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Mq4Inputs"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "live_risk": {
+            "$ref": "#/components/schemas/LiveRiskConfig"
+          },
+          "market_data": {
+            "$ref": "#/components/schemas/MarketDataConfig"
+          },
+          "settings_csv": {
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Settings Csv",
+            "type": "string"
+          }
+        },
+        "required": [
+          "settings_csv",
+          "market_data",
+          "live_risk"
+        ],
+        "title": "Mq4CsvImportRequest",
+        "type": "object"
+      },
+      "Mq4ExportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/MartingaleTp4Config"
+          }
+        },
+        "required": [
+          "config"
+        ],
+        "title": "Mq4ExportRequest",
+        "type": "object"
+      },
+      "Mq4ImportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "inputs": {
+            "$ref": "#/components/schemas/Mq4Inputs"
+          },
+          "live_risk": {
+            "$ref": "#/components/schemas/LiveRiskConfig"
+          },
+          "market_data": {
+            "$ref": "#/components/schemas/MarketDataConfig"
+          }
+        },
+        "required": [
+          "inputs",
+          "market_data",
+          "live_risk"
+        ],
+        "title": "Mq4ImportRequest",
+        "type": "object"
+      },
+      "Mq4Inputs": {
+        "additionalProperties": false,
+        "description": "All source inputs, preserving their original MQL variable names.",
+        "properties": {
+          "AutoBoxRange": {
+            "default": true,
+            "title": "Autoboxrange",
+            "type": "boolean"
+          },
+          "AutoBoxRangeDailyATRfactor": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 10.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0.2",
+            "title": "Autoboxrangedailyatrfactor"
+          },
+          "AutoBoxRangeDailyATRperiod": {
+            "default": 30,
+            "maximum": 365.0,
+            "minimum": 2.0,
+            "title": "Autoboxrangedailyatrperiod",
+            "type": "integer"
+          },
+          "Autolot": {
+            "default": false,
+            "title": "Autolot",
+            "type": "boolean"
+          },
+          "Autolotsize": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "10000",
+            "title": "Autolotsize"
+          },
+          "BoxBufferPips": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "5",
+            "title": "Boxbufferpips"
+          },
+          "BoxLength": {
+            "default": 22,
+            "maximum": 999.0,
+            "minimum": 2.0,
+            "title": "Boxlength",
+            "type": "integer"
+          },
+          "BoxRange": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "30",
+            "title": "Boxrange"
+          },
+          "BoxTimeFrame": {
+            "default": "15m",
+            "enum": [
+              "1m",
+              "5m",
+              "15m",
+              "30m",
+              "1h"
+            ],
+            "title": "Boxtimeframe",
+            "type": "string"
+          },
+          "ChooseTrading": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "recovery",
+              "grid"
+            ],
+            "title": "Choosetrading",
+            "type": "string"
+          },
+          "Distance": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "150",
+            "title": "Distance"
+          },
+          "End_Hour": {
+            "default": 23,
+            "maximum": 23.0,
+            "minimum": 0.0,
+            "title": "End Hour",
+            "type": "integer"
+          },
+          "GridDrift": {
+            "default": 100,
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Griddrift",
+            "type": "integer"
+          },
+          "Kol_Ord_for_TP2": {
+            "default": 2,
+            "minimum": 1.0,
+            "title": "Kol Ord For Tp2",
+            "type": "integer"
+          },
+          "Kol_Ord_for_TP3": {
+            "default": 5,
+            "minimum": 1.0,
+            "title": "Kol Ord For Tp3",
+            "type": "integer"
+          },
+          "Kol_Ord_for_TP4": {
+            "default": 7,
+            "minimum": 1.0,
+            "title": "Kol Ord For Tp4",
+            "type": "integer"
+          },
+          "Lot": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0.01",
+            "title": "Lot"
+          },
+          "Magic": {
+            "default": 201800,
+            "minimum": 0.0,
+            "title": "Magic",
+            "type": "integer"
+          },
+          "MaxLot": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "100",
+            "title": "Maxlot"
+          },
+          "MaxOrders": {
+            "default": 16,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Maxorders",
+            "type": "integer"
+          },
+          "MaxSpred": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "50",
+            "title": "Maxspred"
+          },
+          "NewCycle": {
+            "default": true,
+            "title": "Newcycle",
+            "type": "boolean"
+          },
+          "Overlap": {
+            "default": true,
+            "title": "Overlap",
+            "type": "boolean"
+          },
+          "OverlapOrderNumber": {
+            "default": 7,
+            "minimum": 2.0,
+            "title": "Overlapordernumber",
+            "type": "integer"
+          },
+          "OverlapPercent": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "11",
+            "title": "Overlappercent"
+          },
+          "SL_Dollar": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0",
+            "title": "Sl Dollar"
+          },
+          "Section": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "1000",
+            "title": "Section"
+          },
+          "ShowButton": {
+            "default": true,
+            "title": "Showbutton",
+            "type": "boolean"
+          },
+          "ShowMainSetting": {
+            "default": true,
+            "title": "Showmainsetting",
+            "type": "boolean"
+          },
+          "ShowStat": {
+            "default": true,
+            "title": "Showstat",
+            "type": "boolean"
+          },
+          "Start_Hour": {
+            "default": 1,
+            "maximum": 23.0,
+            "minimum": 0.0,
+            "title": "Start Hour",
+            "type": "integer"
+          },
+          "TP": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "100",
+            "title": "Tp"
+          },
+          "TP2": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "80",
+            "title": "Tp2"
+          },
+          "TP3": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "50",
+            "title": "Tp3"
+          },
+          "TP4": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "30",
+            "title": "Tp4"
+          },
+          "TrailDistance": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "100",
+            "title": "Traildistance"
+          },
+          "TrailStart": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "600",
+            "title": "Trailstart"
+          },
+          "mm": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "2",
+            "title": "Mm"
+          }
+        },
+        "title": "Mq4Inputs",
+        "type": "object"
+      },
       "OpportunityPreferenceUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -3557,6 +4747,40 @@
           "action"
         ],
         "title": "OpportunityPreferenceUpdate",
+        "type": "object"
+      },
+      "OverlapConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "excess_percent": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "11",
+            "title": "Excess Percent"
+          },
+          "min_orders": {
+            "default": 7,
+            "maximum": 100000.0,
+            "minimum": 2.0,
+            "title": "Min Orders",
+            "type": "integer"
+          }
+        },
+        "title": "OverlapConfig",
         "type": "object"
       },
       "PaperAccountCreateRequest": {
@@ -4160,6 +5384,34 @@
         "title": "RegisterRequest",
         "type": "object"
       },
+      "SessionConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "end_hour": {
+            "default": 23,
+            "maximum": 23.0,
+            "minimum": 0.0,
+            "title": "End Hour",
+            "type": "integer"
+          },
+          "start_hour": {
+            "default": 1,
+            "maximum": 23.0,
+            "minimum": 0.0,
+            "title": "Start Hour",
+            "type": "integer"
+          },
+          "timezone": {
+            "default": "exchange",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "title": "SessionConfig",
+        "type": "object"
+      },
       "ShadowDeploymentRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4208,6 +5460,120 @@
           "confirmed"
         ],
         "title": "ShadowDeploymentRequest",
+        "type": "object"
+      },
+      "SizingConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "autolot": {
+            "default": false,
+            "title": "Autolot",
+            "type": "boolean"
+          },
+          "autolot_balance_unit": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "10000",
+            "title": "Autolot Balance Unit"
+          },
+          "initial_lot": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0.01",
+            "title": "Initial Lot"
+          },
+          "lot_multiplier": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "2",
+            "title": "Lot Multiplier"
+          },
+          "max_lot": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "100",
+            "title": "Max Lot"
+          },
+          "max_orders": {
+            "default": 16,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Max Orders",
+            "type": "integer"
+          }
+        },
+        "title": "SizingConfig",
+        "type": "object"
+      },
+      "StopConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "basket_loss_currency": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0",
+            "title": "Basket Loss Currency"
+          },
+          "catastrophe_stop_pct": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catastrophe Stop Pct"
+          }
+        },
+        "title": "StopConfig",
         "type": "object"
       },
       "StrategyAiApplyRequest": {
@@ -4277,7 +5643,7 @@
                 }
               ]
             },
-            "maxProperties": 32,
+            "maxProperties": 64,
             "title": "Parameters",
             "type": "object"
           },
@@ -4471,7 +5837,7 @@
                     }
                   ]
                 },
-                "maxProperties": 32,
+                "maxProperties": 64,
                 "type": "object"
               },
               {
@@ -4577,6 +5943,118 @@
           "key"
         ],
         "title": "StrategyIndicatorSelection",
+        "type": "object"
+      },
+      "StrategyParameters": {
+        "additionalProperties": false,
+        "properties": {
+          "box": {
+            "$ref": "#/components/schemas/BoxConfig",
+            "default": {
+              "auto_range": true,
+              "buffer_points": "5",
+              "daily_atr_factor": "0.2",
+              "daily_atr_period": 30,
+              "fixed_range_points": "30",
+              "length": 22,
+              "timeframe": "15m"
+            }
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/CompatibilityConfig",
+            "default": {
+              "display": {
+                "show_buttons_close": true,
+                "show_main_setting": true,
+                "show_stat": true
+              },
+              "magic": 201800,
+              "section_points": "1000",
+              "section_policy": "disabled"
+            }
+          },
+          "execution": {
+            "$ref": "#/components/schemas/ExecutionConfig",
+            "default": {
+              "max_spread_points": "50"
+            }
+          },
+          "ladder": {
+            "$ref": "#/components/schemas/LadderConfig",
+            "default": {
+              "distance_points": "150",
+              "grid_drift_order_count": 100
+            }
+          },
+          "mode": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "recovery",
+              "grid"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "new_cycle": {
+            "default": true,
+            "title": "New Cycle",
+            "type": "boolean"
+          },
+          "overlap": {
+            "$ref": "#/components/schemas/OverlapConfig",
+            "default": {
+              "enabled": true,
+              "excess_percent": "11",
+              "min_orders": 7
+            }
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionConfig",
+            "default": {
+              "end_hour": 23,
+              "start_hour": 1,
+              "timezone": "exchange"
+            }
+          },
+          "sizing": {
+            "$ref": "#/components/schemas/SizingConfig",
+            "default": {
+              "autolot": false,
+              "autolot_balance_unit": "10000",
+              "initial_lot": "0.01",
+              "lot_multiplier": "2",
+              "max_lot": "100",
+              "max_orders": 16
+            }
+          },
+          "stop": {
+            "$ref": "#/components/schemas/StopConfig",
+            "default": {
+              "basket_loss_currency": "0"
+            }
+          },
+          "take_profit": {
+            "$ref": "#/components/schemas/TakeProfitConfig",
+            "default": {
+              "base_points": "100",
+              "tier2_min_orders": 2,
+              "tier2_points": "80",
+              "tier3_min_orders": 5,
+              "tier3_points": "50",
+              "tier4_min_orders": 7,
+              "tier4_points": "30"
+            }
+          },
+          "trailing": {
+            "$ref": "#/components/schemas/TrailingConfig",
+            "default": {
+              "distance_points": "100",
+              "start_points": "600"
+            }
+          }
+        },
+        "title": "StrategyParameters",
         "type": "object"
       },
       "StrategyPromotionDecisionRequest": {
@@ -5050,7 +6528,7 @@
                 }
               ]
             },
-            "maxProperties": 32,
+            "maxProperties": 64,
             "title": "Parameters",
             "type": "object"
           },
@@ -5144,6 +6622,154 @@
         "title": "StrategyValidationEvidenceRequest",
         "type": "object"
       },
+      "TakeProfitConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "base_points": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "100",
+            "title": "Base Points"
+          },
+          "tier2_min_orders": {
+            "default": 2,
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Tier2 Min Orders",
+            "type": "integer"
+          },
+          "tier2_points": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "80",
+            "title": "Tier2 Points"
+          },
+          "tier3_min_orders": {
+            "default": 5,
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Tier3 Min Orders",
+            "type": "integer"
+          },
+          "tier3_points": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "50",
+            "title": "Tier3 Points"
+          },
+          "tier4_min_orders": {
+            "default": 7,
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Tier4 Min Orders",
+            "type": "integer"
+          },
+          "tier4_points": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "30",
+            "title": "Tier4 Points"
+          }
+        },
+        "title": "TakeProfitConfig",
+        "type": "object"
+      },
+      "TigerBackfillRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "adjustment": {
+            "default": "none",
+            "title": "Adjustment",
+            "type": "string"
+          },
+          "begin_at": {
+            "format": "date-time",
+            "title": "Begin At",
+            "type": "string"
+          },
+          "end_at": {
+            "format": "date-time",
+            "title": "End At",
+            "type": "string"
+          },
+          "expected_bars": {
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Expected Bars",
+            "type": "integer"
+          },
+          "maximum_age_seconds": {
+            "maximum": 31536000.0,
+            "minimum": 0.0,
+            "title": "Maximum Age Seconds",
+            "type": "integer"
+          },
+          "timeframe": {
+            "title": "Timeframe",
+            "type": "string"
+          },
+          "total": {
+            "default": 10000,
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "trade_session": {
+            "default": "regular",
+            "title": "Trade Session",
+            "type": "string"
+          },
+          "underlying_symbol": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Underlying Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "underlying_symbol",
+          "timeframe",
+          "begin_at",
+          "end_at",
+          "expected_bars",
+          "maximum_age_seconds"
+        ],
+        "title": "TigerBackfillRequest",
+        "type": "object"
+      },
       "TokenPair": {
         "properties": {
           "access_token": {
@@ -5177,6 +6803,41 @@
           "expires_in"
         ],
         "title": "TokenPair",
+        "type": "object"
+      },
+      "TrailingConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "distance_points": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "100",
+            "title": "Distance Points"
+          },
+          "start_points": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "600",
+            "title": "Start Points"
+          }
+        },
+        "title": "TrailingConfig",
         "type": "object"
       },
       "UsMarketStatusOut": {
@@ -8293,7 +9954,7 @@
     },
     "/api/v2/ai-monitor/opportunities/{opportunity_id}/order-book": {
       "get": {
-        "description": "Expose Binance Futures depth across the API/market process boundary.",
+        "description": "Expose synchronized Binance and Tiger Level-2 research snapshots.",
         "operationId": "opportunity_order_book_api_v2_ai_monitor_opportunities__opportunity_id__order_book_get",
         "parameters": [
           {
@@ -9471,6 +11132,419 @@
           }
         ],
         "summary": "Get Backtest"
+      }
+    },
+    "/api/v2/basket-strategies/martingale-tp4/backtests": {
+      "post": {
+        "operationId": "run_martingale_bar_backtest_api_v2_basket_strategies_martingale_tp4_backtests_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MartingaleBarReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Run Martingale Bar Backtest Api V2 Basket Strategies Martingale Tp4 Backtests Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Run Martingale Bar Backtest",
+        "tags": [
+          "basket-strategies"
+        ]
+      }
+    },
+    "/api/v2/basket-strategies/martingale-tp4/mq4/csv/import": {
+      "post": {
+        "operationId": "import_mq4_settings_csv_api_v2_basket_strategies_martingale_tp4_mq4_csv_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Mq4CsvImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Import Mq4 Settings Csv Api V2 Basket Strategies Martingale Tp4 Mq4 Csv Import Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Import Mq4 Settings Csv",
+        "tags": [
+          "basket-strategies"
+        ]
+      }
+    },
+    "/api/v2/basket-strategies/martingale-tp4/mq4/export": {
+      "post": {
+        "operationId": "export_mq4_parameters_api_v2_basket_strategies_martingale_tp4_mq4_export_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Mq4ExportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Export Mq4 Parameters Api V2 Basket Strategies Martingale Tp4 Mq4 Export Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Export Mq4 Parameters",
+        "tags": [
+          "basket-strategies"
+        ]
+      }
+    },
+    "/api/v2/basket-strategies/martingale-tp4/mq4/import": {
+      "post": {
+        "operationId": "import_mq4_parameters_api_v2_basket_strategies_martingale_tp4_mq4_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Mq4ImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Import Mq4 Parameters Api V2 Basket Strategies Martingale Tp4 Mq4 Import Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Import Mq4 Parameters",
+        "tags": [
+          "basket-strategies"
+        ]
+      }
+    },
+    "/api/v2/basket-strategies/martingale-tp4/shadow/cycles": {
+      "get": {
+        "operationId": "list_martingale_shadow_cycles_api_v2_basket_strategies_martingale_tp4_shadow_cycles_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "deployment_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Deployment Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "active_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Active Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Martingale Shadow Cycles Api V2 Basket Strategies Martingale Tp4 Shadow Cycles Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Martingale Shadow Cycles",
+        "tags": [
+          "basket-strategies"
+        ]
+      }
+    },
+    "/api/v2/basket-strategies/martingale-tp4/shadow/cycles/{cycle_id}": {
+      "get": {
+        "operationId": "get_martingale_shadow_cycle_api_v2_basket_strategies_martingale_tp4_shadow_cycles__cycle_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cycle_id",
+            "required": true,
+            "schema": {
+              "title": "Cycle Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Martingale Shadow Cycle Api V2 Basket Strategies Martingale Tp4 Shadow Cycles  Cycle Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Martingale Shadow Cycle",
+        "tags": [
+          "basket-strategies"
+        ]
+      }
+    },
+    "/api/v2/basket-strategies/martingale-tp4/tiger-bars/backfill": {
+      "post": {
+        "operationId": "backfill_tiger_bars_api_v2_basket_strategies_martingale_tp4_tiger_bars_backfill_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TigerBackfillRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Backfill Tiger Bars Api V2 Basket Strategies Martingale Tp4 Tiger Bars Backfill Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Backfill Tiger Bars",
+        "tags": [
+          "basket-strategies"
+        ]
+      }
+    },
+    "/api/v2/basket-strategies/martingale-tp4/validate": {
+      "post": {
+        "operationId": "validate_martingale_tp4_api_v2_basket_strategies_martingale_tp4_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MartingaleRiskPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate Martingale Tp4 Api V2 Basket Strategies Martingale Tp4 Validate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Validate Martingale Tp4",
+        "tags": [
+          "basket-strategies"
+        ]
       }
     },
     "/api/v2/dashboard/binance-performance": {
@@ -11756,6 +13830,64 @@
           }
         ],
         "summary": "Monitor Strategy Indicators"
+      }
+    },
+    "/api/v2/monitor/tiger-news": {
+      "get": {
+        "operationId": "monitor_tiger_news_api_v2_monitor_tiger_news_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Monitor Tiger News Api V2 Monitor Tiger News Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Monitor Tiger News"
       }
     },
     "/api/v2/monitor/watchlist": {

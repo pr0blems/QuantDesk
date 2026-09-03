@@ -438,11 +438,20 @@ def run_bar_replay(
     manual_entry_time: int | None = None,
     evaluation_begin_time: int | None = None,
     evaluation_end_time: int | None = None,
+    leverage: int = 1,
+    maintenance_margin_rate: Decimal = Decimal("0.005"),
+    liquidation_fee_rate: Decimal = Decimal("0"),
 ) -> ReplayResult:
     if initial_capital <= 0:
         raise ValueError("initial_capital must be positive")
     if point_size <= 0:
         raise ValueError("point_size must be positive")
+    if leverage < 1 or leverage > 20:
+        raise ValueError("leverage must be between 1 and 20")
+    if not Decimal("0") <= maintenance_margin_rate < Decimal("0.5"):
+        raise ValueError("maintenance_margin_rate must be between 0 and 0.5")
+    if not Decimal("0") <= liquidation_fee_rate <= Decimal("0.1"):
+        raise ValueError("liquidation_fee_rate must be between 0 and 0.1")
     costs = costs or ReplayCosts()
     symbol = config.market_data.underlying_symbol
     parameters = config.parameters
@@ -489,6 +498,9 @@ def run_bar_replay(
         "manual_entry_time": manual_entry_time,
         "evaluation_begin_time": evaluation_begin_time,
         "evaluation_end_time": evaluation_end_time,
+        "leverage": leverage,
+        "maintenance_margin_rate": str(maintenance_margin_rate),
+        "liquidation_fee_rate": str(liquidation_fee_rate),
     }
     run_hash = hashlib.sha256(
         json.dumps(run_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -514,6 +526,9 @@ def run_bar_replay(
     maximum_drawdown = Decimal("0")
     fee_rate = costs.fee_bps / Decimal("10000")
     slippage_rate = costs.slippage_bps / Decimal("10000")
+    rejected_order_count = 0
+    liquidation_count = 0
+    liquidation_fees = Decimal("0")
 
     def mark_price(direction: Direction, bid: Decimal, ask: Decimal) -> Decimal:
         return bid if direction == Direction.BUY else ask
@@ -553,6 +568,7 @@ def run_bar_replay(
     ) -> None:
         nonlocal balance, cycle_fees, cycle_leg_count, next_leg_index
         nonlocal favorable_high, favorable_low, cycle_opened_at, cycle_mode
+        nonlocal rejected_order_count
         if decision.direction is None or decision.quantity is None:
             raise RuntimeError("entry decision is incomplete")
         base_price = ask if decision.direction == Direction.BUY else bid
@@ -561,6 +577,13 @@ def run_bar_replay(
             if decision.direction == Direction.BUY
             else Decimal("1") - slippage_rate
         )
+        current_notional = sum(
+            (item.entry_price * item.quantity for item in open_legs), Decimal("0")
+        )
+        projected_notional = current_notional + fill_price * decision.quantity
+        if projected_notional / Decimal(leverage) > max(balance, Decimal("0")):
+            rejected_order_count += 1
+            return
         fee = fill_price * decision.quantity * fee_rate
         balance -= fee
         cycle_fees += fee
@@ -605,6 +628,7 @@ def run_bar_replay(
     ) -> None:
         nonlocal balance, cycle_pnl, cycle_fees, cycle_opened_at, cycle_leg_count
         nonlocal active_box, next_leg_index, favorable_high, favorable_low
+        nonlocal liquidation_fees
         if decision.action == DecisionAction.CLOSE_ALL:
             selected = list(open_legs)
         elif decision.action == DecisionAction.CLOSE_DIRECTION:
@@ -622,10 +646,17 @@ def run_bar_replay(
             direction_sign = Decimal("1") if item.direction == Direction.BUY else Decimal("-1")
             gross = (fill_price - item.entry_price) * direction_sign * item.quantity
             exit_fee = fill_price * item.quantity * fee_rate
-            net = gross - item.entry_fee - exit_fee
-            balance += gross - exit_fee
+            liquidation_fee = (
+                fill_price * item.quantity * liquidation_fee_rate
+                if decision.reason_code == "liquidation"
+                else Decimal("0")
+            )
+            charged_fee = exit_fee + liquidation_fee
+            net = gross - item.entry_fee - charged_fee
+            balance += gross - charged_fee
             cycle_pnl += net
-            cycle_fees += exit_fee
+            cycle_fees += charged_fee
+            liquidation_fees += liquidation_fee
             fills.append(
                 ReplayFill(
                     sequence=len(fills) + 1,
@@ -635,9 +666,9 @@ def run_bar_replay(
                     direction=item.direction,
                     quantity=item.quantity,
                     price=fill_price,
-                    fee=exit_fee,
+                    fee=charged_fee,
                     gross_pnl=gross,
-                    net_pnl=gross - exit_fee,
+                    net_pnl=gross - charged_fee,
                     leg_indices=(item.leg_index,),
                 )
             )
@@ -677,6 +708,36 @@ def run_bar_replay(
             if open_legs:
                 favorable_high = bid if favorable_high is None else max(favorable_high, bid)
                 favorable_low = ask if favorable_low is None else min(favorable_low, ask)
+                unrealized_now = sum(
+                    (
+                        (mark_price(item.direction, bid, ask) - item.entry_price)
+                        * (Decimal("1") if item.direction == Direction.BUY else Decimal("-1"))
+                        * item.quantity
+                    )
+                    for item in open_legs
+                )
+                maintenance_margin = sum(
+                    (
+                        mark_price(item.direction, bid, ask)
+                        * item.quantity
+                        * maintenance_margin_rate
+                    )
+                    for item in open_legs
+                )
+                if balance + unrealized_now <= maintenance_margin:
+                    close_selected(
+                        StrategyDecision(
+                            action=DecisionAction.CLOSE_ALL,
+                            reason_code="liquidation",
+                            effective_mode=parameters.mode,
+                        ),
+                        bar_time=bar.open_time,
+                        bid=bid,
+                        ask=ask,
+                    )
+                    liquidation_count += 1
+                    previous_bid = bid
+                    break
             if not open_legs and cycle_opened_at is None and path_index == 0:
                 active_box = current_level
             manual_direction: Direction | None = None
@@ -796,11 +857,17 @@ def run_bar_replay(
         "total_fees": total_fees,
         "maximum_drawdown_pct": maximum_drawdown,
         "open_fill_count": sum(item.action in {"open", "add"} for item in fills),
+        "leverage": leverage,
+        "maintenance_margin_rate_pct": maintenance_margin_rate * Decimal("100"),
+        "liquidation_count": liquidation_count,
+        "liquidation_fees": liquidation_fees,
+        "rejected_order_count": rejected_order_count,
     }
     warnings = [
         "ohlc_intrabar_path_is_an_assumption",
         "tiger_reference_prices_are_not_binance_execution_prices",
         "contract_multiplier_and_funding_not_applied",
+        "isolated_margin_liquidation_uses_platform_tier1_mmr",
         "legacy_mq4_get_range_mode_high_defect_corrected",
     ]
     if engine_policy == EnginePolicy.RESEARCH_COMPATIBILITY:

@@ -54,6 +54,7 @@ def _bind_params(sql: str, params: tuple[Any, ...]):
 MAX_BARS = 50_000
 MAX_EQUITY_POINTS = 1_500
 MAX_RETURNED_TRADES = 5_000
+MAX_PRICE_CANDLES = 1_200
 MAINTENANCE_MARGIN_RATE = 0.005
 SUPPORTED_BACKTEST_TIMEFRAMES = SUPPORTED_STRATEGY_TIMEFRAMES
 SUPPORTED_MARKET_DATA_TIMEFRAMES = frozenset(
@@ -238,6 +239,7 @@ _REQUIRED_CONFIG = {
     "max_holding_bars",
     "params",
 }
+_OPTIONAL_CONFIG = {"contract_rules", "margin_mode"}
 
 
 _Candle = StrategyCandle
@@ -355,6 +357,7 @@ class BacktestRepository:
                 "max_bars": MAX_BARS,
                 "max_equity_points": MAX_EQUITY_POINTS,
                 "max_returned_trades": MAX_RETURNED_TRADES,
+                "max_price_candles": MAX_PRICE_CANDLES,
                 "timestamp_unit": "seconds",
             },
         }
@@ -941,7 +944,7 @@ class BacktestRepository:
         if not isinstance(config, dict):
             raise BacktestUnavailable("backtest config must be an object")
         missing = sorted(_REQUIRED_CONFIG - config.keys())
-        unknown = sorted(config.keys() - _REQUIRED_CONFIG)
+        unknown = sorted(config.keys() - _REQUIRED_CONFIG - _OPTIONAL_CONFIG)
         if missing:
             raise BacktestUnavailable(f"missing backtest config fields: {', '.join(missing)}")
         if unknown:
@@ -975,6 +978,14 @@ class BacktestRepository:
             config["position_size_pct"], "position_size_pct", minimum=0.01, maximum=100
         )
         leverage = _strict_integer(config["leverage"], "leverage", minimum=1, maximum=20)
+        margin_mode = str(config.get("margin_mode") or "isolated").strip().lower()
+        if margin_mode != "isolated":
+            raise BacktestUnavailable("backtest currently supports isolated margin only")
+        contract_rules = _validate_contract_rules(config.get("contract_rules"), symbol)
+        if leverage > int(contract_rules["max_leverage"]):
+            raise BacktestUnavailable(
+                f"leverage exceeds the Binance contract limit of {contract_rules['max_leverage']}"
+            )
         fee_bps = _strict_number(config["fee_bps"], "fee_bps", minimum=0, maximum=1_000)
         slippage_bps = _strict_number(
             config["slippage_bps"], "slippage_bps", minimum=0, maximum=1_000
@@ -998,6 +1009,8 @@ class BacktestRepository:
             "initial_capital": initial_capital,
             "position_size_pct": position_size_pct,
             "leverage": leverage,
+            "margin_mode": margin_mode,
+            "contract_rules": contract_rules,
             "fee_bps": fee_bps,
             "slippage_bps": slippage_bps,
             "stop_loss_pct": stop_loss_pct,
@@ -1005,6 +1018,68 @@ class BacktestRepository:
             "max_holding_bars": max_holding_bars,
             "params": params,
         }
+
+
+def _validate_contract_rules(value: Any, symbol: str) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+
+    def optional_positive(name: str) -> float | None:
+        candidate = raw.get(name)
+        if candidate is None:
+            return None
+        return _strict_number(candidate, f"contract_rules.{name}", minimum=0.000000000001, maximum=1_000_000_000_000)
+
+    source = str(raw.get("source") or "platform_fallback").strip()[:64]
+    rule_symbol = str(raw.get("symbol") or symbol).strip().upper()
+    if rule_symbol != symbol:
+        raise BacktestUnavailable("Binance contract rules do not match the backtest symbol")
+    max_leverage = _strict_integer(
+        raw.get("max_leverage", 20),
+        "contract_rules.max_leverage",
+        minimum=1,
+        maximum=20,
+    )
+    maintenance_margin_rate = _strict_number(
+        raw.get("maintenance_margin_rate", MAINTENANCE_MARGIN_RATE),
+        "contract_rules.maintenance_margin_rate",
+        minimum=0,
+        maximum=0.5,
+    )
+    maintenance_amount = _strict_number(
+        raw.get("maintenance_amount", 0),
+        "contract_rules.maintenance_amount",
+        minimum=0,
+        maximum=1_000_000_000_000,
+    )
+    liquidation_fee_rate = _strict_number(
+        raw.get("liquidation_fee_rate", 0),
+        "contract_rules.liquidation_fee_rate",
+        minimum=0,
+        maximum=0.1,
+    )
+    market_take_bound = _strict_number(
+        raw.get("market_take_bound", 0),
+        "contract_rules.market_take_bound",
+        minimum=0,
+        maximum=1,
+    )
+    return {
+        "source": source,
+        "symbol": symbol,
+        "tick_size": optional_positive("tick_size"),
+        "market_step_size": optional_positive("market_step_size"),
+        "min_quantity": optional_positive("min_quantity"),
+        "max_quantity": optional_positive("max_quantity"),
+        "min_notional": optional_positive("min_notional"),
+        "liquidation_fee_rate": liquidation_fee_rate,
+        "market_take_bound": market_take_bound,
+        "max_leverage": max_leverage,
+        "maintenance_margin_rate": maintenance_margin_rate,
+        "maintenance_amount": maintenance_amount,
+        "maintenance_margin_source": str(
+            raw.get("maintenance_margin_source") or "platform_tier1_isolated"
+        )[:64],
+    }
 
 
 def _timestamp_scale(value: Any) -> int:
@@ -1211,6 +1286,7 @@ def _finalize_result(
     full_curve = result.pop("_full_equity_curve")
     all_trades = result["trades"]
     equity_curve = _even_sample(full_curve, MAX_EQUITY_POINTS)
+    price_candles = _compress_price_candles(candles, MAX_PRICE_CANDLES)
     returned_trades = all_trades[-MAX_RETURNED_TRADES:]
     assumptions = [
         "信号在当前 K 线收盘确认，并于下一根 K 线开盘成交",
@@ -1218,14 +1294,15 @@ def _finalize_result(
         "每次仅交易一个标的并持有一个方向的单一仓位",
         "手续费和滑点均在开仓、平仓两端计入",
         (
-            "强平采用固定 0.5% 维持保证金率的简化逐仓模型；逐 K 线检查，"
-            "跳空越过强平价时按更差的开盘价成交"
+            "逐仓强平使用本次运行保存的合约规则快照与平台一级维持保证金率；"
+            "逐 K 线检查，跳空越过强平价时按更差的开盘价成交"
         ),
         (
             "止损与强平同时触发时，按从开盘价向不利方向最先遇到的价位执行；"
-            "该模型不包含阶梯维持保证金、保险基金或自动减仓"
+            "账户专属阶梯保证金属于签名接口，本模型不包含保险基金或自动减仓"
         ),
-        "收益计算未覆盖资金费率与借贷成本，长时间持仓的结果可能偏乐观",
+        "已应用 Binance 合约价格步进、市场单数量步进、最小数量与最小名义价值过滤",
+        "收益计算未覆盖资金费率，长时间持仓的结果可能偏乐观",
     ]
     if extra_assumptions:
         assumptions.extend(extra_assumptions)
@@ -1240,6 +1317,10 @@ def _finalize_result(
             "equity_points_total": len(full_curve),
             "equity_points_returned": len(equity_curve),
             "equity_curve_truncated": len(equity_curve) < len(full_curve),
+            "price_candles_total": len(candles),
+            "price_candles_returned": len(price_candles),
+            "price_candles_truncated": len(price_candles) < len(candles),
+            "price_candles": price_candles,
             "trades_total": len(all_trades),
             "trades_returned": len(returned_trades),
             "trades_truncated": len(returned_trades) < len(all_trades),
@@ -1248,6 +1329,7 @@ def _finalize_result(
         }
     )
     result["equity_curve"] = equity_curve
+    result["price_candles"] = price_candles
     result["trades"] = returned_trades
     if len(returned_trades) < len(all_trades):
         result["_all_trades"] = all_trades
@@ -1286,12 +1368,29 @@ def _run_engine(
     balance = initial_capital
     fee_rate = config["fee_bps"] / 10_000
     slippage_rate = config["slippage_bps"] / 10_000
+    # ``_run_engine`` is also the cross-mode semantic oracle's low-level
+    # entry point.  Keep it compatible with callers that predate persisted
+    # exchange-rule snapshots while API/repository runs continue to inject
+    # the captured Binance filters through ``_validate_config``.
+    contract_rules = _validate_contract_rules(
+        config.get("contract_rules"), str(config["symbol"]).strip().upper()
+    )
+    tick_size = contract_rules.get("tick_size")
+    quantity_step = contract_rules.get("market_step_size")
+    min_quantity = contract_rules.get("min_quantity")
+    max_quantity = contract_rules.get("max_quantity")
+    min_notional = contract_rules.get("min_notional")
+    maintenance_margin_rate = contract_rules["maintenance_margin_rate"]
+    maintenance_amount = contract_rules["maintenance_amount"]
+    liquidation_fee_rate = contract_rules["liquidation_fee_rate"]
     position: dict[str, Any] | None = None
     pending_signal = 0
     pending_risk: dict[str, Any] | None = None
     pending_valid_until: int | None = None
     trades: list[dict[str, Any]] = []
     total_fees = 0.0
+    liquidation_fees = 0.0
+    rejected_order_count = 0
     exposed_bars = 0
     equity_values = [initial_capital]
     running_peak = initial_capital
@@ -1303,17 +1402,23 @@ def _run_engine(
         base_price: float,
         reason: str,
     ) -> None:
-        nonlocal balance, position, total_fees
+        nonlocal balance, position, total_fees, liquidation_fees
         if position is None:
             return
         direction = position["direction"]
-        exit_price = base_price * (1 - direction * slippage_rate)
+        exit_price = _round_to_tick(
+            base_price * (1 - direction * slippage_rate),
+            tick_size,
+            round_up=direction < 0,
+        )
         exit_notional = position["quantity"] * exit_price
         exit_fee = exit_notional * fee_rate
+        liquidation_fee = exit_notional * liquidation_fee_rate if reason == "liquidation" else 0.0
         gross_pnl = (exit_price - position["entry_price"]) * direction * position["quantity"]
-        balance += gross_pnl - exit_fee
-        total_fees += exit_fee
-        fees = position["entry_fee"] + exit_fee
+        balance += gross_pnl - exit_fee - liquidation_fee
+        total_fees += exit_fee + liquidation_fee
+        liquidation_fees += liquidation_fee
+        fees = position["entry_fee"] + exit_fee + liquidation_fee
         net_pnl = gross_pnl - fees
         margin = position["notional"] / config["leverage"]
         exit_decision = DEFAULT_EXIT_POLICY.decision_for_reason(
@@ -1337,6 +1442,7 @@ def _run_engine(
                 "gross_pnl": _result_number(gross_pnl, 8),
                 "net_pnl": _result_number(net_pnl, 8),
                 "fees": _result_number(fees, 8),
+                "liquidation_fee": _result_number(liquidation_fee, 8),
                 "return_pct": _result_number(net_pnl / margin * 100, 8) if margin else None,
                 "holding_bars": max(1, int(position["holding_bars"])),
                 "exit_reason": reason,
@@ -1356,10 +1462,14 @@ def _run_engine(
         direction: int,
         risk_proposal: dict[str, Any] | None,
     ) -> None:
-        nonlocal balance, position, total_fees
+        nonlocal balance, position, total_fees, rejected_order_count
         if balance <= 0:
             return
-        entry_price = candle.open * (1 + direction * slippage_rate)
+        entry_price = _round_to_tick(
+            candle.open * (1 + direction * slippage_rate),
+            tick_size,
+            round_up=direction > 0,
+        )
         margin = balance * config["position_size_pct"] / 100
         notional = margin * config["leverage"]
         if notional <= 0 or entry_price <= 0:
@@ -1377,12 +1487,30 @@ def _run_engine(
             )
         if isinstance(risk_proposal, dict) and level_plan is None:
             return
-        quantity = notional / entry_price
+        quantity = _round_down_step(notional / entry_price, quantity_step)
+        actual_notional = quantity * entry_price
+        if (
+            quantity <= 0
+            or (min_quantity is not None and quantity < min_quantity)
+            or (max_quantity is not None and quantity > max_quantity)
+            or (min_notional is not None and actual_notional < min_notional)
+        ):
+            rejected_order_count += 1
+            return
+        notional = actual_notional
         entry_fee = notional * fee_rate
         balance -= entry_fee
         total_fees += entry_fee
-        stop_price = level_plan.stop if level_plan is not None else None
-        take_price = level_plan.target if level_plan is not None else None
+        stop_price = (
+            _round_to_tick(level_plan.stop, tick_size, round_up=direction < 0)
+            if level_plan is not None
+            else None
+        )
+        take_price = (
+            _round_to_tick(level_plan.target, tick_size, round_up=direction < 0)
+            if level_plan is not None
+            else None
+        )
         position = {
             "direction": direction,
             "entry_ts": candle.ts,
@@ -1393,6 +1521,9 @@ def _run_engine(
                 entry_price,
                 direction,
                 config["leverage"],
+                maintenance_margin_rate,
+                maintenance_amount,
+                quantity,
             ),
             "entry_fee": entry_fee,
             "holding_bars": 0,
@@ -1528,8 +1659,12 @@ def _run_engine(
         "sharpe_ratio": _sharpe_ratio(equity_values, config["timeframe"]),
         "trade_count": len(trades),
         "liquidation_count": liquidation_count,
-        "maintenance_margin_rate_pct": MAINTENANCE_MARGIN_RATE * 100,
-        "liquidation_model": "isolated_fixed_mmr_ohlc",
+        "maintenance_margin_rate_pct": maintenance_margin_rate * 100,
+        "liquidation_model": "binance_isolated_contract_snapshot_ohlc",
+        "margin_mode": str(config.get("margin_mode") or "isolated"),
+        "contract_rules": contract_rules,
+        "rejected_order_count": rejected_order_count,
+        "liquidation_fees": _result_number(liquidation_fees, 8),
         "exposure_pct": _result_number(exposed_bars / len(candles) * 100, 8),
         "gross_profit": _result_number(gross_profit, 8),
         "gross_loss": _result_number(gross_loss, 8),
@@ -1560,12 +1695,24 @@ def _build_signals(
     return DEFAULT_STRATEGY_EVALUATOR.evaluate(strategy_id, candles, params)
 
 
-def _liquidation_price(entry_price: float, direction: int, leverage: int) -> float:
-    """Return the fixed-MMR isolated liquidation threshold for one position."""
+def _liquidation_price(
+    entry_price: float,
+    direction: int,
+    leverage: int,
+    maintenance_margin_rate: float = MAINTENANCE_MARGIN_RATE,
+    maintenance_amount: float = 0.0,
+    quantity: float = 1.0,
+) -> float:
+    """Return the isolated liquidation threshold for one contract-rule snapshot."""
+    maintenance_offset = maintenance_amount / quantity if quantity > 0 else 0.0
     if direction == 1:
-        price = entry_price * (1 - 1 / leverage) / (1 - MAINTENANCE_MARGIN_RATE)
+        price = (
+            entry_price * (1 - 1 / leverage) - maintenance_offset
+        ) / (1 - maintenance_margin_rate)
         return max(0.0, price)
-    return entry_price * (1 + 1 / leverage) / (1 + MAINTENANCE_MARGIN_RATE)
+    return (
+        entry_price * (1 + 1 / leverage) + maintenance_offset
+    ) / (1 + maintenance_margin_rate)
 
 
 def _annualized_return(initial: float, final: float, duration_seconds: int) -> float | None:
@@ -1612,6 +1759,45 @@ def _even_sample(points: list[dict[str, Any]], maximum: int) -> list[dict[str, A
         return points[-maximum:]
     indexes = [round(index * (len(points) - 1) / (maximum - 1)) for index in range(maximum)]
     return [points[index] for index in indexes]
+
+
+def _compress_price_candles(
+    candles: list[_Candle], maximum: int
+) -> list[dict[str, float | int]]:
+    """Compress OHLCV without inventing prices so charts remain bounded."""
+
+    if not candles:
+        return []
+    bucket_size = max(1, math.ceil(len(candles) / maximum))
+    output: list[dict[str, float | int]] = []
+    for start in range(0, len(candles), bucket_size):
+        bucket = candles[start : start + bucket_size]
+        output.append(
+            {
+                "ts": bucket[0].ts,
+                "open": _finite_or_zero(bucket[0].open),
+                "high": _finite_or_zero(max(item.high for item in bucket)),
+                "low": _finite_or_zero(min(item.low for item in bucket)),
+                "close": _finite_or_zero(bucket[-1].close),
+                "volume": _finite_or_zero(sum(item.volume for item in bucket)),
+            }
+        )
+    return output
+
+
+def _round_down_step(value: float, step: float | None) -> float:
+    if step is None or step <= 0:
+        return value
+    units = math.floor((value + step * 1e-12) / step)
+    return max(0.0, units * step)
+
+
+def _round_to_tick(value: float, tick: float | None, *, round_up: bool) -> float:
+    if tick is None or tick <= 0:
+        return value
+    scaled = value / tick
+    units = math.ceil(scaled - 1e-12) if round_up else math.floor(scaled + 1e-12)
+    return max(tick, units * tick)
 
 
 def _finite_or_zero(value: float) -> float:
