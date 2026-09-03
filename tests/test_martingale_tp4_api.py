@@ -12,6 +12,40 @@ from quantdesk_v2.strategy_catalog import ENGINE_PARAMETER_SCHEMAS
 from quantdesk_v2.tiger_market_data import VerifiedMarketLink
 
 
+def _warmup_bar(open_time: int, close_time: int) -> SimpleNamespace:
+    return SimpleNamespace(open_time=open_time, close_time=close_time)
+
+
+def test_binance_replay_moves_evaluation_start_past_incomplete_warmup() -> None:
+    signal = tuple(_warmup_bar(index * 10, index * 10 + 9) for index in range(8))
+    daily = tuple(_warmup_bar(index * 100, index * 100 + 99) for index in range(5))
+
+    adjusted = martingale_api._warmup_adjusted_evaluation_begin(
+        signal,
+        daily,
+        requested_begin_time=5,
+        required_signal_warmup_bars=3,
+        required_daily_warmup_bars=2,
+    )
+
+    assert adjusted == 199
+
+
+def test_binance_replay_preserves_start_when_warmup_is_already_complete() -> None:
+    signal = tuple(_warmup_bar(index * 10, index * 10 + 9) for index in range(8))
+    daily = tuple(_warmup_bar(index * 100, index * 100 + 99) for index in range(5))
+
+    adjusted = martingale_api._warmup_adjusted_evaluation_begin(
+        signal,
+        daily,
+        requested_begin_time=350,
+        required_signal_warmup_bars=3,
+        required_daily_warmup_bars=2,
+    )
+
+    assert adjusted == 350
+
+
 def test_martingale_control_plane_exposes_research_routes_without_trade_route() -> None:
     paths = {route.path for route in router.routes}
 
@@ -26,7 +60,7 @@ def test_martingale_control_plane_exposes_research_routes_without_trade_route() 
     assert not any(path.endswith(("/execute", "/order", "/arm")) for path in paths)
 
 
-def test_catalog_backtest_uses_mapped_binance_bars_when_tiger_is_unconfigured(
+def test_catalog_backtest_uses_binance_bars_by_default(
     monkeypatch,
 ) -> None:
     link = VerifiedMarketLink(
@@ -97,9 +131,7 @@ def test_catalog_backtest_uses_mapped_binance_bars_when_tiger_is_unconfigured(
 
     assert result["market_data_source"] == "binance_fapi"
     assert calls == [("AAOIUSDT", "15m", 20_000), ("AAOIUSDT", "1d", 1_000)]
-    assert captured["source_quality"]["fallback_reason"] == (
-        "tiger_openapi_not_configured_and_cached_history_unavailable"
-    )
+    assert captured["source_quality"]["fallback_reason"] == "binance_selected_by_user"
     assert captured["signal_bars_override"][0].source_version == "binance_fapi_mapped_v1"
 
 

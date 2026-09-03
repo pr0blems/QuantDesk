@@ -549,6 +549,49 @@ def _required_quality(
     return row
 
 
+def _warmup_adjusted_evaluation_begin(
+    signal_bars: Sequence[TigerBar],
+    daily_bars: Sequence[TigerBar],
+    *,
+    requested_begin_time: int,
+    required_signal_warmup_bars: int,
+    required_daily_warmup_bars: int,
+) -> int:
+    """Return the earliest evaluation boundary with complete warmup data.
+
+    The requested date is an evaluation preference, not permission to run an
+    indicator on an incomplete window.  Binance-mapped contracts can begin
+    after the requested lookback when the contract is newly listed, so shift
+    the scoring boundary to the first point where both intraday and daily
+    indicator windows are ready.  Coverage validation still fails closed when
+    the entire dataset is too short.
+    """
+
+    adjusted = requested_begin_time
+    ordered_signal = tuple(sorted(signal_bars, key=lambda item: item.open_time))
+    ordered_daily = tuple(sorted(daily_bars, key=lambda item: item.open_time))
+
+    signal_ready = sum(
+        item.close_time <= requested_begin_time for item in ordered_signal
+    )
+    if signal_ready < required_signal_warmup_bars and len(ordered_signal) >= required_signal_warmup_bars:
+        adjusted = max(
+            adjusted,
+            ordered_signal[required_signal_warmup_bars - 1].close_time,
+        )
+
+    daily_ready = sum(
+        item.close_time <= requested_begin_time for item in ordered_daily
+    )
+    if daily_ready < required_daily_warmup_bars and len(ordered_daily) >= required_daily_warmup_bars:
+        adjusted = max(
+            adjusted,
+            ordered_daily[required_daily_warmup_bars - 1].close_time,
+        )
+
+    return adjusted
+
+
 def _execute_martingale_bar_backtest(
     payload: MartingaleBarReplayRequest,
     request: Request,
@@ -589,7 +632,8 @@ def _execute_martingale_bar_backtest(
     else:
         signal_quality = None
         daily_quality = None
-    begin_ms = int(payload.begin_at.timestamp() * 1000)
+    requested_begin_ms = int(payload.begin_at.timestamp() * 1000)
+    begin_ms = requested_begin_ms
     end_ms = int(payload.end_at.timestamp() * 1000)
     timeframe_ms = _timeframe_milliseconds(timeframe)
     signal_lookback = max(
@@ -628,6 +672,22 @@ def _execute_martingale_bar_backtest(
         daily_bars = tuple(daily_bars_override or ())
     if len(signal_bars) > 20_000:
         raise HTTPException(status_code=422, detail="replay exceeds the 20000 bar limit")
+    if source_name == "binance_fapi":
+        # Newly listed mapped contracts may not have enough bars before the
+        # user's requested start date.  Preserve a valid indicator warmup by
+        # moving only the evaluation boundary forward; warmup bars themselves
+        # remain excluded from returns and trades.
+        begin_ms = _warmup_adjusted_evaluation_begin(
+            signal_bars,
+            daily_bars,
+            requested_begin_time=requested_begin_ms,
+            required_signal_warmup_bars=payload.warmup_bars,
+            required_daily_warmup_bars=(
+                config.parameters.box.daily_atr_period
+                if config.parameters.box.auto_range
+                else 0
+            ),
+        )
     try:
         coverage = assess_replay_coverage(
             signal_bars,
@@ -690,7 +750,9 @@ def _execute_martingale_bar_backtest(
         "source_fallback_reason": (source_quality or {}).get("fallback_reason"),
         "mapping_security_id": link.security_id,
         "warmup_begin_time": warmup_begin_ms,
+        "requested_evaluation_begin_time": requested_begin_ms,
         "evaluation_begin_time": begin_ms,
+        "evaluation_begin_adjusted_for_warmup": begin_ms != requested_begin_ms,
         "evaluation_end_time": end_ms,
     }
     manifest = db.scalar(
@@ -814,7 +876,7 @@ def run_catalog_martingale_backtest(
     maintenance_margin_rate: Decimal = Decimal("0.005"),
     liquidation_fee_rate: Decimal = Decimal("0"),
     backtest_repository: BacktestRepository | None = None,
-    market_data_source: str = "auto",
+    market_data_source: str = "binance",
 ) -> dict[str, Any]:
     """Run the basket engine through the standard Data Backtest workflow.
 

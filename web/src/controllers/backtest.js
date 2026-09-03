@@ -87,9 +87,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   <select id="market-data-source" name="market_data_source">
                     <option value="auto">自动选择（Tiger 优先，失败转 Binance）</option>
                     <option value="tiger">Tiger 历史优先（不足转 Binance）</option>
-                    <option value="binance">仅使用 Binance 合约行情</option>
+                    <option value="binance" selected>仅使用 Binance 合约行情</option>
                   </select>
-                  <small id="market-source-help" class="field-help">自动模式会优先读取 Tiger，缺失或不可用时直接使用 Binance。</small>
+                  <small id="market-source-help" class="field-help">默认使用 Binance 合约历史 K 线；Tiger 仅在手动选择时启用。</small>
                 </label>
               </div>
               <div id="data-availability" class="data-availability" role="status" aria-live="polite">
@@ -547,7 +547,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const sourceHelp = this.q("#market-source-help");
     sourceSelect.disabled = !basket;
     if (basket) {
-      if (changed || !["auto", "tiger", "binance"].includes(sourceSelect.value)) sourceSelect.value = "auto";
+      if (changed || !["auto", "tiger", "binance"].includes(sourceSelect.value)) sourceSelect.value = "binance";
       this.updateMarketSourceHelp();
     } else {
       sourceSelect.value = "binance";
@@ -568,8 +568,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   updateMarketSourceHelp() {
     const sourceSelect = this.q("#market-data-source");
     const sourceHelp = this.q("#market-source-help");
-    if (sourceSelect.disabled || sourceSelect.value === "binance") {
+    if (sourceSelect.disabled) {
       sourceHelp.textContent = "当前策略固定使用 Binance 合约历史 K 线。";
+    } else if (sourceSelect.value === "binance") {
+      sourceHelp.textContent = "默认使用 Binance 合约历史 K 线；回测会自动向前补取指标预热数据。";
     } else if (sourceSelect.value === "tiger") {
       sourceHelp.textContent = "优先使用已入库或官方 Open API 回补的 Tiger 历史 K 线；不足时使用已验证的 Binance 映射合约。";
     } else {

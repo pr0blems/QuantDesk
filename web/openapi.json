@@ -1470,7 +1470,7 @@
             "type": "string"
           },
           "market_data_source": {
-            "default": "auto",
+            "default": "binance",
             "enum": [
               "auto",
               "tiger",

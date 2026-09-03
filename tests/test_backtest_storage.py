@@ -37,7 +37,7 @@ def test_backtest_request_normalizes_symbol_and_is_json_serializable() -> None:
     request = BacktestRunRequest.model_validate(valid_request())
 
     assert request.symbol == "BTCUSDT"
-    assert request.market_data_source == "auto"
+    assert request.market_data_source == "binance"
     dumped = request.model_dump(mode="json")
     assert dumped["initial_capital"] == "10000.00"
     assert dumped["start_date"] == "2025-01-01"

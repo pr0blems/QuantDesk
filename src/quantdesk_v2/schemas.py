@@ -1541,7 +1541,7 @@ class BacktestRunRequest(BaseModel):
     )
     symbol: str = Field(min_length=2, max_length=32, pattern=r"^[A-Z0-9][A-Z0-9._:/-]*$")
     timeframe: BacktestTimeframe
-    market_data_source: Literal["auto", "tiger", "binance"] = "auto"
+    market_data_source: Literal["auto", "tiger", "binance"] = "binance"
     start_date: date
     end_date: date
     initial_capital: Decimal = Field(ge=1, le=Decimal("1000000000000"), max_digits=30)
