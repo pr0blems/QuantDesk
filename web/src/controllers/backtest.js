@@ -53,7 +53,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-4">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-5">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -217,10 +217,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                 <div id="calculator-facts" class="calculator-facts"></div>
                 <div class="calculator-explanation">
                   <div class="calculator-explanation-head">
-                    <span>收益与行情摘要</span>
+                    <span id="calculator-summary-title">止盈计算表</span>
                     <strong id="calculator-market-change" class="neutral">Binance 24h 涨跌幅 --</strong>
                   </div>
-                  <div id="calculator-summary" class="calculator-summary"></div>
+                  <div class="calculator-summary-table-wrap">
+                    <table class="calculator-summary-table" aria-label="多空止盈价格与收益计算">
+                      <thead><tr><th scope="col">方向</th><th scope="col">止盈价格</th><th scope="col">目标涨跌幅</th><th scope="col">预计毛利润</th><th scope="col">杠杆毛 ROE</th></tr></thead>
+                      <tbody id="calculator-summary"></tbody>
+                    </table>
+                  </div>
                   <p id="calculator-note">--</p>
                 </div>
                 <div class="calculator-points">
@@ -723,10 +728,21 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return fact;
   }
 
-  calculatorSummaryItem(label, value) {
-    const item = this.node("div", "calculator-summary-item");
-    item.append(this.node("span", "", label), this.node("strong", "", value));
-    return item;
+  calculatorTargetRow(direction, targetPrice, movementLabel, movementPercent, grossProfit, grossRoePct) {
+    const row = this.node("tr", direction === "做多" ? "long" : "short");
+    [
+      ["方向", direction],
+      ["止盈价格", targetPrice],
+      ["目标涨跌幅", `${movementLabel} ${this.calculatorPercent(Math.abs(movementPercent))}`],
+      ["预计毛利润", this.calculatorMoney(grossProfit, true)],
+      ["杠杆毛 ROE", this.calculatorPercent(grossRoePct)],
+    ].forEach(([label, value]) => {
+      const cell = this.node("td");
+      cell.dataset.label = label;
+      cell.append(this.node("strong", "", value));
+      row.append(cell);
+    });
+    return row;
   }
 
   calculatorMoney(value, signed = false) {
@@ -808,12 +824,24 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       ? `Binance 24h 涨跌幅 ${this.calculatorPercent(marketChangePercent, true)}`
       : "Binance 24h 涨跌幅暂缺";
     marketChange.className = hasMarketChange ? this.toneClass(marketChangePercent) : "neutral";
+    this.q("#calculator-summary-title").textContent = `基础止盈 ${this.number(values.basePoints, 2)} 点 · 止盈计算表`;
     this.q("#calculator-summary").replaceChildren(
-      this.calculatorSummaryItem("基础止盈", `${this.number(values.basePoints, 2)} 点`),
-      this.calculatorSummaryItem("做多止盈价", `${this.price(values.longTakeProfitPrice)} USDT`),
-      this.calculatorSummaryItem("做空止盈价", shortTakeProfitLabel),
-      this.calculatorSummaryItem(`${values.leverage}x 预计毛 ROE`, this.calculatorPercent(values.grossRoePct)),
-      this.calculatorSummaryItem("预计毛利润", this.calculatorMoney(values.grossProfit, true)),
+      this.calculatorTargetRow(
+        "做多",
+        `${this.price(values.longTakeProfitPrice)} USDT`,
+        "涨幅",
+        values.priceMovePct,
+        values.grossProfit,
+        values.grossRoePct,
+      ),
+      this.calculatorTargetRow(
+        "做空",
+        shortTakeProfitLabel,
+        "跌幅",
+        values.priceMovePct,
+        values.grossProfit,
+        values.grossRoePct,
+      ),
     );
     this.q("#calculator-note").textContent = `扣除双边手续费与滑点后：预计净利润 ${this.calculatorMoney(values.estimatedNetProfit, true)} · 净 ROE ${this.calculatorPercent(values.estimatedNetRoePct)} · ${this.quantity(values.lot)} 手占用保证金 ${this.calculatorMoney(values.positionMargin)}。`;
     if (resetPointFields || !this.q("#calculator-point-preview").children.length) {

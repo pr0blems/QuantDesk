@@ -40,7 +40,8 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="calculator-lot"',
         'id="calculator-leverage"',
         'id="calculator-market-change" class="neutral"',
-        'id="calculator-summary" class="calculator-summary"',
+        'class="calculator-summary-table" aria-label="多空止盈价格与收益计算"',
+        '<tbody id="calculator-summary"></tbody>',
         'data-calculator-param-key="TP"',
         '/position-calculator?symbol=',
         'this.applyCalculatedPoints("position")',
@@ -53,6 +54,12 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'Binance 24h 涨跌幅',
         'quote.price_change_percent_24h',
         'rawMarketChangePercent != null',
+        'this.calculatorTargetRow(',
+        '"做多"',
+        '"涨幅"',
+        '"做空"',
+        '"跌幅"',
+        'values.priceMovePct',
         'this.calculatorMoney(values.grossProfit, true)',
     ):
         assert contract in script
@@ -68,8 +75,8 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert "const grossRoePct = grossProfit / positionMargin * 100;" in script
     assert "const estimatedNetRoePct = estimatedNetProfit / positionMargin * 100;" in script
     assert "renderLotCalculator(resetPointFields = false)" in script
-    assert "做多止盈价" in script
-    assert "做空止盈价" in script
+    assert '`${this.price(values.longTakeProfitPrice)} USDT`' in script
+    assert "shortTakeProfitLabel" in script
     assert 'const lot = Number(this.q("#calculator-lot").value);' in script
     assert 'const leverage = Number(this.q("#calculator-leverage").value);' in script
     assert 'if (scope === "all") this.applyCalculatorPositionSettings();' in script
