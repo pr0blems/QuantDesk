@@ -50,7 +50,15 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert '["净盈亏", this.signedMoney(pnl), tone]' in script
     assert 'trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct' in script
     assert 'trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct' in script
-    assert '"开仓保证金", "杠杆", "剩余可用金额"' in script
+    assert 'this.node("strong", "", `交易周期 #${this.integer(sequence)}`)' in script
+    assert 'exitTime ? "已平仓" : "持仓中"' in script
+    assert '"买卖执行明细"' in script
+    assert 'orderSide === "buy" ? "买入时间" : "卖出时间"' in script
+    assert 'return positionSide === "short" ? "卖出开空" : "买入开多";' in script
+    assert 'return orderSide === "buy" ? "买入平空" : "卖出平多";' in script
+    assert '["开仓保证金", this.money(initialMargin), ""]' in script
+    assert '["杠杆倍率", `${this.integer(trade.leverage ?? 1)}x`, ""]' in script
+    assert '["最低剩余可用", this.money(availableBalance)' in script
     assert 'String(trade.position_structure ?? "").toLowerCase() === "mixed_basket"' in script
     assert 'isBasket ? "双向篮子"' in script
     assert 'id="leverage" name="leverage" required' in script

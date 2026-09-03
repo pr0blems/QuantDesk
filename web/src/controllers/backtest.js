@@ -51,7 +51,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-margin-fields-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-trade-groups-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -175,7 +175,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   </section>
 
                   <section class="result-panel trades-panel">
-                    <div class="panel-head"><div><strong>逐笔交易</strong><span id="trade-summary">--</span></div><span id="trade-count" class="count-badge">0 笔</span></div>
+                    <div class="panel-head"><div><strong>交易周期</strong><span id="trade-summary">--</span></div><span id="trade-count" class="count-badge">0 组</span></div>
                     <div id="trade-table" class="trade-table"></div>
                   </section>
                 </div>
@@ -921,11 +921,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   renderTrades(trades, quality = {}) {
     const total = Number(quality?.trades_total);
     const totalTrades = Number.isFinite(total) ? total : trades.length;
-    this.q("#trade-count").textContent = `${this.integer(totalTrades)} 笔`;
+    this.q("#trade-count").textContent = `${this.integer(totalTrades)} 组`;
     const wins = trades.filter((trade) => Number(trade.pnl ?? trade.net_pnl ?? 0) > 0).length;
     const truncated = Boolean(quality?.trades_truncated) || totalTrades > trades.length;
     this.q("#trade-summary").textContent = trades.length
-      ? `${wins} 胜 / ${trades.length - wins} 负${truncated ? ` · 返回 ${trades.length} / ${totalTrades} 笔` : ""} · 表格显示最近 100 笔`
+      ? `${wins} 胜 / ${trades.length - wins} 负${truncated ? ` · 返回 ${trades.length} / ${totalTrades} 组` : ""} · 按开仓到平仓分组，显示最近 100 个周期`
       : "暂无成交样本";
     const container = this.q("#trade-table");
     if (!trades.length) {
@@ -934,47 +934,145 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       container.replaceChildren(empty);
       return;
     }
-    const table = this.node("table");
-    const thead = this.node("thead");
-    const headRow = this.node("tr");
-    ["开仓时间", "方向", "开仓 → 平仓", "仓位", "开仓保证金", "杠杆", "剩余可用金额", "净盈亏", "账户收益率", "保证金 ROE", "持有", "退出原因"].forEach((title) => headRow.append(this.node("th", "", title)));
-    thead.append(headRow);
-    const tbody = this.node("tbody");
-    trades.slice(-100).reverse().forEach((trade) => {
-      const row = this.node("tr");
+    const list = this.node("div", "trade-cycle-list");
+    trades.slice(-100).reverse().forEach((trade, visibleIndex) => {
       const sideValue = String(trade.side ?? trade.direction ?? "").toLowerCase();
       const isLong = ["long", "buy", "1", "多"].includes(sideValue) || Number(trade.side) > 0;
       const isBasket = Boolean(trade.is_mixed_basket)
         || String(trade.position_structure ?? "").toLowerCase() === "mixed_basket"
         || ["basket", "mixed", "双向", "篮子"].includes(sideValue);
       const pnl = Number(trade.net_pnl ?? trade.pnl ?? trade.profit ?? 0);
-      const priceSummary = isBasket
-        ? [
-            Number(trade.long_quantity) > 0 ? `多 ${this.quantity(trade.long_quantity)}：${this.price(trade.long_entry_price)} → ${this.price(trade.long_exit_price)}` : "",
-            Number(trade.short_quantity) > 0 ? `空 ${this.quantity(trade.short_quantity)}：${this.price(trade.short_entry_price)} → ${this.price(trade.short_exit_price)}` : "",
-          ].filter(Boolean).join(" · ")
-        : `${this.price(trade.entry_price ?? trade.open_price)} → ${this.price(trade.exit_price ?? trade.close_price)}`;
       const initialMargin = trade.initial_margin ?? trade.peak_initial_margin ?? trade.margin;
       const availableBalance = trade.remaining_available_balance ?? trade.minimum_available_balance ?? trade.available_balance;
-      const values = [
-        [this.shortDate(trade.entry_time ?? trade.entry_at ?? trade.opened_at ?? trade.entry_ts, true), "muted"],
-        [isBasket ? "双向篮子" : isLong ? "做多" : "做空", isBasket ? "basket-side" : isLong ? "positive" : "negative"],
-        [priceSummary, isBasket ? "prices basket-prices" : "prices"],
-        [this.quantity(trade.quantity ?? trade.qty ?? trade.position_size), ""],
-        [this.money(initialMargin), ""],
-        [`${this.integer(trade.leverage ?? 1)}x`, ""],
-        [this.money(availableBalance), this.toneClass(availableBalance)],
-        [this.signedMoney(pnl), this.toneClass(pnl)],
-        [this.percent(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), this.toneClass(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct)],
-        [this.percent(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), this.toneClass(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct)],
-        [`${this.integer(trade.holding_bars ?? trade.bars_held ?? trade.duration_bars)} 根`, "muted"],
-        [this.exitReason(trade.exit_reason ?? trade.reason), "muted"],
-      ];
-      values.forEach(([value, className]) => row.append(this.node("td", className, value)));
-      tbody.append(row);
+      const entryTime = trade.entry_time ?? trade.entry_at ?? trade.opened_at ?? trade.entry_ts;
+      const exitTime = trade.exit_time ?? trade.exit_at ?? trade.closed_at ?? trade.exit_ts;
+      const sequence = Number(trade.cycle_sequence) || totalTrades - visibleIndex;
+
+      const group = this.node("article", "trade-cycle-group");
+      const head = this.node("header", "trade-cycle-head");
+      const identity = this.node("div", "trade-cycle-identity");
+      const titleLine = this.node("div", "trade-cycle-title");
+      titleLine.append(
+        this.node("strong", "", `交易周期 #${this.integer(sequence)}`),
+        this.node("span", exitTime ? "trade-status closed" : "trade-status open", exitTime ? "已平仓" : "持仓中"),
+        this.node("span", isBasket ? "trade-direction basket" : isLong ? "trade-direction long" : "trade-direction short", isBasket ? "双向篮子" : isLong ? "做多" : "做空"),
+      );
+      identity.append(titleLine, this.node("span", "trade-cycle-caption", `${this.cycleModeLabel(trade.cycle_mode)} · ${this.exitReason(trade.exit_reason ?? trade.reason)}`));
+      const outcome = this.node("div", `trade-cycle-outcome ${this.toneClass(pnl)}`);
+      outcome.append(this.node("small", "", "本周期净盈亏"), this.node("strong", "", this.signedMoney(pnl)), this.node("span", "", `账户 ${this.percent(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct, true)}`));
+      head.append(identity, outcome);
+
+      const timing = this.node("div", "trade-cycle-timing");
+      const entryNode = this.node("div", "trade-time-node entry");
+      entryNode.append(this.node("span", "", "开仓时间"), this.node("strong", "", this.shortDate(entryTime, true)), this.node("small", "", isBasket ? "建立多头与空头腿" : isLong ? "买入开多" : "卖出开空"));
+      const arrow = this.node("div", "trade-time-arrow", "→");
+      const exitNode = this.node("div", "trade-time-node exit");
+      exitNode.append(this.node("span", "", "平仓时间"), this.node("strong", "", this.shortDate(exitTime, true)), this.node("small", "", isBasket ? "结清全部方向腿" : isLong ? "卖出平多" : "买入平空"));
+      timing.append(entryNode, arrow, exitNode);
+
+      const executions = this.tradeExecutions(trade, { isBasket, isLong, entryTime, exitTime });
+      const executionSection = this.node("section", "trade-execution-section");
+      const executionHead = this.node("div", "trade-subhead");
+      executionHead.append(this.node("strong", "", "买卖执行明细"), this.node("span", "", `${executions.length} 个动作 · 按时间排序`));
+      const executionGrid = this.node("div", "trade-execution-grid");
+      executions.forEach((execution, executionIndex) => {
+        const orderSide = String(execution.order_side || "").toLowerCase();
+        const positionSide = String(execution.position_side || "").toLowerCase();
+        const action = String(execution.action || "").toLowerCase();
+        const phase = execution.phase === "exit" ? "exit" : "entry";
+        const actionLabel = this.executionLabel({ orderSide, positionSide, action, phase });
+        const event = this.node("div", `trade-execution ${orderSide === "buy" ? "buy" : "sell"}`);
+        const eventTop = this.node("div", "trade-execution-top");
+        eventTop.append(this.node("span", "trade-execution-index", String(executionIndex + 1).padStart(2, "0")), this.node("strong", "", actionLabel), this.node("span", "trade-execution-phase", phase === "entry" ? "开仓阶段" : "平仓阶段"));
+        const eventBody = this.node("div", "trade-execution-body");
+        eventBody.append(
+          this.tradeExecutionFact(orderSide === "buy" ? "买入时间" : "卖出时间", this.shortDate(execution.timestamp, true)),
+          this.tradeExecutionFact("成交价格", this.price(execution.price)),
+          this.tradeExecutionFact("成交数量", this.quantity(execution.quantity)),
+          this.tradeExecutionFact("方向腿", positionSide === "short" ? "空头" : "多头"),
+        );
+        event.append(eventTop, eventBody);
+        executionGrid.append(event);
+      });
+      executionSection.append(executionHead, executionGrid);
+
+      const metrics = this.node("div", "trade-cycle-metrics");
+      [
+        ["总仓位", this.quantity(trade.quantity ?? trade.qty ?? trade.position_size), ""],
+        ["开仓保证金", this.money(initialMargin), ""],
+        ["杠杆倍率", `${this.integer(trade.leverage ?? 1)}x`, ""],
+        ["最低剩余可用", this.money(availableBalance), this.toneClass(availableBalance)],
+        ["平仓后可用", this.money(trade.available_balance_after_close ?? trade.available_balance), this.toneClass(trade.available_balance_after_close ?? trade.available_balance)],
+        ["手续费", this.money(trade.fees ?? trade.fee), "muted"],
+        ["账户收益率", this.percent(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), this.toneClass(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct)],
+        ["保证金 ROE", this.percent(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), this.toneClass(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct)],
+        ["持有周期", `${this.integer(trade.holding_bars ?? trade.bars_held ?? trade.duration_bars)} 根`, ""],
+        ["退出原因", this.exitReason(trade.exit_reason ?? trade.reason), ""],
+      ].forEach(([label, value, tone]) => {
+        const metric = this.node("div", "trade-cycle-metric");
+        metric.append(this.node("span", "", label), this.node("strong", tone, value));
+        metrics.append(metric);
+      });
+      group.append(head, timing, executionSection, metrics);
+      list.append(group);
     });
-    table.append(thead, tbody);
-    container.replaceChildren(table);
+    container.replaceChildren(list);
+  }
+
+  tradeExecutions(trade, context) {
+    const supplied = Array.isArray(trade.executions) ? trade.executions.filter((item) => item && item.timestamp) : [];
+    if (supplied.length) {
+      return supplied.slice().sort((left, right) => Number(left.timestamp) - Number(right.timestamp) || Number(left.sequence || 0) - Number(right.sequence || 0));
+    }
+    const fallback = [];
+    const add = (phase, positionSide, timestamp, price, quantity, action) => {
+      if (!timestamp || !Number.isFinite(Number(price))) return;
+      fallback.push({
+        phase,
+        position_side: positionSide,
+        order_side: phase === "entry" ? (positionSide === "long" ? "buy" : "sell") : (positionSide === "long" ? "sell" : "buy"),
+        timestamp,
+        price,
+        quantity,
+        action,
+      });
+    };
+    if (context.isBasket) {
+      if (Number(trade.long_quantity) > 0) {
+        add("entry", "long", context.entryTime, trade.long_entry_price, trade.long_quantity, "open");
+        add("exit", "long", context.exitTime, trade.long_exit_price, trade.long_quantity, "close_all");
+      }
+      if (Number(trade.short_quantity) > 0) {
+        add("entry", "short", context.entryTime, trade.short_entry_price, trade.short_quantity, "open");
+        add("exit", "short", context.exitTime, trade.short_exit_price, trade.short_quantity, "close_all");
+      }
+    } else {
+      const positionSide = context.isLong ? "long" : "short";
+      const quantity = trade.quantity ?? trade.qty ?? trade.position_size;
+      add("entry", positionSide, context.entryTime, trade.entry_price ?? trade.open_price, quantity, "open");
+      add("exit", positionSide, context.exitTime, trade.exit_price ?? trade.close_price, quantity, "close_all");
+    }
+    return fallback.sort((left, right) => Number(left.timestamp) - Number(right.timestamp) || (left.phase === "entry" ? -1 : 1));
+  }
+
+  executionLabel({ orderSide, positionSide, action, phase }) {
+    if (phase === "entry") {
+      if (action === "add") return positionSide === "short" ? "卖出加空" : "买入加多";
+      return positionSide === "short" ? "卖出开空" : "买入开多";
+    }
+    return orderSide === "buy" ? "买入平空" : "卖出平多";
+  }
+
+  tradeExecutionFact(label, value) {
+    const fact = this.node("div", "trade-execution-fact");
+    fact.append(this.node("span", "", label), this.node("b", "", value));
+    return fact;
+  }
+
+  cycleModeLabel(value) {
+    const labels = { auto: "自动模式", grid: "网格模式", recovery: "恢复模式", manual: "手动模式" };
+    const key = String(value || "auto").toLowerCase();
+    return labels[key] || value || "策略模式";
   }
 
   drawCharts(result) {

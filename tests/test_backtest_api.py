@@ -417,6 +417,38 @@ def test_martingale_replay_is_normalized_for_standard_backtest_persistence() -> 
     assert normalized["trades"][0]["available_balance_after_close"] == 10010.0
     assert normalized["trades"][0]["account_return_pct"] == 0.1
     assert normalized["trades"][0]["margin_return_pct"] == 100.0
+    assert normalized["trades"][0]["executions"] == [
+        {
+            "sequence": 1,
+            "timestamp": 1000,
+            "phase": "entry",
+            "action": "open",
+            "position_side": "long",
+            "order_side": "buy",
+            "quantity": 1.0,
+            "price": 100.0,
+            "fee": 0.0,
+            "gross_pnl": 0.0,
+            "net_pnl": 0.0,
+            "reason_code": "",
+            "leg_indices": [],
+        },
+        {
+            "sequence": 2,
+            "timestamp": 1120,
+            "phase": "exit",
+            "action": "close_all",
+            "position_side": "long",
+            "order_side": "sell",
+            "quantity": 1.0,
+            "price": 112.0,
+            "fee": 0.0,
+            "gross_pnl": 0.0,
+            "net_pnl": 0.0,
+            "reason_code": "",
+            "leg_indices": [],
+        },
+    ]
     assert normalized["equity_curve"][0]["timestamp"] == 1000
     assert normalized["data_quality"]["manifest_id"] == "manifest-1"
     assert normalized["data_quality"]["source"] == "binance_fapi"
@@ -481,6 +513,18 @@ def test_martingale_mixed_cycle_is_not_mislabelled_as_one_long_trade() -> None:
     assert trade["initial_margin"] == 30.0
     assert trade["available_balance_after_close"] == 900.0
     assert trade["return_pct"] == -10.0
+    assert [item["order_side"] for item in trade["executions"]] == [
+        "buy",
+        "sell",
+        "sell",
+        "buy",
+    ]
+    assert [item["position_side"] for item in trade["executions"]] == [
+        "long",
+        "short",
+        "long",
+        "short",
+    ]
 
 
 def test_catalog_keeps_symbols_without_local_history_for_on_demand_fetch() -> None:

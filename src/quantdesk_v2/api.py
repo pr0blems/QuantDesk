@@ -834,6 +834,45 @@ def _normalize_martingale_backtest_result(
         )
         mixed_directions = bool(long_opening_fills and short_opening_fills)
         direction = enum_value(opening_fills[0].get("direction"))
+        executions: list[dict[str, Any]] = []
+        for fill_index, item in enumerate(cycle_fills, start=1):
+            action = enum_value(item.get("action"))
+            position_direction = enum_value(item.get("direction"))
+            position_side = (
+                "long" if position_direction in {"buy", "long"} else "short"
+            )
+            phase = "entry" if action in {"open", "add"} else "exit"
+            # ReplayFill.direction records the position leg, not the submitted
+            # order side.  Closing a long therefore sells, while closing a
+            # short buys it back.
+            order_side = (
+                "buy"
+                if (phase == "entry" and position_side == "long")
+                or (phase == "exit" and position_side == "short")
+                else "sell"
+            )
+            fill_time = int(item.get("bar_open_time") or 0)
+            executions.append(
+                {
+                    "sequence": int(item.get("sequence") or fill_index),
+                    "timestamp": fill_time // 1000 if fill_time > 0 else None,
+                    "phase": phase,
+                    "action": action,
+                    "position_side": position_side,
+                    "order_side": order_side,
+                    "quantity": float(decimal(item.get("quantity"))),
+                    "price": float(decimal(item.get("price"))),
+                    "fee": float(decimal(item.get("fee"))),
+                    "gross_pnl": float(decimal(item.get("gross_pnl"))),
+                    "net_pnl": float(decimal(item.get("net_pnl"))),
+                    "reason_code": str(item.get("reason_code") or ""),
+                    "leg_indices": [
+                        int(index)
+                        for index in (item.get("leg_indices") or [])
+                        if str(index).lstrip("-").isdigit()
+                    ],
+                }
+            )
         trades.append(
             {
                 # Keep the persisted side compatible with the long/short database
@@ -875,6 +914,7 @@ def _normalize_martingale_backtest_result(
                 "cycle_mode": str(raw_cycle.get("mode") or "auto"),
                 "leg_count": int(raw_cycle.get("leg_count") or len(opening_fills)),
                 "fill_count": len(cycle_fills),
+                "executions": executions,
             }
         )
 
