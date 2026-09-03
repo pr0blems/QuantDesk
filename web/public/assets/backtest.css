@@ -163,8 +163,22 @@ button { cursor: pointer; }
 .equity-chart-wrap { height: 224px; padding: 5px 4px 0; }
 .drawdown-chart-wrap { height: 92px; padding: 0 4px 4px; border-top: 1px solid rgba(132, 158, 183, .08); }
 .equity-chart-wrap canvas, .drawdown-chart-wrap canvas { width: 100%; height: 100%; display: block; }
-.price-chart-wrap { height: 300px; padding: 5px 4px 2px; }
-.price-chart-wrap canvas { width: 100%; height: 100%; display: block; }
+.price-chart-wrap { height: 300px; position: relative; padding: 5px 4px 2px; overflow: hidden; }
+.price-chart-wrap canvas { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: pan-y; user-select: none; }
+.price-chart-wrap canvas.dragging { cursor: grabbing; }
+.price-chart-range { position: absolute; z-index: 2; top: 11px; right: 70px; padding: 3px 7px; border: 1px solid rgba(126, 154, 181, .18); border-radius: 5px; color: #7790a7; background: rgba(7, 17, 27, .84); font-size: 11.2px; pointer-events: none; }
+.price-chart-tooltip { width: 272px; position: absolute; z-index: 4; display: grid; gap: 8px; padding: 10px 11px; border: 1px solid #3d566d; border-radius: 7px; color: #dbe6ef; background: rgba(5, 15, 24, .97); box-shadow: 0 10px 30px rgba(0, 0, 0, .42); pointer-events: none; }
+.price-chart-tooltip.profit { border-color: rgba(49, 212, 160, .62); }
+.price-chart-tooltip.loss { border-color: rgba(240, 100, 120, .62); }
+.price-tooltip-title { color: #dbe6ef; font-size: 14.4px; }
+.price-chart-tooltip.profit .price-tooltip-title { color: var(--bt-brand); }
+.price-chart-tooltip.loss .price-tooltip-title { color: var(--bt-danger); }
+.price-tooltip-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; }
+.price-tooltip-grid > div { min-width: 0; display: grid; gap: 2px; }
+.price-tooltip-grid span { color: #6f8498; font-size: 11.2px; }
+.price-tooltip-grid b { overflow: hidden; color: #c2d0dc; font-size: 12.8px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.price-tooltip-grid .profit b { color: var(--bt-brand); }
+.price-tooltip-grid .loss b { color: var(--bt-danger); }
 .trade-marker-legend { display: flex !important; grid-auto-flow: column; gap: 10px !important; }
 .trade-marker-legend span { display: flex; align-items: center; gap: 5px; }
 .trade-marker-legend span::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }

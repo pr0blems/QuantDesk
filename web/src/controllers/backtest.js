@@ -13,6 +13,20 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.strategyId = "";
     this.category = "全部";
     this.resizeObserver = null;
+    this.priceChartState = {
+      dataKey: "",
+      candles: [],
+      trades: [],
+      viewStart: 0,
+      viewEnd: 0,
+      hover: null,
+      layout: null,
+      dragging: false,
+      pointerId: null,
+      dragStartX: 0,
+      dragViewStart: 0,
+    };
+    this.priceChartFrame = 0;
     this.handleStrategiesChanged = () => { this.started = false; };
     this.renderShell();
   }
@@ -37,7 +51,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-source-history-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-chart-interaction-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -150,8 +164,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   </section>
 
                   <section id="price-panel" class="result-panel price-panel">
-                    <div class="panel-head"><div><strong>K 线与成交点</strong><span>显示实际回放行情、开仓与平仓位置</span></div><div class="trade-marker-legend"><span class="long-marker">多开</span><span class="short-marker">空开</span><span class="exit-marker">平仓</span></div></div>
-                    <div class="price-chart-wrap"><canvas id="price-chart" aria-label="回测 K 线与买卖点"></canvas></div>
+                    <div class="panel-head"><div><strong>K 线与成交点</strong><span>滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看成交盈亏</span></div><div class="trade-marker-legend"><span class="long-marker">多开</span><span class="short-marker">空开</span><span class="exit-marker">平仓</span></div></div>
+                    <div class="price-chart-wrap"><canvas id="price-chart" aria-label="回测 K 线与买卖点" tabindex="0"></canvas><div id="price-chart-tooltip" class="price-chart-tooltip hidden" role="status" aria-live="polite"></div><div id="price-chart-range" class="price-chart-range">全部数据</div></div>
                   </section>
 
                   <section id="quality-panel" class="result-panel quality-panel">
@@ -221,6 +235,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
     this.q("#reset-params").addEventListener("click", () => this.renderParameters(true));
     this.qa("[data-months]").forEach((button) => button.addEventListener("click", () => this.applyRange(button.dataset.months)));
+    this.bindPriceChartEvents();
   }
 
   start() {
@@ -244,6 +259,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.history = [];
     this.historyLoaded = false;
     this.activeDetail = null;
+    this.resetPriceChartState();
     this.strategyId = "";
     this.category = "全部";
     this.q("#backtest-form").reset();
@@ -944,6 +960,260 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     );
   }
 
+  resetPriceChartState() {
+    if (this.priceChartFrame) window.cancelAnimationFrame(this.priceChartFrame);
+    this.priceChartFrame = 0;
+    this.priceChartState = {
+      dataKey: "",
+      candles: [],
+      trades: [],
+      viewStart: 0,
+      viewEnd: 0,
+      hover: null,
+      layout: null,
+      dragging: false,
+      pointerId: null,
+      dragStartX: 0,
+      dragViewStart: 0,
+    };
+    const tooltip = this.q("#price-chart-tooltip");
+    if (tooltip) tooltip.classList.add("hidden");
+    const range = this.q("#price-chart-range");
+    if (range) range.textContent = "全部数据";
+  }
+
+  chartTimestamp(value) {
+    if (value == null) return NaN;
+    if (typeof value === "string" && !/^\d+(\.\d+)?$/.test(value)) return Date.parse(value) / 1000;
+    const numeric = Number(value);
+    return numeric > 100000000000 ? numeric / 1000 : numeric;
+  }
+
+  bindPriceChartEvents() {
+    const canvas = this.q("#price-chart");
+    if (!canvas || canvas.dataset.interactive === "1") return;
+    canvas.dataset.interactive = "1";
+    canvas.addEventListener("wheel", (event) => this.handlePriceChartWheel(event), { passive: false });
+    canvas.addEventListener("pointerdown", (event) => this.handlePriceChartPointerDown(event));
+    canvas.addEventListener("pointermove", (event) => this.handlePriceChartPointerMove(event));
+    canvas.addEventListener("pointerup", (event) => this.handlePriceChartPointerUp(event));
+    canvas.addEventListener("pointercancel", (event) => this.handlePriceChartPointerUp(event));
+    canvas.addEventListener("pointerleave", () => {
+      if (!this.priceChartState.dragging) this.hidePriceChartTooltip();
+    });
+    canvas.addEventListener("dblclick", () => {
+      const total = this.priceChartState.candles.length;
+      if (!total) return;
+      this.priceChartState.viewStart = 0;
+      this.priceChartState.viewEnd = total;
+      this.priceChartState.hover = null;
+      this.hidePriceChartTooltip();
+      this.schedulePriceChartDraw();
+    });
+    canvas.addEventListener("keydown", (event) => {
+      if (["ArrowLeft", "ArrowRight", "+", "=", "-", "0", "Home"].includes(event.key)) event.preventDefault();
+      if (event.key === "ArrowLeft") this.panPriceChart(-Math.max(1, Math.round(this.visiblePriceCandleCount() * .12)));
+      if (event.key === "ArrowRight") this.panPriceChart(Math.max(1, Math.round(this.visiblePriceCandleCount() * .12)));
+      if (event.key === "+" || event.key === "=") this.zoomPriceChart(.8, .5);
+      if (event.key === "-") this.zoomPriceChart(1.25, .5);
+      if (event.key === "0" || event.key === "Home") {
+        this.priceChartState.viewStart = 0;
+        this.priceChartState.viewEnd = this.priceChartState.candles.length;
+        this.schedulePriceChartDraw();
+      }
+    });
+  }
+
+  visiblePriceCandleCount() {
+    return Math.max(0, this.priceChartState.viewEnd - this.priceChartState.viewStart);
+  }
+
+  setPriceChartWindow(start, count) {
+    const total = this.priceChartState.candles.length;
+    if (!total) return;
+    const safeCount = Math.max(1, Math.min(total, Math.round(count)));
+    const safeStart = Math.max(0, Math.min(total - safeCount, Math.round(start)));
+    this.priceChartState.viewStart = safeStart;
+    this.priceChartState.viewEnd = safeStart + safeCount;
+    this.priceChartState.hover = null;
+    this.hidePriceChartTooltip();
+    this.schedulePriceChartDraw();
+  }
+
+  zoomPriceChart(factor, anchorRatio = .5) {
+    const total = this.priceChartState.candles.length;
+    const currentCount = this.visiblePriceCandleCount() || total;
+    if (!total || !currentCount) return;
+    const minimum = Math.min(total, 24);
+    const nextCount = Math.max(minimum, Math.min(total, Math.round(currentCount * factor)));
+    const anchor = Math.max(0, Math.min(1, anchorRatio));
+    const anchorIndex = this.priceChartState.viewStart + currentCount * anchor;
+    this.setPriceChartWindow(anchorIndex - nextCount * anchor, nextCount);
+  }
+
+  panPriceChart(deltaBars) {
+    const count = this.visiblePriceCandleCount();
+    if (!count) return;
+    this.setPriceChartWindow(this.priceChartState.viewStart + deltaBars, count);
+  }
+
+  handlePriceChartWheel(event) {
+    const layout = this.priceChartState.layout;
+    if (!layout || !this.priceChartState.candles.length) return;
+    event.preventDefault();
+    const horizontal = event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY);
+    if (horizontal) {
+      const delta = event.shiftKey ? event.deltaY : event.deltaX;
+      this.panPriceChart(Math.round(delta / Math.max(8, layout.plotWidth) * this.visiblePriceCandleCount()));
+      return;
+    }
+    const anchor = (event.offsetX - layout.padding.left) / Math.max(1, layout.plotWidth);
+    this.zoomPriceChart(event.deltaY < 0 ? .8 : 1.25, anchor);
+  }
+
+  handlePriceChartPointerDown(event) {
+    if (event.button !== 0 || !this.priceChartState.layout) return;
+    const state = this.priceChartState;
+    state.dragging = true;
+    state.pointerId = event.pointerId;
+    state.dragStartX = event.offsetX;
+    state.dragViewStart = state.viewStart;
+    state.hover = null;
+    this.hidePriceChartTooltip();
+    this.schedulePriceChartDraw();
+    event.currentTarget.classList.add("dragging");
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  handlePriceChartPointerMove(event) {
+    const state = this.priceChartState;
+    const layout = state.layout;
+    if (!layout) return;
+    if (state.dragging) {
+      const candleCount = this.visiblePriceCandleCount();
+      const shift = Math.round((state.dragStartX - event.offsetX) / Math.max(1, layout.plotWidth) * candleCount);
+      const total = state.candles.length;
+      const nextStart = Math.max(0, Math.min(total - candleCount, state.dragViewStart + shift));
+      if (nextStart !== state.viewStart) {
+        state.viewStart = nextStart;
+        state.viewEnd = nextStart + candleCount;
+        this.schedulePriceChartDraw();
+      }
+      return;
+    }
+    const inside = event.offsetX >= layout.padding.left
+      && event.offsetX <= layout.width - layout.padding.right
+      && event.offsetY >= layout.padding.top
+      && event.offsetY <= layout.height - layout.padding.bottom;
+    if (!inside) {
+      this.hidePriceChartTooltip();
+      return;
+    }
+    state.hover = { x: event.offsetX, y: event.offsetY };
+    this.renderPriceChartTooltip(event.offsetX, event.offsetY);
+    this.schedulePriceChartDraw();
+  }
+
+  handlePriceChartPointerUp(event) {
+    const state = this.priceChartState;
+    if (!state.dragging) return;
+    state.dragging = false;
+    state.pointerId = null;
+    event.currentTarget.classList.remove("dragging");
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    this.handlePriceChartPointerMove(event);
+  }
+
+  schedulePriceChartDraw() {
+    if (this.priceChartFrame) return;
+    this.priceChartFrame = window.requestAnimationFrame(() => {
+      this.priceChartFrame = 0;
+      this.drawPriceChart(this.q("#price-chart"));
+    });
+  }
+
+  hidePriceChartTooltip() {
+    const tooltip = this.q("#price-chart-tooltip");
+    if (tooltip) tooltip.classList.add("hidden");
+    if (this.priceChartState) {
+      const hadHover = Boolean(this.priceChartState.hover);
+      this.priceChartState.hover = null;
+      if (hadHover && !this.priceChartState.dragging) this.schedulePriceChartDraw();
+    }
+  }
+
+  renderPriceChartTooltip(pointerX, pointerY) {
+    const tooltip = this.q("#price-chart-tooltip");
+    const wrap = this.q(".price-chart-wrap");
+    const layout = this.priceChartState.layout;
+    if (!tooltip || !wrap || !layout) return;
+    let target = null;
+    let distance = Infinity;
+    layout.markers.forEach((marker) => {
+      const value = Math.hypot(marker.x - pointerX, marker.y - pointerY);
+      if (value < distance) {
+        distance = value;
+        target = marker;
+      }
+    });
+    if (distance > 16) {
+      target = layout.candles.reduce((nearest, candle) => (
+        !nearest || Math.abs(candle.x - pointerX) < Math.abs(nearest.x - pointerX) ? candle : nearest
+      ), null);
+    }
+    if (!target) {
+      this.hidePriceChartTooltip();
+      return;
+    }
+
+    const rows = [];
+    let title = "K 线行情";
+    let tone = "";
+    if (target.trade) {
+      const trade = target.trade;
+      const pnl = Number(trade.net_pnl ?? trade.pnl ?? trade.profit ?? 0);
+      const sideValue = String(trade.side ?? trade.direction ?? "").toLowerCase();
+      const isLong = ["long", "buy", "1", "多"].includes(sideValue) || Number(trade.side) > 0;
+      title = target.kind === "entry" ? `${isLong ? "做多" : "做空"}开仓` : `${isLong ? "做多" : "做空"}平仓`;
+      tone = pnl > 0 ? "profit" : pnl < 0 ? "loss" : "";
+      rows.push(
+        ["成交时间", this.shortDate(target.time, true)],
+        [isLong ? "买入开仓价" : "卖出开仓价", this.price(trade.entry_price ?? trade.open_price)],
+        [isLong ? "卖出平仓价" : "买入平仓价", this.price(trade.exit_price ?? trade.close_price)],
+        ["成交数量", this.quantity(trade.quantity ?? trade.qty ?? trade.position_size)],
+        ["毛盈亏", this.signedMoney(trade.gross_pnl), Number(trade.gross_pnl) > 0 ? "profit" : Number(trade.gross_pnl) < 0 ? "loss" : ""],
+        ["手续费", this.signedMoney(-Math.abs(Number(trade.fees ?? trade.fee ?? 0)))],
+        ["净盈亏", this.signedMoney(pnl), tone],
+        ["收益率", this.percent(trade.return_pct ?? trade.pnl_pct, true), tone],
+        ["退出原因", this.exitReason(trade.exit_reason ?? trade.reason)],
+      );
+    } else {
+      const candle = target.candle;
+      rows.push(
+        ["时间", this.shortDate(candle.ts, true)],
+        ["开盘", this.price(candle.open)],
+        ["最高", this.price(candle.high)],
+        ["最低", this.price(candle.low)],
+        ["收盘", this.price(candle.close)],
+        ["成交量", this.quantity(candle.volume)],
+      );
+    }
+    const head = this.node("strong", "price-tooltip-title", title);
+    const body = this.node("div", "price-tooltip-grid");
+    rows.forEach(([label, value, rowTone = ""]) => {
+      const row = this.node("div", rowTone);
+      row.append(this.node("span", "", label), this.node("b", "", value));
+      body.append(row);
+    });
+    tooltip.className = `price-chart-tooltip ${tone}`.trim();
+    tooltip.replaceChildren(head, body);
+    const canvas = this.q("#price-chart");
+    const originX = canvas?.offsetLeft || 0;
+    const originY = canvas?.offsetTop || 0;
+    tooltip.style.left = `${Math.max(8, Math.min(wrap.clientWidth - 286, originX + pointerX + 14))}px`;
+    tooltip.style.top = `${Math.max(8, Math.min(wrap.clientHeight - tooltip.offsetHeight - 8, originY + pointerY - 18))}px`;
+  }
+
   drawPriceChart(canvas, rawCandles, trades) {
     if (!canvas) return;
     const width = Math.floor(canvas.clientWidth);
@@ -957,39 +1227,73 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     context.clearRect(0, 0, width, height);
     context.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
 
-    const timestamp = (value) => {
-      if (value == null) return NaN;
-      if (typeof value === "string" && !/^\d+(\.\d+)?$/.test(value)) return Date.parse(value) / 1000;
-      const numeric = Number(value);
-      return numeric > 100000000000 ? numeric / 1000 : numeric;
-    };
-    const candles = (Array.isArray(rawCandles) ? rawCandles : []).map((item) => ({
-      ts: timestamp(item?.ts ?? item?.timestamp ?? item?.open_time),
-      open: Number(item?.open), high: Number(item?.high), low: Number(item?.low),
-      close: Number(item?.close), volume: Number(item?.volume || 0),
-    })).filter((item) => Number.isFinite(item.ts) && [item.open, item.high, item.low, item.close].every(Number.isFinite));
+    const state = this.priceChartState;
+    if (rawCandles !== undefined) {
+      const candles = (Array.isArray(rawCandles) ? rawCandles : []).map((item) => ({
+        ts: this.chartTimestamp(item?.ts ?? item?.timestamp ?? item?.open_time),
+        open: Number(item?.open), high: Number(item?.high), low: Number(item?.low),
+        close: Number(item?.close), volume: Number(item?.volume || 0),
+      })).filter((item) => Number.isFinite(item.ts) && [item.open, item.high, item.low, item.close].every(Number.isFinite));
+      const tradeList = Array.isArray(trades) ? trades : [];
+      const firstTrade = tradeList[0] || {};
+      const lastTrade = tradeList[tradeList.length - 1] || {};
+      const dataKey = [
+        candles.length,
+        candles[0]?.ts,
+        candles[candles.length - 1]?.ts,
+        tradeList.length,
+        firstTrade.entry_ts ?? firstTrade.entry_at ?? firstTrade.entry_time,
+        lastTrade.exit_ts ?? lastTrade.exit_at ?? lastTrade.exit_time,
+      ].join(":");
+      if (dataKey !== state.dataKey) {
+        state.dataKey = dataKey;
+        state.candles = candles;
+        state.trades = tradeList;
+        state.viewStart = 0;
+        state.viewEnd = candles.length;
+        state.hover = null;
+        this.hidePriceChartTooltip();
+      } else {
+        state.candles = candles;
+        state.trades = tradeList;
+      }
+    }
+    const candles = state.candles;
     if (!candles.length) {
+      state.layout = null;
       context.fillStyle = "#64778d";
       context.fillText("当前历史记录没有保存 K 线快照，请重新运行一次回测", 18, 31);
+      const range = this.q("#price-chart-range");
+      if (range) range.textContent = "暂无 K 线";
       return;
     }
 
     const padding = { left: 12, right: 66, top: 16, bottom: 28 };
     const plotWidth = Math.max(1, width - padding.left - padding.right);
     const plotHeight = Math.max(1, height - padding.top - padding.bottom);
-    const lows = candles.map((item) => item.low);
-    const highs = candles.map((item) => item.high);
+    const total = candles.length;
+    const viewStart = Math.max(0, Math.min(total - 1, state.viewStart));
+    const viewEnd = Math.max(viewStart + 1, Math.min(total, state.viewEnd || total));
+    state.viewStart = viewStart;
+    state.viewEnd = viewEnd;
+    const visibleCandles = candles.slice(viewStart, viewEnd);
+    const lows = visibleCandles.map((item) => item.low);
+    const highs = visibleCandles.map((item) => item.high);
     let minPrice = Math.min(...lows);
     let maxPrice = Math.max(...highs);
     const pricePadding = (maxPrice - minPrice || Math.abs(maxPrice) * .01 || 1) * .08;
     minPrice -= pricePadding;
     maxPrice += pricePadding;
     const priceRange = maxPrice - minPrice || 1;
-    const firstTs = candles[0].ts;
-    const lastTs = candles[candles.length - 1].ts;
+    const firstTs = visibleCandles[0].ts;
+    const lastTs = visibleCandles[visibleCandles.length - 1].ts;
     const timeRange = lastTs - firstTs || 1;
-    const xTime = (ts) => padding.left + Math.max(0, Math.min(1, (ts - firstTs) / timeRange)) * plotWidth;
+    const xTime = (ts) => visibleCandles.length === 1
+      ? padding.left + plotWidth / 2
+      : padding.left + Math.max(0, Math.min(1, (ts - firstTs) / timeRange)) * plotWidth;
     const yPrice = (price) => padding.top + (maxPrice - price) / priceRange * plotHeight;
+    const layout = { width, height, padding, plotWidth, plotHeight, markers: [], candles: [] };
+    state.layout = layout;
 
     context.strokeStyle = "rgba(126, 154, 181, .14)";
     context.fillStyle = "#657b91";
@@ -1001,9 +1305,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       context.fillText(this.price(price), width - padding.right + 7, y + 4);
     }
 
-    const candleWidth = Math.max(.7, Math.min(7, plotWidth / candles.length * .68));
-    candles.forEach((item) => {
+    const candleWidth = Math.max(.7, Math.min(12, plotWidth / visibleCandles.length * .68));
+    visibleCandles.forEach((item) => {
       const x = xTime(item.ts);
+      layout.candles.push({ x, candle: item });
       const rising = item.close >= item.open;
       context.strokeStyle = rising ? "#31d4a0" : "#f06478";
       context.fillStyle = context.strokeStyle;
@@ -1013,18 +1318,19 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       context.fillRect(x - candleWidth / 2, top, candleWidth, Math.max(1, bottom - top));
     });
 
-    const marker = (ts, price, color, kind, label) => {
+    const marker = (ts, price, color, shape, label, trade, kind) => {
       if (!Number.isFinite(ts) || !Number.isFinite(price) || ts < firstTs || ts > lastTs) return;
       const x = xTime(ts);
       const y = yPrice(price);
+      layout.markers.push({ x, y, kind, trade, time: ts });
       context.save();
       context.fillStyle = color;
       context.strokeStyle = "#07111b";
       context.lineWidth = 1.5;
       context.beginPath();
-      if (kind === "up") {
+      if (shape === "up") {
         context.moveTo(x, y - 8); context.lineTo(x - 6, y + 3); context.lineTo(x + 6, y + 3);
-      } else if (kind === "down") {
+      } else if (shape === "down") {
         context.moveTo(x, y + 8); context.lineTo(x - 6, y - 3); context.lineTo(x + 6, y - 3);
       } else {
         context.arc(x, y, 4.5, 0, Math.PI * 2);
@@ -1032,21 +1338,39 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       context.closePath(); context.fill(); context.stroke();
       context.fillStyle = color;
       context.font = "bold 11px sans-serif";
-      context.fillText(label, x + 7, y + (kind === "down" ? 11 : -7));
+      context.fillText(label, x + 7, y + (shape === "down" ? 11 : -7));
       context.restore();
     };
-    trades.forEach((trade) => {
+    state.trades.forEach((trade) => {
       const side = String(trade?.side ?? trade?.direction ?? "").toLowerCase();
       const isLong = ["long", "buy", "1", "多"].includes(side) || Number(trade?.side) > 0;
-      marker(timestamp(trade?.entry_ts ?? trade?.entry_at ?? trade?.entry_time), Number(trade?.entry_price), isLong ? "#31d4a0" : "#f06478", isLong ? "up" : "down", isLong ? "多" : "空");
-      marker(timestamp(trade?.exit_ts ?? trade?.exit_at ?? trade?.exit_time), Number(trade?.exit_price), "#e6b850", "exit", "平");
+      marker(this.chartTimestamp(trade?.entry_ts ?? trade?.entry_at ?? trade?.entry_time), Number(trade?.entry_price), isLong ? "#31d4a0" : "#f06478", isLong ? "up" : "down", isLong ? "多" : "空", trade, "entry");
+      marker(this.chartTimestamp(trade?.exit_ts ?? trade?.exit_at ?? trade?.exit_time), Number(trade?.exit_price), "#e6b850", "exit", "平", trade, "exit");
     });
+
+    if (state.hover) {
+      context.save();
+      context.setLineDash([4, 4]);
+      context.strokeStyle = "rgba(180, 198, 216, .34)";
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(state.hover.x, padding.top);
+      context.lineTo(state.hover.x, height - padding.bottom);
+      context.moveTo(padding.left, state.hover.y);
+      context.lineTo(width - padding.right, state.hover.y);
+      context.stroke();
+      context.restore();
+    }
 
     context.fillStyle = "#657b91";
     const dateLabel = (seconds) => new Date(seconds * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
     context.fillText(dateLabel(firstTs), padding.left, height - 8);
     const endLabel = dateLabel(lastTs);
     context.fillText(endLabel, Math.max(padding.left, width - padding.right - context.measureText(endLabel).width), height - 8);
+    const range = this.q("#price-chart-range");
+    if (range) range.textContent = visibleCandles.length === total
+      ? `全部 ${this.integer(total)} 根`
+      : `可视 ${this.integer(viewStart + 1)}–${this.integer(viewEnd)} / ${this.integer(total)} 根`;
   }
 
   normalizeCurve(raw) {

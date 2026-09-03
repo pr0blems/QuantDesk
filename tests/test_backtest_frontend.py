@@ -39,6 +39,15 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'id="standard-execution-note"' in script
     assert 'id="price-chart"' in script
     assert "drawPriceChart(" in script
+    assert "滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看成交盈亏" in script
+    assert 'id="price-chart-tooltip"' in script
+    assert 'id="price-chart-range"' in script
+    assert 'canvas.addEventListener("wheel"' in script
+    assert 'canvas.addEventListener("pointerdown"' in script
+    assert 'canvas.addEventListener("dblclick"' in script
+    assert "this.renderPriceChartTooltip(event.offsetX, event.offsetY);" in script
+    assert '["净盈亏", this.signedMoney(pnl), tone]' in script
+    assert '["收益率", this.percent(trade.return_pct ?? trade.pnl_pct, true), tone]' in script
     assert 'id="leverage" name="leverage" required' in script
     assert '<option value="20">20x</option>' in script
     assert 'margin_mode: "isolated"' in script
