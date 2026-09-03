@@ -306,7 +306,7 @@ button { cursor: pointer; }
 .calculator-points-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid rgba(139, 123, 211, .2); }
 .calculator-points-head > label { min-width: 205px; display: grid; grid-template-columns: auto minmax(90px, 1fr); align-items: center; gap: 9px; }
 .calculator-points-head span, .calculator-points-head small { color: #7d8fa1; font-size: 11px; }
-.calculator-point-preview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: rgba(139, 123, 211, .16); }
+.calculator-point-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: rgba(139, 123, 211, .16); }
 .calculator-point-field { min-width: 0; display: grid; gap: 5px; padding: 9px 11px; background: #0b1724; }
 .calculator-point-preview small { color: #687f93; font-size: 10.5px; }
 .calculator-point-control { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; border: 1px solid rgba(139, 123, 211, .35); background: #07121e; }
