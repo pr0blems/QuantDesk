@@ -53,7 +53,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-3">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-lot-calculator-4">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -216,7 +216,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                 </div>
                 <div id="calculator-facts" class="calculator-facts"></div>
                 <div class="calculator-explanation">
-                  <strong id="calculator-summary">--</strong>
+                  <div class="calculator-explanation-head">
+                    <span>收益与行情摘要</span>
+                    <strong id="calculator-market-change" class="neutral">Binance 24h 涨跌幅 --</strong>
+                  </div>
+                  <div id="calculator-summary" class="calculator-summary"></div>
                   <p id="calculator-note">--</p>
                 </div>
                 <div class="calculator-points">
@@ -273,12 +277,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
     this.shadowRoot.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !this.q("#history-dialog").classList.contains("hidden")) this.closeHistory();
-      if (event.key === "Escape" && !this.q("#lot-calculator-dialog").classList.contains("hidden")) this.closeLotCalculator();
     });
     this.q("#close-lot-calculator").addEventListener("click", () => this.closeLotCalculator());
-    this.q("#lot-calculator-dialog").addEventListener("click", (event) => {
-      if (event.target === this.q("#lot-calculator-dialog")) this.closeLotCalculator();
-    });
     this.q("#calculator-lot").addEventListener("input", () => this.renderLotCalculator());
     this.q("#calculator-leverage").addEventListener("change", () => this.renderLotCalculator());
     this.q("#calculator-base-points").addEventListener("input", () => {
@@ -723,6 +723,31 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return fact;
   }
 
+  calculatorSummaryItem(label, value) {
+    const item = this.node("div", "calculator-summary-item");
+    item.append(this.node("span", "", label), this.node("strong", "", value));
+    return item;
+  }
+
+  calculatorMoney(value, signed = false) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return "--";
+    const digits = numeric !== 0 && Math.abs(numeric) < 0.01 ? 6 : 2;
+    const amount = Math.abs(numeric).toLocaleString("zh-CN", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: digits,
+    });
+    const sign = signed && numeric !== 0 ? (numeric > 0 ? "+" : "-") : numeric < 0 ? "-" : "";
+    return `${sign}${amount} U`;
+  }
+
+  calculatorPercent(value, signed = false) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return "--";
+    const sign = signed && numeric > 0 ? "+" : "";
+    return `${sign}${numeric.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+  }
+
   calculatorPointField(key, label, value) {
     const field = this.node("label", "calculator-point-field");
     const input = this.node("input");
@@ -764,19 +789,33 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const quote = this.lotCalculatorQuote;
     const settings = this.calculatedPointSettings(values.basePoints);
     const shortTakeProfitLabel = values.shortTakeProfitPrice == null ? "不可用" : `${this.price(values.shortTakeProfitPrice)} USDT`;
+    const rawMarketChangePercent = quote.price_change_percent_24h;
+    const marketChangePercent = Number(rawMarketChangePercent);
+    const hasMarketChange = rawMarketChangePercent != null && Number.isFinite(marketChangePercent);
     this.q("#calculator-symbol").textContent = quote.symbol || this.q("#symbol").value;
     this.q("#calculator-price").textContent = `${this.price(values.price)} USDT`;
-    this.q("#calculator-source").textContent = `Binance 最新价 · 策略 1 点=${this.price(values.pointSize)} USDT`;
+    this.q("#calculator-source").textContent = `Binance 24h 实时行情 · 策略 1 点=${this.price(values.pointSize)} USDT`;
     this.q("#calculator-facts").replaceChildren(
-      this.calculatorFact("1 手名义价值", this.money(values.oneLotNotional), `${values.leverage}x 保证金 ${this.money(values.oneLotMargin)}`),
-      this.calculatorFact(`${this.quantity(values.lot)} 手名义价值`, this.money(values.positionNotional), `开仓保证金 ${this.money(values.positionMargin)}`),
+      this.calculatorFact("1 手名义价值", this.calculatorMoney(values.oneLotNotional), `${values.leverage}x 保证金 ${this.calculatorMoney(values.oneLotMargin)}`),
+      this.calculatorFact(`${this.quantity(values.lot)} 手名义价值`, this.calculatorMoney(values.positionNotional), `开仓保证金 ${this.calculatorMoney(values.positionMargin)}`),
       this.calculatorFact(`基础止盈 ${this.number(values.basePoints, 2)} 点`, `做多 ${this.price(values.longTakeProfitPrice)} USDT`, `做空 ${shortTakeProfitLabel} · 价差 ±${this.price(values.priceMove)} USDT（${this.number(values.priceMovePct, 4)}%）`),
-      this.calculatorFact("预计毛利润", this.signedMoney(values.grossProfit), `保证金毛 ROE ${this.number(values.grossRoePct, 2)}%`),
-      this.calculatorFact("预计净利润", this.signedMoney(values.estimatedNetProfit), `双边成本约 ${this.money(values.roundTripCost)}`),
-      this.calculatorFact("预计净 ROE", `${this.number(values.estimatedNetRoePct, 2)}%`, `${values.leverage}x 逐仓保证金口径`),
+      this.calculatorFact("预计毛利润", this.calculatorMoney(values.grossProfit, true), `保证金毛 ROE ${this.calculatorPercent(values.grossRoePct)}`),
+      this.calculatorFact("预计净利润", this.calculatorMoney(values.estimatedNetProfit, true), `双边成本约 ${this.calculatorMoney(values.roundTripCost)}`),
+      this.calculatorFact("预计净 ROE", this.calculatorPercent(values.estimatedNetRoePct), `${values.leverage}x 逐仓保证金口径`),
     );
-    this.q("#calculator-summary").textContent = `基础止盈 ${this.number(values.basePoints, 2)} 点时，做多止盈价 ${this.price(values.longTakeProfitPrice)} USDT、做空止盈价 ${shortTakeProfitLabel}；${values.leverage}x 杠杆预计毛 ROE ${this.number(values.grossRoePct, 2)}%，毛利润 ${this.money(values.grossProfit)}。`;
-    this.q("#calculator-note").textContent = `扣除双边手续费与滑点后，预计净利润 ${this.money(values.estimatedNetProfit)}、净 ROE ${this.number(values.estimatedNetRoePct, 2)}%；当前 ${this.quantity(values.lot)} 手预计占用保证金 ${this.money(values.positionMargin)}。`;
+    const marketChange = this.q("#calculator-market-change");
+    marketChange.textContent = hasMarketChange
+      ? `Binance 24h 涨跌幅 ${this.calculatorPercent(marketChangePercent, true)}`
+      : "Binance 24h 涨跌幅暂缺";
+    marketChange.className = hasMarketChange ? this.toneClass(marketChangePercent) : "neutral";
+    this.q("#calculator-summary").replaceChildren(
+      this.calculatorSummaryItem("基础止盈", `${this.number(values.basePoints, 2)} 点`),
+      this.calculatorSummaryItem("做多止盈价", `${this.price(values.longTakeProfitPrice)} USDT`),
+      this.calculatorSummaryItem("做空止盈价", shortTakeProfitLabel),
+      this.calculatorSummaryItem(`${values.leverage}x 预计毛 ROE`, this.calculatorPercent(values.grossRoePct)),
+      this.calculatorSummaryItem("预计毛利润", this.calculatorMoney(values.grossProfit, true)),
+    );
+    this.q("#calculator-note").textContent = `扣除双边手续费与滑点后：预计净利润 ${this.calculatorMoney(values.estimatedNetProfit, true)} · 净 ROE ${this.calculatorPercent(values.estimatedNetRoePct)} · ${this.quantity(values.lot)} 手占用保证金 ${this.calculatorMoney(values.positionMargin)}。`;
     if (resetPointFields || !this.q("#calculator-point-preview").children.length) {
       this.q("#calculator-point-preview").replaceChildren(...[
         ["TP2", "TP2", settings.TP2], ["TP3", "TP3", settings.TP3], ["TP4", "TP4", settings.TP4],

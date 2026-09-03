@@ -36,8 +36,11 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         '["实际数据源", sourceLabel]',
         'this.node("button", "lot-calculator-trigger", "计算器")',
         'id="lot-calculator-dialog" class="calculator-dialog-backdrop hidden"',
+        'this.q("#close-lot-calculator").addEventListener("click", () => this.closeLotCalculator());',
         'id="calculator-lot"',
         'id="calculator-leverage"',
+        'id="calculator-market-change" class="neutral"',
+        'id="calculator-summary" class="calculator-summary"',
         'data-calculator-param-key="TP"',
         '/position-calculator?symbol=',
         'this.applyCalculatedPoints("position")',
@@ -47,10 +50,16 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         '按止盈点数、当前合约价格、初始手数和 Binance 杠杆估算实际收益',
         '基础止盈 TP',
         '预计净 ROE',
+        'Binance 24h 涨跌幅',
+        'quote.price_change_percent_24h',
+        'rawMarketChangePercent != null',
+        'this.calculatorMoney(values.grossProfit, true)',
     ):
         assert contract in script
 
     assert 'id="calculator-target-roe"' not in script
+    assert 'this.q("#lot-calculator-dialog").addEventListener("click"' not in script
+    assert 'event.key === "Escape" && !this.q("#lot-calculator-dialog")' not in script
     assert "const priceMove = basePoints * pointSize;" in script
     assert "const priceMovePct = priceMove / price * 100;" in script
     assert "const longTakeProfitPrice = price + priceMove;" in script

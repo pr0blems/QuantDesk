@@ -2560,7 +2560,7 @@ def backtest_position_calculator(
     ),
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Return the live Binance reference price used by the lot calculator.
+    """Return the live Binance price and 24-hour change used by the lot calculator.
 
     The calculator is informational only.  Returning the strategy point size
     separately from the exchange tick size prevents the browser from silently
@@ -2569,20 +2569,31 @@ def backtest_position_calculator(
 
     normalized = symbol.strip().upper()
     state = request.app.state
-    provider = getattr(state, "backtest_position_calculator_price_provider", None)
+    price_provider = getattr(state, "backtest_position_calculator_price_provider", None)
+    change_provider = getattr(state, "backtest_position_calculator_change_provider", None)
     try:
-        if callable(provider):
-            raw_price = provider(normalized)
+        if callable(price_provider):
+            raw_price = price_provider(normalized)
+            raw_change_percent = (
+                change_provider(normalized) if callable(change_provider) else None
+            )
             source = "test_provider"
         else:
             client = getattr(state, "binance_trading_client", None)
             if client is None:
                 raise BinanceAccountClientError("unavailable")
-            raw_price = client.ticker_price(normalized)
-            source = "binance_fapi_latest_price"
+            ticker = client.ticker_24h(normalized)
+            raw_price = ticker.last_price
+            raw_change_percent = ticker.price_change_percent
+            source = "binance_fapi_24h_ticker"
         price = Decimal(str(raw_price))
         if not price.is_finite() or price <= 0:
             raise ValueError("invalid price")
+        price_change_percent = (
+            Decimal(str(raw_change_percent)) if raw_change_percent is not None else None
+        )
+        if price_change_percent is not None and not price_change_percent.is_finite():
+            raise ValueError("invalid price change percent")
     except (BinanceAccountClientError, InvalidOperation, TypeError, ValueError):
         raise HTTPException(
             status_code=503,
@@ -2593,6 +2604,9 @@ def backtest_position_calculator(
     return {
         "symbol": normalized,
         "price": float(price),
+        "price_change_percent_24h": (
+            float(price_change_percent) if price_change_percent is not None else None
+        ),
         "source": source,
         "observed_at": _utc_iso(utcnow()),
         "strategy_point_size": float(DEFAULT_SIGNAL_POINT_SIZE),

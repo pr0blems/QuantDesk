@@ -93,6 +93,30 @@ def test_ticker_price_reads_current_binance_price_without_credentials() -> None:
     assert "X-MBX-APIKEY" not in headers
 
 
+def test_ticker_24h_reads_price_and_real_change_without_credentials() -> None:
+    captured: list[tuple[str, str, dict[str, str]]] = []
+
+    def transport(method: str, url: str, headers: dict[str, str], _timeout: float):
+        captured.append((method, url, headers))
+        return 200, (
+            b'{"symbol":"AAOIUSDT","lastPrice":"102.27",'
+            b'"priceChangePercent":"-1.84"}'
+        )
+
+    client = BinanceUsdMTradingClient("https://fapi.binance.com", transport=transport)
+
+    ticker = client.ticker_24h("aaoiusdt")
+
+    assert ticker.symbol == "AAOIUSDT"
+    assert ticker.last_price == Decimal("102.27")
+    assert ticker.price_change_percent == Decimal("-1.84")
+    method, url, headers = captured[0]
+    assert method == "GET"
+    assert urlsplit(url).path == "/fapi/v1/ticker/24hr"
+    assert parse_qs(urlsplit(url).query) == {"symbol": ["AAOIUSDT"]}
+    assert "X-MBX-APIKEY" not in headers
+
+
 def test_close_trigger_is_exchange_side_mark_price_protection() -> None:
     captured: list[str] = []
 

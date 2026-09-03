@@ -76,6 +76,13 @@ class FuturesSymbolRules:
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class FuturesTicker24h:
+    symbol: str
+    last_price: Decimal
+    price_change_percent: Decimal
+
+
 def _trade_transport(
     method: str, url: str, headers: dict[str, str], timeout: float
 ) -> tuple[int, bytes, dict[str, str]]:
@@ -155,6 +162,28 @@ class BinanceUsdMTradingClient:
             return self._positive_decimal(payload.get("price"))
         except (TypeError, ValueError):
             raise BinanceAccountClientError("invalid_response") from None
+
+    def ticker_24h(self, symbol: str) -> FuturesTicker24h:
+        """Return Binance USD-M 24-hour ticker data for one symbol."""
+
+        normalized = self._symbol(symbol)
+        payload = self._object(
+            self._public(f"/fapi/v1/ticker/24hr?symbol={normalized}")
+        )
+        if str(payload.get("symbol") or "").upper() != normalized:
+            raise BinanceAccountClientError("invalid_response")
+        try:
+            last_price = self._positive_decimal(payload.get("lastPrice"))
+            price_change_percent = Decimal(str(payload.get("priceChangePercent")))
+        except (InvalidOperation, TypeError, ValueError):
+            raise BinanceAccountClientError("invalid_response") from None
+        if not price_change_percent.is_finite():
+            raise BinanceAccountClientError("invalid_response")
+        return FuturesTicker24h(
+            symbol=normalized,
+            last_price=last_price,
+            price_change_percent=price_change_percent,
+        )
 
     def position_mode(self, api_key: str, api_secret: str) -> Literal["one_way", "hedge"]:
         payload = self._signed("GET", "/fapi/v1/positionSide/dual", api_key, api_secret)

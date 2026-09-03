@@ -677,6 +677,9 @@ def test_backtest_position_calculator_returns_live_price_and_contract_rules(
     client.app.state.backtest_position_calculator_price_provider = (
         lambda symbol: Decimal("500.25") if symbol == "MUUSDT" else Decimal("0")
     )
+    client.app.state.backtest_position_calculator_change_provider = (
+        lambda symbol: Decimal("-1.84") if symbol == "MUUSDT" else Decimal("0")
+    )
     client.app.state.backtest_contract_rules_provider = lambda symbol: {
         "symbol": symbol,
         "tick_size": Decimal("0.01"),
@@ -696,6 +699,7 @@ def test_backtest_position_calculator_returns_live_price_and_contract_rules(
     payload = response.json()
     assert payload["symbol"] == "MUUSDT"
     assert payload["price"] == 500.25
+    assert payload["price_change_percent_24h"] == -1.84
     assert payload["source"] == "test_provider"
     assert payload["strategy_point_size"] == 0.01
     assert payload["exchange_tick_size"] == 0.01
