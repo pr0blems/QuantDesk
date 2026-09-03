@@ -38,18 +38,25 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="lot-calculator-dialog" class="calculator-dialog-backdrop hidden"',
         'id="calculator-lot"',
         'id="calculator-leverage"',
-        'id="calculator-target-roe"',
         'data-calculator-param-key="TP"',
         '/position-calculator?symbol=',
         'this.applyCalculatedPoints("position")',
         'this.applyCalculatedPoints("take-profit")',
         'this.applyCalculatedPoints("all")',
         '一键应用全部设置',
-        '保证金盈利',
+        '按止盈点数、当前合约价格、初始手数和 Binance 杠杆估算实际收益',
+        '基础止盈 TP',
+        '预计净 ROE',
     ):
         assert contract in script
 
-    assert "const priceMovePct = targetRoePct / leverage;" in script
+    assert 'id="calculator-target-roe"' not in script
+    assert "const priceMove = basePoints * pointSize;" in script
+    assert "const priceMovePct = priceMove / price * 100;" in script
+    assert "const grossProfit = priceMove * lot;" in script
+    assert "const grossRoePct = grossProfit / positionMargin * 100;" in script
+    assert "const estimatedNetRoePct = estimatedNetProfit / positionMargin * 100;" in script
+    assert "renderLotCalculator(resetPointFields = false)" in script
     assert 'const lot = Number(this.q("#calculator-lot").value);' in script
     assert 'const leverage = Number(this.q("#calculator-leverage").value);' in script
     assert 'if (scope === "all") this.applyCalculatorPositionSettings();' in script
