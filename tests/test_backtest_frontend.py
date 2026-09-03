@@ -53,10 +53,14 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'id="calculator-target-roe"' not in script
     assert "const priceMove = basePoints * pointSize;" in script
     assert "const priceMovePct = priceMove / price * 100;" in script
+    assert "const longTakeProfitPrice = price + priceMove;" in script
+    assert "const shortTakeProfitPrice = priceMove < price ? price - priceMove : null;" in script
     assert "const grossProfit = priceMove * lot;" in script
     assert "const grossRoePct = grossProfit / positionMargin * 100;" in script
     assert "const estimatedNetRoePct = estimatedNetProfit / positionMargin * 100;" in script
     assert "renderLotCalculator(resetPointFields = false)" in script
+    assert "做多止盈价" in script
+    assert "做空止盈价" in script
     assert 'const lot = Number(this.q("#calculator-lot").value);' in script
     assert 'const leverage = Number(this.q("#calculator-leverage").value);' in script
     assert 'if (scope === "all") this.applyCalculatorPositionSettings();' in script

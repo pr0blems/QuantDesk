@@ -689,13 +689,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const positionMargin = positionNotional / leverage;
     const priceMove = basePoints * pointSize;
     const priceMovePct = priceMove / price * 100;
+    const longTakeProfitPrice = price + priceMove;
+    const shortTakeProfitPrice = priceMove < price ? price - priceMove : null;
     const grossProfit = priceMove * lot;
     const grossRoePct = grossProfit / positionMargin * 100;
     const roundTripCostRate = (Number(this.q("#fee").value || 0) + Number(this.q("#slippage").value || 0)) * 2 / 10000;
     const roundTripCost = positionNotional * roundTripCostRate;
     const estimatedNetProfit = grossProfit - roundTripCost;
     const estimatedNetRoePct = estimatedNetProfit / positionMargin * 100;
-    return { price, lot, leverage, basePoints, pointSize, oneLotNotional, oneLotMargin, positionNotional, positionMargin, priceMove, priceMovePct, grossProfit, grossRoePct, roundTripCost, estimatedNetProfit, estimatedNetRoePct };
+    return { price, lot, leverage, basePoints, pointSize, oneLotNotional, oneLotMargin, positionNotional, positionMargin, priceMove, priceMovePct, longTakeProfitPrice, shortTakeProfitPrice, grossProfit, grossRoePct, roundTripCost, estimatedNetProfit, estimatedNetRoePct };
   }
 
   calculatedPointSettings(basePoints) {
@@ -761,18 +763,19 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (!values) return;
     const quote = this.lotCalculatorQuote;
     const settings = this.calculatedPointSettings(values.basePoints);
+    const shortTakeProfitLabel = values.shortTakeProfitPrice == null ? "不可用" : `${this.price(values.shortTakeProfitPrice)} USDT`;
     this.q("#calculator-symbol").textContent = quote.symbol || this.q("#symbol").value;
     this.q("#calculator-price").textContent = `${this.price(values.price)} USDT`;
     this.q("#calculator-source").textContent = `Binance 最新价 · 策略 1 点=${this.price(values.pointSize)} USDT`;
     this.q("#calculator-facts").replaceChildren(
       this.calculatorFact("1 手名义价值", this.money(values.oneLotNotional), `${values.leverage}x 保证金 ${this.money(values.oneLotMargin)}`),
       this.calculatorFact(`${this.quantity(values.lot)} 手名义价值`, this.money(values.positionNotional), `开仓保证金 ${this.money(values.positionMargin)}`),
-      this.calculatorFact(`基础止盈 ${this.number(values.basePoints, 2)} 点`, `${this.price(values.priceMove)} USDT`, `标的价格变动 ${this.number(values.priceMovePct, 4)}%`),
+      this.calculatorFact(`基础止盈 ${this.number(values.basePoints, 2)} 点`, `做多 ${this.price(values.longTakeProfitPrice)} USDT`, `做空 ${shortTakeProfitLabel} · 价差 ±${this.price(values.priceMove)} USDT（${this.number(values.priceMovePct, 4)}%）`),
       this.calculatorFact("预计毛利润", this.signedMoney(values.grossProfit), `保证金毛 ROE ${this.number(values.grossRoePct, 2)}%`),
       this.calculatorFact("预计净利润", this.signedMoney(values.estimatedNetProfit), `双边成本约 ${this.money(values.roundTripCost)}`),
       this.calculatorFact("预计净 ROE", `${this.number(values.estimatedNetRoePct, 2)}%`, `${values.leverage}x 逐仓保证金口径`),
     );
-    this.q("#calculator-summary").textContent = `基础止盈 ${this.number(values.basePoints, 2)} 点时，${values.leverage}x 杠杆预计毛 ROE ${this.number(values.grossRoePct, 2)}%，毛利润 ${this.money(values.grossProfit)}。`;
+    this.q("#calculator-summary").textContent = `基础止盈 ${this.number(values.basePoints, 2)} 点时，做多止盈价 ${this.price(values.longTakeProfitPrice)} USDT、做空止盈价 ${shortTakeProfitLabel}；${values.leverage}x 杠杆预计毛 ROE ${this.number(values.grossRoePct, 2)}%，毛利润 ${this.money(values.grossProfit)}。`;
     this.q("#calculator-note").textContent = `扣除双边手续费与滑点后，预计净利润 ${this.money(values.estimatedNetProfit)}、净 ROE ${this.number(values.estimatedNetRoePct, 2)}%；当前 ${this.quantity(values.lot)} 手预计占用保证金 ${this.money(values.positionMargin)}。`;
     if (resetPointFields || !this.q("#calculator-point-preview").children.length) {
       this.q("#calculator-point-preview").replaceChildren(...[
