@@ -18,11 +18,15 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="data-availability"',
         'id="available-range"',
         'id="available-bars"',
-        'type="search" list="symbol-options"',
-        'id="symbol-options"',
+        'id="open-symbol-picker"',
+        'id="symbol-picker-dialog" class="symbol-dialog-backdrop hidden"',
+        'id="symbol-search" type="search"',
+        'id="symbol-choice-list"',
+        'id="confirm-symbol-picker"',
         'id="range-feedback"',
-        "this.handleSymbolSearch()",
-        "请输入并选择列表中的有效交易品种",
+        "this.openSymbolPicker()",
+        "this.confirmSymbolSelection()",
+        "请至少选择 1 个交易品种后再确定",
         "超出历史库存，已自动使用最大可用范围",
         "首次回测将按需同步；完成后显示具体范围",
         'id="market-data-source" name="market_data_source"',
@@ -137,7 +141,7 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'button.setAttribute("aria-pressed", String(active));' in script
     assert "this.renderAvailability(bounds);" in script
     assert "this.populateSymbolSearch(symbols" in script
-    assert 'input.disabled = !this.symbolOptions.length;' in script
+    assert 'this.q("#open-symbol-picker").disabled = !this.symbolOptions.length;' in script
     assert 'new Intl.NumberFormat("zh-CN").format(bars)' in script
     assert 'start.min = min || "";' in script
     assert '<aside class="history-panel">' not in script
@@ -176,7 +180,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260904-config-dialog-1" in controller
+    assert "/next/assets/backtest.css?v=20260904-symbol-dialog-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
@@ -188,7 +192,11 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
 
     for contract in (
         'id="selected-symbols"',
-        'id="add-symbol"',
+        'id="open-symbol-picker"',
+        'aria-controls="symbol-picker-dialog"',
+        'role="listbox" aria-multiselectable="true"',
+        'this.draftSymbols = [...this.selectedSymbols]',
+        'this.selectedSymbols = this.draftSymbols.filter',
         'id="save-default-profile"',
         'id="save-symbol-profile"',
         'id="profile-status"',
@@ -207,6 +215,9 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
     assert ".backtest-action-row" in stylesheet
     assert ".selected-symbols" in stylesheet
     assert ".symbol-chip" in stylesheet
+    assert ".symbol-dialog-backdrop" in stylesheet
+    assert ".symbol-choice-list" in stylesheet
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in stylesheet
 
 
 def test_backtest_configuration_uses_wide_dialog() -> None:

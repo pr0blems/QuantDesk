@@ -8,6 +8,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.catalog = { strategies: [], symbols: [], timeframes: [], bounds: {} };
     this.symbolOptions = [];
     this.selectedSymbols = [];
+    this.draftSymbols = [];
     this.profileRequest = 0;
     this.profileSaveInFlight = false;
     this.history = [];
@@ -61,7 +62,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-config-dialog-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-symbol-dialog-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -94,12 +95,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
             <section id="market-section" class="config-section">
               <div class="section-head"><div><span class="section-index">02</span><strong>市场与区间</strong></div><small id="data-bound">等候行情目录</small></div>
               <div class="field-grid two">
-                <label>交易品种
-                  <span class="symbol-picker"><input id="symbol" name="symbol" type="search" list="symbol-options" placeholder="加载中…" autocomplete="off" spellcheck="false" required><button id="add-symbol" class="symbol-add" type="button">添加</button></span>
+                <div class="symbol-field">
+                  <span class="field-label">交易品种</span>
+                  <input id="symbol" name="symbol" type="hidden">
+                  <button id="open-symbol-picker" class="symbol-selection-trigger" type="button" aria-controls="symbol-picker-dialog" aria-expanded="false" disabled>
+                    <span><strong id="symbol-selection-title">正在加载交易品种…</strong><small id="symbol-selection-summary">请稍候</small></span><b>选择</b>
+                  </button>
                   <span id="selected-symbols" class="selected-symbols" aria-label="已选择的交易品种"></span>
                   <small class="field-help">可添加多个品种同时回测；结果分别保存，不混合计算资金。</small>
-                  <datalist id="symbol-options"></datalist>
-                </label>
+                </div>
                 <label>数据周期<select id="timeframe" name="timeframe" required><option value="">加载中…</option></select></label>
               </div>
               <div class="field-grid data-source-fields">
@@ -239,6 +243,24 @@ class BacktestWorkbench extends window.QuantDeskPageController {
           </section>
         </div>
 
+        <div id="symbol-picker-dialog" class="symbol-dialog-backdrop hidden" role="presentation">
+          <section class="symbol-dialog" role="dialog" aria-modal="true" aria-labelledby="symbol-dialog-title">
+            <header class="symbol-dialog-head">
+              <div><span>MARKET UNIVERSE</span><h2 id="symbol-dialog-title">选择交易品种</h2><p>搜索并勾选一个或多个品种，点击确定后应用到本次回测。</p></div>
+              <button id="close-symbol-picker" class="dialog-close" type="button" aria-label="关闭交易品种选择">×</button>
+            </header>
+            <div class="symbol-dialog-body">
+              <label class="symbol-search-field"><span>搜索代码或名称</span><input id="symbol-search" type="search" placeholder="例如 AAPL、TSLA、MU" autocomplete="off" spellcheck="false"></label>
+              <div class="symbol-dialog-toolbar"><span id="symbol-match-count">--</span><button id="clear-symbol-selection" type="button">清空待选</button></div>
+              <div id="symbol-choice-list" class="symbol-choice-list" role="listbox" aria-multiselectable="true"></div>
+            </div>
+            <footer class="symbol-dialog-foot">
+              <span id="symbol-dialog-status" role="status" aria-live="polite">尚未选择交易品种</span>
+              <div><button id="cancel-symbol-picker" type="button">取消</button><button id="confirm-symbol-picker" class="primary" type="button">确定选择</button></div>
+            </footer>
+          </section>
+        </div>
+
         <div id="history-dialog" class="history-dialog-backdrop hidden" role="presentation">
           <section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-dialog-title">
             <header class="history-dialog-head">
@@ -326,17 +348,23 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#open-backtest-config").addEventListener("click", () => this.openConfigDialog());
     this.q("#close-backtest-config").addEventListener("click", () => this.closeConfigDialog());
     this.q("#backtest-config-dialog").addEventListener("keydown", (event) => {
-      if (event.key === "Escape") this.closeConfigDialog();
+      if (event.key === "Escape" && this.q("#symbol-picker-dialog").classList.contains("hidden")) this.closeConfigDialog();
     });
     this.q("#backtest-form").addEventListener("submit", (event) => this.runBacktest(event));
-    this.q("#symbol").addEventListener("input", () => this.handleSymbolSearch());
-    this.q("#symbol").addEventListener("change", () => this.handleSymbolSearch(true));
-    this.q("#symbol").addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== ",") return;
-      event.preventDefault();
-      this.handleSymbolSearch(true);
+    this.q("#open-symbol-picker").addEventListener("click", () => this.openSymbolPicker());
+    this.q("#close-symbol-picker").addEventListener("click", () => this.closeSymbolPicker());
+    this.q("#cancel-symbol-picker").addEventListener("click", () => this.closeSymbolPicker());
+    this.q("#confirm-symbol-picker").addEventListener("click", () => this.confirmSymbolSelection());
+    this.q("#clear-symbol-selection").addEventListener("click", () => {
+      this.draftSymbols = [];
+      this.renderSymbolChoices();
     });
-    this.q("#add-symbol").addEventListener("click", () => this.handleSymbolSearch(true));
+    this.q("#symbol-search").addEventListener("input", () => this.renderSymbolChoices());
+    this.q("#symbol-picker-dialog").addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      this.closeSymbolPicker();
+    });
     this.q("#save-default-profile").addEventListener("click", () => this.saveParameterProfile("default"));
     this.q("#save-symbol-profile").addEventListener("click", () => this.saveParameterProfile("symbol"));
     this.q("#timeframe").addEventListener("change", () => this.syncBounds());
@@ -386,6 +414,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.catalog = { strategies: [], symbols: [], timeframes: [], bounds: {} };
     this.symbolOptions = [];
     this.selectedSymbols = [];
+    this.draftSymbols = [];
     this.profileRequest += 1;
     this.profileSaveInFlight = false;
     this.history = [];
@@ -411,10 +440,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#data-availability").classList.remove("empty");
     const symbolInput = this.q("#symbol");
     symbolInput.value = "";
-    symbolInput.placeholder = "登录后加载…";
-    symbolInput.disabled = true;
-    symbolInput.setCustomValidity("");
-    this.q("#symbol-options").replaceChildren();
+    this.q("#open-symbol-picker").disabled = true;
     this.renderSelectedSymbols();
     this.q("#profile-status").textContent = "选择策略后可加载和保存交易参数。";
     const timeframeOption = this.node("option", "", "登录后加载…");
@@ -433,6 +459,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       button.setAttribute("aria-pressed", "false");
     });
     this.renderHistory();
+    this.closeSymbolPicker(false);
     this.closeConfigDialog(false);
     this.closeHistory();
     this.closeLotCalculator();
@@ -552,57 +579,86 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.symbolOptions = options
       .map((option) => ({ ...option, value: String(option.value || "").trim().toUpperCase() }))
       .filter((option) => option.value);
-    const nodes = this.symbolOptions.map((option) => {
-      const node = this.node("option");
-      node.value = option.value;
-      node.label = option.label === option.value ? option.value : `${option.value} · ${option.label}`;
-      return node;
-    });
-    this.q("#symbol-options").replaceChildren(...nodes);
-    input.placeholder = placeholder;
-    input.disabled = !this.symbolOptions.length;
     const allowed = new Set(this.symbolOptions.map((item) => item.value));
     this.selectedSymbols = this.selectedSymbols.filter((symbol) => allowed.has(symbol));
     const initial = allowed.has(previous) ? previous : this.symbolOptions[0]?.value || "";
     if (!this.selectedSymbols.length && initial) this.selectedSymbols = [initial];
     input.value = this.selectedSymbols[0] || initial;
-    input.setCustomValidity("");
+    this.q("#open-symbol-picker").disabled = !this.symbolOptions.length;
+    this.q("#symbol-selection-summary").textContent = this.symbolOptions.length ? placeholder : "当前策略没有可用品种";
     this.renderSelectedSymbols();
+    if (!this.q("#symbol-picker-dialog").classList.contains("hidden")) this.renderSymbolChoices();
   }
 
-  handleSymbolSearch(commit = false) {
-    const input = this.q("#symbol");
-    const normalized = input.value.trim().toUpperCase();
-    if (input.value !== normalized) input.value = normalized;
-    const matched = this.symbolOptions.find((item) => item.value === normalized);
-    input.setCustomValidity(matched || this.selectedSymbols.length ? "" : "请输入并选择列表中的有效交易品种");
-    if (matched) {
-      if (commit) this.addSelectedSymbol(matched.value);
-      this.syncBounds();
-      if (commit) void this.loadParameterProfile();
+  openSymbolPicker() {
+    if (!this.symbolOptions.length) return;
+    this.draftSymbols = [...this.selectedSymbols];
+    this.q("#symbol-search").value = "";
+    this.q("#symbol-picker-dialog").classList.remove("hidden");
+    this.q("#open-symbol-picker").setAttribute("aria-expanded", "true");
+    this.renderSymbolChoices();
+    this.q("#symbol-search").focus();
+  }
+
+  closeSymbolPicker(restoreFocus = true) {
+    this.q("#symbol-picker-dialog")?.classList.add("hidden");
+    const opener = this.q("#open-symbol-picker");
+    opener?.setAttribute("aria-expanded", "false");
+    if (restoreFocus) opener?.focus();
+  }
+
+  renderSymbolChoices() {
+    const query = this.q("#symbol-search").value.trim().toUpperCase();
+    const matches = this.symbolOptions.filter((option) => {
+      const label = String(option.label || "").toUpperCase();
+      return !query || option.value.includes(query) || label.includes(query);
+    });
+    this.q("#symbol-match-count").textContent = query
+      ? `找到 ${matches.length} 个品种`
+      : `全部 ${matches.length} 个品种`;
+    this.q("#symbol-dialog-status").textContent = this.draftSymbols.length
+      ? `待确认：已选择 ${this.draftSymbols.length} 个品种`
+      : "请至少选择 1 个交易品种";
+    this.q("#symbol-dialog-status").classList.toggle("error", !this.draftSymbols.length);
+    const list = this.q("#symbol-choice-list");
+    if (!matches.length) {
+      list.replaceChildren(this.node("div", "symbol-choice-empty", "没有匹配的交易品种，请更换关键词。"));
       return;
     }
-    this.q("#available-range").textContent = normalized ? "未找到匹配的交易品种" : "请输入或选择交易品种";
-    this.q("#available-bars").textContent = "可输入股票名称或合约代码进行搜索";
-    this.q("#data-bound").textContent = "等待选择有效品种";
-    this.q("#data-availability").classList.add("empty");
+    list.replaceChildren(...matches.map((option) => {
+      const selected = this.draftSymbols.includes(option.value);
+      const button = this.node("button", `symbol-choice${selected ? " selected" : ""}`);
+      button.type = "button";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", String(selected));
+      button.dataset.symbol = option.value;
+      const mark = this.node("span", "symbol-choice-mark", selected ? "✓" : "");
+      const copy = this.node("span", "symbol-choice-copy");
+      copy.append(
+        this.node("strong", "", option.value),
+        this.node("small", "", option.label && option.label !== option.value ? option.label : "Binance 合约"),
+      );
+      button.append(mark, copy);
+      button.addEventListener("click", () => {
+        if (selected) this.draftSymbols = this.draftSymbols.filter((item) => item !== option.value);
+        else this.draftSymbols = [...this.draftSymbols, option.value];
+        this.renderSymbolChoices();
+      });
+      return button;
+    }));
   }
 
-  addSelectedSymbol(symbol) {
-    const normalized = String(symbol || "").trim().toUpperCase();
-    if (!this.symbolOptions.some((item) => item.value === normalized)) return false;
-    if (!this.selectedSymbols.includes(normalized)) this.selectedSymbols.push(normalized);
-    this.q("#symbol").value = normalized;
-    this.q("#symbol").setCustomValidity("");
-    this.renderSelectedSymbols();
-    return true;
-  }
-
-  removeSelectedSymbol(symbol) {
-    this.selectedSymbols = this.selectedSymbols.filter((item) => item !== symbol);
-    if (!this.selectedSymbols.length && this.symbolOptions.length) this.selectedSymbols = [this.symbolOptions[0].value];
+  confirmSymbolSelection() {
+    if (!this.draftSymbols.length) {
+      this.q("#symbol-dialog-status").textContent = "请至少选择 1 个交易品种后再确定";
+      this.q("#symbol-dialog-status").classList.add("error");
+      return;
+    }
+    const allowed = new Set(this.symbolOptions.map((item) => item.value));
+    this.selectedSymbols = this.draftSymbols.filter((symbol) => allowed.has(symbol));
     this.q("#symbol").value = this.selectedSymbols[0] || "";
     this.renderSelectedSymbols();
+    this.closeSymbolPicker();
     this.syncBounds();
     void this.loadParameterProfile();
   }
@@ -610,28 +666,28 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   renderSelectedSymbols() {
     const container = this.q("#selected-symbols");
     if (!container) return;
-    container.replaceChildren(...this.selectedSymbols.map((symbol) => {
+    const visible = this.selectedSymbols.slice(0, 4);
+    container.replaceChildren(...visible.map((symbol) => {
       const chip = this.node("span", "symbol-chip");
-      const label = this.node("b", "", symbol);
-      const remove = this.node("button", "", "×");
-      remove.type = "button";
-      remove.setAttribute("aria-label", `移除 ${symbol}`);
-      remove.addEventListener("click", () => this.removeSelectedSymbol(symbol));
-      chip.append(label, remove);
+      chip.append(this.node("b", "", symbol));
       return chip;
     }));
+    if (this.selectedSymbols.length > visible.length) {
+      container.append(this.node("span", "symbol-chip symbol-chip-more", `另 ${this.selectedSymbols.length - visible.length} 个`));
+    }
+    const count = this.selectedSymbols.length;
+    this.q("#symbol-selection-title").textContent = count ? `已选择 ${count} 个交易品种` : "选择交易品种";
+    this.q("#symbol-selection-summary").textContent = count
+      ? this.selectedSymbols.slice(0, 3).join("、") + (count > 3 ? "…" : "")
+      : this.symbolOptions.length ? "点击打开品种列表" : "当前策略没有可用品种";
   }
 
   symbolsForRun() {
-    const typed = this.q("#symbol").value.trim().toUpperCase();
-    const values = [...this.selectedSymbols];
-    if (this.symbolOptions.some((item) => item.value === typed) && !values.includes(typed)) values.push(typed);
-    return values;
+    return [...this.selectedSymbols];
   }
 
   primarySymbol() {
-    const typed = this.q("#symbol").value.trim().toUpperCase();
-    return this.symbolOptions.some((item) => item.value === typed) ? typed : this.selectedSymbols[0] || "";
+    return this.selectedSymbols[0] || "";
   }
 
   selectStrategy(id) {
@@ -797,6 +853,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   closeConfigDialog(restoreFocus = true) {
+    this.closeSymbolPicker(false);
     this.q("#backtest-config-dialog")?.classList.add("hidden");
     const opener = this.q("#open-backtest-config");
     opener?.setAttribute("aria-expanded", "false");
