@@ -100,7 +100,7 @@ function Workspace({ user, onLogout }: { user: CurrentUser; onLogout: () => Prom
     </aside>
     <div className="workspace">
       <header className="mobile-bar"><button className="menu-toggle" type="button" aria-label="打开功能菜单" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>菜单</button><strong>{pageTitles[page]}</strong><span className="status-dot" title="服务状态" /></header>
-      <main className={`workspace-content${page === "monitor" ? " monitor-mode" : page === "ai-monitor" ? " ai-monitor-mode" : ""}`}>
+      <main className={`workspace-content${page === "monitor" ? " monitor-mode" : page === "ai-monitor" ? " ai-monitor-mode" : page === "backtest" ? " backtest-mode" : ""}`}>
         <section className={`workspace-panel${page === "monitor" ? "" : " hidden"}`}><PageControllerPanel active={page === "monitor"} name="contract-monitor" /></section>
         <section className={`workspace-panel${page === "ai-monitor" ? "" : " hidden"}`}><PageControllerPanel active={page === "ai-monitor"} name="ai-monitor-dashboard" /></section>
         <section className={`workspace-panel${page === "paper" ? "" : " hidden"}`}><PageControllerPanel active={page === "paper"} name="paper-dashboard" /></section>

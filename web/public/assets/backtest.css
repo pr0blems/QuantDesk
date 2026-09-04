@@ -109,7 +109,7 @@ button { cursor: pointer; }
 .run-button.loading span { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.result-stage { min-width: 0; min-height: calc(100vh - 116px); overflow: hidden; border: 1px solid var(--bt-line); border-radius: 2px; background: var(--bt-panel); box-shadow: none; }
+.result-stage { min-width: 0; min-height: calc(100vh - 116px); overflow: hidden; container-type: inline-size; border: 1px solid var(--bt-line); border-radius: 2px; background: var(--bt-panel); box-shadow: none; }
 .stage-toolbar { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 9px 13px; border-bottom: 1px solid var(--bt-line-soft); background: rgba(13, 29, 46, .78); }
 .stage-toolbar > div { display: flex; align-items: center; gap: 10px; }
 .stage-toolbar strong { font-size: 19.2px; }
@@ -196,6 +196,12 @@ button { cursor: pointer; }
 .trade-cycle-rail .trade-time-arrow { min-height: 14px; transform: rotate(90deg); }
 .trade-cycle-rail .trade-execution-grid { grid-template-columns: minmax(0, 1fr); }
 .trade-cycle-rail .trade-cycle-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+@container (max-width: 960px) {
+  .stage-layout.has-result { grid-template-columns: minmax(0, 1fr); }
+  .trade-cycle-rail { position: static; padding: 0 14px 14px; }
+  .trade-cycle-rail .trades-panel { max-height: 620px; }
+}
 .panel-head { min-height: 43px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 11px; border-bottom: 1px solid var(--bt-line-soft); }
 .panel-head > div:first-child { display: grid; gap: 3px; }
 .panel-head strong { font-size: 16px; }

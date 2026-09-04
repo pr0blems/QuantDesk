@@ -157,3 +157,14 @@ def test_backtest_exposes_calculation_pipeline_and_progressive_replay() -> None:
     assert "grid-template-columns: minmax(0, 1fr) minmax(320px, 372px)" in stylesheet
     assert ".trade-cycle-rail {" in stylesheet
     assert "position: sticky" in stylesheet
+    assert "container-type: inline-size" in stylesheet
+    assert "@container (max-width: 960px)" in stylesheet
+
+
+def test_backtest_workspace_uses_adaptive_page_width() -> None:
+    app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
+
+    assert 'page === "backtest" ? " backtest-mode"' in app
+    assert ".workspace-content.backtest-mode" in stylesheet
+    assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet

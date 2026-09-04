@@ -13,6 +13,7 @@
 .controller-panel-state.error { border-color: rgba(255, 107, 125, .25); }
 .controller-panel-state.error > span { color: #ff6b7d; border-color: rgba(255, 107, 125, .35); }
 .workspace-content.ai-monitor-mode { width: calc(100% - 24px); padding: 12px 0 24px; }
+.workspace-content.backtest-mode { width: calc(100% - clamp(16px, 1.25vw, 32px)); padding: 12px 0 24px; }
 
 @media (max-width: 780px) {
   .sidebar-backdrop.open { display: block; }
