@@ -176,7 +176,34 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260904-responsive-workspace-1" in controller
+    assert "/next/assets/backtest.css?v=20260904-strategy-profiles-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
+
+
+def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
+    script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
+
+    for contract in (
+        'id="selected-symbols"',
+        'id="add-symbol"',
+        'id="save-default-profile"',
+        'id="save-symbol-profile"',
+        'id="profile-status"',
+        'saveParameterProfile("default")',
+        'saveParameterProfile("symbol")',
+        "symbolsForRun()",
+        "primarySymbol()",
+        "const concurrency = Math.max(1, Math.min(2",
+        "await Promise.all(Array.from({ length: concurrency }, () => runNext()))",
+        "多品种回测完成",
+        "专有交易策略参数已保存",
+        "/strategy-parameters/",
+    ):
+        assert contract in script
+
+    assert ".backtest-action-row" in stylesheet
+    assert ".selected-symbols" in stylesheet
+    assert ".symbol-chip" in stylesheet

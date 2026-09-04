@@ -73,6 +73,7 @@ from .models import (
     BacktestRun,
     BacktestTrade,
     MarketOpportunity,
+    StrategyParameterProfile,
     StrategyRevision,
     User,
     UserOpportunityState,
@@ -101,6 +102,7 @@ from .schemas import (
     PredictionAlgorithmUpdate,
     RefreshRequest,
     RegisterRequest,
+    StrategyParameterProfileSaveRequest,
     TokenPair,
     UserOut,
 )
@@ -571,7 +573,9 @@ def _strategy_version(strategy: dict[str, Any]) -> str:
     return hashlib.sha256(definition.encode("utf-8")).hexdigest()[:16]
 
 
-def _engine_config(payload: BacktestRunRequest, strategy: dict[str, Any]) -> dict[str, Any]:
+def _normalized_strategy_parameters(
+    supplied: Mapping[str, Any], strategy: dict[str, Any]
+) -> dict[str, int | float]:
     definitions = {
         item.get("key"): item
         for item in strategy.get("params", [])
@@ -579,16 +583,21 @@ def _engine_config(payload: BacktestRunRequest, strategy: dict[str, Any]) -> dic
     }
     params: dict[str, int | float] = {}
     for key, definition in definitions.items():
-        value = payload.params.get(key, definition.get("default"))
+        value = supplied.get(key, definition.get("default"))
         if value is None:
             raise HTTPException(status_code=503, detail="backtest strategy catalog is invalid")
         if definition.get("type") == "integer" and float(value).is_integer():
             params[key] = int(value)
         else:
             params[key] = float(value)
-    for key, value in payload.params.items():
+    for key, value in supplied.items():
         if key not in definitions:
             params[key] = float(value)
+    return params
+
+
+def _engine_config(payload: BacktestRunRequest, strategy: dict[str, Any]) -> dict[str, Any]:
+    params = _normalized_strategy_parameters(payload.params, strategy)
     start_at = datetime.combine(payload.start_date, time.min, tzinfo=UTC)
     end_at = datetime.combine(
         payload.end_date + timedelta(days=1), time.min, tzinfo=UTC
@@ -611,6 +620,23 @@ def _engine_config(payload: BacktestRunRequest, strategy: dict[str, Any]) -> dic
         "max_holding_bars": payload.max_holding_bars,
         "margin_mode": payload.margin_mode,
         "params": params,
+    }
+
+
+def _strategy_parameter_profile_out(
+    profile: StrategyParameterProfile | None,
+) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    return {
+        "id": profile.public_id,
+        "scope": "default" if profile.scope_key == "*" else "symbol",
+        "symbol": None if profile.scope_key == "*" else profile.scope_key,
+        "strategy_version": profile.strategy_version,
+        "parameters": _json_safe(profile.parameters_json),
+        "execution": _json_safe(profile.execution_json),
+        "created_at": _utc_iso(profile.created_at),
+        "updated_at": _utc_iso(profile.updated_at),
     }
 
 
@@ -777,24 +803,16 @@ def _normalize_martingale_backtest_result(
             return notional / quantity
 
         long_opening_fills = [
-            item
-            for item in opening_fills
-            if enum_value(item.get("direction")) in {"buy", "long"}
+            item for item in opening_fills if enum_value(item.get("direction")) in {"buy", "long"}
         ]
         short_opening_fills = [
-            item
-            for item in opening_fills
-            if enum_value(item.get("direction")) in {"sell", "short"}
+            item for item in opening_fills if enum_value(item.get("direction")) in {"sell", "short"}
         ]
         long_closing_fills = [
-            item
-            for item in closing_fills
-            if enum_value(item.get("direction")) in {"buy", "long"}
+            item for item in closing_fills if enum_value(item.get("direction")) in {"buy", "long"}
         ]
         short_closing_fills = [
-            item
-            for item in closing_fills
-            if enum_value(item.get("direction")) in {"sell", "short"}
+            item for item in closing_fills if enum_value(item.get("direction")) in {"sell", "short"}
         ]
         quantity = sum((decimal(item.get("quantity")) for item in opening_fills), Decimal("0"))
         if quantity < MIN_PERSISTED_QUANTITY:
@@ -839,9 +857,7 @@ def _normalize_martingale_backtest_result(
         for fill_index, item in enumerate(cycle_fills, start=1):
             action = enum_value(item.get("action"))
             position_direction = enum_value(item.get("direction"))
-            position_side = (
-                "long" if position_direction in {"buy", "long"} else "short"
-            )
+            position_side = "long" if position_direction in {"buy", "long"} else "short"
             phase = "entry" if action in {"open", "add"} else "exit"
             # ReplayFill.direction records the position leg, not the submitted
             # order side.  Closing a long therefore sells, while closing a
@@ -887,10 +903,15 @@ def _normalize_martingale_backtest_result(
                 "exit_price": float(weighted_price(closing_fills)),
                 "quantity": float(quantity),
                 "long_quantity": float(
-                    sum((decimal(item.get("quantity")) for item in long_opening_fills), Decimal("0"))
+                    sum(
+                        (decimal(item.get("quantity")) for item in long_opening_fills), Decimal("0")
+                    )
                 ),
                 "short_quantity": float(
-                    sum((decimal(item.get("quantity")) for item in short_opening_fills), Decimal("0"))
+                    sum(
+                        (decimal(item.get("quantity")) for item in short_opening_fills),
+                        Decimal("0"),
+                    )
                 ),
                 "long_entry_price": float(weighted_price(long_opening_fills)),
                 "long_exit_price": float(weighted_price(long_closing_fills)),
@@ -1839,14 +1860,10 @@ def optimize_monitor_prediction_algorithm(
             max_tokens=max_tokens,
         )
     except PredictionOptimizationUnavailable as exc:
-        _audit_prediction_ai_rejection(
-            db, request, user_id, current_version, model_name, exc
-        )
+        _audit_prediction_ai_rejection(db, request, user_id, current_version, model_name, exc)
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except StrategyAiError as exc:
-        _audit_prediction_ai_rejection(
-            db, request, user_id, current_version, model_name, exc
-        )
+        _audit_prediction_ai_rejection(db, request, user_id, current_version, model_name, exc)
         status_by_category = {
             "not_configured": 503,
             "timeout": 504,
@@ -1957,23 +1974,23 @@ def _prediction_ai_trace_database_analysis(
         return {"available": False, "reason": "source_config_version_missing"}
 
     submitted_prompt = metadata.get("submitted_prompt")
-    submitted_user = (
-        submitted_prompt.get("user") if isinstance(submitted_prompt, Mapping) else None
-    )
+    submitted_user = submitted_prompt.get("user") if isinstance(submitted_prompt, Mapping) else None
     try:
         submitted_payload = json.loads(submitted_user) if isinstance(submitted_user, str) else {}
     except (TypeError, ValueError, json.JSONDecodeError):
         submitted_payload = {}
     submitted_horizons = (
-        submitted_payload.get("training_statistics", {})
-        .get("history", {})
-        .get("horizons", {})
+        submitted_payload.get("training_statistics", {}).get("history", {}).get("horizons", {})
         if isinstance(submitted_payload, Mapping)
         else {}
     )
-    if isinstance(submitted_horizons, Mapping) and submitted_horizons and all(
-        isinstance(item, Mapping) and isinstance(item.get("training_history_analysis"), Mapping)
-        for item in submitted_horizons.values()
+    if (
+        isinstance(submitted_horizons, Mapping)
+        and submitted_horizons
+        and all(
+            isinstance(item, Mapping) and isinstance(item.get("training_history_analysis"), Mapping)
+            for item in submitted_horizons.values()
+        )
     ):
         return {"available": False, "reason": "submitted_prompt_already_contains_analysis"}
 
@@ -2017,10 +2034,7 @@ def _prediction_ai_trace_database_analysis(
             outcome_updated_at_ms = int(row.get("outcome_updated_at_ms") or 0)
         except (TypeError, ValueError):
             outcome_updated_at_ms = 0
-        if (
-            audit_created_at_ms is not None
-            and outcome_updated_at_ms > audit_created_at_ms
-        ):
+        if audit_created_at_ms is not None and outcome_updated_at_ms > audit_created_at_ms:
             continue
         source_config = source_config or config
         matching_rows.append(row)
@@ -2124,9 +2138,7 @@ def monitor_prediction_algorithm_ai_history(
         AuditLog.resource_type == "admin_setting",
         AuditLog.resource_id == battle.ALGORITHM_SETTING_KEY,
     )
-    total = int(
-        db.scalar(select(func.count()).select_from(AuditLog).where(*filters)) or 0
-    )
+    total = int(db.scalar(select(func.count()).select_from(AuditLog).where(*filters)) or 0)
     audits = db.scalars(
         select(AuditLog)
         .where(*filters)
@@ -2550,6 +2562,130 @@ def update_monitor_watchlist(
     return user.monitor_watchlist
 
 
+@router.get("/backtests/strategy-parameters/{strategy_id}")
+def get_strategy_parameter_profiles(
+    strategy_id: str,
+    symbol: str | None = Query(
+        default=None,
+        min_length=2,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+    ),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return default, exact-symbol and merged parameters for one strategy."""
+
+    strategy = get_user_strategy(db, user.id, strategy_id)
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="strategy not found")
+    normalized_symbol = symbol.strip().upper() if symbol else None
+    scope_keys = ["*"] + ([normalized_symbol] if normalized_symbol else [])
+    profiles = list(
+        db.scalars(
+            select(StrategyParameterProfile).where(
+                StrategyParameterProfile.user_id == user.id,
+                StrategyParameterProfile.strategy_id == strategy.id,
+                StrategyParameterProfile.scope_key.in_(scope_keys),
+            )
+        ).all()
+    )
+    by_scope = {profile.scope_key: profile for profile in profiles}
+    default_profile = by_scope.get("*")
+    symbol_profile = by_scope.get(normalized_symbol) if normalized_symbol else None
+    effective_parameters = dict(strategy.parameters_json or {})
+    effective_execution = dict(strategy.risk_defaults_json or {})
+    effective_scope = "strategy"
+    for profile in (default_profile, symbol_profile):
+        if profile is None:
+            continue
+        effective_parameters.update(profile.parameters_json or {})
+        effective_execution.update(profile.execution_json or {})
+        effective_scope = "default" if profile.scope_key == "*" else "symbol"
+    return {
+        "strategy_id": strategy.public_id,
+        "strategy_name": strategy.name,
+        "strategy_version": strategy.version,
+        "symbol": normalized_symbol,
+        "default_profile": _strategy_parameter_profile_out(default_profile),
+        "symbol_profile": _strategy_parameter_profile_out(symbol_profile),
+        "effective": {
+            "scope": effective_scope,
+            "parameters": _json_safe(effective_parameters),
+            "execution": _json_safe(effective_execution),
+        },
+    }
+
+
+@router.put("/backtests/strategy-parameters/{strategy_id}")
+def save_strategy_parameter_profile(
+    strategy_id: str,
+    payload: StrategyParameterProfileSaveRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Upsert a mutable strategy runtime profile without revising strategy code."""
+
+    strategy = get_user_strategy(db, user.id, strategy_id)
+    if strategy is None or strategy.status != "active":
+        raise HTTPException(status_code=404, detail="strategy not found")
+    revision = current_strategy_revision(db, strategy)
+    if not _strategy_is_backtest_compatible(strategy, revision):
+        raise HTTPException(status_code=422, detail="当前策略不支持保存交易运行参数")
+    catalog_strategy = strategy_to_catalog_item(strategy)
+    normalized_parameters = _normalized_strategy_parameters(payload.params, catalog_strategy)
+    scope_key = "*" if payload.scope == "default" else str(payload.symbol)
+    profile = db.scalar(
+        select(StrategyParameterProfile).where(
+            StrategyParameterProfile.user_id == user.id,
+            StrategyParameterProfile.strategy_id == strategy.id,
+            StrategyParameterProfile.scope_key == scope_key,
+        )
+    )
+    now = utcnow()
+    if profile is None:
+        profile = StrategyParameterProfile(
+            public_id=str(uuid.uuid4()),
+            user_id=user.id,
+            strategy_id=strategy.id,
+            scope_key=scope_key,
+            strategy_version=strategy.version,
+            parameters_json=normalized_parameters,
+            execution_json=payload.execution.model_dump(mode="json"),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(profile)
+    else:
+        profile.strategy_version = strategy.version
+        profile.parameters_json = normalized_parameters
+        profile.execution_json = payload.execution.model_dump(mode="json")
+        profile.updated_at = now
+    _audit(
+        db,
+        request,
+        "strategy.parameter_profile.save",
+        user.id,
+        "strategy_parameter_profile",
+        profile.public_id,
+    )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="策略参数配置同时被更新，请重试") from None
+    db.refresh(profile)
+    return {
+        "strategy_id": strategy.public_id,
+        "strategy_name": strategy.name,
+        "profile": _strategy_parameter_profile_out(profile),
+        "message": (
+            "默认交易策略参数已保存" if scope_key == "*" else f"{scope_key} 专有交易策略参数已保存"
+        ),
+    }
+
+
 @router.get("/backtests/position-calculator")
 def backtest_position_calculator(
     request: Request,
@@ -2574,9 +2710,7 @@ def backtest_position_calculator(
     try:
         if callable(price_provider):
             raw_price = price_provider(normalized)
-            raw_change_percent = (
-                change_provider(normalized) if callable(change_provider) else None
-            )
+            raw_change_percent = change_provider(normalized) if callable(change_provider) else None
             source = "test_provider"
         else:
             client = getattr(state, "binance_trading_client", None)
@@ -2670,9 +2804,7 @@ def create_backtest(
     ensure_user_default_strategies(db, user_id)
     selected = get_user_strategy(db, user_id, payload.strategy_id)
     selected_revision = current_strategy_revision(db, selected) if selected is not None else None
-    if selected is not None and not _strategy_is_backtest_compatible(
-        selected, selected_revision
-    ):
+    if selected is not None and not _strategy_is_backtest_compatible(selected, selected_revision):
         raise HTTPException(
             status_code=422,
             detail="当前策略不兼容标准 K 线回测，请先完成校验或使用对应的专用回测入口",

@@ -12,6 +12,7 @@ from typing import Any
 from ..domain.exit_policy import ExitLevelPlan
 from ..domain.runtime import DecisionEnvelope, decision_record_key
 from ..strategy_evaluator import resolve_strategy_timing_policy
+from .strategy_parameter_profiles import apply_parameter_profile
 from .strategy_signals import (
     EvaluatedStrategySignal,
     build_builtin_strategy_evidence,
@@ -60,11 +61,20 @@ def evaluate_account_strategy(
     full_evaluator: Callable[[dict[str, Any], dict[str, Any]], Any] | None = None,
     source_validator: Callable[[str, str], Any] | None = None,
     source_evaluator: Callable[..., Any] | None = None,
+    query: QueryRows | None = None,
 ) -> EvaluatedStrategySignal:
     """Evaluate the selected revision and fail closed if it cannot be audited."""
 
     snapshots = strategy_snapshots(account)
     selected = dict(snapshot) if snapshot is not None else (snapshots[0] if snapshots else {})
+    effective_account = account
+    if query is not None and selected and account.get("strategy_id"):
+        effective_account, selected, _ = apply_parameter_profile(
+            account,
+            selected,
+            symbol,
+            query=query,
+        )
     evaluator_options: dict[str, Any] = {}
     if full_validator is not None:
         evaluator_options["full_validator"] = full_validator
@@ -77,17 +87,21 @@ def evaluate_account_strategy(
     result = evaluate_strategy_snapshot(
         selected,
         symbol,
-        account.get("config_json")
-        if isinstance(account.get("config_json"), Mapping)
+        effective_account.get("config_json")
+        if isinstance(effective_account.get("config_json"), Mapping)
         else None,
         load_klines=load_klines,
         evidence_builder=build_builtin_strategy_evidence,
         **evaluator_options,
     )
-    if str(selected.get("strategy_kind") or "") not in {
-        "source_strategy",
-        "full_strategy",
-    } or not result.direction:
+    if (
+        str(selected.get("strategy_kind") or "")
+        not in {
+            "source_strategy",
+            "full_strategy",
+        }
+        or not result.direction
+    ):
         return result
     persisted = (
         result.runtime_decision is not None
@@ -325,9 +339,7 @@ def build_entry_basis_snapshot(
     score = signal_evidence.get("score")
     timing_policy = resolve_strategy_timing_policy(
         strategy,
-        account.get("config_json")
-        if isinstance(account.get("config_json"), Mapping)
-        else None,
+        account.get("config_json") if isinstance(account.get("config_json"), Mapping) else None,
         evidence=signal_evidence,
         default_max_holding_bars=default_max_holding_bars,
     )

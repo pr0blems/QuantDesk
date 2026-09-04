@@ -40,6 +40,7 @@ from .application.strategy_execution import (
 from .application.strategy_execution import (
     build_entry_basis_snapshot as build_shared_entry_basis_snapshot,
 )
+from .application.strategy_parameter_profiles import effective_execution_config
 from .binance_client import BinanceAccountClientError
 from .binance_service import BinanceAccountService
 from .binance_trading import BinanceUsdMTradingClient
@@ -336,9 +337,7 @@ def _ai_monitor_signal(
         ):
             return 0, None, [], None, {}
     market_environment = evidence.get("market_environment")
-    market_environment = (
-        market_environment if isinstance(market_environment, dict) else {}
-    )
+    market_environment = market_environment if isinstance(market_environment, dict) else {}
     macro_policy = evidence.get("macro_entry_policy")
     if not isinstance(macro_policy, dict):
         macro_policy = market_environment.get("entry_policy")
@@ -353,9 +352,7 @@ def _ai_monitor_signal(
     if not macro_entry_allowed:
         return 0, None, [], None, {}
     try:
-        macro_position_multiplier = float(
-            macro_policy.get("position_multiplier", 1.0)
-        )
+        macro_position_multiplier = float(macro_policy.get("position_multiplier", 1.0))
     except (TypeError, ValueError):
         macro_position_multiplier = 1.0
     macro_position_multiplier = max(0.0, min(1.0, macro_position_multiplier))
@@ -382,9 +379,7 @@ def _ai_monitor_signal(
         "cost_stress_edge",
     }
     try:
-        expected_edge_lower_bound_bps = float(
-            row.get("expected_edge_lower_bound_bps")
-        )
+        expected_edge_lower_bound_bps = float(row.get("expected_edge_lower_bound_bps"))
         estimated_cost_bps = float(row.get("estimated_cost_bps"))
         required_gross_edge_bps = max(
             estimated_cost_bps + float(readiness.get("safety_margin_bps") or 0.0),
@@ -478,9 +473,7 @@ def _ai_monitor_signal(
         "source": "ai_monitor_live_copy_v1",
         "execution_venue": "binance_usdm",
         "execution_price_source": "binance",
-        "regular_session_only": bool(
-            config.get("ai_monitor_live_regular_session_only", True)
-        ),
+        "regular_session_only": bool(config.get("ai_monitor_live_regular_session_only", True)),
         "score": combined_score,
         "valid_until": valid_until,
         "prediction_public_id": row.get("prediction_public_id"),
@@ -491,22 +484,16 @@ def _ai_monitor_signal(
         "manual_gate_override": bool(
             manual_selection
             and (
-                not entry_ready
-                or not automatic_readiness_passed
-                or combined_score < minimum_score
+                not entry_ready or not automatic_readiness_passed or combined_score < minimum_score
             )
         ),
         "automatic_readiness_passed": automatic_readiness_passed,
         "persisted_edge_passed": persisted_edge_passed,
         "expected_edge_lower_bound_bps": (
-            expected_edge_lower_bound_bps
-            if math.isfinite(expected_edge_lower_bound_bps)
-            else None
+            expected_edge_lower_bound_bps if math.isfinite(expected_edge_lower_bound_bps) else None
         ),
         "required_gross_edge_bps": (
-            required_gross_edge_bps
-            if math.isfinite(required_gross_edge_bps)
-            else None
+            required_gross_edge_bps if math.isfinite(required_gross_edge_bps) else None
         ),
         "live_readiness": readiness,
         "entry_gate": gate,
@@ -524,9 +511,7 @@ def _ai_monitor_signal(
             "准入：人工确认覆盖研究门槛"
             if manual_selection
             and (
-                not entry_ready
-                or not automatic_readiness_passed
-                or combined_score < minimum_score
+                not entry_ready or not automatic_readiness_passed or combined_score < minimum_score
             )
             else "准入：全部入场条件已满足"
         ),
@@ -565,6 +550,7 @@ def _strategy_signal(
             selected_symbol, timeframe, limit
         ),
         record_decision=_record_live_strategy_decision,
+        query=store.query,
     ).execution_tuple()
 
 
@@ -662,8 +648,7 @@ def _active_accounts(account_id: int | None = None) -> list[dict[str, Any]]:
         if (
             _settings is not None
             and not _settings.binance_live_trading_enabled
-            and str(account["config_json"].get("execution_scope") or "")
-            != "ai_monitor"
+            and str(account["config_json"].get("execution_scope") or "") != "ai_monitor"
         ):
             continue
         accounts.append(account)
@@ -733,8 +718,7 @@ def _recovery_accounts() -> list[dict[str, Any]]:
         if (
             _settings is not None
             and not _settings.binance_live_trading_enabled
-            and str(account["config_json"].get("execution_scope") or "")
-            != "ai_monitor"
+            and str(account["config_json"].get("execution_scope") or "") != "ai_monitor"
         ):
             continue
         accounts.append(account)
@@ -1084,18 +1068,14 @@ def _reconcile_intents(
             account_type="UM_FUTURE",
             force_refresh=True,
         ),
-        query_market_order=lambda key, secret, symbol, client_id: (
-            _trading_client.query_order(
-                key,
-                secret,
-                symbol=symbol,
-                client_order_id=client_id,
-            )
+        query_market_order=lambda key, secret, symbol, client_id: _trading_client.query_order(
+            key,
+            secret,
+            symbol=symbol,
+            client_order_id=client_id,
         ),
-        query_protection_order=lambda key, secret, client_id: (
-            _trading_client.query_algo_order(
-                key, secret, client_order_id=client_id
-            )
+        query_protection_order=lambda key, secret, client_id: _trading_client.query_algo_order(
+            key, secret, client_order_id=client_id
         ),
         update_intent=_update_intent,
         normalize_open_order=_normalized_open_order_response,
@@ -1135,7 +1115,9 @@ def _live_timeframe(account: dict[str, Any], entry_basis: dict[str, Any] | None)
     try:
         snapshots = account.get("strategy_snapshot_json")
         snapshot = snapshots if isinstance(snapshots, dict) else {}
-        return resolve_strategy_timing_policy(snapshot, account.get("config_json")).trigger_timeframe
+        return resolve_strategy_timing_policy(
+            snapshot, account.get("config_json")
+        ).trigger_timeframe
     except (KeyError, StrategyEvaluationError, TypeError, ValueError):
         return "1h"
 
@@ -1300,9 +1282,7 @@ def _record_live_position_snapshot(
     basis = _json_object(entry_basis)
     execution_basis = _json_object(basis.get("execution"))
     average_price = getattr(order, "average_price", None)
-    average_entry_price = (
-        average_price if action == "open" else execution_basis.get("entry_price")
-    )
+    average_entry_price = average_price if action == "open" else execution_basis.get("entry_price")
     snapshot = {
         "schema_version": 1,
         "execution_intent_id": intent.intent_id,
@@ -1315,9 +1295,7 @@ def _record_live_position_snapshot(
             str(average_entry_price) if average_entry_price is not None else None
         ),
         "mark_price": str(average_price) if average_price is not None else None,
-        "strategy_signal_id": (
-            _json_object(basis.get("signal")).get("strategy_signal_id")
-        ),
+        "strategy_signal_id": (_json_object(basis.get("signal")).get("strategy_signal_id")),
     }
     encoded = json.dumps(
         snapshot,
@@ -1838,11 +1816,7 @@ def _current_initial_margin(
                 initial_margin = Decimal(str(raw_initial_margin))
             except (InvalidOperation, TypeError, ValueError):
                 initial_margin = None
-            if (
-                initial_margin is not None
-                and initial_margin.is_finite()
-                and initial_margin > 0
-            ):
+            if initial_margin is not None and initial_margin.is_finite() and initial_margin > 0:
                 total += initial_margin
                 continue
         try:
@@ -2109,9 +2083,7 @@ def _risk_review_warnings(
     return warnings
 
 
-def _apply_risk_review_state(
-    state: dict[str, Any], warnings: list[dict[str, Any]]
-) -> None:
+def _apply_risk_review_state(state: dict[str, Any], warnings: list[dict[str, Any]]) -> None:
     state["risk_review_required"] = bool(warnings)
     state["risk_review_warnings"] = warnings
     raw_reasons = state.get("entry_block_reasons")
@@ -2122,9 +2094,7 @@ def _apply_risk_review_state(
     state["entry_block_reasons"] = reasons
 
 
-def _persist_risk_review(
-    account: dict[str, Any], warnings: list[dict[str, Any]]
-) -> None:
+def _persist_risk_review(account: dict[str, Any], warnings: list[dict[str, Any]]) -> None:
     state = _json_object(account.get("runtime_state_json"))
     _apply_risk_review_state(state, warnings)
     store.execute(
@@ -2207,11 +2177,7 @@ def _signal_is_fresh(
             return False
         while valid_until >= 100_000_000_000:
             valid_until /= 1000
-        return (
-            maximum_age.fresh
-            and math.isfinite(valid_until)
-            and time.time() <= valid_until
-        )
+        return maximum_age.fresh and math.isfinite(valid_until) and time.time() <= valid_until
     snapshot = account.get("strategy_snapshot_json") or {}
     if snapshot.get("strategy_kind") == "builtin_strategy":
         try:
@@ -2255,9 +2221,7 @@ def _execution_timeframe_seconds(account: dict[str, Any]) -> int:
 
     policy = resolve_strategy_timing_policy(
         account.get("strategy_snapshot_json") or {},
-        account.get("config_json")
-        if isinstance(account.get("config_json"), dict)
-        else None,
+        account.get("config_json") if isinstance(account.get("config_json"), dict) else None,
     )
     return policy.timeframe_seconds
 
@@ -2348,15 +2312,11 @@ def _live_profit_guard_snapshot(
         previous=previous,
         exit_cost_bps=exit_cost_bps,
         observed_at=observed_at,
-        activation_r=protection.get(
-            "activation_r", _LIVE_PROFIT_GUARD_ACTIVATION_R
-        ),
+        activation_r=protection.get("activation_r", _LIVE_PROFIT_GUARD_ACTIVATION_R),
         trailing_activation_r=protection.get(
             "trailing_activation_r", _LIVE_PROFIT_GUARD_TRAILING_ACTIVATION_R
         ),
-        maximum_giveback_r=protection.get(
-            "maximum_giveback_r", _LIVE_PROFIT_GUARD_GIVEBACK_R
-        ),
+        maximum_giveback_r=protection.get("maximum_giveback_r", _LIVE_PROFIT_GUARD_GIVEBACK_R),
         minimum_protected_r=protection.get("minimum_protected_r", 0.0),
         cost_buffer_bps=_LIVE_PROFIT_GUARD_COST_BUFFER_BPS,
         peak_write_step_r=_LIVE_PROFIT_GUARD_PEAK_WRITE_STEP_R,
@@ -2367,9 +2327,7 @@ def _live_profit_guard_snapshot(
                 "version": _LIVE_PROFIT_GUARD_VERSION,
                 "open_intent_id": int(managed_open["id"]),
                 "symbol": str(position.get("symbol") or "").upper(),
-                "position_side": str(
-                    position.get("position_side") or "BOTH"
-                ).upper(),
+                "position_side": str(position.get("position_side") or "BOTH").upper(),
             }
         )
     return guard, should_exit
@@ -2385,9 +2343,7 @@ def _live_profit_guard_key(managed_open: dict[str, Any]) -> str:
     )
 
 
-def _persist_live_profit_guards(
-    account: dict[str, Any], guards: dict[str, dict[str, Any]]
-) -> None:
+def _persist_live_profit_guards(account: dict[str, Any], guards: dict[str, dict[str, Any]]) -> None:
     state = _json_object(account.get("runtime_state_json"))
     state["live_profit_guards"] = guards
     store.execute(
@@ -2459,11 +2415,14 @@ def _close_position(
     managed_quantity = Decimal(str(managed.get("quantity") or actual_quantity))
     quantity = rules.quantity(min(actual_quantity, managed_quantity))
     side = "SELL" if position["side"] == "long" else "BUY"
-    managed_identity = managed.get("id") or hashlib.sha256(
-        str(managed.get("signal_key") or managed.get("client_order_id") or symbol).encode(
-            "utf-8"
-        )
-    ).hexdigest()[:24]
+    managed_identity = (
+        managed.get("id")
+        or hashlib.sha256(
+            str(managed.get("signal_key") or managed.get("client_order_id") or symbol).encode(
+                "utf-8"
+            )
+        ).hexdigest()[:24]
+    )
     signal_key = (
         f"live:{account['deployment_id']}:{symbol}:{position_side}:close:"
         f"managed-open:{managed_identity}"
@@ -2487,11 +2446,7 @@ def _close_position(
         reduce_only=position_side == "BOTH",
         strategy_signal_id=managed.get("strategy_signal_id"),
         entry_basis=_json_object(managed.get("entry_basis_json")),
-        decision_trace=(
-            exit_decision.snapshot(mode="live")
-            if exit_decision is not None
-            else None
-        ),
+        decision_trace=(exit_decision.snapshot(mode="live") if exit_decision is not None else None),
         signal_time=observed_at,
         timeframe=_live_timeframe(account, _json_object(managed.get("entry_basis_json"))),
     )
@@ -2522,6 +2477,7 @@ def _open_position(
 ) -> bool:
     if _trading_client is None:
         return False
+    account["config_json"] = effective_execution_config(account, symbol, query=store.query)
     config = account["config_json"]
     policy = policy_from_config(config)
     strategy_snapshot = account.get("strategy_snapshot_json") or {}
@@ -2573,8 +2529,7 @@ def _open_position(
         available,
         max(
             Decimal(0),
-            sizing_capital.margin_equity
-            * Decimal(str(config.get("margin_cap", 0.20)))
+            sizing_capital.margin_equity * Decimal(str(config.get("margin_cap", 0.20)))
             - current_margin,
         ),
     )
@@ -2754,9 +2709,7 @@ def _open_position(
         stop_loss_pct=config.get("stop_loss_pct"),
         take_profit_pct=config.get("take_profit_pct"),
         atr=atr,
-        risk_proposal=(
-            final_risk_proposal if isinstance(final_risk_proposal, dict) else None
-        ),
+        risk_proposal=(final_risk_proposal if isinstance(final_risk_proposal, dict) else None),
     )
     if final_exit_plan is not None:
         entry_basis["exit_policy"] = final_exit_plan.snapshot()
@@ -2964,9 +2917,7 @@ def _manual_follow_result(
                 "id": intent.get("public_id"),
                 "status": intent.get("status"),
                 "quantity": (
-                    float(intent["quantity"])
-                    if intent.get("quantity") is not None
-                    else None
+                    float(intent["quantity"]) if intent.get("quantity") is not None else None
                 ),
             }
             if intent is not None
@@ -3284,13 +3235,9 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
         for key, opened in managed.items()
         if key in positions and not _is_manual_follow_open(opened)
     }
-    profit_guards_changed = any(
-        key not in active_profit_guard_keys for key in profit_guards
-    )
+    profit_guards_changed = any(key not in active_profit_guard_keys for key in profit_guards)
     profit_guards = {
-        key: value
-        for key, value in profit_guards.items()
-        if key in active_profit_guard_keys
+        key: value for key, value in profit_guards.items() if key in active_profit_guard_keys
     }
     max_positions = max(1, min(int(config.get("max_positions", 1)), 20))
     positions_changed = False
@@ -3356,9 +3303,7 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                 exit_cost_bps=policy.round_trip_cost_bps,
                 observed_at=observed_at,
             )
-            if profit_guard is not None and profit_guard != profit_guards.get(
-                profit_guard_key
-            ):
+            if profit_guard is not None and profit_guard != profit_guards.get(profit_guard_key):
                 profit_guards[profit_guard_key] = profit_guard
                 profit_guards_changed = True
             opened_at = _opened_at_seconds(managed[key])
@@ -3368,18 +3313,11 @@ def _tick_account_unlocked(account: dict[str, Any]) -> None:
                 timing_policy = resolve_strategy_timing_policy(
                     account.get("strategy_snapshot_json") or {},
                     config,
-                    captured=(
-                        captured_timing
-                        if isinstance(captured_timing, dict)
-                        else None
-                    ),
+                    captured=(captured_timing if isinstance(captured_timing, dict) else None),
                 )
-                holding_period_expired = (
-                    opened_at is not None
-                    and timing_policy.expired(
-                        opened_at=opened_at,
-                        observed_at=observed_at,
-                    )
+                holding_period_expired = opened_at is not None and timing_policy.expired(
+                    opened_at=opened_at,
+                    observed_at=observed_at,
                 )
             except (StrategyEvaluationError, TypeError, ValueError):
                 _fail_account(account, "position_holding_policy_invalid")

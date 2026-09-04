@@ -100,21 +100,13 @@ class News(Base):
     related_industries: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON, comment="AI 识别的关联行业、相关度与影响方向"
     )
-    ai_sentiment: Mapped[str | None] = mapped_column(
-        String(32), comment="AI 语义研判情绪"
-    )
+    ai_sentiment: Mapped[str | None] = mapped_column(String(32), comment="AI 语义研判情绪")
     ai_confidence: Mapped[Decimal | None] = mapped_column(
         Numeric(5, 4), comment="AI 情绪置信度，范围 0 到 1"
     )
-    ai_impact_strength: Mapped[str | None] = mapped_column(
-        String(16), comment="AI 判断的影响强度"
-    )
-    ai_time_horizon: Mapped[str | None] = mapped_column(
-        String(32), comment="AI 判断的影响周期"
-    )
-    ai_category: Mapped[str | None] = mapped_column(
-        String(32), comment="AI 判断的新闻类别"
-    )
+    ai_impact_strength: Mapped[str | None] = mapped_column(String(16), comment="AI 判断的影响强度")
+    ai_time_horizon: Mapped[str | None] = mapped_column(String(32), comment="AI 判断的影响周期")
+    ai_category: Mapped[str | None] = mapped_column(String(32), comment="AI 判断的新闻类别")
     ai_reason: Mapped[str | None] = mapped_column(Text, comment="AI 情绪和关联标的判断依据")
     ai_model: Mapped[str | None] = mapped_column(String(128), comment="执行分析的模型标识")
     ai_batch_id: Mapped[str | None] = mapped_column(
@@ -194,9 +186,7 @@ class NewsAiBatch(Base):
     )
     provider_code: Mapped[str | None] = mapped_column(String(32), comment="AI 服务商代码")
     model_name: Mapped[str | None] = mapped_column(String(128), comment="模型标识")
-    market_sentiment: Mapped[str | None] = mapped_column(
-        String(32), comment="批次整体美股情绪结论"
-    )
+    market_sentiment: Mapped[str | None] = mapped_column(String(32), comment="批次整体美股情绪结论")
     market_confidence: Mapped[Decimal | None] = mapped_column(
         Numeric(5, 4), comment="批次整体结论置信度"
     )
@@ -247,12 +237,8 @@ class NewsAiModelCall(Base):
     attempt_depth: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, comment="结构恢复拆分重试深度"
     )
-    provider_code: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="AI 服务商代码"
-    )
-    model_name: Mapped[str] = mapped_column(
-        String(128), nullable=False, comment="模型标识"
-    )
+    provider_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="AI 服务商代码")
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="模型标识")
     news_ids_json: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, comment="该次调用包含的新闻稳定 ID"
     )
@@ -265,12 +251,8 @@ class NewsAiModelCall(Base):
     response_envelope: Mapped[str | None] = mapped_column(
         MODEL_RAW_TEXT, comment="AI 服务商返回的完整 HTTP 响应正文"
     )
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="调用完成或失败状态"
-    )
-    error_category: Mapped[str | None] = mapped_column(
-        String(32), comment="稳定且脱敏的错误类别"
-    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, comment="调用完成或失败状态")
+    error_category: Mapped[str | None] = mapped_column(String(32), comment="稳定且脱敏的错误类别")
     started_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, comment="调用开始时间（UTC）"
     )
@@ -374,9 +356,7 @@ class NewsAiAnalysisRecord(Base):
         nullable=False,
         comment="本次研判对应的新闻",
     )
-    symbol: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="关联美股代码"
-    )
+    symbol: Mapped[str] = mapped_column(String(16), nullable=False, comment="关联美股代码")
     direction: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="本次对股票的影响方向"
     )
@@ -386,18 +366,10 @@ class NewsAiAnalysisRecord(Base):
     relevance: Mapped[Decimal] = mapped_column(
         Numeric(5, 4), nullable=False, comment="新闻与股票的关联度"
     )
-    impact_strength: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="影响强度"
-    )
-    time_horizon: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="影响周期"
-    )
-    category: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="新闻类别"
-    )
-    analysis_reason: Mapped[str] = mapped_column(
-        Text, nullable=False, comment="本次新闻研判依据"
-    )
+    impact_strength: Mapped[str] = mapped_column(String(16), nullable=False, comment="影响强度")
+    time_horizon: Mapped[str] = mapped_column(String(32), nullable=False, comment="影响周期")
+    category: Mapped[str] = mapped_column(String(32), nullable=False, comment="新闻类别")
+    analysis_reason: Mapped[str] = mapped_column(Text, nullable=False, comment="本次新闻研判依据")
     memory_effect: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="相对历史判断的变化类型"
     )
@@ -414,9 +386,7 @@ class NewsAiAnalysisRecord(Base):
     position_reason: Mapped[str | None] = mapped_column(
         Text, comment="本次新闻影响研究持仓的判断依据"
     )
-    previous_direction: Mapped[str | None] = mapped_column(
-        String(16), comment="前序记忆记录的方向"
-    )
+    previous_direction: Mapped[str | None] = mapped_column(String(16), comment="前序记忆记录的方向")
     previous_confidence: Mapped[Decimal | None] = mapped_column(
         Numeric(5, 4), comment="前序记忆记录的置信度"
     )
@@ -549,9 +519,7 @@ class AiModelConfig(Base):
         ),
         CheckConstraint("is_default = 0 OR is_enabled = 1", name="default_enabled"),
         UniqueConstraint("public_id", name="uq_ai_model_configs_public_id"),
-        UniqueConstraint(
-            "user_id", "display_name", name="uq_ai_model_configs_user_display_name"
-        ),
+        UniqueConstraint("user_id", "display_name", name="uq_ai_model_configs_user_display_name"),
         UniqueConstraint("default_user_id", name="uq_ai_model_configs_default_user_id"),
         Index(
             "ix_ai_model_configs_user_updated",
@@ -587,9 +555,7 @@ class AiModelConfig(Base):
     display_name: Mapped[str] = mapped_column(
         String(80), nullable=False, comment="用户自定义配置名称，同一用户内唯一"
     )
-    model_name: Mapped[str] = mapped_column(
-        String(128), nullable=False, comment="服务商模型标识"
-    )
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="服务商模型标识")
     api_key_encrypted: Mapped[str] = mapped_column(
         Text, nullable=False, comment="Fernet 加密后的 AI 服务商 API Key"
     )
@@ -774,7 +740,10 @@ class AiMonitorConfig(Base):
         Integer, default=1000, nullable=False, comment="历史净优势校准的最低已结算样本数"
     )
     live_safety_margin_bps: Mapped[Decimal] = mapped_column(
-        Numeric(8, 4), default=Decimal("10.0000"), nullable=False, comment="成本之外要求的安全边际基点"
+        Numeric(8, 4),
+        default=Decimal("10.0000"),
+        nullable=False,
+        comment="成本之外要求的安全边际基点",
     )
     news_score_weight: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), default=Decimal("20.00"), nullable=False, comment="新闻评分组合权重百分比"
@@ -806,7 +775,10 @@ class AiMonitorConfig(Base):
         Boolean, default=True, nullable=False, comment="预测统计是否扣除持有期资金成本"
     )
     prediction_funding_bps_per_8h: Mapped[Decimal] = mapped_column(
-        Numeric(8, 4), default=Decimal("1.0000"), nullable=False, comment="预测统计每八小时资金成本基点"
+        Numeric(8, 4),
+        default=Decimal("1.0000"),
+        nullable=False,
+        comment="预测统计每八小时资金成本基点",
     )
     last_news_run_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="最近一次新闻分析启动时间（UTC）"
@@ -892,18 +864,10 @@ class AiMonitorRun(Base):
     matched_count: Mapped[int] = mapped_column(
         Integer, default=0, nullable=False, comment="本轮成功分析或发现数量"
     )
-    summary_json: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON, comment="执行摘要和脱敏统计"
-    )
-    error_message: Mapped[str | None] = mapped_column(
-        Text, comment="面向用户的脱敏错误摘要"
-    )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="开始时间（UTC）"
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="完成时间（UTC）"
-    )
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="执行摘要和脱敏统计")
+    error_message: Mapped[str | None] = mapped_column(Text, comment="面向用户的脱敏错误摘要")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, comment="开始时间（UTC）")
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, comment="完成时间（UTC）")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False, comment="创建时间（UTC）"
     )
@@ -986,15 +950,11 @@ class AiMonitorOpportunity(Base):
     contract_symbol: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="对应的 Binance TradFi 合约代码"
     )
-    direction: Mapped[str] = mapped_column(
-        String(12), nullable=False, comment="机会方向"
-    )
+    direction: Mapped[str] = mapped_column(String(12), nullable=False, comment="机会方向")
     status: Mapped[str] = mapped_column(
         String(16), default="discovered", nullable=False, comment="机会状态"
     )
-    timeframe: Mapped[str] = mapped_column(
-        String(8), nullable=False, comment="技术指标确认周期"
-    )
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False, comment="技术指标确认周期")
     news_score: Mapped[Decimal] = mapped_column(
         Numeric(8, 4), nullable=False, comment="新闻侧置信评分（0 到 100）"
     )
@@ -1128,9 +1088,7 @@ class AiMonitorPrediction(Base):
     status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False, comment="预测结算状态"
     )
-    result: Mapped[str | None] = mapped_column(
-        String(16), comment="到期结果：win、loss 或 flat"
-    )
+    result: Mapped[str | None] = mapped_column(String(16), comment="到期结果：win、loss 或 flat")
     confidence_score: Mapped[Decimal] = mapped_column(
         Numeric(8, 4), nullable=False, comment="生成预测时的组合置信评分"
     )
@@ -1143,9 +1101,7 @@ class AiMonitorPrediction(Base):
     exit_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="Virtual position exit time (UTC)"
     )
-    exit_reason: Mapped[str | None] = mapped_column(
-        String(32), comment="Virtual exit trigger"
-    )
+    exit_reason: Mapped[str | None] = mapped_column(String(32), comment="Virtual exit trigger")
     exit_subreason: Mapped[str | None] = mapped_column(
         String(32), comment="Precise virtual exit subtype"
     )
@@ -1256,18 +1212,12 @@ class MarketStreamEvent(Base):
     channel: Mapped[str] = mapped_column(String(48), nullable=False)
     symbol: Mapped[str | None] = mapped_column(String(32))
     event_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    received_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     sequence_key: Mapped[str | None] = mapped_column(String(96))
     dedup_key: Mapped[str] = mapped_column(String(191), nullable=False)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    schema_version: Mapped[str] = mapped_column(
-        String(32), default="uw_stream_v1", nullable=False
-    )
-    quality_status: Mapped[str] = mapped_column(
-        String(16), default="valid", nullable=False
-    )
+    schema_version: Mapped[str] = mapped_column(String(32), default="uw_stream_v1", nullable=False)
+    quality_status: Mapped[str] = mapped_column(String(16), default="valid", nullable=False)
 
 
 class RealtimeMarketFeatureSnapshot(Base):
@@ -1308,9 +1258,7 @@ class RealtimeMarketFeatureSnapshot(Base):
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     bucket_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    market_session: Mapped[str] = mapped_column(
-        String(16), default="unknown", nullable=False
-    )
+    market_session: Mapped[str] = mapped_column(String(16), default="unknown", nullable=False)
     last_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     bid: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     ask: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
@@ -1321,9 +1269,7 @@ class RealtimeMarketFeatureSnapshot(Base):
     option_flow_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     gex_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     institutional_flow_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    halt_status: Mapped[str] = mapped_column(
-        String(16), default="unknown", nullable=False
-    )
+    halt_status: Mapped[str] = mapped_column(String(16), default="unknown", nullable=False)
     data_coverage: Mapped[Decimal] = mapped_column(
         Numeric(5, 4), default=Decimal("0.0000"), nullable=False
     )
@@ -1332,9 +1278,7 @@ class RealtimeMarketFeatureSnapshot(Base):
     feature_version: Mapped[str] = mapped_column(
         String(32), default="uw_features_v2", nullable=False
     )
-    captured_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class FinnhubQuoteSnapshot(Base):
@@ -1374,9 +1318,7 @@ class FinnhubQuoteSnapshot(Base):
     source_timestamp: Mapped[int] = mapped_column(BigInteger, nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     live: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    captured_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
     )
@@ -1395,9 +1337,7 @@ class MarketRiskEvent(Base):
             "status IN ('scheduled', 'active', 'completed', 'cancelled')",
             name="valid_event_status",
         ),
-        UniqueConstraint(
-            "provider", "dedup_key", name="uq_market_risk_event_identity"
-        ),
+        UniqueConstraint("provider", "dedup_key", name="uq_market_risk_event_identity"),
         Index("ix_market_risk_events_schedule", "status", "scheduled_at"),
         Index("ix_market_risk_events_symbol_schedule", "symbol", "scheduled_at"),
         {
@@ -1418,24 +1358,14 @@ class MarketRiskEvent(Base):
     symbol: Mapped[str | None] = mapped_column(String(32))
     scheduled_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     actual_at: Mapped[datetime | None] = mapped_column(DateTime)
-    risk_level: Mapped[str] = mapped_column(
-        String(16), default="medium", nullable=False
-    )
-    blocking_before_seconds: Mapped[int] = mapped_column(
-        Integer, default=0, nullable=False
-    )
-    blocking_after_seconds: Mapped[int] = mapped_column(
-        Integer, default=0, nullable=False
-    )
-    status: Mapped[str] = mapped_column(
-        String(16), default="scheduled", nullable=False
-    )
+    risk_level: Mapped[str] = mapped_column(String(16), default="medium", nullable=False)
+    blocking_before_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    blocking_after_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="scheduled", nullable=False)
     dedup_key: Mapped[str] = mapped_column(String(191), nullable=False)
     source_payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     source_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class OpportunityMarketSnapshot(Base):
@@ -1443,9 +1373,7 @@ class OpportunityMarketSnapshot(Base):
 
     __tablename__ = "opportunity_market_snapshots"
     __table_args__ = (
-        UniqueConstraint(
-            "opportunity_id", name="uq_opportunity_market_snapshot_opportunity"
-        ),
+        UniqueConstraint("opportunity_id", name="uq_opportunity_market_snapshot_opportunity"),
         ForeignKeyConstraint(
             ["opportunity_id", "user_id"],
             ["ai_monitor_opportunities.id", "ai_monitor_opportunities.user_id"],
@@ -1467,15 +1395,11 @@ class OpportunityMarketSnapshot(Base):
         BigInteger,
         ForeignKey("realtime_market_feature_snapshots.id", ondelete="SET NULL"),
     )
-    captured_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     quote_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     option_flow_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     gex_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    institutional_flow_snapshot_json: Mapped[dict[str, Any]] = mapped_column(
-        JSON, nullable=False
-    )
+    institutional_flow_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     macro_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     risk_gate_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     score_components_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
@@ -1549,9 +1473,7 @@ class OpportunityGateDecision(Base):
     weights_version: Mapped[str] = mapped_column(String(32), nullable=False)
     decision_version: Mapped[str] = mapped_column(String(32), nullable=False)
     dedup_key: Mapped[str] = mapped_column(String(191), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class AiMonitorPredictionFact(Base):
@@ -1559,9 +1481,7 @@ class AiMonitorPredictionFact(Base):
 
     __tablename__ = "ai_monitor_prediction_facts"
     __table_args__ = (
-        UniqueConstraint(
-            "prediction_id", name="uq_ai_monitor_prediction_facts_prediction"
-        ),
+        UniqueConstraint("prediction_id", name="uq_ai_monitor_prediction_facts_prediction"),
         Index(
             "ix_ai_monitor_prediction_facts_user_signal",
             "user_id",
@@ -1621,15 +1541,9 @@ class AiMonitorPredictionFact(Base):
     prediction_status: Mapped[str] = mapped_column(String(16), nullable=False)
     result: Mapped[str | None] = mapped_column(String(16))
     net_result: Mapped[str | None] = mapped_column(String(16))
-    market_session: Mapped[str] = mapped_column(
-        String(16), default="unknown", nullable=False
-    )
-    quote_quality: Mapped[str] = mapped_column(
-        String(16), default="unknown", nullable=False
-    )
-    quote_source: Mapped[str] = mapped_column(
-        String(32), default="unknown", nullable=False
-    )
+    market_session: Mapped[str] = mapped_column(String(16), default="unknown", nullable=False)
+    quote_quality: Mapped[str] = mapped_column(String(16), default="unknown", nullable=False)
+    quote_source: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
     quote_age_ms: Mapped[int | None] = mapped_column(BigInteger)
     quote_spread_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     option_flow_status: Mapped[str] = mapped_column(
@@ -1641,9 +1555,7 @@ class AiMonitorPredictionFact(Base):
     institutional_flow_status: Mapped[str] = mapped_column(
         String(32), default="not_captured_at_signal", nullable=False
     )
-    event_risk: Mapped[str] = mapped_column(
-        String(16), default="unknown", nullable=False
-    )
+    event_risk: Mapped[str] = mapped_column(String(16), default="unknown", nullable=False)
     data_coverage: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     news_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     technical_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
@@ -1653,9 +1565,7 @@ class AiMonitorPredictionFact(Base):
     institutional_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     market_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     combined_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
-    price_source: Mapped[str] = mapped_column(
-        String(16), default="binance", nullable=False
-    )
+    price_source: Mapped[str] = mapped_column(String(16), default="binance", nullable=False)
     entry_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     exit_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     gross_return_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
@@ -1665,30 +1575,18 @@ class AiMonitorPredictionFact(Base):
     estimated_cost_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     exit_reason: Mapped[str | None] = mapped_column(String(32))
     exit_subreason: Mapped[str | None] = mapped_column(String(32))
-    peak_favorable_bps_at_exit: Mapped[Decimal | None] = mapped_column(
-        Numeric(20, 8)
-    )
+    peak_favorable_bps_at_exit: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     protected_bps_at_exit: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
-    weights_version: Mapped[str] = mapped_column(
-        String(32), default="unknown", nullable=False
-    )
-    feature_version: Mapped[str] = mapped_column(
-        String(32), default="unknown", nullable=False
-    )
-    decision_version: Mapped[str] = mapped_column(
-        String(32), default="unknown", nullable=False
-    )
+    weights_version: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
+    feature_version: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
+    decision_version: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
     settlement_version: Mapped[str] = mapped_column(String(32), nullable=False)
     readiness_status: Mapped[str] = mapped_column(
         String(24), default="research_only", nullable=False
     )
-    calibration_sample_count: Mapped[int] = mapped_column(
-        BigInteger, default=0, nullable=False
-    )
+    calibration_sample_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     expected_gross_edge_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
-    expected_edge_lower_bound_bps: Mapped[Decimal | None] = mapped_column(
-        Numeric(20, 8)
-    )
+    expected_edge_lower_bound_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     snapshot_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     projection_version: Mapped[str] = mapped_column(
         String(32), default="signal_features_v3", nullable=False
@@ -1699,9 +1597,7 @@ class AiMonitorPredictionFact(Base):
     exit_at: Mapped[datetime | None] = mapped_column(DateTime)
     settled_at: Mapped[datetime | None] = mapped_column(DateTime)
     source_updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow, nullable=False
     )
@@ -1712,9 +1608,7 @@ class AiMonitorOpportunityCurrent(Base):
 
     __tablename__ = "ai_monitor_opportunity_current"
     __table_args__ = (
-        UniqueConstraint(
-            "opportunity_id", name="uq_ai_monitor_opportunity_current_opportunity"
-        ),
+        UniqueConstraint("opportunity_id", name="uq_ai_monitor_opportunity_current_opportunity"),
         UniqueConstraint(
             "user_id",
             "contract_symbol",
@@ -1758,9 +1652,7 @@ class AiMonitorOpportunityCurrent(Base):
     market_flow_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     combined_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     data_coverage: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
-    price_source: Mapped[str] = mapped_column(
-        String(16), default="binance", nullable=False
-    )
+    price_source: Mapped[str] = mapped_column(String(16), default="binance", nullable=False)
     entry_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     current_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
     discovered_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -1782,9 +1674,7 @@ class AiMonitorScoreHistory(Base):
             "sampled_at",
             name="uq_ai_monitor_score_history_opportunity_sample",
         ),
-        UniqueConstraint(
-            "gate_decision_id", name="uq_ai_monitor_score_history_gate_decision"
-        ),
+        UniqueConstraint("gate_decision_id", name="uq_ai_monitor_score_history_gate_decision"),
         Index(
             "ix_ai_monitor_score_history_opportunity_time",
             "opportunity_id",
@@ -1825,9 +1715,7 @@ class AiMonitorScoreHistory(Base):
     weights_version: Mapped[str] = mapped_column(String(32), nullable=False)
     decision_version: Mapped[str] = mapped_column(String(32), nullable=False)
     sampled_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class AiMonitorReplayRun(Base):
@@ -1841,9 +1729,7 @@ class AiMonitorReplayRun(Base):
         ),
         CheckConstraint("timeframe IN ('15m', '1h', '4h')", name="valid_timeframe"),
         UniqueConstraint("public_id", name="uq_ai_monitor_replay_runs_public_id"),
-        UniqueConstraint(
-            "active_user_id", name="uq_ai_monitor_replay_runs_active_user"
-        ),
+        UniqueConstraint("active_user_id", name="uq_ai_monitor_replay_runs_active_user"),
         UniqueConstraint("id", "user_id", name="uq_ai_monitor_replay_runs_id_user_id"),
         Index("ix_ai_monitor_replay_runs_user_created", "user_id", "created_at"),
         Index("ix_ai_monitor_replay_runs_user_status", "user_id", "status"),
@@ -2013,13 +1899,9 @@ class AiMonitorReplayOutcome(Base):
     sample_split: Mapped[str] = mapped_column(String(12), nullable=False)
     exit_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     exit_price: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False)
-    gross_directional_return_bps: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8), nullable=False
-    )
+    gross_directional_return_bps: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     estimated_cost_bps: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
-    net_directional_return_bps: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8), nullable=False
-    )
+    net_directional_return_bps: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     max_favorable_bps: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     max_adverse_bps: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     result: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -2192,7 +2074,7 @@ class WorkerHeartbeat(Base):
     __tablename__ = "worker_heartbeats"
     __table_args__ = (
         CheckConstraint(
-              "worker_type IN ('market', 'shadow', 'paper', 'live', 'ai', 'ops', 'settlement')",
+            "worker_type IN ('market', 'shadow', 'paper', 'live', 'ai', 'ops', 'settlement')",
             name="valid_worker_type",
         ),
         CheckConstraint(
@@ -2224,7 +2106,7 @@ class WorkerHeartbeat(Base):
         default=utcnow,
         onupdate=utcnow,
         nullable=False,
-        )
+    )
 
 
 class RuntimeIncident(Base):
@@ -2311,8 +2193,12 @@ class NewsSourceSetting(Base):
     )
     lang: Mapped[str] = mapped_column(String(16), default="en", nullable=False, comment="内容语言")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, comment="是否启用")
-    slow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="是否低频轮询")
-    weight: Mapped[int] = mapped_column(Integer, default=100, nullable=False, comment="来源展示权重")
+    slow: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, comment="是否低频轮询"
+    )
+    weight: Mapped[int] = mapped_column(
+        Integer, default=100, nullable=False, comment="来源展示权重"
+    )
     hourly_limit: Mapped[int] = mapped_column(
         Integer, default=600, nullable=False, comment="每小时最大入库数量"
     )
@@ -2334,12 +2220,16 @@ class CollectorStatus(Base):
     __table_args__ = ({"comment": "后台采集器心跳与最近运行结果"},)
 
     name: Mapped[str] = mapped_column(String(32), primary_key=True, comment="采集器名称")
-    heartbeat_at: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="最近心跳 Unix 时间")
+    heartbeat_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="最近心跳 Unix 时间"
+    )
     last_success_at: Mapped[int | None] = mapped_column(BigInteger, comment="最近成功 Unix 时间")
     last_error_at: Mapped[int | None] = mapped_column(BigInteger, comment="最近失败 Unix 时间")
     last_error: Mapped[str | None] = mapped_column(Text, comment="最近错误摘要")
     cycles: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False, comment="累计周期数")
-    items: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False, comment="累计处理条数")
+    items: Mapped[int] = mapped_column(
+        BigInteger, default=0, nullable=False, comment="累计处理条数"
+    )
     details_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="脱敏运行详情")
 
 
@@ -2535,9 +2425,7 @@ class UserStrategy(Base):
     source_language: Mapped[str | None] = mapped_column(
         String(24), comment="源码策略语言；首个运行时支持 python"
     )
-    source_code: Mapped[str | None] = mapped_column(
-        Text, comment="用户发布的可执行策略源码"
-    )
+    source_code: Mapped[str | None] = mapped_column(Text, comment="用户发布的可执行策略源码")
     source_hash: Mapped[str | None] = mapped_column(
         String(64), comment="规范化策略源码的 SHA-256 哈希"
     )
@@ -2585,6 +2473,84 @@ class UserStrategy(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="StrategyRevision.version",
+    )
+
+
+class StrategyParameterProfile(Base):
+    """Mutable execution parameters layered over an immutable strategy revision."""
+
+    __tablename__ = "strategy_parameter_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "scope_key = '*' OR scope_key <> ''",
+            name="ck_strategy_parameter_profiles_valid_scope_key",
+        ),
+        CheckConstraint(
+            "strategy_version > 0",
+            name="ck_strategy_parameter_profiles_positive_strategy_version",
+        ),
+        ForeignKeyConstraint(
+            ["strategy_id", "user_id"],
+            ["user_strategies.id", "user_strategies.user_id"],
+            name="fk_strategy_parameter_profiles_strategy_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("public_id", name="uq_strategy_parameter_profiles_public_id"),
+        UniqueConstraint(
+            "user_id",
+            "strategy_id",
+            "scope_key",
+            name="uq_strategy_parameter_profiles_scope",
+        ),
+        Index(
+            "ix_strategy_parameter_profiles_user_strategy_updated",
+            "user_id",
+            "strategy_id",
+            "updated_at",
+        ),
+        {
+            "comment": "策略默认或品种专属的可变运行参数；不修改不可变策略修订",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
+    )
+
+    id: Mapped[int] = mapped_column(
+        BIGINT_PK, primary_key=True, autoincrement=True, comment="策略参数档案内部主键"
+    )
+    public_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid.uuid4()), nullable=False, comment="公开 UUID"
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属用户 ID",
+    )
+    strategy_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, comment="所属用户策略内部 ID"
+    )
+    scope_key: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="* 表示策略默认；否则为规范化交易品种"
+    )
+    strategy_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="保存参数时对应的策略版本，仅用于追踪"
+    )
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="策略求值参数覆盖"
+    )
+    execution_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="仓位、杠杆、成本与退出参数覆盖"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, comment="创建时间（UTC）"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+        comment="最后更新时间（UTC）",
     )
 
 
@@ -2653,12 +2619,8 @@ class StrategyRevision(Base):
     spec_hash: Mapped[str | None] = mapped_column(
         String(64), comment="该修订规范化策略 DSL 的 SHA-256 哈希"
     )
-    source_language: Mapped[str | None] = mapped_column(
-        String(24), comment="该修订使用的源码语言"
-    )
-    source_code: Mapped[str | None] = mapped_column(
-        Text, comment="该修订不可变的策略源码"
-    )
+    source_language: Mapped[str | None] = mapped_column(String(24), comment="该修订使用的源码语言")
+    source_code: Mapped[str | None] = mapped_column(Text, comment="该修订不可变的策略源码")
     source_hash: Mapped[str | None] = mapped_column(
         String(64), comment="该修订规范化策略源码的 SHA-256 哈希"
     )
@@ -2892,9 +2854,7 @@ class MarketFeatureSnapshot(Base):
 class MarketOpportunity(Base):
     __tablename__ = "market_opportunities"
     __table_args__ = (
-        CheckConstraint(
-            "direction IN ('long', 'short', 'neutral')", name="valid_direction"
-        ),
+        CheckConstraint("direction IN ('long', 'short', 'neutral')", name="valid_direction"),
         CheckConstraint(
             "status IN ('detected', 'watching', 'confirmed', 'expired', 'rejected', 'consumed')",
             name="valid_status",
@@ -2923,15 +2883,11 @@ class MarketOpportunity(Base):
         Integer, nullable=False, comment="机会扫描器实现版本"
     )
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="合约代码")
-    primary_timeframe: Mapped[str] = mapped_column(
-        String(8), nullable=False, comment="机会主周期"
-    )
+    primary_timeframe: Mapped[str] = mapped_column(String(8), nullable=False, comment="机会主周期")
     direction: Mapped[str] = mapped_column(
         String(12), nullable=False, comment="机会方向：long、short 或 neutral"
     )
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="机会生命周期状态"
-    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, comment="机会生命周期状态")
     quality_score: Mapped[Decimal] = mapped_column(
         Numeric(8, 4), nullable=False, comment="机会质量分，仅用于排序和解释"
     )
@@ -3077,9 +3033,7 @@ class StrategyDeployment(Base):
     last_error_code: Mapped[str | None] = mapped_column(
         String(64), comment="最后一次脱敏运行错误代码"
     )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="策略部署启动时间（UTC）"
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, comment="策略部署启动时间（UTC）")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False, comment="策略部署创建时间（UTC）"
     )
@@ -3097,9 +3051,7 @@ class StrategyRunManifest(Base):
 
     __tablename__ = "strategy_run_manifests"
     __table_args__ = (
-        CheckConstraint(
-            "mode IN ('backtest', 'paper', 'shadow', 'live')", name="valid_mode"
-        ),
+        CheckConstraint("mode IN ('backtest', 'paper', 'shadow', 'live')", name="valid_mode"),
         CheckConstraint(
             "(mode = 'backtest' AND backtest_run_id IS NOT NULL "
             "AND deployment_id IS NULL) OR "
@@ -3214,26 +3166,20 @@ class StrategySignal(Base):
     strategy_revision_id: Mapped[int] = mapped_column(
         BigInteger, nullable=False, comment="产生信号的不可变策略修订 ID"
     )
-    opportunity_id: Mapped[int | None] = mapped_column(
-        BigInteger, comment="关联的公共市场机会 ID"
-    )
+    opportunity_id: Mapped[int | None] = mapped_column(BigInteger, comment="关联的公共市场机会 ID")
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="合约代码")
     timeframe: Mapped[str] = mapped_column(String(8), nullable=False, comment="信号触发周期")
     signal_bar_time: Mapped[int] = mapped_column(
         BigInteger, nullable=False, comment="信号对应的已收盘 K 线时间"
     )
-    decision: Mapped[str] = mapped_column(
-        String(24), nullable=False, comment="结构化策略决策代码"
-    )
+    decision: Mapped[str] = mapped_column(String(24), nullable=False, comment="结构化策略决策代码")
     confidence: Mapped[Decimal | None] = mapped_column(
         Numeric(8, 4), comment="规则置信度，仅用于排序和解释"
     )
     status: Mapped[str] = mapped_column(
         String(24), default="proposed", nullable=False, comment="信号审批与执行状态"
     )
-    valid_until: Mapped[datetime | None] = mapped_column(
-        DateTime, comment="策略信号有效期（UTC）"
-    )
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime, comment="策略信号有效期（UTC）")
     reason_codes_json: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, comment="稳定且可检索的决策原因代码"
     )
@@ -3540,9 +3486,7 @@ class PaperAccount(Base):
 class LiveTradingAccount(Base):
     __tablename__ = "live_trading_accounts"
     __table_args__ = (
-        CheckConstraint(
-            "status IN ('paused', 'active', 'archived', 'error')", name="valid_status"
-        ),
+        CheckConstraint("status IN ('paused', 'active', 'archived', 'error')", name="valid_status"),
         ForeignKeyConstraint(
             ["strategy_id", "user_id"],
             ["user_strategies.id", "user_strategies.user_id"],
@@ -3614,13 +3558,9 @@ class LiveTradingAccount(Base):
 class LiveOrderIntent(Base):
     __tablename__ = "live_order_intents"
     __table_args__ = (
-        CheckConstraint(
-            "action IN ('open', 'close', 'stop', 'take_profit')", name="valid_action"
-        ),
+        CheckConstraint("action IN ('open', 'close', 'stop', 'take_profit')", name="valid_action"),
         CheckConstraint("side IN ('BUY', 'SELL')", name="valid_side"),
-        CheckConstraint(
-            "position_side IN ('BOTH', 'LONG', 'SHORT')", name="valid_position_side"
-        ),
+        CheckConstraint("position_side IN ('BOTH', 'LONG', 'SHORT')", name="valid_position_side"),
         CheckConstraint(
             "status IN ('created', 'submitted', 'filled', 'canceled', 'rejected', 'unknown')",
             name="valid_status",
@@ -3705,9 +3645,7 @@ class LiveOrderIntent(Base):
     response_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, comment="经过字段白名单裁剪的 Binance 响应"
     )
-    error_code: Mapped[str | None] = mapped_column(
-        String(64), comment="脱敏错误类别"
-    )
+    error_code: Mapped[str | None] = mapped_column(String(64), comment="脱敏错误类别")
     submitted_at: Mapped[datetime | None] = mapped_column(
         DateTime, comment="首次发往 Binance 的时间（UTC）"
     )
@@ -3730,9 +3668,7 @@ class PositionSnapshot(Base):
     __table_args__ = (
         CheckConstraint("mode IN ('paper', 'shadow', 'live')", name="valid_mode"),
         CheckConstraint("position_state IN ('open', 'closed')", name="valid_state"),
-        CheckConstraint(
-            "position_side IN ('BOTH', 'LONG', 'SHORT')", name="valid_position_side"
-        ),
+        CheckConstraint("position_side IN ('BOTH', 'LONG', 'SHORT')", name="valid_position_side"),
         CheckConstraint("quantity >= 0", name="nonnegative_quantity"),
         ForeignKeyConstraint(
             ["deployment_id", "user_id"],
@@ -3892,7 +3828,11 @@ class Security(Base):
     __table_args__ = (
         UniqueConstraint("exchange", "symbol", name="uq_securities_exchange_symbol"),
         Index("ix_securities_type_active", "security_type", "is_active"),
-        {"comment": "美股、ADR 与 ETF 证券主数据", "mysql_engine": "InnoDB", "mysql_charset": "utf8mb4"},
+        {
+            "comment": "美股、ADR 与 ETF 证券主数据",
+            "mysql_engine": "InnoDB",
+            "mysql_charset": "utf8mb4",
+        },
     )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
@@ -3909,41 +3849,37 @@ class Security(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     verification_status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
 
 
 class SecuritySymbolMapping(Base):
     __tablename__ = "security_symbol_mappings"
     __table_args__ = (
-        UniqueConstraint(
-            "source", "source_symbol", name="uq_security_mapping_source_symbol"
-        ),
+        UniqueConstraint("source", "source_symbol", name="uq_security_mapping_source_symbol"),
         Index("ix_security_mappings_source_status", "source", "source_status"),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
-    security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False)
+    security_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False
+    )
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     source_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
     normalized_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     mapping_status: Mapped[str] = mapped_column(String(32), default="AUTO", nullable=False)
     mapping_method: Mapped[str | None] = mapped_column(String(64))
     notes: Mapped[str | None] = mapped_column(Text)
-    source_status: Mapped[str] = mapped_column(
-        String(32), default="UNKNOWN", nullable=False
-    )
+    source_status: Mapped[str] = mapped_column(String(32), default="UNKNOWN", nullable=False)
     contract_type: Mapped[str | None] = mapped_column(String(32))
     underlying_type: Mapped[str | None] = mapped_column(String(32))
     onboard_date_ms: Mapped[int | None] = mapped_column(BigInteger)
     monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     strategy_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    live_trading_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
-    )
+    live_trading_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     source_metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime, default=utcnow, nullable=False
-    )
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -4192,9 +4128,7 @@ class StrategyBasketLeg(Base):
             name="fk_strategy_basket_legs_cycle_tenant",
             ondelete="CASCADE",
         ),
-        UniqueConstraint(
-            "cycle_id", "leg_index", "action", name="uq_strategy_basket_legs_action"
-        ),
+        UniqueConstraint("cycle_id", "leg_index", "action", name="uq_strategy_basket_legs_action"),
         UniqueConstraint("client_order_id", name="uq_strategy_basket_legs_client_order"),
         Index("ix_strategy_basket_legs_cycle_state", "cycle_id", "state", "created_at"),
         {
@@ -4221,12 +4155,8 @@ class StrategyBasketLeg(Base):
     intent_id: Mapped[str | None] = mapped_column(String(64))
     exchange_order_id: Mapped[str | None] = mapped_column(String(64))
     client_order_id: Mapped[str | None] = mapped_column(String(64))
-    fee: Mapped[Decimal] = mapped_column(
-        Numeric(30, 12), default=Decimal("0"), nullable=False
-    )
-    funding: Mapped[Decimal] = mapped_column(
-        Numeric(30, 12), default=Decimal("0"), nullable=False
-    )
+    fee: Mapped[Decimal] = mapped_column(Numeric(30, 12), default=Decimal("0"), nullable=False)
+    funding: Mapped[Decimal] = mapped_column(Numeric(30, 12), default=Decimal("0"), nullable=False)
     realized_pnl: Mapped[Decimal] = mapped_column(
         Numeric(30, 12), default=Decimal("0"), nullable=False
     )
@@ -4249,9 +4179,7 @@ class StrategyBasketEvent(Base):
             ondelete="CASCADE",
         ),
         UniqueConstraint("public_id", name="uq_strategy_basket_events_public_id"),
-        UniqueConstraint(
-            "cycle_id", "sequence_no", name="uq_strategy_basket_events_sequence"
-        ),
+        UniqueConstraint("cycle_id", "sequence_no", name="uq_strategy_basket_events_sequence"),
         Index("ix_strategy_basket_events_cycle_time", "cycle_id", "occurred_at"),
         {
             "comment": "Append-only basket strategy event ledger",
@@ -4278,7 +4206,9 @@ class StrategyBasketEvent(Base):
 class CompanyProfile(Base):
     __tablename__ = "company_profiles"
 
-    security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), primary_key=True)
+    security_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), primary_key=True
+    )
     legal_name: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
     industry: Mapped[str | None] = mapped_column(String(128))
@@ -4293,15 +4223,21 @@ class CompanyProfile(Base):
     source: Mapped[str | None] = mapped_column(String(32))
     source_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     raw_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
 
 
 class SecurityResearchSource(Base):
     __tablename__ = "security_research_sources"
-    __table_args__ = (UniqueConstraint("security_id", "content_hash", name="uq_research_security_hash"),)
+    __table_args__ = (
+        UniqueConstraint("security_id", "content_hash", name="uq_research_security_hash"),
+    )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
-    security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False)
+    security_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False
+    )
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     url: Mapped[str | None] = mapped_column(Text)
@@ -4316,10 +4252,19 @@ class SecurityResearchSource(Base):
 
 class SecurityFundamentalAnalysis(Base):
     __tablename__ = "security_fundamental_analyses"
-    __table_args__ = (UniqueConstraint("security_id", "analysis_version", "as_of_date", name="uq_analysis_security_version_date"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "security_id",
+            "analysis_version",
+            "as_of_date",
+            name="uq_analysis_security_version_date",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
-    security_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False)
+    security_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("securities.id", ondelete="CASCADE"), nullable=False
+    )
     analysis_version: Mapped[str] = mapped_column(String(32), default="v1", nullable=False)
     as_of_date: Mapped[Any] = mapped_column(Date, nullable=False)
     business_summary: Mapped[str | None] = mapped_column(Text)

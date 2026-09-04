@@ -40,6 +40,7 @@ from .application.strategy_execution import (
     record_strategy_decision,
     strategy_snapshots,
 )
+from .application.strategy_parameter_profiles import effective_execution_config
 from .domain.execution import (
     ExecutionMode,
     ExecutionState,
@@ -98,9 +99,7 @@ STRATEGY_EVENT_SIGNAL_MODE = "strategy_event_v2"
 PAPER_MAX_FUTURE_TICKER_SKEW_SECONDS = 15
 _lock = threading.RLock()
 _paper_execution_safety: dict[int, ExecutionSafetyController] = {}
-_paper_reconciliation = PaperExecutionReconciliationService(
-    MySqlPaperProjectionStore(store)
-)
+_paper_reconciliation = PaperExecutionReconciliationService(MySqlPaperProjectionStore(store))
 
 
 class _PriceSnapshot(dict[str, float]):
@@ -180,34 +179,26 @@ def _tracked_accounts(account_id: int | None = None) -> list[dict[str, Any]]:
             continue
         seen.add(int(account["id"]))
         account["config_json"] = _json_object(account.get("config_json"))
-        account["strategy_snapshot_json"] = _json_object(
-            account.get("strategy_snapshot_json")
-        )
+        account["strategy_snapshot_json"] = _json_object(account.get("strategy_snapshot_json"))
         result.append(account)
     return result
 
 
-def _config(account: dict[str, Any]) -> dict[str, float | int]:
-    raw = account["config_json"]
+def _config(account: dict[str, Any], symbol: str | None = None) -> dict[str, float | int]:
+    raw = effective_execution_config(account, symbol, query=store.query)
     try:
-        funding_rate_8h_bps = float(
-            raw.get("funding_rate_8h_bps", DEFAULT_FUNDING_RATE_8H_BPS)
-        )
+        funding_rate_8h_bps = float(raw.get("funding_rate_8h_bps", DEFAULT_FUNDING_RATE_8H_BPS))
     except (TypeError, ValueError):
         funding_rate_8h_bps = DEFAULT_FUNDING_RATE_8H_BPS
     if not math.isfinite(funding_rate_8h_bps):
         funding_rate_8h_bps = DEFAULT_FUNDING_RATE_8H_BPS
     return {
         "leverage": max(1, min(int(raw.get("leverage", DEFAULT_LEVERAGE)), 20)),
-        "max_positions": max(
-            1, min(int(raw.get("max_positions", DEFAULT_MAX_POSITIONS)), 20)
-        ),
+        "max_positions": max(1, min(int(raw.get("max_positions", DEFAULT_MAX_POSITIONS)), 20)),
         "margin_cap": max(0.05, min(float(raw.get("margin_cap", DEFAULT_MARGIN_CAP)), 0.95)),
         "position_size_pct": max(0.1, min(float(raw.get("position_size_pct", 10)), 100)),
         "fee_bps": max(0.0, min(float(raw.get("fee_bps", DEFAULT_FEE_BPS)), 100)),
-        "slippage_bps": max(
-            0.0, min(float(raw.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)), 100)
-        ),
+        "slippage_bps": max(0.0, min(float(raw.get("slippage_bps", DEFAULT_SLIPPAGE_BPS)), 100)),
         # Historical funding rates are not available in the local market store.
         # Keep the paper approximation explicit and configurable instead of
         # silently treating perpetual funding as zero. Positive rates charge
@@ -314,7 +305,9 @@ def _paper_account_snapshot(
                 quantity=quantity,
                 entry_price=Decimal(str(row["avg_entry"])),
                 mark_price=mark,
-                liquidation_price=(Decimal(str(row["liq_price"])) if row.get("liq_price") is not None else None),
+                liquidation_price=(
+                    Decimal(str(row["liq_price"])) if row.get("liq_price") is not None else None
+                ),
                 notional=quantity * mark,
                 initial_margin=Decimal(str(row["margin"])),
                 unrealized_pnl=Decimal(str(_upnl(row, float(mark)))),
@@ -391,8 +384,7 @@ def _reconcile_paper_account(account: dict[str, Any]) -> bool:
             "checked_at": int(time.time()),
         }
         if not isinstance(previous, dict) or (
-            previous.get("status") != "blocked"
-            or previous.get("details") != health["details"]
+            previous.get("status") != "blocked" or previous.get("details") != health["details"]
         ):
             store.user_state_set(account["user_id"], state_key, health)
             store.add_alert(
@@ -483,8 +475,8 @@ def _paper_execute(
         account_scope=intent.account_scope,
         physical_account_id=broker.physical_account_id,
         risk_policy=RiskPolicy(
-            max_open_positions=int(_config(account)["max_positions"]),
-            max_notional_to_equity=Decimal(str(_config(account)["leverage"])),
+            max_open_positions=int(_config(account, intent.symbol)["max_positions"]),
+            max_notional_to_equity=Decimal(str(_config(account, intent.symbol)["leverage"])),
             allowed_symbols=frozenset(tradfi_symbols()),
         ),
         safety=safety,
@@ -514,11 +506,7 @@ def _used_margin(positions: list[dict[str, Any]]) -> float:
 
 
 def _upnl(position: dict[str, Any], price: float) -> float:
-    return (
-        (price - float(position["avg_entry"]))
-        * float(position["qty"])
-        * int(position["side"])
-    )
+    return (price - float(position["avg_entry"])) * float(position["qty"]) * int(position["side"])
 
 
 def _equity(
@@ -621,9 +609,7 @@ def _current_open_risk(
         except (InvalidOperation, TypeError, ValueError):
             stop = Decimal(0)
         if stop <= 0 or (entry - stop) * side <= 0:
-            repaired_stop, _ = _exit_levels(
-                float(entry), side, position.get("atr_entry"), config
-            )
+            repaired_stop, _ = _exit_levels(float(entry), side, position.get("atr_entry"), config)
             if repaired_stop is not None:
                 stop = Decimal(str(repaired_stop))
         if stop <= 0 or (entry - stop) * side <= 0:
@@ -645,9 +631,7 @@ def _current_open_risk(
     return total_open_risk(risks)
 
 
-def _price_is_fresh(
-    prices: dict[str, float], symbol: str, now: int, policy: Any
-) -> bool:
+def _price_is_fresh(prices: dict[str, float], symbol: str, now: int, policy: Any) -> bool:
     timestamps = getattr(prices, "timestamps", None)
     # Plain dicts are retained as a compatibility seam for deterministic unit
     # tests and internal callers. Production snapshots always carry timestamps.
@@ -732,11 +716,7 @@ def _signal_is_fresh(
     snapshots = _strategy_snapshots(account)
     if not snapshots:
         return False
-    config = (
-        account.get("config_json")
-        if isinstance(account.get("config_json"), dict)
-        else None
-    )
+    config = account.get("config_json") if isinstance(account.get("config_json"), dict) else None
     evidence = signal_evidence if isinstance(signal_evidence, dict) else {}
     components = evidence.get("strategy_signals")
     if len(snapshots) > 1:
@@ -756,9 +736,7 @@ def _signal_is_fresh(
             ):
                 return False
         return True
-    return _snapshot_signal_is_fresh(
-        snapshots[0], config, signal_time, evidence, now, policy
-    )
+    return _snapshot_signal_is_fresh(snapshots[0], config, signal_time, evidence, now, policy)
 
 
 def _accrue_estimated_funding(
@@ -796,9 +774,7 @@ def _accrue_estimated_funding(
     ):
         return 0.0
 
-    first_boundary = (
-        previous_ts // FUNDING_INTERVAL_SECONDS + 1
-    ) * FUNDING_INTERVAL_SECONDS
+    first_boundary = (previous_ts // FUNDING_INTERVAL_SECONDS + 1) * FUNDING_INTERVAL_SECONDS
     if first_boundary > int(now):
         return 0.0
     periods = (int(now) - first_boundary) // FUNDING_INTERVAL_SECONDS + 1
@@ -919,6 +895,7 @@ def _strategy_signal(
         full_evaluator=evaluate_strategy,
         source_validator=validate_source,
         source_evaluator=evaluate_source,
+        query=store.query,
     ).execution_tuple()
 
 
@@ -947,10 +924,7 @@ def _combined_strategy_signal(
 ) -> tuple[int, float | None, list[str], int | None, dict[str, Any]]:
     """Require every selected strategy to emit the same non-zero direction."""
 
-    results = [
-        _strategy_signal(account, symbol, snapshot)
-        for snapshot in snapshots
-    ]
+    results = [_strategy_signal(account, symbol, snapshot) for snapshot in snapshots]
     directions = [int(result[0]) for result in results]
     signal_times = [result[3] for result in results]
     all_same_direction = (
@@ -961,14 +935,10 @@ def _combined_strategy_signal(
     )
     direction = directions[0] if all_same_direction else 0
     matched_count = (
-        len(directions)
-        if all_same_direction
-        else max(directions.count(1), directions.count(-1))
+        len(directions) if all_same_direction else max(directions.count(1), directions.count(-1))
     )
     components: list[dict[str, Any]] = []
-    combined_basis = [
-        f"组合条件：{matched_count}/{len(snapshots)} 策略同向满足（全部满足才开仓）"
-    ]
+    combined_basis = [f"组合条件：{matched_count}/{len(snapshots)} 策略同向满足（全部满足才开仓）"]
     for snapshot, result in zip(snapshots, results, strict=True):
         component_direction, component_atr, basis, signal_time, evidence = result
         combined_basis.extend(basis)
@@ -1127,11 +1097,7 @@ def _repair_missing_target(
         current_target = float(position.get("target") or 0)
     except (TypeError, ValueError):
         current_target = 0.0
-    if (
-        math.isfinite(current_target)
-        and current_target > 0
-        and (current_target - entry) * side > 0
-    ):
+    if math.isfinite(current_target) and current_target > 0 and (current_target - entry) * side > 0:
         return
     _, target = _exit_levels(entry, side, position.get("atr_entry") or atr, config)
     if target is None:
@@ -1156,7 +1122,7 @@ def _open_position(
     signal_time: int | None = None,
     signal_evidence: dict[str, Any] | None = None,
 ) -> bool:
-    config = _config(account)
+    config = _config(account, symbol)
     try:
         policy = _paper_risk_policy(account, signal_evidence)
     except ValueError:
@@ -1276,10 +1242,19 @@ def _open_position(
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'FILLED',?,'pending',
                             'paper_projection_v1',?)""",
                 (
-                    str(uuid.uuid4()), account["user_id"], account["id"],
-                    account["deployment_id"], intent.intent_id, order.client_order_id,
-                    symbol, "open", order.side.value, order.position_side.value,
-                    order.quantity, order.quantity, execution,
+                    str(uuid.uuid4()),
+                    account["user_id"],
+                    account["id"],
+                    account["deployment_id"],
+                    intent.intent_id,
+                    order.client_order_id,
+                    symbol,
+                    "open",
+                    order.side.value,
+                    order.position_side.value,
+                    order.quantity,
+                    order.quantity,
+                    execution,
                     json.dumps({"simulated": True, "entry_basis": entry_basis}, ensure_ascii=False),
                     json.dumps(projection, ensure_ascii=False),
                 ),
@@ -1328,22 +1303,17 @@ def _open_position(
 def _close_position(
     account: dict[str, Any], position: dict[str, Any], price: float, reason: str, now: int
 ) -> bool:
-    config = _config(account)
-    execution = _execution_price(
-        price, int(position["side"]), False, float(config["slippage_bps"])
-    )
+    config = _config(account, str(position["symbol"]))
+    execution = _execution_price(price, int(position["side"]), False, float(config["slippage_bps"]))
     quantity = float(position["qty"])
     fee = quantity * execution * float(config["fee_bps"]) / 10_000
-    pnl = (
-        (execution - float(position["avg_entry"])) * quantity * int(position["side"])
-        - float(position.get("funding_acc") or 0)
+    pnl = (execution - float(position["avg_entry"])) * quantity * int(position["side"]) - float(
+        position.get("funding_acc") or 0
     )
     margin = float(position["margin"])
     returned = max(margin + pnl - fee, 0.0)
     trade_basis = _json_object(position.get("basis"))
-    exit_decision = DEFAULT_EXIT_POLICY.decision_for_reason(
-        reason, price, observed_at=now
-    )
+    exit_decision = DEFAULT_EXIT_POLICY.decision_for_reason(reason, price, observed_at=now)
     if exit_decision is not None:
         trade_basis["exit_decision"] = exit_decision.snapshot(
             mode="paper",
@@ -1395,10 +1365,19 @@ def _close_position(
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'FILLED',?,'pending',
                             'paper_projection_v1',?)""",
                 (
-                    str(uuid.uuid4()), account["user_id"], account["id"],
-                    account["deployment_id"], intent.intent_id, order.client_order_id,
-                    position["symbol"], "close", order.side.value, order.position_side.value,
-                    order.quantity, order.quantity, execution,
+                    str(uuid.uuid4()),
+                    account["user_id"],
+                    account["id"],
+                    account["deployment_id"],
+                    intent.intent_id,
+                    order.client_order_id,
+                    position["symbol"],
+                    "close",
+                    order.side.value,
+                    order.position_side.value,
+                    order.quantity,
+                    order.quantity,
+                    execution,
                     json.dumps({"simulated": True, "reason": reason}, ensure_ascii=False),
                     json.dumps(projection, ensure_ascii=False),
                 ),
@@ -1451,13 +1430,14 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
     positions = _positions(account)
     closed_symbols: set[str] = set()
     for position in list(positions):
+        position_config = _config(account, str(position["symbol"]))
         price = prices.get(position["symbol"])
         funding_price = (
             float(price)
             if price is not None and math.isfinite(float(price)) and float(price) > 0
             else float(position["avg_entry"])
         )
-        _accrue_estimated_funding(account, position, funding_price, now, config)
+        _accrue_estimated_funding(account, position, funding_price, now, position_config)
         if (
             not price
             or not math.isfinite(float(price))
@@ -1471,7 +1451,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             continue
         # Stored exchange-risk levels must remain effective even when indicator
         # calculation or historical market data is temporarily unavailable.
-        _repair_missing_target(account, position, None, config)
+        _repair_missing_target(account, position, None, position_config)
         entry_basis = _json_object(position.get("basis"))
         captured_timing = entry_basis.get("execution_policy")
         try:
@@ -1480,9 +1460,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 account.get("config_json")
                 if isinstance(account.get("config_json"), dict)
                 else None,
-                captured=(
-                    captured_timing if isinstance(captured_timing, dict) else None
-                ),
+                captured=(captured_timing if isinstance(captured_timing, dict) else None),
                 default_max_holding_bars=DEFAULT_MAX_HOLDING_BARS,
             )
             holding_period_expired = timing_policy.expired(
@@ -1491,9 +1469,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             )
         except (KeyError, StrategyEvaluationError, TypeError, ValueError):
             holding_period_expired = False
-            print(
-                f"[paper] holding policy unavailable for position={position.get('id')}"
-            )
+            print(f"[paper] holding policy unavailable for position={position.get('id')}")
         exit_decision = DEFAULT_EXIT_POLICY.evaluate_mark(
             price,
             side,
@@ -1512,15 +1488,10 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                     account, position["symbol"], price
                 )
             except Exception as exc:
-                print(
-                    f"[paper] signal unavailable for {position['symbol']}: "
-                    f"{type(exc).__name__}"
-                )
+                print(f"[paper] signal unavailable for {position['symbol']}: {type(exc).__name__}")
             strategy_reversal = bool(
                 signal_time is not None
-                and _signal_is_fresh(
-                    account, signal_time, signal_evidence, now, policy
-                )
+                and _signal_is_fresh(account, signal_time, signal_evidence, now, policy)
                 and direction == -side
             )
         selected_exit = DEFAULT_EXIT_POLICY.select(
@@ -1531,9 +1502,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             holding_period_expired=holding_period_expired,
         )
         if selected_exit is not None:
-            if _close_position(
-                account, position, price, selected_exit.reason, now
-            ):
+            if _close_position(account, position, price, selected_exit.reason, now):
                 closed_symbols.add(position["symbol"])
             positions = _positions(account)
 
@@ -1545,9 +1514,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
         for symbol in universe
         if symbol not in closed_symbols and symbol not in occupied_symbols
     ]
-    allow_new_entries = bool(candidates) and _entry_loss_guard(
-        account, equity, now, policy
-    )
+    allow_new_entries = bool(candidates) and _entry_loss_guard(account, equity, now, policy)
     if allow_new_entries and len(positions) < int(config["max_positions"]):
         for symbol in candidates:
             if len(positions) >= int(config["max_positions"]):
@@ -1560,9 +1527,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             if (
                 not price
                 or not _price_is_fresh(prices, symbol, now, policy)
-                or not symbol_admission(
-                    symbol, sorted(occupied_symbols), policy=policy
-                ).allowed
+                or not symbol_admission(symbol, sorted(occupied_symbols), policy=policy).allowed
             ):
                 continue
             direction, atr, basis, signal_time, signal_evidence = _paper_strategy_signal(
@@ -1571,17 +1536,12 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
             if (
                 direction not in {-1, 1}
                 or signal_time is None
-                or not _signal_is_fresh(
-                    account, signal_time, signal_evidence, now, policy
-                )
+                or not _signal_is_fresh(account, signal_time, signal_evidence, now, policy)
             ):
                 continue
             state_key = f"paper:{account['id']}:signal:{symbol}"
             consumption_value = _signal_consumption_value(signal_time, signal_evidence)
-            if (
-                store.user_state_get(account["user_id"], state_key)
-                == consumption_value
-            ):
+            if store.user_state_get(account["user_id"], state_key) == consumption_value:
                 continue
             if _open_position(
                 account,
@@ -1595,13 +1555,9 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 signal_time,
                 signal_evidence,
             ):
-                store.user_state_set(
-                    account["user_id"], state_key, consumption_value
-                )
+                store.user_state_set(account["user_id"], state_key, consumption_value)
                 positions = _positions(account)
-                occupied_symbols = {
-                    str(position["symbol"]).upper() for position in positions
-                }
+                occupied_symbols = {str(position["symbol"]).upper() for position in positions}
 
     _record_equity(account, prices, positions, now)
 
@@ -1634,8 +1590,7 @@ def tick(account_id: int | None = None) -> None:
                         ready_accounts.append(account)
                 except Exception as exc:
                     print(
-                        f"[paper] account {account.get('id')} isolated: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"[paper] account {account.get('id')} isolated: {type(exc).__name__}: {exc}"
                     )
             prices = _prices()
             if not prices:
@@ -1651,8 +1606,7 @@ def tick(account_id: int | None = None) -> None:
                     # paper account. The pending fact remains blocked and is
                     # retried before that account may generate new intents.
                     print(
-                        f"[paper] account {account.get('id')} isolated: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"[paper] account {account.get('id')} isolated: {type(exc).__name__}: {exc}"
                     )
 
 
@@ -1721,9 +1675,7 @@ def reset(user_id: int, account_id: int) -> None:
             )
 
 
-def api_data(
-    user_id: int, account_id: int, timezone_offset_minutes: int = 0
-) -> dict[str, Any]:
+def api_data(user_id: int, account_id: int, timezone_offset_minutes: int = 0) -> dict[str, Any]:
     account = _account(user_id, account_id)
     prices = _prices()
     positions = _positions(account)
@@ -1753,10 +1705,10 @@ def api_data(
         )
     trades = []
     for row in store.query(
-            """SELECT * FROM paper_trades WHERE paper_account_id=? AND user_id=?
+        """SELECT * FROM paper_trades WHERE paper_account_id=? AND user_id=?
                ORDER BY closed_ts DESC LIMIT 100""",
-            (account_id, user_id),
-        ):
+        (account_id, user_id),
+    ):
         trade = dict(row)
         entry_basis = _json_object(trade.get("entry_basis_json"))
         if not entry_basis:

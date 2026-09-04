@@ -195,9 +195,7 @@ class AdminNewsSourceCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=80)
     url: str = Field(min_length=10, max_length=2048)
-    feed_type: str = Field(
-        default="rss", pattern=r"^(rss|taoz_flash|unusual_whales)$"
-    )
+    feed_type: str = Field(default="rss", pattern=r"^(rss|taoz_flash|unusual_whales)$")
     lang: str = Field(default="en", min_length=2, max_length=16, pattern=r"^[A-Za-z0-9-]+$")
     enabled: bool = True
     slow: bool = False
@@ -214,9 +212,7 @@ class AdminNewsSourceUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     url: str | None = Field(default=None, min_length=10, max_length=2048)
-    feed_type: str | None = Field(
-        default=None, pattern=r"^(rss|taoz_flash|unusual_whales)$"
-    )
+    feed_type: str | None = Field(default=None, pattern=r"^(rss|taoz_flash|unusual_whales)$")
     lang: str | None = Field(default=None, min_length=2, max_length=16, pattern=r"^[A-Za-z0-9-]+$")
     enabled: bool | None = None
     slow: bool | None = None
@@ -410,9 +406,7 @@ class AiMonitorLiveCopyConfigUpdate(BaseModel):
     position_mode: Literal["one_way", "hedge"] = "one_way"
     leverage: int = Field(default=10, ge=1, le=20)
     max_positions: int = Field(default=10, ge=1, le=20)
-    position_size_basis: Literal["account_equity", "copy_total_amount"] = (
-        "account_equity"
-    )
+    position_size_basis: Literal["account_equity", "copy_total_amount"] = "account_equity"
     copy_total_amount: float = Field(default=1_000.0, ge=1.0, le=1_000_000_000.0)
     position_size_pct: float = Field(default=2.0, ge=0.1, le=20.0)
     risk_per_trade_pct: float = Field(default=0.5, ge=0.1, le=5.0)
@@ -460,13 +454,9 @@ class AdminUnusualWhalesConfigUpdate(BaseModel):
     rest_enabled: bool = True
     websocket_enabled: bool = True
     channels: AdminUnusualWhalesChannels = Field(default_factory=AdminUnusualWhalesChannels)
-    thresholds: AdminUnusualWhalesThresholds = Field(
-        default_factory=AdminUnusualWhalesThresholds
-    )
+    thresholds: AdminUnusualWhalesThresholds = Field(default_factory=AdminUnusualWhalesThresholds)
     weights: AdminUnusualWhalesWeights = Field(default_factory=AdminUnusualWhalesWeights)
-    retention: AdminUnusualWhalesRetention = Field(
-        default_factory=AdminUnusualWhalesRetention
-    )
+    retention: AdminUnusualWhalesRetention = Field(default_factory=AdminUnusualWhalesRetention)
 
     @field_validator("api_key", mode="before")
     @classmethod
@@ -1336,17 +1326,16 @@ class StrategyPromotionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     expected_version: int = Field(ge=1)
-    target_status: Literal[
-        "validated", "backtested", "shadow", "paper", "micro_live", "live"
-    ]
+    target_status: Literal["validated", "backtested", "shadow", "paper", "micro_live", "live"]
     confirmed: Literal[True]
     approval_note: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def require_live_approval_note(self) -> Self:
-        if self.target_status in {"micro_live", "live"} and len(
-            (self.approval_note or "").strip()
-        ) < 10:
+        if (
+            self.target_status in {"micro_live", "live"}
+            and len((self.approval_note or "").strip()) < 10
+        ):
             raise ValueError("微型实盘或正式实盘晋级必须填写至少 10 个字符的审批说明")
         return self
 
@@ -1358,9 +1347,7 @@ class StrategyPromotionReviewRequest(BaseModel):
 
     request_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
     expected_version: int = Field(ge=1)
-    target_status: Literal[
-        "validated", "backtested", "shadow", "paper", "micro_live", "live"
-    ]
+    target_status: Literal["validated", "backtested", "shadow", "paper", "micro_live", "live"]
     request_note: str = Field(min_length=10, max_length=500)
     confirmed: Literal[True]
 
@@ -1394,9 +1381,7 @@ class StrategyValidationEvidenceRequest(BaseModel):
 
     run_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
     expected_version: int = Field(ge=1)
-    validation_type: Literal[
-        "oos", "stress", "shadow", "paper", "micro_live", "fault_drill"
-    ]
+    validation_type: Literal["oos", "stress", "shadow", "paper", "micro_live", "fault_drill"]
     status: Literal["passed", "failed"]
     report: dict[str, JsonValue] = Field(max_length=64)
     confirmed: Literal[True]
@@ -1529,6 +1514,18 @@ class StrategySourceCreateRequest(BaseModel):
         return _bounded_numeric_map(value, "risk default") if value is not None else None
 
 
+def _validated_strategy_params(value: dict[str, float]) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for raw_key, raw_value in value.items():
+        key = raw_key.strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", key):
+            raise ValueError(f"invalid strategy parameter name: {raw_key!r}")
+        if not math.isfinite(raw_value) or abs(raw_value) > 1_000_000_000:
+            raise ValueError(f"strategy parameter {key!r} must be finite and bounded")
+        normalized[key] = raw_value
+    return normalized
+
+
 class BacktestRunRequest(BaseModel):
     """创建单策略、单品种回测所需的可信输入。"""
 
@@ -1563,15 +1560,7 @@ class BacktestRunRequest(BaseModel):
     @field_validator("params")
     @classmethod
     def validate_params(cls, value: dict[str, float]) -> dict[str, float]:
-        normalized: dict[str, float] = {}
-        for raw_key, raw_value in value.items():
-            key = raw_key.strip()
-            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", key):
-                raise ValueError(f"invalid strategy parameter name: {raw_key!r}")
-            if not math.isfinite(raw_value) or abs(raw_value) > 1_000_000_000:
-                raise ValueError(f"strategy parameter {key!r} must be finite and bounded")
-            normalized[key] = raw_value
-        return normalized
+        return _validated_strategy_params(value)
 
     @model_validator(mode="after")
     def validate_date_range(self) -> Self:
@@ -1579,6 +1568,55 @@ class BacktestRunRequest(BaseModel):
             raise ValueError("start_date must be earlier than or equal to end_date")
         if (self.end_date - self.start_date).days > 366:
             raise ValueError("backtest date range cannot exceed 366 days")
+        return self
+
+
+class StrategyExecutionParameterProfile(BaseModel):
+    """Execution settings that may be shared by paper and live strategy runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    position_size_pct: Decimal = Field(ge=Decimal("0.01"), le=100, max_digits=10, decimal_places=6)
+    leverage: int = Field(ge=1, le=20)
+    margin_mode: Literal["isolated"] = "isolated"
+    fee_bps: Decimal = Field(ge=0, le=1000, max_digits=10, decimal_places=6)
+    slippage_bps: Decimal = Field(ge=0, le=1000, max_digits=10, decimal_places=6)
+    stop_loss_pct: Decimal = Field(ge=0, le=Decimal("99.9"), max_digits=10, decimal_places=6)
+    take_profit_pct: Decimal = Field(ge=0, le=Decimal("99.9"), max_digits=10, decimal_places=6)
+    max_holding_bars: int = Field(ge=0, le=50_000)
+
+
+class StrategyParameterProfileSaveRequest(BaseModel):
+    """Save either a strategy-wide default or a symbol-specific override."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    scope: Literal["default", "symbol"]
+    symbol: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=32,
+        pattern=r"^[A-Z0-9][A-Z0-9._:/-]*$",
+    )
+    params: dict[str, float] = Field(default_factory=dict, max_length=64)
+    execution: StrategyExecutionParameterProfile
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("params")
+    @classmethod
+    def validate_params(cls, value: dict[str, float]) -> dict[str, float]:
+        return _validated_strategy_params(value)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> Self:
+        if self.scope == "symbol" and not self.symbol:
+            raise ValueError("symbol is required for a symbol-specific profile")
+        if self.scope == "default":
+            self.symbol = None
         return self
 
 
