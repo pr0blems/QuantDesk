@@ -72,7 +72,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-result-summary-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-calculator-title-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -166,7 +166,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
             </section>
 
             <section id="parameter-section" class="config-section hidden">
-              <div class="section-head"><div><span class="section-index">05</span><strong>策略参数</strong></div><button id="reset-params" class="text-button" type="button">恢复默认</button></div>
+              <div class="section-head"><div><span class="section-index">05</span><strong>策略参数</strong><button id="lot-calculator-trigger" class="lot-calculator-trigger hidden" type="button" aria-label="打开仓位与止盈计算器">计算器</button></div><button id="reset-params" class="text-button" type="button">恢复默认</button></div>
               <div id="strategy-params" class="field-grid two"></div>
             </section>
             </div>
@@ -417,6 +417,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       if (event.key === "Escape" && !this.q("#history-dialog").classList.contains("hidden")) this.closeHistory();
     });
     this.q("#close-lot-calculator").addEventListener("click", () => this.closeLotCalculator());
+    this.q("#lot-calculator-trigger").addEventListener("click", () => void this.openLotCalculator());
     this.q("#calculator-lot").addEventListener("input", () => this.renderLotCalculator());
     this.q("#calculator-leverage").addEventListener("change", () => this.renderLotCalculator());
     this.q("#calculator-base-points").addEventListener("input", () => {
@@ -1002,25 +1003,13 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       .filter((param) => !this.isBasketStrategy() || param?.key !== "BoxTimeFrameMinutes");
     const section = this.q("#parameter-section");
     section.classList.toggle("hidden", !params.length);
+    this.q("#lot-calculator-trigger").classList.toggle("hidden", !this.isBasketStrategy() || !params.some((param) => param?.key === "Lot"));
     const container = this.q("#strategy-params");
     const existing = reset ? {} : Object.fromEntries(this.qa("[data-param-key]").map((input) => [input.dataset.paramKey, input.type === "checkbox" ? input.checked : input.value]));
     const fields = params.map((param) => {
       const label = this.node("label");
       const fieldName = this.node("span", "field-label", param.label || param.key);
-      if (this.isBasketStrategy() && param.key === "Lot") {
-        const heading = this.node("span", "field-label-row");
-        const calculatorButton = this.node("button", "lot-calculator-trigger", "计算器");
-        calculatorButton.type = "button";
-        calculatorButton.setAttribute("aria-label", "打开初始手数计算器");
-        calculatorButton.addEventListener("click", (event) => {
-          event.preventDefault();
-          void this.openLotCalculator();
-        });
-        heading.append(fieldName, calculatorButton);
-        label.append(heading);
-      } else {
-        label.append(fieldName);
-      }
+      label.append(fieldName);
       const type = String(param.type || "number").toLowerCase();
       let input;
       if (Array.isArray(param.options)) {

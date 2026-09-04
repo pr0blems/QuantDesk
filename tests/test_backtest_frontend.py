@@ -41,7 +41,9 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="history-list" class="history-list"',
         "this.closeHistory();",
         '["实际数据源", sourceLabel]',
-        'this.node("button", "lot-calculator-trigger", "计算器")',
+        'id="lot-calculator-trigger" class="lot-calculator-trigger hidden"',
+        'this.q("#lot-calculator-trigger").addEventListener("click", () => void this.openLotCalculator());',
+        'this.q("#lot-calculator-trigger").classList.toggle("hidden", !this.isBasketStrategy() || !params.some((param) => param?.key === "Lot"));',
         'id="lot-calculator-dialog" class="calculator-dialog-backdrop hidden"',
         'this.q("#close-lot-calculator").addEventListener("click", () => this.closeLotCalculator());',
         'id="calculator-lot"',
@@ -180,7 +182,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260904-result-summary-1" in controller
+    assert "/next/assets/backtest.css?v=20260904-calculator-title-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
