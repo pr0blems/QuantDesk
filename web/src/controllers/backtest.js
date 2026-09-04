@@ -58,7 +58,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260903-progress-replay-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-responsive-workspace-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">

@@ -162,9 +162,11 @@ def test_backtest_exposes_calculation_pipeline_and_progressive_replay() -> None:
 
 
 def test_backtest_workspace_uses_adaptive_page_width() -> None:
+    controller = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
+    assert "/next/assets/backtest.css?v=20260904-responsive-workspace-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
