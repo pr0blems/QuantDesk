@@ -72,7 +72,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-calculator-title-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-calculator-capital-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -312,6 +312,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   <div><span>最新价格</span><strong id="calculator-price">--</strong><small id="calculator-source">--</small></div>
                 </div>
                 <div class="calculator-adjustments">
+                  <label>初始资金 (USDT)<input id="calculator-initial-capital" type="number" min="1" step="any" value="10000"></label>
                   <label>初始手数<input id="calculator-lot" type="number" min="0.000001" step="any" value="0.01"></label>
                   <label>Binance 杠杆<select id="calculator-leverage"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option><option value="5">5x</option><option value="10">10x</option><option value="20">20x</option></select></label>
                 </div>
@@ -418,6 +419,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
     this.q("#close-lot-calculator").addEventListener("click", () => this.closeLotCalculator());
     this.q("#lot-calculator-trigger").addEventListener("click", () => void this.openLotCalculator());
+    this.q("#calculator-initial-capital").addEventListener("input", () => this.renderLotCalculator());
     this.q("#calculator-lot").addEventListener("input", () => this.renderLotCalculator());
     this.q("#calculator-leverage").addEventListener("change", () => this.renderLotCalculator());
     this.q("#calculator-base-points").addEventListener("input", () => {
@@ -1080,6 +1082,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       return;
     }
     const dialog = this.q("#lot-calculator-dialog");
+    this.q("#calculator-initial-capital").value = this.q("#initial-capital").value;
     this.q("#calculator-lot").value = lotInput.value;
     this.q("#calculator-leverage").value = this.q("#leverage").value;
     this.q("#calculator-base-points").value = this.strategyParamInput("TP")?.value || "100";
@@ -1109,15 +1112,17 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   lotCalculatorValues() {
     const quote = this.lotCalculatorQuote || {};
     const price = Number(quote.price);
+    const initialCapital = Number(this.q("#calculator-initial-capital").value);
     const lot = Number(this.q("#calculator-lot").value);
     const leverage = Number(this.q("#calculator-leverage").value);
     const basePoints = Number(this.q("#calculator-base-points").value);
     const pointSize = Number(quote.strategy_point_size || 0.01);
-    if (![price, lot, leverage, basePoints, pointSize].every((value) => Number.isFinite(value) && value > 0)) return null;
+    if (![price, initialCapital, lot, leverage, basePoints, pointSize].every((value) => Number.isFinite(value) && value > 0)) return null;
     const oneLotNotional = price;
     const oneLotMargin = oneLotNotional / leverage;
     const positionNotional = oneLotNotional * lot;
     const positionMargin = positionNotional / leverage;
+    const remainingAvailableBalance = initialCapital - positionMargin;
     const priceMove = basePoints * pointSize;
     const priceMovePct = priceMove / price * 100;
     const longTakeProfitPrice = price + priceMove;
@@ -1128,7 +1133,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const roundTripCost = positionNotional * roundTripCostRate;
     const estimatedNetProfit = grossProfit - roundTripCost;
     const estimatedNetRoePct = estimatedNetProfit / positionMargin * 100;
-    return { price, lot, leverage, basePoints, pointSize, oneLotNotional, oneLotMargin, positionNotional, positionMargin, priceMove, priceMovePct, longTakeProfitPrice, shortTakeProfitPrice, grossProfit, grossRoePct, roundTripCost, estimatedNetProfit, estimatedNetRoePct };
+    return { price, initialCapital, lot, leverage, basePoints, pointSize, oneLotNotional, oneLotMargin, positionNotional, positionMargin, remainingAvailableBalance, priceMove, priceMovePct, longTakeProfitPrice, shortTakeProfitPrice, grossProfit, grossRoePct, roundTripCost, estimatedNetProfit, estimatedNetRoePct };
   }
 
   calculatedPointSettings(basePoints) {
@@ -1238,6 +1243,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#calculator-price").textContent = `${this.price(values.price)} USDT`;
     this.q("#calculator-source").textContent = `Binance 24h 实时行情 · 策略 1 点=${this.price(values.pointSize)} USDT`;
     this.q("#calculator-facts").replaceChildren(
+      this.calculatorFact("回测初始资金", this.calculatorMoney(values.initialCapital), `开仓后剩余可用 ${this.calculatorMoney(values.remainingAvailableBalance)}`),
       this.calculatorFact("1 手名义价值", this.calculatorMoney(values.oneLotNotional), `${values.leverage}x 保证金 ${this.calculatorMoney(values.oneLotMargin)}`),
       this.calculatorFact(`${this.quantity(values.lot)} 手名义价值`, this.calculatorMoney(values.positionNotional), `开仓保证金 ${this.calculatorMoney(values.positionMargin)}`),
       this.calculatorFact(`基础止盈 ${this.number(values.basePoints, 2)} 点`, `做多 ${this.price(values.longTakeProfitPrice)} USDT`, `做空 ${shortTakeProfitLabel} · 价差 ±${this.price(values.priceMove)} USDT（${this.number(values.priceMovePct, 4)}%）`),
@@ -1284,6 +1290,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const values = this.lotCalculatorValues();
     const lotInput = this.strategyParamInput("Lot");
     if (!values || !lotInput) return false;
+    this.q("#initial-capital").value = String(values.initialCapital);
+    this.q("#initial-capital").dispatchEvent(new Event("input", { bubbles: true }));
     lotInput.value = String(values.lot);
     lotInput.dispatchEvent(new Event("input", { bubbles: true }));
     this.q("#leverage").value = String(values.leverage);
@@ -1296,7 +1304,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (!values) return;
     if (scope === "position") {
       if (!this.applyCalculatorPositionSettings()) return;
-      const message = `已写入初始手数 ${this.quantity(values.lot)} 和 Binance ${values.leverage}x 杠杆；点击右上角 × 关闭。`;
+      const message = `已写入初始资金 ${this.calculatorMoney(values.initialCapital)}、初始手数 ${this.quantity(values.lot)} 和 Binance ${values.leverage}x 杠杆；点击右上角 × 关闭。`;
       this.q("#calculator-apply-status").textContent = message;
       this.showBanner(message, "success");
       return;
@@ -1315,7 +1323,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (scope === "all") this.applyCalculatorPositionSettings();
     const message = scope === "take-profit"
       ? `已写入 ${applied} 项分级止盈点数；点击右上角 × 关闭。`
-      : `已写入手数、杠杆和 ${applied} 项可编辑点数；点击右上角 × 关闭。`;
+      : `已写入初始资金、手数、杠杆和 ${applied} 项可编辑点数；点击右上角 × 关闭。`;
     this.q("#calculator-apply-status").textContent = message;
     this.showBanner(message, "success");
   }
@@ -1575,7 +1583,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     }
     const fields = [
       ...this.qa("[data-param-key]"),
-      this.q("#position-size"), this.q("#leverage"), this.q("#fee"), this.q("#slippage"),
+      this.q("#initial-capital"), this.q("#position-size"), this.q("#leverage"), this.q("#fee"), this.q("#slippage"),
       this.q("#stop-loss"), this.q("#take-profit"), this.q("#max-holding"),
     ].filter(Boolean);
     const invalid = fields.find((field) => !field.checkValidity());
@@ -1589,6 +1597,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   executionProfileFromConfiguration(configuration = {}) {
     return {
+      initial_capital: Number(configuration.initial_capital),
       position_size_pct: Number(configuration.position_size_pct),
       leverage: Number(configuration.leverage),
       margin_mode: "isolated",

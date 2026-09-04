@@ -47,6 +47,7 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="lot-calculator-dialog" class="calculator-dialog-backdrop hidden"',
         'this.q("#close-lot-calculator").addEventListener("click", () => this.closeLotCalculator());',
         'id="calculator-lot"',
+        'id="calculator-initial-capital"',
         'id="calculator-leverage"',
         'id="calculator-market-change" class="neutral"',
         'class="calculator-summary-table" aria-label="多空止盈价格与收益计算"',
@@ -92,7 +93,10 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert '`${this.price(values.longTakeProfitPrice)} USDT`' in script
     assert "shortTakeProfitLabel" in script
     assert 'const lot = Number(this.q("#calculator-lot").value);' in script
+    assert 'const initialCapital = Number(this.q("#calculator-initial-capital").value);' in script
     assert 'const leverage = Number(this.q("#calculator-leverage").value);' in script
+    assert 'this.q("#initial-capital").value = String(values.initialCapital);' in script
+    assert 'initial_capital: Number(configuration.initial_capital),' in script
     assert 'if (scope === "all") this.applyCalculatorPositionSettings();' in script
     assert 'const takeProfitKeys = new Set(["TP", "TP2", "TP3", "TP4"]);' in script
     assert 'TrailStart: scaled(6)' in script
@@ -182,7 +186,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260904-calculator-title-1" in controller
+    assert "/next/assets/backtest.css?v=20260905-calculator-capital-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet

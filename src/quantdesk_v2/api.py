@@ -2652,7 +2652,7 @@ def save_strategy_parameter_profile(
             scope_key=scope_key,
             strategy_version=strategy.version,
             parameters_json=normalized_parameters,
-            execution_json=payload.execution.model_dump(mode="json"),
+            execution_json=payload.execution.model_dump(mode="json", exclude_none=True),
             created_at=now,
             updated_at=now,
         )
@@ -2660,7 +2660,7 @@ def save_strategy_parameter_profile(
     else:
         profile.strategy_version = strategy.version
         profile.parameters_json = normalized_parameters
-        profile.execution_json = payload.execution.model_dump(mode="json")
+        profile.execution_json = payload.execution.model_dump(mode="json", exclude_none=True)
         profile.updated_at = now
     _audit(
         db,

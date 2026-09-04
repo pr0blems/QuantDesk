@@ -15,7 +15,7 @@ def _query(_sql: str, params: tuple[object, ...]) -> list[dict[str, object]]:
         {
             "scope_key": "*",
             "parameters_json": json.dumps({"period": 21, "threshold": 1.5}),
-            "execution_json": json.dumps({"leverage": 3, "position_size_pct": 8}),
+            "execution_json": json.dumps({"initial_capital": 2500, "leverage": 3, "position_size_pct": 8}),
         }
     ]
     if symbol == "AAPLUSDT":
@@ -23,7 +23,7 @@ def _query(_sql: str, params: tuple[object, ...]) -> list[dict[str, object]]:
             {
                 "scope_key": "AAPLUSDT",
                 "parameters_json": {"threshold": 2.25},
-                "execution_json": {"leverage": 7, "take_profit_pct": 12},
+                "execution_json": {"initial_capital": 5000, "leverage": 7, "take_profit_pct": 12},
             }
         )
     return rows

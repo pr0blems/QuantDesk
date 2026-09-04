@@ -1572,10 +1572,16 @@ class BacktestRunRequest(BaseModel):
 
 
 class StrategyExecutionParameterProfile(BaseModel):
-    """Execution settings that may be shared by paper and live strategy runs."""
+    """Backtest defaults plus execution settings shared by paper and live runs."""
 
     model_config = ConfigDict(extra="forbid")
 
+    initial_capital: Decimal | None = Field(
+        default=None,
+        ge=1,
+        le=Decimal("1000000000000"),
+        max_digits=30,
+    )
     position_size_pct: Decimal = Field(ge=Decimal("0.01"), le=100, max_digits=10, decimal_places=6)
     leverage: int = Field(ge=1, le=20)
     margin_mode: Literal["isolated"] = "isolated"

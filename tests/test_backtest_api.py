@@ -25,6 +25,7 @@ from quantdesk_v2.models import (
     User,
     UserStrategy,
 )
+from quantdesk_v2.schemas import StrategyExecutionParameterProfile
 from quantdesk_v2.strategy_catalog import ENGINE_PARAMETER_SCHEMAS
 
 
@@ -252,6 +253,22 @@ def backtest_payload() -> dict:
         "max_holding_bars": 120,
         "params": {"fast_period": 5},
     }
+
+
+def test_strategy_parameter_profile_accepts_backtest_initial_capital() -> None:
+    profile = StrategyExecutionParameterProfile(
+        initial_capital=Decimal("2500"),
+        position_size_pct=Decimal("10"),
+        leverage=10,
+        margin_mode="isolated",
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        stop_loss_pct=Decimal("5"),
+        take_profit_pct=Decimal("10"),
+        max_holding_bars=120,
+    )
+
+    assert profile.initial_capital == Decimal("2500")
 
 
 def test_builtin_indicator_strategy_is_a_manual_backtest_choice() -> None:
