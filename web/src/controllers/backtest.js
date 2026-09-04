@@ -14,6 +14,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.history = [];
     this.historyLoaded = false;
     this.activeDetail = null;
+    this.batchResults = [];
+    this.batchFailures = [];
+    this.expandedBatchIndex = -1;
+    this.batchExpandToken = 0;
     this.lotCalculatorQuote = null;
     this.lotCalculatorRequest = 0;
     this.strategyId = "";
@@ -62,7 +66,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-symbol-dialog-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-batch-results-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -176,6 +180,14 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div><strong>回测结果</strong><span id="stage-status" class="stage-status idle"><i></i>等待运行</span></div>
               <div class="toolbar-meta"><span id="active-run-meta">选择策略并配置参数</span><button id="open-history" type="button">历史回测数据</button></div>
             </div>
+
+            <section id="batch-result-overview" class="batch-result-overview hidden" aria-label="本次回测结果">
+              <div class="batch-result-head">
+                <div><span>RUN RESULTS</span><strong>本次回测结果</strong><small id="batch-result-summary">回测结果默认收起，点击交易品种展开完整视图。</small></div>
+                <span id="batch-result-count">0 个品种</span>
+              </div>
+              <div id="batch-result-list" class="batch-result-list"></div>
+            </section>
 
             <div class="stage-layout">
               <div class="result-primary">
@@ -420,6 +432,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.history = [];
     this.historyLoaded = false;
     this.activeDetail = null;
+    this.batchResults = [];
+    this.batchFailures = [];
+    this.expandedBatchIndex = -1;
+    this.batchExpandToken += 1;
     this.lotCalculatorQuote = null;
     this.lotCalculatorRequest += 1;
     this.stopComputationProgress();
@@ -468,6 +484,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#result-content").classList.add("hidden");
     this.q("#trade-cycle-rail").classList.add("hidden");
     this.q(".stage-layout").classList.remove("has-result");
+    this.hideBatchResults(true);
     this.q("#open-history").disabled = false;
     this.q("#reload-history").disabled = false;
     this.q("#active-run-meta").textContent = "选择策略并配置参数";
@@ -1440,19 +1457,17 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       await Promise.all(Array.from({ length: concurrency }, () => runNext()));
       if (generation !== this.sessionGeneration) return;
       if (!successes.length) throw new Error(failures.map((item) => `${item.symbol}: ${item.message}`).join("；"));
-      const preferred = successes.find((item) => item.symbol === this.primarySymbol()) || successes[0];
-      const detail = preferred.detail;
       this.stopComputationProgress();
-      this.activeDetail = detail;
-      await this.replayResult(detail, generation);
-      if (generation !== this.sessionGeneration) return;
+      const symbolOrder = new Map(symbols.map((symbol, index) => [symbol, index]));
+      successes.sort((left, right) => (symbolOrder.get(left.symbol) ?? 0) - (symbolOrder.get(right.symbol) ?? 0));
+      failures.sort((left, right) => (symbolOrder.get(left.symbol) ?? 0) - (symbolOrder.get(right.symbol) ?? 0));
+      this.renderBatchResults(successes, failures);
       await this.loadHistory(false, generation);
       if (generation !== this.sessionGeneration) return;
       this.setStageStatus(failures.length ? "部分完成" : "已完成", "success");
-      this.q("#active-run-meta").textContent = `${preferred.symbol} · ${this.q("#timeframe").value} · 当前展示`;
       const message = symbols.length === 1
-        ? "回测完成。请先检查数据质量和最大回撤，再判断策略表现。"
-        : `多品种回测完成：成功 ${successes.length}，失败 ${failures.length}。当前展示 ${preferred.symbol}，其余结果可在历史回测数据中查看。`;
+        ? "回测完成。结果已收起，点击交易品种可展开完整视图。"
+        : `多品种回测完成：成功 ${successes.length}，失败 ${failures.length}。结果已按品种列出，点击展开查看完整回测视图。`;
       this.showBanner(message, "success");
     } catch (error) {
       if (generation !== this.sessionGeneration) return;
@@ -1469,6 +1484,119 @@ class BacktestWorkbench extends window.QuantDeskPageController {
         this.setRunButton(false);
       }
     }
+  }
+
+  hideBatchResults(clear = false) {
+    const overview = this.q("#batch-result-overview");
+    if (overview) overview.classList.add("hidden");
+    if (!clear) return;
+    this.batchExpandToken += 1;
+    this.expandedBatchIndex = -1;
+    this.batchResults = [];
+    this.batchFailures = [];
+    const list = this.q("#batch-result-list");
+    if (list) list.replaceChildren();
+  }
+
+  renderBatchResults(successes = [], failures = []) {
+    this.stopResultReplay();
+    this.batchExpandToken += 1;
+    this.batchResults = [...successes];
+    this.batchFailures = [...failures];
+    this.expandedBatchIndex = -1;
+    this.activeDetail = null;
+    this.q("#empty-result").classList.add("hidden");
+    this.q("#running-result").classList.add("hidden");
+    this.q("#result-content").classList.add("hidden");
+    this.q("#trade-cycle-rail").classList.add("hidden");
+    this.q(".stage-layout").classList.remove("has-result");
+    this.resetPriceChartState();
+    this.q("#batch-result-overview").classList.remove("hidden");
+    this.q("#batch-result-count").textContent = `${successes.length + failures.length} 个品种`;
+    this.q("#batch-result-summary").textContent = `成功 ${successes.length} · 失败 ${failures.length} · 结果默认收起，点击交易品种展开完整视图。`;
+    this.q("#active-run-meta").textContent = `${successes.length + failures.length} 个结果 · 点击交易品种展开`;
+    this.renderBatchResultCards();
+  }
+
+  renderBatchResultCards() {
+    const cards = this.batchResults.map((item, index) => {
+      const { run, result } = this.unpackDetail(item.detail);
+      const metrics = result.metrics || {};
+      const totalReturn = this.metric(metrics, ["total_return_pct", "return_pct", "total_return"]);
+      const drawdown = this.metric(metrics, ["max_drawdown_pct", "max_drawdown"]);
+      const winRate = this.metric(metrics, ["win_rate_pct", "win_rate"]);
+      const trades = this.metric(metrics, ["trade_count", "total_trades", "trades"]);
+      const expanded = index === this.expandedBatchIndex;
+      const card = this.node("article", `batch-result-card${expanded ? " expanded" : ""}`);
+      const head = this.node("div", "batch-result-card-head");
+      const identity = this.node("div", "batch-result-identity");
+      identity.append(
+        this.node("span", "batch-result-order", String(index + 1).padStart(2, "0")),
+        this.node("strong", "", run.symbol || item.symbol || "--"),
+        this.node("small", "", `${run.strategy_name || run.strategy_id || "策略回测"} · ${run.timeframe || "--"}`),
+      );
+      head.append(identity, this.node("strong", `batch-result-return ${this.toneClass(totalReturn)}`, this.percent(totalReturn)));
+      const facts = this.node("div", "batch-result-metrics");
+      for (const [label, value, tone] of [
+        ["最大回撤", this.percent(drawdown, false), -Math.abs(Number(drawdown) || 0)],
+        ["胜率", this.percent(winRate, false), winRate],
+        ["交易次数", this.integer(trades), 0],
+        ["数据区间", `${this.dateOnly(run.start_date || run.start_at) || "--"} — ${this.dateOnly(run.end_date || run.end_at) || "--"}`, 0],
+      ]) {
+        const fact = this.node("div", "batch-result-metric");
+        fact.append(this.node("span", "", label), this.node("strong", this.toneClass(tone), value));
+        facts.append(fact);
+      }
+      const button = this.node("button", "batch-result-toggle", expanded ? "收起回测结果" : "展开回测结果");
+      button.type = "button";
+      button.setAttribute("aria-expanded", String(expanded));
+      button.addEventListener("click", () => { void this.toggleBatchResult(index); });
+      card.append(head, facts, button);
+      return card;
+    });
+    const failedCards = this.batchFailures.map((item) => {
+      const card = this.node("article", "batch-result-card failed");
+      const head = this.node("div", "batch-result-card-head");
+      const identity = this.node("div", "batch-result-identity");
+      identity.append(this.node("span", "batch-result-order", "!"), this.node("strong", "", item.symbol || "--"), this.node("small", "", "该品种未产生可展示结果"));
+      head.append(identity, this.node("strong", "batch-result-return negative", "失败"));
+      card.append(head, this.node("p", "batch-result-error", item.message || "运行失败"));
+      return card;
+    });
+    this.q("#batch-result-list").replaceChildren(...cards, ...failedCards);
+  }
+
+  async toggleBatchResult(index) {
+    if (index === this.expandedBatchIndex) {
+      this.collapseBatchResult();
+      return;
+    }
+    const item = this.batchResults[index];
+    if (!item?.detail) return;
+    const token = ++this.batchExpandToken;
+    const generation = this.sessionGeneration;
+    this.stopResultReplay();
+    this.expandedBatchIndex = index;
+    this.activeDetail = item.detail;
+    this.renderBatchResultCards();
+    await this.replayResult(item.detail, generation, { preserveBatch: true, expandToken: token });
+    if (generation !== this.sessionGeneration || token !== this.batchExpandToken) return;
+    this.setStageStatus("已展开", "success");
+    this.renderBatchResultCards();
+  }
+
+  collapseBatchResult() {
+    this.batchExpandToken += 1;
+    this.stopResultReplay();
+    this.expandedBatchIndex = -1;
+    this.activeDetail = null;
+    this.q("#result-content").classList.add("hidden");
+    this.q("#trade-cycle-rail").classList.add("hidden");
+    this.q(".stage-layout").classList.remove("has-result");
+    this.resetPriceChartState();
+    this.q("#active-run-meta").textContent = `${this.batchResults.length + this.batchFailures.length} 个结果 · 点击交易品种展开`;
+    this.setStageStatus(this.batchFailures.length ? "部分完成" : "已完成", "success");
+    this.renderBatchResultCards();
   }
 
   async loadHistory(showFeedback = false, generation = this.sessionGeneration) {
@@ -1552,6 +1680,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   renderResult(detail = {}, options = {}) {
+    if (!options.preserveBatch) this.hideBatchResults(true);
     const unpacked = this.unpackDetail(detail);
     const run = unpacked.run;
     const result = unpacked.result;
@@ -1579,6 +1708,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   showComputationProgress() {
     this.stopComputationProgress();
+    this.hideBatchResults(true);
     this.q("#empty-result").classList.add("hidden");
     this.q("#result-content").classList.add("hidden");
     this.q("#trade-cycle-rail").classList.add("hidden");
@@ -1627,17 +1757,20 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
   }
 
-  async replayResult(detail, generation = this.sessionGeneration) {
+  async replayResult(detail, generation = this.sessionGeneration, options = {}) {
     const { result, run } = this.unpackDetail(detail);
     const candles = Array.isArray(result.price_candles) ? result.price_candles : (result.data_quality?.price_candles || []);
     const trades = Array.isArray(result.trades) ? result.trades : [];
     const curve = this.normalizeCurve(result.equity_curve || result.curve || []);
-    this.renderResult(detail, { deferCharts: true });
+    const replayIsCurrent = () => generation === this.sessionGeneration
+      && (options.expandToken == null || options.expandToken === this.batchExpandToken);
+    this.renderResult(detail, { deferCharts: true, preserveBatch: Boolean(options.preserveBatch) });
     this.q("#result-kicker").textContent = "BACKTEST REPLAY";
     this.q("#trade-replay-status").classList.remove("hidden");
     this.setStageStatus("逐根回放", "loading");
     this.resetPriceChartState();
     if (!candles.length) {
+      if (!replayIsCurrent()) return;
       this.drawCharts(result);
       this.finishResultReplay(result, run);
       return;
@@ -1648,7 +1781,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       this.resultReplayState = { result, candles, trades, curve, visibleCandles: 1, lastPaintAt: 0, resolve };
       const tick = (now) => {
         const state = this.resultReplayState;
-        if (!state || generation !== this.sessionGeneration) {
+        if (!state || !replayIsCurrent()) {
           resolve();
           return;
         }
@@ -1669,7 +1802,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       };
       this.resultReplayFrame = window.requestAnimationFrame(tick);
     });
-    if (generation !== this.sessionGeneration) return;
+    if (!replayIsCurrent()) return;
     this.finishResultReplay(result, run);
   }
 

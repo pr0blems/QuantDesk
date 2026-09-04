@@ -158,7 +158,7 @@ def test_backtest_exposes_calculation_pipeline_and_progressive_replay() -> None:
         'data-running-step="4"',
         "服务端正在逐根执行策略、撮合订单并计算账户权益。",
         "收到结果后，将按真实历史时间轴逐根回放。",
-        "await this.replayResult(detail, generation);",
+        "await this.replayResult(item.detail, generation, { preserveBatch: true, expandToken: token });",
         "drawReplayFrame(visibleCount)",
         "state.candles.slice(0, visibleCount)",
         "正在回放 ${this.integer(visibleCount)} / ${this.integer(state.candles.length)} 根 K 线",
@@ -180,7 +180,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260904-symbol-dialog-1" in controller
+    assert "/next/assets/backtest.css?v=20260904-batch-results-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
@@ -207,6 +207,14 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
         "const concurrency = Math.max(1, Math.min(2",
         "await Promise.all(Array.from({ length: concurrency }, () => runNext()))",
         "多品种回测完成",
+        'id="batch-result-overview" class="batch-result-overview hidden"',
+        'id="batch-result-list"',
+        "this.renderBatchResults(successes, failures)",
+        "结果已按品种列出",
+        "展开回测结果",
+        "收起回测结果",
+        "this.expandedBatchIndex",
+        "preserveBatch: true",
         "专有交易策略参数已保存",
         "/strategy-parameters/",
     ):
@@ -217,6 +225,10 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
     assert ".symbol-chip" in stylesheet
     assert ".symbol-dialog-backdrop" in stylesheet
     assert ".symbol-choice-list" in stylesheet
+    assert ".batch-result-overview" in stylesheet
+    assert ".batch-result-list" in stylesheet
+    assert ".batch-result-card.expanded" in stylesheet
+    assert ".batch-result-toggle" in stylesheet
     assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in stylesheet
 
 
