@@ -103,7 +103,10 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert "this.renderPriceChartTooltip(event.offsetX, event.offsetY);" in script
     assert 'const executions = this.tradeExecutions(trade' in script
     assert 'executions.forEach((execution, index) =>' in script
-    assert 'layout.markers.push({ x, y, kind, trade, execution, isFinalExit, time: ts });' in script
+    assert 'const markerBounds = []' in script
+    assert 'context.measureText(label).width' in script
+    assert 'layout.markers.push({ x, y, baseX, baseY, kind, trade, execution, isFinalExit, time: ts });' in script
+    assert 'context.lineTo(x, y)' in script
     assert 'isBuy ? "买平" : "卖平"' in script
     assert 'action === "add" ? (isBuy ? "买加" : "卖加")' in script
     assert 'if (isExit) {' in script

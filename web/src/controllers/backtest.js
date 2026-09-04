@@ -2010,18 +2010,81 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       context.fillRect(x - candleWidth / 2, top, candleWidth, Math.max(1, bottom - top));
     });
 
-    const markerSlots = new Map();
+    const markerBounds = [];
     const marker = (ts, price, color, shape, label, trade, kind, execution, isFinalExit = false) => {
       if (!Number.isFinite(ts) || !Number.isFinite(price) || ts < firstTs || ts > lastTs) return;
       const baseX = xTime(ts);
-      const y = yPrice(price);
-      const slotKey = `${Math.round(baseX)}:${Math.round(y)}`;
-      const slotIndex = markerSlots.get(slotKey) || 0;
-      markerSlots.set(slotKey, slotIndex + 1);
-      const slotStep = slotIndex === 0 ? 0 : Math.ceil(slotIndex / 2) * (slotIndex % 2 ? 7 : -7);
-      const x = Math.max(padding.left, Math.min(width - padding.right, baseX + slotStep));
-      layout.markers.push({ x, y, kind, trade, execution, isFinalExit, time: ts });
+      const baseY = yPrice(price);
       context.save();
+      context.font = "bold 11px sans-serif";
+      const labelWidth = Math.max(24, Math.ceil(context.measureText(label).width));
+      context.restore();
+      const candidates = [
+        [0, 0], [0, -20], [0, 20], [36, 0], [-36, 0],
+        [36, -20], [-36, -20], [36, 20], [-36, 20],
+        [0, -40], [0, 40], [72, 0], [-72, 0],
+      ];
+      let placement = null;
+      for (const [offsetX, offsetY] of candidates) {
+        const candidateX = Math.max(padding.left + 7, Math.min(width - padding.right - labelWidth - 12, baseX + offsetX));
+        const candidateY = Math.max(padding.top + 12, Math.min(height - padding.bottom - 12, baseY + offsetY));
+        const labelAbove = offsetY <= 0;
+        const labelX = candidateX + 8;
+        const labelY = candidateY + (labelAbove ? -8 : 14);
+        const bounds = {
+          left: candidateX - 7,
+          right: labelX + labelWidth + 3,
+          top: Math.min(candidateY - 9, labelY - 12),
+          bottom: Math.max(candidateY + 9, labelY + 3),
+        };
+        const collides = markerBounds.some((item) => !(
+          bounds.right + 3 < item.left
+          || bounds.left - 3 > item.right
+          || bounds.bottom + 3 < item.top
+          || bounds.top - 3 > item.bottom
+        ));
+        if (!collides) {
+          placement = { x: candidateX, y: candidateY, labelX, labelY, bounds };
+          break;
+        }
+      }
+      if (!placement) {
+        const overflowIndex = markerBounds.length;
+        const direction = overflowIndex % 2 ? 1 : -1;
+        const distance = 20 + Math.ceil(overflowIndex / 2) * 18;
+        const x = Math.max(padding.left + 7, Math.min(width - padding.right - labelWidth - 12, baseX));
+        const y = Math.max(padding.top + 12, Math.min(height - padding.bottom - 12, baseY + direction * distance));
+        const labelX = x + 8;
+        const labelY = y + (direction < 0 ? -8 : 14);
+        placement = {
+          x,
+          y,
+          labelX,
+          labelY,
+          bounds: {
+            left: x - 7,
+            right: labelX + labelWidth + 3,
+            top: Math.min(y - 9, labelY - 12),
+            bottom: Math.max(y + 9, labelY + 3),
+          },
+        };
+      }
+      const { x, y, labelX, labelY, bounds } = placement;
+      markerBounds.push(bounds);
+      layout.markers.push({ x, y, baseX, baseY, kind, trade, execution, isFinalExit, time: ts });
+      context.save();
+      if (Math.abs(x - baseX) > 1 || Math.abs(y - baseY) > 1) {
+        context.setLineDash([2, 3]);
+        context.strokeStyle = color;
+        context.globalAlpha = .55;
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(baseX, baseY);
+        context.lineTo(x, y);
+        context.stroke();
+        context.setLineDash([]);
+        context.globalAlpha = 1;
+      }
       context.fillStyle = color;
       context.strokeStyle = "#07111b";
       context.lineWidth = 1.5;
@@ -2036,7 +2099,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       context.closePath(); context.fill(); context.stroke();
       context.fillStyle = color;
       context.font = "bold 11px sans-serif";
-      context.fillText(label, x + 7, y + (shape === "down" ? 11 : -7));
+      context.fillText(label, labelX, labelY);
       context.restore();
     };
     state.trades.forEach((trade) => {
