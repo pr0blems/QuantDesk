@@ -94,14 +94,21 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'id="standard-execution-note"' in script
     assert 'id="price-chart"' in script
     assert "drawPriceChart(" in script
-    assert "滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看成交盈亏" in script
+    assert "滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看成交；收益仅在平仓点显示" in script
     assert 'id="price-chart-tooltip"' in script
     assert 'id="price-chart-range"' in script
     assert 'canvas.addEventListener("wheel"' in script
     assert 'canvas.addEventListener("pointerdown"' in script
     assert 'canvas.addEventListener("dblclick"' in script
     assert "this.renderPriceChartTooltip(event.offsetX, event.offsetY);" in script
-    assert '["净盈亏", this.signedMoney(pnl), tone]' in script
+    assert 'const executions = this.tradeExecutions(trade' in script
+    assert 'executions.forEach((execution, index) =>' in script
+    assert 'layout.markers.push({ x, y, kind, trade, execution, isFinalExit, time: ts });' in script
+    assert 'isBuy ? "买平" : "卖平"' in script
+    assert 'action === "add" ? (isBuy ? "买加" : "卖加")' in script
+    assert 'if (isExit) {' in script
+    assert '[isFinalExit ? "本周期净盈亏" : "本次平仓净盈亏", this.signedMoney(pnl), tone]' in script
+    assert 'if (isFinalExit) {' in script
     assert 'trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct' in script
     assert 'trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct' in script
     assert 'this.node("strong", "", `交易周期 #${this.integer(sequence)}`)' in script

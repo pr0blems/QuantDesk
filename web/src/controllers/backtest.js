@@ -191,7 +191,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   </section>
 
                   <section id="price-panel" class="result-panel price-panel">
-                    <div class="panel-head"><div><strong>K 线与成交点</strong><span>滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看成交盈亏</span></div><div class="trade-marker-legend"><span class="long-marker">多开</span><span class="short-marker">空开</span><span class="exit-marker">平仓</span></div></div>
+                    <div class="panel-head"><div><strong>K 线与成交点</strong><span>滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看成交；收益仅在平仓点显示</span></div><div class="trade-marker-legend"><span class="long-marker">买入</span><span class="short-marker">卖出</span><span class="exit-marker">平仓收益</span></div></div>
                     <div class="price-chart-wrap"><canvas id="price-chart" aria-label="回测 K 线与买卖点" tabindex="0"></canvas><div id="price-chart-tooltip" class="price-chart-tooltip hidden" role="status" aria-live="polite"></div><div id="price-chart-range" class="price-chart-range">全部数据</div></div>
                   </section>
 
@@ -1839,30 +1839,46 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     let tone = "";
     if (target.trade) {
       const trade = target.trade;
-      const pnl = Number(trade.net_pnl ?? trade.pnl ?? trade.profit ?? 0);
-      const sideValue = String(trade.side ?? trade.direction ?? "").toLowerCase();
-      const isLong = ["long", "buy", "1", "多"].includes(sideValue) || Number(trade.side) > 0;
-      const isBasket = Boolean(trade.is_mixed_basket)
-        || String(trade.position_structure ?? "").toLowerCase() === "mixed_basket"
-        || ["basket", "mixed", "双向", "篮子"].includes(sideValue);
-      title = isBasket ? "双向篮子成交" : target.kind === "entry" ? `${isLong ? "做多" : "做空"}开仓` : `${isLong ? "做多" : "做空"}平仓`;
-      tone = pnl > 0 ? "profit" : pnl < 0 ? "loss" : "";
+      const execution = target.execution || {};
+      const phase = execution.phase === "exit" || target.kind === "exit" ? "exit" : "entry";
+      const orderSide = String(execution.order_side || "").toLowerCase();
+      const positionSide = String(execution.position_side || "").toLowerCase();
+      const action = String(execution.action || "").toLowerCase();
+      const isExit = phase === "exit";
+      const isFinalExit = Boolean(target.isFinalExit);
+      const tradePnl = Number(trade.net_pnl ?? trade.pnl ?? trade.profit ?? 0);
+      const executionPnl = Number(execution.net_pnl);
+      const pnl = isFinalExit || !Number.isFinite(executionPnl) ? tradePnl : executionPnl;
+      title = this.executionLabel({ orderSide, positionSide, action, phase });
+      tone = isExit ? (pnl > 0 ? "profit" : pnl < 0 ? "loss" : "") : "";
       rows.push(
         ["成交时间", this.shortDate(target.time, true)],
-        [isBasket ? "多头开仓 → 平仓" : isLong ? "买入开仓价" : "卖出开仓价", isBasket ? `${this.price(trade.long_entry_price)} → ${this.price(trade.long_exit_price)}` : this.price(trade.entry_price ?? trade.open_price)],
-        [isBasket ? "空头开仓 → 平仓" : isLong ? "卖出平仓价" : "买入平仓价", isBasket ? `${this.price(trade.short_entry_price)} → ${this.price(trade.short_exit_price)}` : this.price(trade.exit_price ?? trade.close_price)],
-        ["成交数量", this.quantity(trade.quantity ?? trade.qty ?? trade.position_size)],
-        ["开仓保证金", this.money(trade.initial_margin ?? trade.peak_initial_margin ?? trade.margin)],
+        ["成交动作", title],
+        ["成交价格", this.price(execution.price)],
+        ["成交数量", this.quantity(execution.quantity)],
+        ["方向腿", positionSide === "short" ? "空头" : "多头"],
         ["杠杆倍率", `${this.integer(trade.leverage ?? 1)}x`],
-        ["剩余可用金额", this.money(trade.remaining_available_balance ?? trade.minimum_available_balance ?? trade.available_balance)],
-        ["平仓后可用金额", this.money(trade.available_balance_after_close ?? trade.available_balance)],
-        ["毛盈亏", this.signedMoney(trade.gross_pnl), Number(trade.gross_pnl) > 0 ? "profit" : Number(trade.gross_pnl) < 0 ? "loss" : ""],
-        ["手续费", this.signedMoney(-Math.abs(Number(trade.fees ?? trade.fee ?? 0)))],
-        ["净盈亏", this.signedMoney(pnl), tone],
-        ["账户收益率", this.percent(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), tone],
-        ["保证金 ROE", this.percent(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), tone],
-        ["退出原因", this.exitReason(trade.exit_reason ?? trade.reason)],
       );
+      if (isExit) {
+        const executionFee = Number(execution.fee);
+        rows.push(
+          [isFinalExit ? "本周期净盈亏" : "本次平仓净盈亏", this.signedMoney(pnl), tone],
+          ["本次平仓手续费", this.signedMoney(-Math.abs(Number.isFinite(executionFee) ? executionFee : 0))],
+        );
+        if (isFinalExit) {
+          rows.push(
+            ["账户收益率", this.percent(trade.account_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), tone],
+            ["保证金 ROE", this.percent(trade.margin_return_pct ?? trade.return_pct ?? trade.pnl_pct, true), tone],
+            ["平仓后可用金额", this.money(trade.available_balance_after_close ?? trade.available_balance)],
+            ["退出原因", this.exitReason(trade.exit_reason ?? trade.reason)],
+          );
+        }
+      } else {
+        rows.push(
+          ["开仓保证金", this.money(trade.initial_margin ?? trade.peak_initial_margin ?? trade.margin)],
+          ["剩余可用金额", this.money(trade.remaining_available_balance ?? trade.minimum_available_balance ?? trade.available_balance)],
+        );
+      }
     } else {
       const candle = target.candle;
       rows.push(
@@ -1994,11 +2010,17 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       context.fillRect(x - candleWidth / 2, top, candleWidth, Math.max(1, bottom - top));
     });
 
-    const marker = (ts, price, color, shape, label, trade, kind) => {
+    const markerSlots = new Map();
+    const marker = (ts, price, color, shape, label, trade, kind, execution, isFinalExit = false) => {
       if (!Number.isFinite(ts) || !Number.isFinite(price) || ts < firstTs || ts > lastTs) return;
-      const x = xTime(ts);
+      const baseX = xTime(ts);
       const y = yPrice(price);
-      layout.markers.push({ x, y, kind, trade, time: ts });
+      const slotKey = `${Math.round(baseX)}:${Math.round(y)}`;
+      const slotIndex = markerSlots.get(slotKey) || 0;
+      markerSlots.set(slotKey, slotIndex + 1);
+      const slotStep = slotIndex === 0 ? 0 : Math.ceil(slotIndex / 2) * (slotIndex % 2 ? 7 : -7);
+      const x = Math.max(padding.left, Math.min(width - padding.right, baseX + slotStep));
+      layout.markers.push({ x, y, kind, trade, execution, isFinalExit, time: ts });
       context.save();
       context.fillStyle = color;
       context.strokeStyle = "#07111b";
@@ -2020,8 +2042,36 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     state.trades.forEach((trade) => {
       const side = String(trade?.side ?? trade?.direction ?? "").toLowerCase();
       const isLong = ["long", "buy", "1", "多"].includes(side) || Number(trade?.side) > 0;
-      marker(this.chartTimestamp(trade?.entry_ts ?? trade?.entry_at ?? trade?.entry_time), Number(trade?.entry_price), isLong ? "#31d4a0" : "#f06478", isLong ? "up" : "down", isLong ? "多" : "空", trade, "entry");
-      marker(this.chartTimestamp(trade?.exit_ts ?? trade?.exit_at ?? trade?.exit_time), Number(trade?.exit_price), "#e6b850", "exit", "平", trade, "exit");
+      const isBasket = Boolean(trade?.is_mixed_basket)
+        || String(trade?.position_structure ?? "").toLowerCase() === "mixed_basket"
+        || ["basket", "mixed", "双向", "篮子"].includes(side);
+      const executions = this.tradeExecutions(trade, {
+        isBasket,
+        isLong,
+        entryTime: trade?.entry_ts ?? trade?.entry_at ?? trade?.entry_time,
+        exitTime: trade?.exit_ts ?? trade?.exit_at ?? trade?.exit_time,
+      });
+      const finalExitIndex = executions.reduce((latest, execution, index) => execution.phase === "exit" ? index : latest, -1);
+      executions.forEach((execution, index) => {
+        const phase = execution.phase === "exit" ? "exit" : "entry";
+        const orderSide = String(execution.order_side || "").toLowerCase();
+        const action = String(execution.action || "").toLowerCase();
+        const isBuy = orderSide === "buy";
+        const label = phase === "exit"
+          ? (isBuy ? "买平" : "卖平")
+          : action === "add" ? (isBuy ? "买加" : "卖加") : (isBuy ? "买开" : "卖开");
+        marker(
+          this.chartTimestamp(execution.timestamp),
+          Number(execution.price),
+          phase === "exit" ? "#e6b850" : isBuy ? "#31d4a0" : "#f06478",
+          phase === "exit" ? "exit" : isBuy ? "up" : "down",
+          label,
+          trade,
+          phase,
+          execution,
+          index === finalExitIndex,
+        );
+      });
     });
 
     if (state.hover) {
