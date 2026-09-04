@@ -848,6 +848,7 @@ class AiMonitorConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    news_analysis_enabled: bool = False
     news_interval_minutes: int = Field(default=15, ge=5, le=1440)
     opportunity_interval_minutes: int = Field(default=15, ge=5, le=1440)
     news_lookback_hours: int = Field(default=168, ge=1, le=168)
@@ -926,6 +927,12 @@ class AiMonitorCostConfigUpdate(BaseModel):
     prediction_slippage_bps_per_side: float = Field(default=3, ge=0, le=500)
     prediction_funding_enabled: bool = True
     prediction_funding_bps_per_8h: float = Field(default=1, ge=0, le=500)
+
+
+class AiMonitorNewsAnalysisUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
 
 
 class AiMonitorNewsSystemPromptUpdate(BaseModel):
@@ -1605,7 +1612,7 @@ class StrategyParameterProfileSaveRequest(BaseModel):
         pattern=r"^[A-Z0-9][A-Z0-9._:/-]*$",
     )
     params: dict[str, float] = Field(default_factory=dict, max_length=64)
-    execution: StrategyExecutionParameterProfile
+    execution: StrategyExecutionParameterProfile | None = None
 
     @field_validator("symbol", mode="before")
     @classmethod

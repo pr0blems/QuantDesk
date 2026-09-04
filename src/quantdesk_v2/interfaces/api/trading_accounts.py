@@ -21,6 +21,7 @@ from ...binance_client import BinanceAccountClientError
 from ...binance_rate_limit import REST_RATE_LIMITER
 from ...database import get_db
 from ...dependencies import get_current_user
+from ...domain.martingale_tp4 import strategy_parameters_from_catalog_parameters
 from ...market_config import TRADFI_UNIVERSE_KEY, tradfi_live_symbols
 from ...models import (
     LiveOrderIntent,
@@ -49,8 +50,8 @@ from ...strategy_catalog import get_user_strategy
 from ...strategy_evaluator import StrategyEvaluationError, resolve_builtin_strategy_timeframe
 from ...strategy_lifecycle import (
     LIVE_ELIGIBLE_STATUSES,
-    PAPER_ELIGIBLE_STATUSES,
     current_strategy_revision,
+    paper_eligibility,
 )
 from .common import add_audit_log, monitor_repository, require_expected_user
 
@@ -140,7 +141,16 @@ def _execution_strategy_snapshot(strategy: UserStrategy) -> dict[str, Any]:
         "parameters": strategy.parameters_json,
         "risk_defaults": strategy.risk_defaults_json,
     }
-    if strategy.strategy_kind not in {"full_strategy", "source_strategy"}:
+    if strategy.strategy_kind == "basket_strategy":
+        try:
+            parameters = strategy_parameters_from_catalog_parameters(strategy.parameters_json)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="马丁 TP4 当前修订参数无法用于模拟盘",
+            ) from exc
+        snapshot["timeframe"] = parameters.box.timeframe
+    elif strategy.strategy_kind not in {"full_strategy", "source_strategy"}:
         try:
             snapshot["timeframe"] = resolve_builtin_strategy_timeframe(
                 strategy.parameters_json,
@@ -176,13 +186,14 @@ def _active_paper_strategies(
         revision = current_strategy_revision(db, strategy)
         if revision is None:
             raise HTTPException(status_code=409, detail="当前策略版本缺少不可变修订记录")
-        if revision.lifecycle_status not in PAPER_ELIGIBLE_STATUSES:
+        eligible, eligibility_detail = paper_eligibility(db, strategy, revision)
+        if not eligible:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "message": "当前策略修订尚未取得模拟盘资格",
                     "lifecycle_status": revision.lifecycle_status,
-                    "required_statuses": sorted(PAPER_ELIGIBLE_STATUSES),
+                    "reason": eligibility_detail,
                 },
             )
         selected.append(strategy)

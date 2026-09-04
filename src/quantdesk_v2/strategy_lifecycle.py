@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .domain.martingale_tp4 import strategy_parameters_from_catalog_parameters
 from .models import (
     BacktestRun,
     StrategyRevision,
@@ -77,6 +78,23 @@ def _static_validation_check(
             return False, "策略定义哈希与当前修订不一致"
         if not isinstance(strategy.spec_json, dict):
             return False, "当前修订缺少完整策略定义"
+    elif strategy.strategy_kind == "basket_strategy":
+        if strategy.engine_key != "martingale_tp4":
+            return False, "当前篮子策略引擎不受支持"
+        if validation.get("engine") != "martingale_tp4_engine_v1":
+            return False, "当前修订缺少马丁 TP4 引擎校验证据"
+        snapshot = revision.snapshot_json if isinstance(revision.snapshot_json, dict) else {}
+        if (
+            snapshot.get("engine_key") != strategy.engine_key
+            or snapshot.get("strategy_kind") != strategy.strategy_kind
+            or snapshot.get("version") != strategy.version
+            or snapshot.get("parameters") != strategy.parameters_json
+        ):
+            return False, "马丁 TP4 参数与当前不可变修订不一致"
+        try:
+            strategy_parameters_from_catalog_parameters(strategy.parameters_json)
+        except (TypeError, ValueError):
+            return False, "马丁 TP4 当前修订参数未通过服务端校验"
     else:
         return False, "旧版信号策略不能进入新的受控生命周期"
     return True, "当前修订、哈希和静态校验结果一致"
@@ -93,6 +111,36 @@ def _backtest_evidence(db: Session, revision_id: int | None) -> tuple[int, int |
         )
     ).one()
     return int(rows[0] or 0), int(rows[1]) if rows[1] is not None else None
+
+
+def paper_eligibility(
+    db: Session,
+    strategy: UserStrategy,
+    revision: StrategyRevision | None = None,
+) -> tuple[bool, str]:
+    """Return paper eligibility, including the curated TP4 paper-safe exception."""
+
+    selected_revision = revision or current_strategy_revision(db, strategy)
+    if selected_revision is None:
+        return False, "当前版本缺少不可变修订记录"
+    if selected_revision.lifecycle_status in PAPER_ELIGIBLE_STATUSES:
+        return True, "当前修订已进入模拟盘或更高阶段"
+    curated_tp4 = (
+        strategy.strategy_kind == "basket_strategy"
+        and strategy.engine_key == "martingale_tp4"
+        and strategy.created_via == "system_default"
+        and strategy.source_template_id is not None
+        and strategy.version == selected_revision.version
+    )
+    if not curated_tp4:
+        return False, "当前修订生命周期尚未进入模拟盘阶段"
+    static_valid, static_detail = _static_validation_check(strategy, selected_revision)
+    if not static_valid:
+        return False, static_detail
+    backtest_count, _latest_backtest_run_id = _backtest_evidence(db, selected_revision.id)
+    if backtest_count <= 0:
+        return False, "马丁 TP4 当前修订还没有完成回测"
+    return True, f"系统内置马丁 TP4 当前修订已完成 {backtest_count} 次回测"
 
 
 def _latest_passed_validation(
@@ -211,7 +259,7 @@ def strategy_readiness(db: Session, strategy: UserStrategy) -> dict[str, Any]:
         "eligibility": {
             "backtest": status in BACKTEST_ELIGIBLE_STATUSES,
             "shadow": status in SHADOW_ELIGIBLE_STATUSES,
-            "paper": status in PAPER_ELIGIBLE_STATUSES,
+            "paper": paper_eligibility(db, strategy, revision)[0],
             "live": status in LIVE_ELIGIBLE_STATUSES,
         },
     }

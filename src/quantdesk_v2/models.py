@@ -691,6 +691,9 @@ class AiMonitorConfig(Base):
     enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, comment="是否启用后台周期分析"
     )
+    news_analysis_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, comment="是否启用定时 AI 新闻分析"
+    )
     news_interval_minutes: Mapped[int] = mapped_column(
         Integer, default=15, nullable=False, comment="AI 分析最新 10 条新新闻的间隔分钟数"
     )

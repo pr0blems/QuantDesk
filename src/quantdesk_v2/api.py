@@ -120,10 +120,12 @@ from .security import (
 from .strategy_ai import StrategyAiError, _chat_http_transport
 from .strategy_artifacts import add_backtest_run_manifest
 from .strategy_catalog import (
+    StrategyParameterError,
     ensure_user_default_strategies,
     get_user_strategy,
     serialize_strategy_catalog,
     strategy_to_catalog_item,
+    validate_strategy_parameters,
 )
 from .strategy_lifecycle import (
     BACKTEST_ELIGIBLE_STATUSES,
@@ -2635,6 +2637,13 @@ def save_strategy_parameter_profile(
         raise HTTPException(status_code=422, detail="当前策略不支持保存交易运行参数")
     catalog_strategy = strategy_to_catalog_item(strategy)
     normalized_parameters = _normalized_strategy_parameters(payload.params, catalog_strategy)
+    if strategy.strategy_kind in {"builtin_strategy", "basket_strategy"}:
+        try:
+            normalized_parameters = validate_strategy_parameters(
+                strategy.engine_key, normalized_parameters
+            )
+        except StrategyParameterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
     scope_key = "*" if payload.scope == "default" else str(payload.symbol)
     profile = db.scalar(
         select(StrategyParameterProfile).where(
@@ -2652,7 +2661,11 @@ def save_strategy_parameter_profile(
             scope_key=scope_key,
             strategy_version=strategy.version,
             parameters_json=normalized_parameters,
-            execution_json=payload.execution.model_dump(mode="json", exclude_none=True),
+            execution_json=(
+                payload.execution.model_dump(mode="json", exclude_none=True)
+                if payload.execution is not None
+                else {}
+            ),
             created_at=now,
             updated_at=now,
         )
@@ -2660,7 +2673,10 @@ def save_strategy_parameter_profile(
     else:
         profile.strategy_version = strategy.version
         profile.parameters_json = normalized_parameters
-        profile.execution_json = payload.execution.model_dump(mode="json", exclude_none=True)
+        if payload.execution is not None:
+            profile.execution_json = payload.execution.model_dump(
+                mode="json", exclude_none=True
+            )
         profile.updated_at = now
     _audit(
         db,

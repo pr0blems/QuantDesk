@@ -75,6 +75,7 @@ from ...schemas import (
     AiMonitorLiveCopyConfigUpdate,
     AiMonitorLiveCopyUpdate,
     AiMonitorManualFollowRequest,
+    AiMonitorNewsAnalysisUpdate,
     AiMonitorNewsSystemPromptUpdate,
     AiMonitorScorePolicyUpdate,
     AiMonitorUnusualWhalesUsageUpdate,
@@ -2129,12 +2130,13 @@ def overview(
         "decision_strategy": _decision_strategy_identity(db, user.id),
         "scheduler": {
             "enabled": settings["enabled"],
+            "news_analysis_enabled": settings["news_analysis_enabled"],
             "active_runs": active_runs,
             "next_news_run_at": _utc_out(
                 _next_run(
                     settings["last_news_run_at"],
                     settings["news_interval_minutes"],
-                    settings["enabled"],
+                    settings["news_analysis_enabled"],
                 )
             ),
             "next_opportunity_run_at": _utc_out(
@@ -2473,6 +2475,42 @@ def get_config(
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, Any]:
     return _config_out(db.get(AiMonitorConfig, user.id))
+
+
+@router.put("/news-analysis/config")
+def update_news_analysis_config(
+    payload: AiMonitorNewsAnalysisUpdate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Enable or disable scheduled news analysis without affecting manual analysis."""
+
+    _require_expected_user(request, user)
+    config = db.get(AiMonitorConfig, user.id)
+    if config is None:
+        defaults = ai_monitor.default_config_data()
+        config = AiMonitorConfig(
+            user_id=user.id,
+            indicator_keys_json=list(defaults["indicator_keys"]),
+            monitor_symbols_json=list(defaults["monitor_symbols"]),
+        )
+        db.add(config)
+    was_enabled = bool(config.news_analysis_enabled)
+    config.news_analysis_enabled = payload.enabled
+    if payload.enabled and not was_enabled:
+        config.last_news_run_at = utcnow()
+    _audit(
+        db,
+        request,
+        user.id,
+        "ai_monitor.news_analysis.toggle",
+        str(user.id),
+        {"enabled": payload.enabled},
+    )
+    db.commit()
+    db.refresh(config)
+    return _config_out(config)
 
 
 @router.get("/score-policy")
@@ -3312,6 +3350,7 @@ def update_config(
         )
         db.add(config)
     config.enabled = payload.enabled
+    config.news_analysis_enabled = payload.news_analysis_enabled
     config.news_interval_minutes = payload.news_interval_minutes
     config.opportunity_interval_minutes = payload.opportunity_interval_minutes
     config.news_lookback_hours = payload.news_lookback_hours
@@ -3341,6 +3380,7 @@ def update_config(
         str(user.id),
         {
             "enabled": payload.enabled,
+            "news_analysis_enabled": payload.news_analysis_enabled,
             "news_interval_minutes": payload.news_interval_minutes,
             "opportunity_interval_minutes": payload.opportunity_interval_minutes,
             "news_lookback_hours": payload.news_lookback_hours,

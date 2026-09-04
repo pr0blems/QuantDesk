@@ -213,7 +213,6 @@ ACTIVE_RUN_STATUSES = ("pending", "running")
 _TIMEFRAME_SECONDS = {"15m": 15 * 60, "1h": 60 * 60, "4h": 4 * 60 * 60}
 NEWS_CATCH_UP_THRESHOLD = NEWS_BATCH_SIZE * 3
 NEWS_CATCH_UP_INTERVAL_SECONDS = 60
-LIVE_NEWS_MAX_AGE_SECONDS = 24 * 60 * 60
 RUN_STALE_SECONDS = 5 * 60
 PREDICTION_SETTLEMENT_RETRY_MINUTES = 5
 PREDICTION_SETTLEMENT_GRACE_HOURS = 6
@@ -380,138 +379,16 @@ NON_BLOCKING_INDICATOR_KEYS = frozenset(
 )
 _worker_lock = threading.Lock()
 _worker_started = False
-_worker_wakeup = threading.Event()
-_ingested_news_lock = threading.Lock()
-_ingested_news_ids: dict[str, None] = {}
-_legacy_rescue_lock = threading.Lock()
-_legacy_rescued_batches: dict[str, datetime] = {}
 
 
 class AiMonitorError(RuntimeError):
     """Stable user-facing configuration or scheduling error."""
 
 
-def enqueue_news_analysis(news_ids: Sequence[str]) -> int:
-    """Wake the AI worker as soon as newly collected news is committed.
-
-    The mapping preserves ingestion order while deduplicating repeated collector
-    notifications. The persisted 15-minute scheduler remains the recovery path
-    for process restarts and temporary model failures.
-    """
-
-    normalized_ids = [
-        str(news_id).strip() for news_id in news_ids if str(news_id).strip()
-    ]
-    if not normalized_ids:
-        return 0
-    with _ingested_news_lock:
-        before = len(_ingested_news_ids)
-        for news_id in normalized_ids:
-            _ingested_news_ids.setdefault(news_id, None)
-        queued = len(_ingested_news_ids) - before
-    _worker_wakeup.set()
-    return queued
-
-
-def _take_ingested_news(limit: int = NEWS_BATCH_SIZE) -> list[str]:
-    if limit < 1:
-        return []
-    with _ingested_news_lock:
-        selected = list(_ingested_news_ids)[:limit]
-        for news_id in selected:
-            _ingested_news_ids.pop(news_id, None)
-        if _ingested_news_ids:
-            _worker_wakeup.set()
-    return selected
-
-
-def _requeue_ingested_news(news_ids: Sequence[str]) -> None:
-    with _ingested_news_lock:
-        existing = list(_ingested_news_ids)
-        _ingested_news_ids.clear()
-        for news_id in news_ids:
-            normalized = str(news_id).strip()
-            if normalized:
-                _ingested_news_ids.setdefault(normalized, None)
-        for news_id in existing:
-            _ingested_news_ids.setdefault(news_id, None)
-
-
-def _enqueue_failed_legacy_news(db: Session) -> int:
-    """Rescue failed work emitted by another instance still using V4 thinking mode."""
-
-    now = utcnow()
-    cutoff = now - timedelta(minutes=15)
-    rows = db.execute(
-        select(
-            NewsAiBatch.id,
-            NewsAiModelCall.news_ids_json,
-            NewsAiModelCall.request_json,
-        )
-        .join(NewsAiModelCall, NewsAiModelCall.batch_id == NewsAiBatch.id)
-        .where(
-            NewsAiBatch.status.in_(("failed", "partial")),
-            NewsAiBatch.created_at >= cutoff,
-            NewsAiModelCall.call_type == "analysis",
-            NewsAiModelCall.status == "failed",
-        )
-        .order_by(NewsAiBatch.created_at.desc(), NewsAiModelCall.id.desc())
-        .limit(100)
-    ).all()
-    candidates_by_batch: dict[str, list[str]] = {}
-    for batch_id, news_ids, request_json in rows:
-        request = dict(request_json or {})
-        thinking = request.get("thinking")
-        if isinstance(thinking, Mapping) and thinking.get("type") == "disabled":
-            continue
-        candidates_by_batch.setdefault(str(batch_id), []).extend(
-            str(news_id).strip()
-            for news_id in list(news_ids or [])
-            if str(news_id).strip()
-        )
-    if not candidates_by_batch:
-        return 0
-    with _legacy_rescue_lock:
-        expired = [
-            batch_id
-            for batch_id, rescued_at in _legacy_rescued_batches.items()
-            if rescued_at < cutoff
-        ]
-        for batch_id in expired:
-            _legacy_rescued_batches.pop(batch_id, None)
-        fresh_batches = {
-            batch_id: news_ids
-            for batch_id, news_ids in candidates_by_batch.items()
-            if batch_id not in _legacy_rescued_batches
-        }
-        for batch_id in fresh_batches:
-            _legacy_rescued_batches[batch_id] = now
-    candidate_ids = list(
-        dict.fromkeys(
-            news_id
-            for news_ids in fresh_batches.values()
-            for news_id in news_ids
-        )
-    )
-    if not candidate_ids:
-        return 0
-    pending_ids = list(
-        db.scalars(
-            select(News.id)
-            .where(
-                News.id.in_(candidate_ids),
-                News.ai_analyzed_at.is_(None),
-                News.ts >= int(time.time()) - LIVE_NEWS_MAX_AGE_SECONDS,
-            )
-            .order_by(News.ts.desc(), News.id.desc())
-        ).all()
-    )
-    return enqueue_news_analysis(pending_ids)
-
-
 def default_config_data() -> dict[str, Any]:
     return {
         "enabled": False,
+        "news_analysis_enabled": False,
         "news_interval_minutes": 15,
         "opportunity_interval_minutes": 15,
         "news_lookback_hours": 168,
@@ -558,6 +435,7 @@ def config_data(config: AiMonitorConfig | None) -> dict[str, Any]:
     indicator_keys = list(config.indicator_keys_json or DEFAULT_INDICATOR_KEYS)
     return {
         "enabled": bool(config.enabled),
+        "news_analysis_enabled": bool(config.news_analysis_enabled),
         "news_interval_minutes": int(config.news_interval_minutes),
         "opportunity_interval_minutes": int(config.opportunity_interval_minutes),
         "news_lookback_hours": int(config.news_lookback_hours),
@@ -6867,16 +6745,15 @@ def create_targeted_news_run(
         raise AiMonitorError("新闻不存在或已被删除")
     selected_news_ids = selected_news_ids[:NEWS_BATCH_SIZE]
 
-    if trigger != "collector":
-        active = db.scalar(
-            select(AiMonitorRun.id).where(
-                AiMonitorRun.user_id == user_id,
-                AiMonitorRun.run_type == "news",
-                AiMonitorRun.status.in_(ACTIVE_RUN_STATUSES),
-            )
+    active = db.scalar(
+        select(AiMonitorRun.id).where(
+            AiMonitorRun.user_id == user_id,
+            AiMonitorRun.run_type == "news",
+            AiMonitorRun.status.in_(ACTIVE_RUN_STATUSES),
         )
-        if active is not None:
-            raise AiMonitorError("同类型任务正在运行，请稍后再试")
+    )
+    if active is not None:
+        raise AiMonitorError("同类型任务正在运行，请稍后再试")
     existing_news_count = int(
         db.scalar(
             select(func.count()).select_from(News).where(News.id.in_(selected_news_ids))
@@ -6908,7 +6785,7 @@ def create_targeted_news_run(
     )
     db.add(run)
     config = db.get(AiMonitorConfig, user_id)
-    if config is not None and trigger != "collector":
+    if config is not None:
         config.last_news_run_at = now
     db.flush()
     return run
@@ -8130,12 +8007,6 @@ def start(engine: Engine, master_key: str, symbols_config: Path) -> None:
         daemon=True,
         name="ai-monitor",
     ).start()
-    threading.Thread(
-        target=_ingest_worker_loop,
-        args=(engine, master_key, symbols_config),
-        daemon=True,
-        name="ai-news-immediate",
-    ).start()
 
 
 def recover_stale_runs(db: Session) -> dict[str, int]:
@@ -8225,7 +8096,12 @@ def _worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
                 user_ids = list(
                     db.scalars(
                         select(AiMonitorConfig.user_id)
-                        .where(AiMonitorConfig.enabled.is_(True))
+                        .where(
+                            or_(
+                                AiMonitorConfig.enabled.is_(True),
+                                AiMonitorConfig.news_analysis_enabled.is_(True),
+                            )
+                        )
                         .order_by(AiMonitorConfig.user_id)
                     ).all()
                 )
@@ -8234,87 +8110,6 @@ def _worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
         except Exception as exc:
             print(f"[ai-monitor] scheduler error: {type(exc).__name__}")
         time.sleep(PREDICTION_SETTLEMENT_POLL_SECONDS)
-
-
-def _ingest_worker_loop(engine: Engine, master_key: str, symbols_config: Path) -> None:
-    """Run collector-triggered model calls independently from backlog scans."""
-
-    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    while True:
-        # Poll as well as listening for collector events.  This keeps the fast
-        # lane independent from the heavier prediction settlement scheduler and
-        # lets a new instance rescue failures emitted by an older deployment.
-        _worker_wakeup.wait(timeout=PREDICTION_SETTLEMENT_POLL_SECONDS)
-        _worker_wakeup.clear()
-        try:
-            with factory() as db:
-                rescued = _enqueue_failed_legacy_news(db)
-            if rescued:
-                print(f"[ai-monitor] queued {rescued} news from legacy failed batches")
-            while _run_ingested_news(factory, engine, master_key, symbols_config):
-                pass
-        except Exception as exc:
-            print(f"[ai-monitor] immediate news worker error: {type(exc).__name__}")
-
-
-def _run_ingested_news(
-    factory: sessionmaker[Session],
-    engine: Engine,
-    master_key: str,
-    symbols_config: Path,
-) -> bool:
-    """Immediately analyze one deduplicated batch emitted by the collector."""
-
-    news_ids = _take_ingested_news()
-    if not news_ids:
-        return False
-    minimum_news_ts = int(time.time()) - LIVE_NEWS_MAX_AGE_SECONDS
-    with factory() as db:
-        pending_ids = list(
-            db.scalars(
-                select(News.id)
-                .where(
-                    News.id.in_(news_ids),
-                    News.ai_analyzed_at.is_(None),
-                    News.ts >= minimum_news_ts,
-                )
-                .order_by(News.ts.desc(), News.id.desc())
-            ).all()
-        )
-        if not pending_ids:
-            return False
-        if not global_ai_model_configured(db):
-            return False
-        user_id = db.scalar(
-            select(AiMonitorConfig.user_id)
-            .where(AiMonitorConfig.enabled.is_(True))
-            .order_by(AiMonitorConfig.user_id)
-            .limit(1)
-        )
-        if user_id is None:
-            return False
-        try:
-            run = create_targeted_news_run(
-                db,
-                int(user_id),
-                pending_ids,
-                trigger="collector",
-            )
-            run_public_id = run.public_id
-            db.commit()
-        except (AiMonitorError, IntegrityError):
-            db.rollback()
-            _requeue_ingested_news(pending_ids)
-            return False
-    execute_news_run(
-        engine,
-        run_public_id,
-        master_key,
-        news_ids=pending_ids,
-        symbols_config=symbols_config,
-        trigger_opportunity=True,
-    )
-    return True
 
 
 def _run_due_user(
@@ -8328,7 +8123,11 @@ def _run_due_user(
     for run_type in ("news", "opportunity"):
         with factory() as db:
             config = db.get(AiMonitorConfig, user_id)
-            if config is None or not config.enabled:
+            if config is None:
+                continue
+            if run_type == "news" and not config.news_analysis_enabled:
+                continue
+            if run_type == "opportunity" and not config.enabled:
                 continue
             interval = (
                 config.news_interval_minutes

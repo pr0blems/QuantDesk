@@ -10,6 +10,7 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.selectedAccountId = null;
     this.loadSequence = 0;
     this.strategyCatalog = [];
+    this.adjustStrategyRequest = 0;
     this.storageKey = "quantdesk.paper.selected-account";
     this.eventsBound = false;
     this.renderShell();
@@ -36,7 +37,7 @@ class PaperDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/paper.css?v=20260809-paper-combo-1">
+      <link rel="stylesheet" href="/next/assets/paper.css?v=20260905-strategy-parameters">
       <main class="paper-dashboard">
         <nav class="account-switcher" aria-label="模拟盘切换">
           <div id="paper-account-tabs" class="account-tabs" role="tablist" aria-label="我的模拟盘">
@@ -158,42 +159,27 @@ class PaperDashboard extends window.QuantDeskPageController {
 
         <div id="paper-adjust-modal" class="paper-modal hidden" aria-hidden="true">
           <button class="modal-backdrop" type="button" data-adjust-modal-close aria-label="关闭调整参数窗口"></button>
-          <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="paper-adjust-title">
+          <section class="modal-card strategy-parameter-modal" role="dialog" aria-modal="true" aria-labelledby="paper-adjust-title">
             <header class="modal-head">
               <div>
-                <span class="modal-kicker">PAPER PARAMETERS</span>
-                <h2 id="paper-adjust-title">调整模拟盘参数</h2>
-                <p>多选绑定策略；全部策略同向满足时才会开仓。</p>
+                <span class="modal-kicker">STRATEGY PARAMETERS</span>
+                <h2 id="paper-adjust-title">调整策略参数</h2>
+                <p>修改当前模拟盘所绑定策略的默认运行参数。</p>
               </div>
               <button class="modal-close" type="button" data-adjust-modal-close aria-label="关闭">×</button>
             </header>
-            <form id="paper-adjust-form" class="create-form">
-              <div class="form-field form-field-wide">
-                <span>绑定策略（多选）</span>
-                <div id="paper-adjust-strategies" class="strategy-picker" role="group" aria-label="调整模拟盘策略"></div>
-                <small id="paper-adjust-strategy-note">至少选择 1 个，最多 10 个；全部策略同向满足才开仓。</small>
-              </div>
-              <label class="form-field">
-                <span>固定杠杆倍数</span>
-                <input id="paper-adjust-leverage" type="number" min="1" max="20" step="1" required>
+            <form id="paper-adjust-form" class="strategy-parameter-form">
+              <label class="form-field form-field-wide">
+                <span>当前绑定策略</span>
+                <select id="paper-adjust-strategy" aria-label="选择要调整参数的策略"></select>
+                <small id="paper-adjust-strategy-note">正在读取策略参数…</small>
               </label>
-              <label class="form-field">
-                <span>最大持仓数</span>
-                <input id="paper-adjust-max-positions" type="number" min="1" max="20" step="1" required>
-              </label>
-              <label class="form-field">
-                <span>单笔仓位（%）</span>
-                <input id="paper-adjust-position-size" type="number" min="0.01" max="100" step="0.01" required>
-              </label>
-              <label class="form-field">
-                <span>保证金上限</span>
-                <input id="paper-adjust-margin-cap" type="number" min="0.01" max="0.95" step="0.01" required>
-              </label>
-              <p class="form-note">组合采用 AND 条件：所选策略必须全部给出同一方向信号才会开仓。调整只影响后续信号和新仓。</p>
+              <div id="paper-adjust-parameters" class="strategy-parameter-groups" aria-live="polite"></div>
+              <p class="form-note">保存的是策略默认运行参数，下一轮信号计算生效；已有币种专属参数时，币种参数仍然优先。</p>
               <p id="paper-adjust-error" class="form-error hidden" role="alert"></p>
               <footer class="modal-actions">
                 <button class="action-button" type="button" data-adjust-modal-close>取消</button>
-                <button id="paper-adjust-submit" class="create-account-button" type="submit">保存参数</button>
+                <button id="paper-adjust-submit" class="create-account-button" type="submit">保存策略参数</button>
               </footer>
             </form>
           </section>
@@ -226,7 +212,7 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.q("#paper-create-form").addEventListener("submit", (event) => this.createAccount(event));
     this.q("#paper-create-strategies").addEventListener("change", () => this.applyStrategyDefaults());
     this.q("#paper-adjust-form").addEventListener("submit", (event) => this.adjustAccount(event));
-    this.q("#paper-adjust-strategies").addEventListener("change", () => this.updateAdjustStrategyNote());
+    this.q("#paper-adjust-strategy").addEventListener("change", () => this.loadAdjustStrategyParameters());
     this.shadowRoot.querySelectorAll("[data-modal-close]").forEach((button) => {
       button.addEventListener("click", () => this.closeCreateDialog());
     });
@@ -512,19 +498,24 @@ class PaperDashboard extends window.QuantDeskPageController {
       const currentStrategyIds = Array.isArray(account.strategy_ids) && account.strategy_ids.length
         ? account.strategy_ids
         : [account.strategy_id].filter(Boolean);
-      this.renderStrategyPicker("#paper-adjust-strategies", currentStrategyIds);
-      const config = account.config || {};
-      this.q("#paper-adjust-leverage").value = String(config.leverage ?? 20);
-      this.q("#paper-adjust-max-positions").value = String(config.max_positions ?? 15);
-      this.q("#paper-adjust-position-size").value = String(config.position_size_pct ?? 10);
-      this.q("#paper-adjust-margin-cap").value = String(config.margin_cap ?? 0.8);
-      this.updateAdjustStrategyNote();
+      const boundStrategies = currentStrategyIds
+        .map((strategyId) => this.strategyCatalog.find((item) => item.id === strategyId))
+        .filter(Boolean);
+      if (!boundStrategies.length) throw new Error("当前模拟盘绑定的策略不存在或已停用");
+      const selector = this.q("#paper-adjust-strategy");
+      selector.innerHTML = boundStrategies.map((strategy) => (
+        `<option value="${this.escape(strategy.id)}">${this.escape(strategy.name)} · v${this.escape(strategy.version || "1")}</option>`
+      )).join("");
+      selector.disabled = boundStrategies.length === 1;
+      this.q("#paper-adjust-parameters").innerHTML = '<p class="parameter-loading">正在读取策略参数…</p>';
+      this.q("#paper-adjust-strategy-note").textContent = "正在读取策略参数…";
       this.showAdjustError("");
       const modal = this.q("#paper-adjust-modal");
       modal.classList.remove("hidden");
       modal.setAttribute("aria-hidden", "false");
+      await this.loadAdjustStrategyParameters();
       window.requestAnimationFrame(() => (
-        this.q('#paper-adjust-strategies input:checked') || this.q("#paper-adjust-strategies input")
+        this.q("[data-paper-param-key]") || selector
       )?.focus());
     } catch (error) {
       this.showBanner(`无法调整参数：${error.message}`, "error");
@@ -542,67 +533,123 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.q("#paper-adjust").focus();
   }
 
-  updateAdjustStrategyNote() {
-    const strategyIds = this.selectedStrategyIds("#paper-adjust-strategies");
-    const names = this.strategyCatalog
-      .filter((item) => strategyIds.includes(item.id))
-      .map((item) => item.name);
-    this.q("#paper-adjust-strategy-note").textContent = names.length
-      ? `已选 ${names.length} 个：${names.join(" + ")}。全部同向满足才开仓。`
-      : "请至少选择 1 个策略；全部策略同向满足才开仓。";
+  async loadAdjustStrategyParameters() {
+    const strategyId = this.q("#paper-adjust-strategy").value;
+    const strategy = this.strategyCatalog.find((item) => item.id === strategyId);
+    if (!strategy) return;
+    const requestId = ++this.adjustStrategyRequest;
+    const submit = this.q("#paper-adjust-submit");
+    submit.disabled = true;
+    this.q("#paper-adjust-parameters").innerHTML = '<p class="parameter-loading">正在读取策略参数…</p>';
+    this.q("#paper-adjust-strategy-note").textContent = `${strategy.name} · v${strategy.version || 1}`;
+    this.showAdjustError("");
+    try {
+      const detail = await window.quantdeskApi(
+        `/api/v2/backtests/strategy-parameters/${encodeURIComponent(strategyId)}`,
+      );
+      if (requestId !== this.adjustStrategyRequest) return;
+      this.renderAdjustStrategyParameters(strategy, detail?.effective?.parameters || {});
+      const scope = detail?.default_profile ? "已加载保存过的默认参数" : "当前使用策略原始参数";
+      this.q("#paper-adjust-strategy-note").textContent = `${strategy.name} · v${strategy.version || 1} · ${scope}`;
+    } catch (error) {
+      if (requestId !== this.adjustStrategyRequest) return;
+      this.q("#paper-adjust-parameters").innerHTML = "";
+      this.showAdjustError(`参数读取失败：${error.message}`);
+    } finally {
+      if (requestId === this.adjustStrategyRequest) submit.disabled = false;
+    }
+  }
+
+  renderAdjustStrategyParameters(strategy, effectiveParameters = {}) {
+    const definitions = Array.isArray(strategy.parameter_schema)
+      ? strategy.parameter_schema
+      : (Array.isArray(strategy.params) ? strategy.params : []);
+    if (!definitions.length) {
+      this.q("#paper-adjust-parameters").innerHTML = '<p class="parameter-loading">该策略没有可调整的运行参数。</p>';
+      return;
+    }
+    const groups = new Map();
+    definitions.forEach((parameter) => {
+      const group = String(parameter.group || "策略参数");
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(parameter);
+    });
+    this.q("#paper-adjust-parameters").innerHTML = [...groups.entries()].map(([group, parameters]) => `
+      <section class="strategy-parameter-group">
+        <h3>${this.escape(group)}</h3>
+        <div class="strategy-parameter-grid">
+          ${parameters.map((parameter) => this.adjustParameterField(parameter, effectiveParameters)).join("")}
+        </div>
+      </section>`).join("");
+  }
+
+  adjustParameterField(parameter, effectiveParameters) {
+    const key = String(parameter.key || "");
+    const label = this.escape(parameter.label || key);
+    const type = String(parameter.type || "number").toLowerCase();
+    const rawValue = Object.prototype.hasOwnProperty.call(effectiveParameters, key)
+      ? effectiveParameters[key]
+      : parameter.default;
+    const data = `data-paper-param-key="${this.escape(key)}" data-paper-param-type="${this.escape(type)}"`;
+    const help = parameter.help ? `<small>${this.escape(parameter.help)}</small>` : "";
+    if (parameter.control === "switch" || type === "boolean" || type === "bool") {
+      const checked = Number(rawValue) !== 0 || rawValue === true ? " checked" : "";
+      return `<label class="form-field strategy-switch"><input type="checkbox" ${data}${checked}><span>${label}</span>${help}</label>`;
+    }
+    if (Array.isArray(parameter.options)) {
+      const options = parameter.options.map((option) => {
+        const value = typeof option === "object" ? option.value : option;
+        const optionLabel = typeof option === "object" ? option.label ?? value : value;
+        return `<option value="${this.escape(value)}"${String(value) === String(rawValue) ? " selected" : ""}>${this.escape(optionLabel)}</option>`;
+      }).join("");
+      return `<label class="form-field"><span>${label}</span><select ${data}>${options}</select>${help}</label>`;
+    }
+    const min = parameter.min != null ? ` min="${this.escape(parameter.min)}"` : "";
+    const max = parameter.max != null ? ` max="${this.escape(parameter.max)}"` : "";
+    const step = parameter.step != null ? parameter.step : (type === "integer" ? 1 : "any");
+    const value = rawValue != null ? ` value="${this.escape(rawValue)}"` : "";
+    return `<label class="form-field"><span>${label}</span><input type="number" ${data}${min}${max} step="${this.escape(step)}"${value} required>${help}</label>`;
   }
 
   async adjustAccount(event) {
     event.preventDefault();
     const submit = this.q("#paper-adjust-submit");
-    const strategyIds = this.selectedStrategyIds("#paper-adjust-strategies");
-    const leverage = Number(this.q("#paper-adjust-leverage").value);
-    const maxPositions = Number(this.q("#paper-adjust-max-positions").value);
-    const positionSizePct = Number(this.q("#paper-adjust-position-size").value);
-    const marginCap = Number(this.q("#paper-adjust-margin-cap").value);
-    if (!strategyIds.length || strategyIds.length > 10) {
-      this.showAdjustError("请选择 1 到 10 个正在运行的策略。");
+    const strategyId = this.q("#paper-adjust-strategy").value;
+    const strategy = this.strategyCatalog.find((item) => item.id === strategyId);
+    const fields = [...this.shadowRoot.querySelectorAll("[data-paper-param-key]")];
+    const invalid = fields.find((field) => !field.checkValidity());
+    if (!strategy || !fields.length) {
+      this.showAdjustError("当前策略没有可保存的运行参数。");
       return;
     }
-    if (!Number.isInteger(leverage) || leverage < 1 || leverage > 20) {
-      this.showAdjustError("固定杠杆必须是 1 到 20 之间的整数。");
+    if (invalid) {
+      invalid.reportValidity();
+      this.showAdjustError("请先修正超出允许范围的策略参数。");
       return;
     }
-    if (!Number.isInteger(maxPositions) || maxPositions < 1 || maxPositions > 20) {
-      this.showAdjustError("最大持仓数必须是 1 到 20 之间的整数。");
-      return;
-    }
-    if (!Number.isFinite(positionSizePct) || positionSizePct <= 0 || positionSizePct > 100) {
-      this.showAdjustError("单笔仓位必须大于 0%，且不能超过 100%。");
-      return;
-    }
-    if (!Number.isFinite(marginCap) || marginCap <= 0 || marginCap > 0.95) {
-      this.showAdjustError("保证金上限必须大于 0，且不能超过 0.95。");
-      return;
-    }
+    const params = Object.fromEntries(fields.map((field) => [
+      field.dataset.paperParamKey,
+      field.type === "checkbox" ? (field.checked ? 1 : 0) : Number(field.value),
+    ]));
     submit.disabled = true;
     submit.textContent = "保存中…";
     this.showAdjustError("");
     try {
-      const updated = await this.api(`/accounts/${encodeURIComponent(this.selectedAccountId)}/strategy`, {
+      await window.quantdeskApi(`/api/v2/backtests/strategy-parameters/${encodeURIComponent(strategyId)}`, {
         method: "PUT",
         body: JSON.stringify({
-          strategy_ids: strategyIds,
-          leverage,
-          max_positions: maxPositions,
-          position_size_pct: positionSizePct,
-          margin_cap: marginCap,
+          scope: "default",
+          params,
         }),
       });
-      await this.loadAccounts(updated.id);
       await this.load();
       this.closeAdjustDialog();
-      this.showBanner(`参数已保存；${strategyIds.length} 个策略必须全部同向满足，新仓才会使用 ${leverage}x 杠杆。`, "success");
+      this.showBanner(`${strategy.name} 的策略参数已保存，模拟盘将在下一轮信号计算时使用。`, "success");
     } catch (error) {
       this.showAdjustError(`保存失败：${error.message}`);
     } finally {
       submit.disabled = false;
-      submit.textContent = "保存参数";
+      submit.textContent = "保存策略参数";
     }
   }
 

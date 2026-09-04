@@ -21,6 +21,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       manualFollowAttemptId: "",
       manualFollowLoading: false,
       uwToggleLoading: false,
+      newsAnalysisToggleLoading: false,
       indicators: [],
       indicatorTemplates: [],
       indicatorConflictPairs: [],
@@ -150,13 +151,13 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/ai-monitor.css?v=20260902-tooltip-layer">
+      <link rel="stylesheet" href="/next/assets/ai-monitor.css?v=20260904-news-analysis-toggle">
       <div class="ai-monitor">
         <header class="ai-head">
           <div>
             <span class="eyebrow">DISCOVERED OPPORTUNITIES</span>
             <h1><i aria-hidden="true">✦</i> 发现机会</h1>
-            <p>每 15 分钟分析最新 10 条新闻 × 美股技术指标确认 · 机会只生成预测，不执行真实交易</p>
+            <p>新闻 AI 独立开关 × 美股技术指标确认 · 机会只生成预测，不执行真实交易</p>
           </div>
           <div class="ai-head-actions">
             <span id="ai-clock" class="ai-clock"></span>
@@ -263,7 +264,11 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
           <main class="ai-content">
             <section id="view-news" class="ai-view">
               <div class="view-head">
-                <div><span class="eyebrow">LIVE NEWS STREAM</span><h2>当前新闻滚动</h2><p>每 15 分钟从数据库读取最新 10 条未分析新闻，识别情绪、行业和关联美股。</p></div>
+                <div><span class="eyebrow">LIVE NEWS STREAM</span><h2>当前新闻滚动</h2><p id="news-analysis-description">正在读取自动新闻分析状态…</p></div>
+                <div id="news-analysis-control" class="news-analysis-control loading" role="group" aria-label="自动新闻分析开关">
+                  <span><i aria-hidden="true"></i><small>自动新闻分析</small><b id="news-analysis-status" role="status">读取中</b></span>
+                  <button id="news-analysis-toggle" type="button" aria-pressed="false" disabled>读取中…</button>
+                </div>
                 <div class="view-tools"><input id="news-search" aria-label="搜索新闻" placeholder="搜索标题 / 来源 / 行业 / 股票"><select id="news-mode" aria-label="新闻筛选"><option value="all">全部新闻</option><option value="analyzed">已 AI 分析</option><option value="pending">待分析</option><option value="bull">偏多新闻</option><option value="bear">偏空新闻</option><option value="neutral">中性新闻</option></select></div>
               </div>
               <div id="news-stream" class="news-stream"><div class="empty-state">正在连接新闻流…</div></div>
@@ -276,7 +281,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
               <div class="view-head"><div><span class="eyebrow">SIGNAL CONFIGURATION</span><h2>指标配置</h2><p>设置新闻分析周期、机会扫描周期和技术确认条件。</p></div></div>
               <form id="ai-config-form" class="config-form">
                 <section class="config-block automation-block">
-                  <div><strong>后台周期监控</strong><small>开启后，服务端会按配置周期持续运行；关闭仍可手动执行。</small></div>
+                  <div><strong>机会周期扫描</strong><small>控制机会发现的后台周期扫描；新闻自动分析由新闻列表顶部的独立开关控制。</small></div>
                   <label class="toggle"><input id="config-enabled" type="checkbox"><span></span><b id="config-enabled-label">已暂停</b></label>
                 </section>
                 <div id="model-warning" class="model-warning hidden">管理员尚未配置全局 DeepSeek。请联系管理员在管理后台完成配置。</div>
@@ -559,6 +564,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     this.q("#symbols-clear").addEventListener("click", () => { this.q("#config-all-symbols").checked = false; this.state.draftSymbols.clear(); this.renderSymbolPicker(); });
     this.q("#news-search").addEventListener("input", (event) => { this.state.newsSearch = event.target.value.trim().toLowerCase(); this.renderNews(); });
     this.q("#news-mode").addEventListener("change", (event) => { this.state.newsMode = event.target.value; this.renderNews(); });
+    this.q("#news-analysis-toggle").addEventListener("click", () => this.toggleNewsAnalysis());
     this.q("#prediction-filter-form").addEventListener("submit", (event) => { event.preventDefault(); this.applyPredictionFilters(); });
     this.q("#prediction-filter-reset").addEventListener("click", () => this.resetPredictionFilters());
     this.q("#prediction-list").addEventListener("click", (event) => {
@@ -1111,11 +1117,12 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     const data = this.state.overview || {};
     const config = data.config || {};
     const state = this.q("#scheduler-state");
-    state.textContent = config.enabled ? "自动监控中" : "自动监控已暂停";
+    state.textContent = config.enabled ? "机会扫描中" : "机会扫描已暂停";
     state.className = `status-badge ${config.enabled ? "running" : "idle"}`;
     this.renderDecisionStrategyTrigger();
     this.renderLiveCopyToggle();
     this.renderUnusualWhalesToggle();
+    this.renderNewsAnalysisControl();
     this.q("#model-warning").classList.toggle("hidden", Boolean(data.model_configured));
     this.renderSignalHealth();
   }
@@ -1287,6 +1294,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     const config = this.state.config || {};
     return {
       enabled: Boolean(config.enabled),
+      news_analysis_enabled: Boolean(config.news_analysis_enabled),
       news_interval_minutes: Number(config.news_interval_minutes ?? 15),
       opportunity_interval_minutes: Number(config.opportunity_interval_minutes ?? 15),
       news_lookback_hours: Number(config.news_lookback_hours ?? 168),
@@ -2404,6 +2412,8 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     const renderSignature = JSON.stringify([
       search,
       mode,
+      Boolean(this.state.config?.news_analysis_enabled),
+      Number(this.state.config?.news_interval_minutes ?? 15),
       [...this.state.analyzingNewsIds].sort(),
       items,
     ]);
@@ -2426,10 +2436,10 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
       const analyzing = this.state.analyzingNewsIds.has(item.id);
       return `<article class="news-item ${this.sentimentClass(sentiment)}">
         <time>${this.formatUnix(item.ts)}</time>
-        <div class="news-source"><span>${this.escape(item.source || "未知来源")}</span>${analyzed ? `<em>AI 已分析</em>` : "<em class=\"pending\">等待批次</em>"}<small>${this.escape(item.lang || "--")}</small></div>
+        <div class="news-source"><span>${this.escape(item.source || "未知来源")}</span>${analyzed ? `<em>AI 已分析</em>` : `<em class="pending">${this.state.config?.news_analysis_enabled ? "等待批次" : "待手动分析"}</em>`}<small>${this.escape(item.lang || "--")}</small></div>
         <div class="news-body">${headline}
-          <div class="news-analysis-line">${analyzed ? `<span class="sentiment-pill ${this.sentimentClass(sentiment)}">${this.sentimentLabel(sentiment)}</span><span>${this.impactLabel(item.ai_impact_strength)}</span><span>${this.horizonLabel(item.ai_time_horizon)}</span><span>${this.categoryLabel(item.ai_category)}</span>` : '<span class="sentiment-pill pending">每 15 分钟 · 最新 10 条</span>'}</div>
-          <p>${this.escape(item.ai_reason || (analyzed ? "AI 未提供进一步说明" : "等待下一轮新闻分析；系统会优先处理数据库中最新的未分析新闻。"))}</p>
+          <div class="news-analysis-line">${analyzed ? `<span class="sentiment-pill ${this.sentimentClass(sentiment)}">${this.sentimentLabel(sentiment)}</span><span>${this.impactLabel(item.ai_impact_strength)}</span><span>${this.horizonLabel(item.ai_time_horizon)}</span><span>${this.categoryLabel(item.ai_category)}</span>` : `<span class="sentiment-pill pending">${this.state.config?.news_analysis_enabled ? `自动分析 ${Number(this.state.config?.news_interval_minutes ?? 15)} 分钟/轮` : "自动分析已关闭"}</span>`}</div>
+          <p>${this.escape(item.ai_reason || (analyzed ? "AI 未提供进一步说明" : this.state.config?.news_analysis_enabled ? "等待下一轮新闻分析；系统会优先处理最新的未分析新闻。" : "自动新闻分析已关闭；如需分析，可使用右侧的立即分析。"))}</p>
           <div class="news-relations"><div><em>行业</em><div class="industry-chips">${industries || `<span class="relation-empty">${analyzed ? "无直接关联行业" : "待分析"}</span>`}</div></div><div><em>美股</em><div class="stock-chips">${stocks || `<span class="relation-empty">${analyzed ? "无直接关联美股" : "待分析"}</span>`}</div></div></div>
         </div>
         <div class="news-score"><b>${item.ai_confidence == null ? "--" : `${Math.round(Number(item.ai_confidence) * 100)}%`}</b><small>${analyzed ? "AI 置信度" : "等待 AI"}</small><button class="news-analyze-action" type="button" data-analyze-news="${this.escape(item.id)}"${analyzing ? " disabled" : ""}>${analyzing ? "分析中…" : analyzed ? "重新分析" : "立即分析"}</button></div>
@@ -2437,6 +2447,53 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     }).join("");
     if (hadPreviousRender) {
       target.scrollTop = Math.min(previousScrollTop, Math.max(0, target.scrollHeight - target.clientHeight));
+    }
+  }
+
+  renderNewsAnalysisControl() {
+    const control = this.q("#news-analysis-control");
+    const button = this.q("#news-analysis-toggle");
+    const status = this.q("#news-analysis-status");
+    const description = this.q("#news-analysis-description");
+    if (!control || !button || !status || !description) return;
+    const config = this.state.config;
+    const loading = !config || this.state.newsAnalysisToggleLoading;
+    const enabled = Boolean(config?.news_analysis_enabled);
+    const interval = Number(config?.news_interval_minutes ?? 15);
+    control.className = `news-analysis-control ${loading ? "loading" : enabled ? "enabled" : "disabled"}`;
+    button.disabled = loading;
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    button.textContent = loading ? "更新中…" : enabled ? "关闭分析" : "开启分析";
+    status.textContent = loading ? "更新中" : enabled ? "已开启" : "已关闭";
+    description.textContent = enabled
+      ? `每 ${interval} 分钟读取最新 10 条未分析新闻；手动分析仍可单独使用。`
+      : "定时 AI 新闻分析已关闭；新闻采集和手动单条分析不受影响。";
+  }
+
+  async toggleNewsAnalysis() {
+    if (!this.state.config || this.state.newsAnalysisToggleLoading) return;
+    const enabled = !Boolean(this.state.config.news_analysis_enabled);
+    this.state.newsAnalysisToggleLoading = true;
+    this.renderNewsAnalysisControl();
+    try {
+      this.state.config = await this.api("/news-analysis/config", {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      });
+      if (this.state.overview) this.state.overview.config = this.state.config;
+      await this.loadOverviewOnly();
+      this.renderNews();
+      this.showBanner(
+        enabled
+          ? `自动新闻分析已开启，首轮将在 ${Number(this.state.config.news_interval_minutes ?? 15)} 分钟后运行。`
+          : "自动新闻分析已关闭；新闻采集与手动分析保持可用。",
+        "success",
+      );
+    } catch (error) {
+      this.showBanner(error.message || "自动新闻分析开关保存失败", "error");
+    } finally {
+      this.state.newsAnalysisToggleLoading = false;
+      this.renderNewsAnalysisControl();
     }
   }
 
@@ -2857,6 +2914,7 @@ class AiMonitorDashboard extends window.QuantDeskPageController {
     try {
       const payload = {
         enabled: this.q("#config-enabled").checked,
+        news_analysis_enabled: Boolean(this.state.config?.news_analysis_enabled),
         news_interval_minutes: Number(this.q("#config-news-interval").value),
         opportunity_interval_minutes: Number(this.q("#config-opportunity-interval").value),
         news_lookback_hours: Number(this.q("#config-lookback").value),

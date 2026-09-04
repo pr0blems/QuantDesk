@@ -14,7 +14,6 @@ from quantdesk_v2.ai_monitor import (
     NEWS_BATCH_SIZE,
     RUN_STALE_SECONDS,
     _news_model_call_audit_index,
-    _take_ingested_news,
     adaptive_exit_precedes,
     aggregate_news_candidates,
     append_score_history,
@@ -23,7 +22,6 @@ from quantdesk_v2.ai_monitor import (
     configured_indicator_policy,
     edge_calibration_summary,
     effective_opportunity_score_weights,
-    enqueue_news_analysis,
     historical_closed_settlement_price,
     historical_settlement_price,
     indicator_catalog,
@@ -95,6 +93,7 @@ from quantdesk_v2.interfaces.api.ai_monitor import (
 )
 from quantdesk_v2.market_microstructure import order_book_gate_snapshot
 from quantdesk_v2.models import (
+    AiMonitorConfig,
     AiMonitorOpportunity,
     AiMonitorPrediction,
     AiMonitorRun,
@@ -106,6 +105,7 @@ from quantdesk_v2.models import (
 from quantdesk_v2.schemas import (
     AiMonitorConfigUpdate,
     AiMonitorCostConfigUpdate,
+    AiMonitorNewsAnalysisUpdate,
     AiMonitorNewsAnalyzeRequest,
 )
 
@@ -726,20 +726,28 @@ def test_ai_monitor_worker_recovers_abandoned_runs_continuously() -> None:
     assert "recover_stale_runs(db)" in source
     assert 'latest_news_run.status in {"completed", "partial"}' in source
     assert "pending >= NEWS_CATCH_UP_THRESHOLD and catch_up_allowed" in source
-    assert 'name="ai-news-immediate"' in source
-    assert "def _ingest_worker_loop(" in source
-    assert "def _enqueue_failed_legacy_news(" in source
-    assert "trigger_opportunity=True" in source
-    assert "symbols_config=symbols_config" in source
+    assert 'name="ai-news-immediate"' not in source
+    assert "def _ingest_worker_loop(" not in source
+    assert "def enqueue_news_analysis(" not in source
 
 
-def test_collector_news_queue_is_ordered_and_deduplicated() -> None:
-    _take_ingested_news(10_000)
+def test_scheduled_news_analysis_has_an_independent_fail_closed_switch() -> None:
+    monitor = (ROOT / "src/quantdesk_v2/ai_monitor.py").read_text(encoding="utf-8")
+    api = (ROOT / "src/quantdesk_v2/interfaces/api/ai_monitor.py").read_text(encoding="utf-8")
+    migration = (ROOT / "migrations/versions/0085_news_analysis_toggle.py").read_text(
+        encoding="utf-8"
+    )
 
-    assert enqueue_news_analysis(["news-1", "news-1", "news-2"]) == 2
-    assert enqueue_news_analysis(["news-2", "news-3"]) == 1
-    assert _take_ingested_news(2) == ["news-1", "news-2"]
-    assert _take_ingested_news(2) == ["news-3"]
+    assert AiMonitorConfigUpdate().news_analysis_enabled is False
+    assert AiMonitorNewsAnalysisUpdate(enabled=True).enabled is True
+    assert AiMonitorConfig.__table__.c.news_analysis_enabled.default.arg is False
+    assert '"news_analysis_enabled": False' in monitor
+    assert 'if run_type == "news" and not config.news_analysis_enabled:' in monitor
+    assert "AiMonitorConfig.news_analysis_enabled.is_(True)" in monitor
+    assert '@router.put("/news-analysis/config")' in api
+    assert "config.last_news_run_at = utcnow()" in api
+    assert 'down_revision: str | None = "0084_strategy_parameter_profiles"' in migration
+    assert 'server_default=sa.text("0")' in migration
 
 
 def test_news_candidates_group_by_direction_and_require_confidence() -> None:
@@ -4481,7 +4489,7 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert 'import "./controllers/monitor.js"' in entrypoint
     assert '"ai-monitor": "发现机会"' in app
     assert '{ key: "ai-monitor", icon: "机", label: "发现机会" }' in app
-    assert 'href="/next/assets/ai-monitor.css?v=20260902-tooltip-layer"' in component
+    assert 'href="/next/assets/ai-monitor.css?v=20260904-news-analysis-toggle"' in component
     assert ".workspace-content.ai-monitor-mode" in app_styles
     assert "/assets/controller-runtime.js" not in react_index
     assert "/assets/strategies.js" not in react_index
@@ -4549,7 +4557,10 @@ def test_ai_monitor_frontend_is_mounted_beside_contract_monitor() -> None:
     assert 'data-ai-view="config"' not in component
     assert "趋势、突破、回踩、反转按策略组择一确认" in component
     assert "监控品种" in component
-    assert "每 15 分钟从数据库读取最新 10 条未分析新闻" in component
+    assert 'id="news-analysis-toggle"' in component
+    assert 'this.api("/news-analysis/config"' in component
+    assert "定时 AI 新闻分析已关闭" in component
+    assert ".news-analysis-control.enabled" in stylesheet
     assert "related_industries" in component
     assert "等待策略组与评分确认" in component
     assert "暂无技术行情" in component

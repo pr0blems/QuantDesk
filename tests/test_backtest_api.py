@@ -271,6 +271,49 @@ def test_strategy_parameter_profile_accepts_backtest_initial_capital() -> None:
     assert profile.initial_capital == Decimal("2500")
 
 
+def test_strategy_parameter_profile_can_update_only_strategy_parameters(
+    mysql_test_engine: Engine,
+) -> None:
+    client, _ = build_test_client(mysql_test_engine)
+    with client:
+        headers = register_and_login(client, "parameter-only-profile")
+        catalog = client.get("/api/v2/strategies", headers=headers)
+        assert catalog.status_code == 200
+        strategy = next(
+            item
+            for item in catalog.json()["items"]
+            if item["engine_key"] == "martingale_tp4"
+        )
+        endpoint = f"/api/v2/backtests/strategy-parameters/{strategy['id']}"
+        execution = {
+            "position_size_pct": 3,
+            "leverage": 5,
+            "margin_mode": "isolated",
+            "fee_bps": 5,
+            "slippage_bps": 3,
+            "stop_loss_pct": 2,
+            "take_profit_pct": 5,
+            "max_holding_bars": 120,
+        }
+        created = client.put(
+            endpoint,
+            headers=headers,
+            json={"scope": "default", "params": {"Lot": 0.01}, "execution": execution},
+        )
+        assert created.status_code == 200, created.text
+
+        updated = client.put(
+            endpoint,
+            headers=headers,
+            json={"scope": "default", "params": {"Lot": 0.02}},
+        )
+        assert updated.status_code == 200, updated.text
+        detail = client.get(endpoint, headers=headers)
+        assert detail.status_code == 200
+        assert detail.json()["default_profile"]["parameters"]["Lot"] == 0.02
+        assert detail.json()["default_profile"]["execution"] == execution
+
+
 def test_builtin_indicator_strategy_is_a_manual_backtest_choice() -> None:
     strategy = UserStrategy(
         status="active",

@@ -688,21 +688,6 @@ def cleanup_news_retention(*, now_ts: int | None = None) -> int:
     return deleted
 
 
-def _notify_news_ingested(news_ids: list[str]) -> None:
-    """Notify the AI scheduler only after collector writes have committed."""
-
-    if not news_ids:
-        return
-    try:
-        from .ai_monitor import enqueue_news_analysis
-
-        enqueue_news_analysis(news_ids)
-    except Exception as exc:
-        # Collection must remain available even when the optional AI pipeline is
-        # not configured; the persisted periodic scan will recover later.
-        print(f"[news] AI immediate-analysis notification failed: {type(exc).__name__}")
-
-
 def news_once(batch=None):
     """batch=None 全量抓一轮；batch=N 轮转抓 N 个源（高频模式用，slow 源自动降频为每 5 轮 1 次）"""
     global _rr_index
@@ -759,7 +744,6 @@ def news_once(batch=None):
                 0, hourly_limit - int(current_hour[0]["n"] if current_hour else 0)
             )
         source_added = 0
-        source_news_ids: list[str] = []
         batch_limit = (
             50 if src.get("feed_type") in {"taoz_flash", "unusual_whales"} else 10
         )
@@ -798,9 +782,6 @@ def news_once(batch=None):
             )
             added += int(inserted > 0)
             source_added += int(inserted > 0)
-            if inserted > 0:
-                source_news_ids.append(nid)
-        _notify_news_ingested(source_news_ids)
         if source_added and src.get("_admin_managed"):
             store.news_source_result(name, success=True, inserted=source_added)
     # 每轮顺带补译最多4条历史未翻译的英文条目

@@ -288,7 +288,7 @@ def test_sha256_migration_does_not_duplicate_an_existing_source_link(monkeypatch
     assert writes == []
 
 
-def test_newly_inserted_news_immediately_notifies_ai_worker(monkeypatch) -> None:
+def test_newly_inserted_news_waits_for_scheduled_ai_analysis(monkeypatch) -> None:
     source = {
         "name": "CoinDesk",
         "url": "https://www.coindesk.com/feed",
@@ -313,12 +313,11 @@ def test_newly_inserted_news_immediately_notifies_ai_worker(monkeypatch) -> None
         news,
         "_notify_news_ingested",
         lambda news_ids: notified.append(news_ids),
+        raising=False,
     )
 
     assert news.news_once() == 1
-    assert notified == [
-        [news._news_id("CoinDesk", "https://example.com/immediate")]
-    ]
+    assert notified == []
 
 
 def test_news_quality_rejects_stale_short_and_promotional_titles() -> None:
