@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -155,6 +156,8 @@ def test_auto_replay_opens_on_box_breakout_and_closes_at_basket_tp() -> None:
     assert result.cycles[0].short_leg_count == 0
     assert [item.action for item in result.fills] == ["open", "close_all"]
     assert result.metrics["winning_cycles"] == 1
+    assert math.isfinite(float(result.metrics["annualized_return_pct"]))
+    assert math.isfinite(float(result.metrics["sharpe_ratio"]))
 
 
 def test_stateful_box_is_invalidated_after_a_closed_bar_breaks_its_boundary() -> None:

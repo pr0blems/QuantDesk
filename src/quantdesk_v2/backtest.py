@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .domain.exit_policy import DEFAULT_EXIT_POLICY
 from .market_data_client import fetch_klines_range
+from .performance_metrics import annualized_return_pct, annualized_sharpe_ratio
 from .strategy_evaluator import (
     DEFAULT_STRATEGY_EVALUATOR,
     SUPPORTED_STRATEGY_TIMEFRAMES,
@@ -1730,40 +1731,11 @@ def _liquidation_price(
 
 
 def _annualized_return(initial: float, final: float, duration_seconds: int) -> float | None:
-    if initial <= 0 or duration_seconds <= 0:
-        return None
-    if final <= 0:
-        return -100.0
-    exponent = math.log(final / initial) * (365 * 86_400 / duration_seconds)
-    # A very short profitable sample can mathematically annualize to infinity.
-    # Keep the metric JSON-safe and visibly capped rather than returning Infinity.
-    maximum_pct = 1_000_000_000.0
-    if exponent >= math.log1p(maximum_pct / 100):
-        return maximum_pct
-    if exponent <= -50:
-        return -100.0
-    return _round_number(math.expm1(exponent) * 100)
+    return annualized_return_pct(initial, final, duration_seconds)
 
 
 def _sharpe_ratio(equity_values: list[float], timeframe: str) -> float | None:
-    returns = []
-    for previous, current in zip(equity_values, equity_values[1:], strict=False):
-        if previous > 0:
-            value = current / previous - 1
-            if math.isfinite(value):
-                returns.append(value)
-    if len(returns) < 2:
-        return None
-    mean = sum(returns) / len(returns)
-    variance = sum((value - mean) ** 2 for value in returns) / (len(returns) - 1)
-    if variance <= 0:
-        return None
-    interval = _timeframe_seconds(timeframe)
-    if not interval:
-        return None
-    periods_per_year = 365 * 86_400 / interval
-    sharpe = mean / math.sqrt(variance) * math.sqrt(periods_per_year)
-    return _round_number(sharpe) if math.isfinite(sharpe) else None
+    return annualized_sharpe_ratio(equity_values, _timeframe_seconds(timeframe))
 
 
 def _even_sample(points: list[dict[str, Any]], maximum: int) -> list[dict[str, Any]]:

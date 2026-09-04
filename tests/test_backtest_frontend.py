@@ -186,6 +186,14 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
 
 
+def test_backtest_missing_metrics_are_not_rendered_as_zero() -> None:
+    script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
+
+    assert 'if (value == null || (typeof value === "string" && value.trim() === "")) return null;' in script
+    assert 'const numeric = this.numericValue(value);' in script
+    assert 'if (numeric == null) return "--";' in script
+
+
 def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
     script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")

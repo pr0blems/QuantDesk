@@ -22,9 +22,10 @@ from ...domain.martingale_tp4_engine import (
     StrategyDecision,
     evaluate_tick,
 )
+from ...performance_metrics import annualized_return_pct, annualized_sharpe_ratio
 from ...tiger_market_data import TigerBar
 
-REPLAY_ENGINE_VERSION = "martingale_tp4_bar_replay_v2"
+REPLAY_ENGINE_VERSION = "martingale_tp4_bar_replay_v3"
 BOX_ALGORITHM_VERSION = "mq4_stateful_adaptive_box_v2"
 FILL_MODEL_VERSION = "tiger_ohlc_path_v1"
 
@@ -880,11 +881,36 @@ def run_bar_replay(
     total_loss = sum((item.realized_pnl for item in losses), Decimal("0"))
     total_fees = sum((item.fees for item in cycles), Decimal("0"))
     final_equity = initial_capital + sum((item.realized_pnl for item in cycles), Decimal("0"))
+    evaluation_duration_seconds = max(
+        0,
+        (
+            signal[last_evaluation_index].close_time
+            - signal[first_evaluation_index].open_time
+        )
+        // 1000,
+    )
+    interval_seconds = max(
+        1,
+        (
+            signal[first_evaluation_index].close_time
+            - signal[first_evaluation_index].open_time
+        )
+        // 1000,
+    )
+    equity_values = [
+        float(initial_capital),
+        *(float(item["equity"]) for item in equity_curve),
+    ]
     metrics: dict[str, object] = {
         "initial_capital": initial_capital,
         "final_equity": final_equity,
         "net_profit": final_equity - initial_capital,
         "return_pct": (final_equity / initial_capital - 1) * Decimal("100"),
+        "annualized_return_pct": annualized_return_pct(
+            float(initial_capital),
+            float(final_equity),
+            evaluation_duration_seconds,
+        ),
         "cycle_count": len(cycles),
         "winning_cycles": len(wins),
         "losing_cycles": len(losses),
@@ -892,6 +918,7 @@ def run_bar_replay(
         "profit_factor": total_profit / abs(total_loss) if total_loss else None,
         "total_fees": total_fees,
         "maximum_drawdown_pct": maximum_drawdown,
+        "sharpe_ratio": annualized_sharpe_ratio(equity_values, interval_seconds),
         "open_fill_count": sum(item.action in {"open", "add"} for item in fills),
         "leverage": leverage,
         "maintenance_margin_rate_pct": maintenance_margin_rate * Decimal("100"),

@@ -3053,47 +3053,53 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   toneClass(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric) || numeric === 0) return "neutral";
+    const numeric = this.numericValue(value);
+    if (numeric == null || numeric === 0) return "neutral";
     return numeric > 0 ? "positive" : "negative";
   }
 
-  number(value, digits = 2) {
+  numericValue(value) {
+    if (value == null || (typeof value === "string" && value.trim() === "")) return null;
     const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return "--";
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  number(value, digits = 2) {
+    const numeric = this.numericValue(value);
+    if (numeric == null) return "--";
     return numeric.toLocaleString("zh-CN", { minimumFractionDigits: 0, maximumFractionDigits: digits });
   }
 
   integer(value) {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? Math.round(numeric).toLocaleString("zh-CN") : "--";
+    const numeric = this.numericValue(value);
+    return numeric == null ? "--" : Math.round(numeric).toLocaleString("zh-CN");
   }
 
   money(value) {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? `${numeric.toLocaleString("zh-CN", { minimumFractionDigits: 0, maximumFractionDigits: 2 })} U` : "--";
+    const numeric = this.numericValue(value);
+    return numeric == null ? "--" : `${numeric.toLocaleString("zh-CN", { minimumFractionDigits: 0, maximumFractionDigits: 2 })} U`;
   }
 
   signedMoney(value) {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? `${numeric > 0 ? "+" : ""}${this.number(numeric)} U` : "--";
+    const numeric = this.numericValue(value);
+    return numeric == null ? "--" : `${numeric > 0 ? "+" : ""}${this.number(numeric)} U`;
   }
 
   percent(value, signed = true) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return "--";
+    const numeric = this.numericValue(value);
+    if (numeric == null) return "--";
     return `${signed && numeric > 0 ? "+" : ""}${this.number(numeric, 2)}%`;
   }
 
   price(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return "--";
+    const numeric = this.numericValue(value);
+    if (numeric == null) return "--";
     return numeric >= 100 ? numeric.toFixed(2) : numeric >= 1 ? numeric.toFixed(4) : numeric.toFixed(6);
   }
 
   quantity(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return "--";
+    const numeric = this.numericValue(value);
+    if (numeric == null) return "--";
     if (numeric !== 0 && Math.abs(numeric) < 0.0001) return numeric.toExponential(4);
     return this.number(numeric, 8);
   }
