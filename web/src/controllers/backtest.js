@@ -9,6 +9,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.symbolOptions = [];
     this.selectedSymbols = [];
     this.draftSymbols = [];
+    this.activeConfigSymbol = "";
+    this.symbolConfigurations = {};
+    this.symbolConfigurationDirty = new Set();
+    this.symbolProfileLoaded = new Set();
+    this.symbolProfileRequests = new Map();
+    this.applyingSymbolConfiguration = false;
     this.profileRequest = 0;
     this.profileSaveInFlight = false;
     this.history = [];
@@ -66,7 +72,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-batch-results-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-symbol-config-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -119,6 +125,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   </select>
                   <small id="market-source-help" class="field-help">默认使用 Binance 合约历史 K 线；Tiger 仅在手动选择时启用。</small>
                 </label>
+              </div>
+              <div class="symbol-config-switcher">
+                <div class="symbol-config-switcher-head"><span>按交易品种配置</span><small>切换后，下方数据范围、资金、成本与策略参数均独立保存</small></div>
+                <div id="symbol-config-tabs" class="symbol-config-tabs" role="tablist" aria-label="按交易品种切换回测参数"></div>
               </div>
               <div id="data-availability" class="data-availability" role="status" aria-live="polite">
                 <span>可用数据范围</span>
@@ -362,7 +372,14 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#backtest-config-dialog").addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.q("#symbol-picker-dialog").classList.contains("hidden")) this.closeConfigDialog();
     });
-    this.q("#backtest-form").addEventListener("submit", (event) => this.runBacktest(event));
+    const form = this.q("#backtest-form");
+    form.addEventListener("submit", (event) => this.runBacktest(event));
+    const captureSymbolConfiguration = (event) => {
+      if (this.applyingSymbolConfiguration || event.target?.id === "timeframe") return;
+      this.captureActiveSymbolConfiguration(true);
+    };
+    form.addEventListener("input", captureSymbolConfiguration);
+    form.addEventListener("change", captureSymbolConfiguration);
     this.q("#open-symbol-picker").addEventListener("click", () => this.openSymbolPicker());
     this.q("#close-symbol-picker").addEventListener("click", () => this.closeSymbolPicker());
     this.q("#cancel-symbol-picker").addEventListener("click", () => this.closeSymbolPicker());
@@ -379,7 +396,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
     this.q("#save-default-profile").addEventListener("click", () => this.saveParameterProfile("default"));
     this.q("#save-symbol-profile").addEventListener("click", () => this.saveParameterProfile("symbol"));
-    this.q("#timeframe").addEventListener("change", () => this.syncBounds());
+    this.q("#timeframe").addEventListener("change", () => {
+      this.captureActiveSymbolConfiguration(false);
+      this.ensureSymbolConfigurations();
+      this.syncBounds();
+      this.renderSymbolConfigTabs();
+    });
     this.q("#market-data-source").addEventListener("change", () => this.updateMarketSourceHelp());
     this.q("#open-history").addEventListener("click", () => this.openHistory());
     this.q("#reload-history").addEventListener("click", () => this.loadHistory(true));
@@ -400,7 +422,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#apply-position-settings").addEventListener("click", () => this.applyCalculatedPoints("position"));
     this.q("#apply-tp-points").addEventListener("click", () => this.applyCalculatedPoints("take-profit"));
     this.q("#apply-all-points").addEventListener("click", () => this.applyCalculatedPoints("all"));
-    this.q("#reset-params").addEventListener("click", () => this.renderParameters(true));
+    this.q("#reset-params").addEventListener("click", () => {
+      this.renderParameters(true);
+      this.captureActiveSymbolConfiguration(true);
+    });
     this.qa("[data-months]").forEach((button) => button.addEventListener("click", () => this.applyRange(button.dataset.months)));
     this.bindPriceChartEvents();
   }
@@ -427,6 +452,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.symbolOptions = [];
     this.selectedSymbols = [];
     this.draftSymbols = [];
+    this.activeConfigSymbol = "";
+    this.symbolConfigurations = {};
+    this.symbolConfigurationDirty.clear();
+    this.symbolProfileLoaded.clear();
+    this.symbolProfileRequests.clear();
+    this.applyingSymbolConfiguration = false;
     this.profileRequest += 1;
     this.profileSaveInFlight = false;
     this.history = [];
@@ -458,6 +489,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     symbolInput.value = "";
     this.q("#open-symbol-picker").disabled = true;
     this.renderSelectedSymbols();
+    this.renderSymbolConfigTabs();
     this.q("#profile-status").textContent = "选择策略后可加载和保存交易参数。";
     const timeframeOption = this.node("option", "", "登录后加载…");
     timeframeOption.value = "";
@@ -600,10 +632,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.selectedSymbols = this.selectedSymbols.filter((symbol) => allowed.has(symbol));
     const initial = allowed.has(previous) ? previous : this.symbolOptions[0]?.value || "";
     if (!this.selectedSymbols.length && initial) this.selectedSymbols = [initial];
-    input.value = this.selectedSymbols[0] || initial;
+    if (!this.selectedSymbols.includes(this.activeConfigSymbol)) this.activeConfigSymbol = this.selectedSymbols[0] || initial;
+    input.value = this.primarySymbol() || initial;
     this.q("#open-symbol-picker").disabled = !this.symbolOptions.length;
     this.q("#symbol-selection-summary").textContent = this.symbolOptions.length ? placeholder : "当前策略没有可用品种";
     this.renderSelectedSymbols();
+    this.renderSymbolConfigTabs();
     if (!this.q("#symbol-picker-dialog").classList.contains("hidden")) this.renderSymbolChoices();
   }
 
@@ -671,13 +705,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       this.q("#symbol-dialog-status").classList.add("error");
       return;
     }
+    const baseConfiguration = this.captureActiveSymbolConfiguration(false) || this.readCurrentSymbolConfiguration();
     const allowed = new Set(this.symbolOptions.map((item) => item.value));
     this.selectedSymbols = this.draftSymbols.filter((symbol) => allowed.has(symbol));
-    this.q("#symbol").value = this.selectedSymbols[0] || "";
-    this.renderSelectedSymbols();
+    if (!this.selectedSymbols.includes(this.activeConfigSymbol)) this.activeConfigSymbol = this.selectedSymbols[0] || "";
+    this.ensureSymbolConfigurations(baseConfiguration);
+    this.q("#symbol").value = this.primarySymbol();
     this.closeSymbolPicker();
-    this.syncBounds();
-    void this.loadParameterProfile();
+    this.switchActiveSymbol(this.primarySymbol(), { loadProfile: false, captureCurrent: false });
+    void this.loadSelectedParameterProfiles();
   }
 
   renderSelectedSymbols() {
@@ -685,7 +721,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (!container) return;
     const visible = this.selectedSymbols.slice(0, 4);
     container.replaceChildren(...visible.map((symbol) => {
-      const chip = this.node("span", "symbol-chip");
+      const chip = this.node("span", `symbol-chip${symbol === this.primarySymbol() ? " active" : ""}`);
       chip.append(this.node("b", "", symbol));
       return chip;
     }));
@@ -704,11 +740,168 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   primarySymbol() {
-    return this.selectedSymbols[0] || "";
+    return this.selectedSymbols.includes(this.activeConfigSymbol)
+      ? this.activeConfigSymbol
+      : this.selectedSymbols[0] || "";
+  }
+
+  cloneSymbolConfiguration(configuration = {}) {
+    return {
+      market_data_source: String(configuration.market_data_source || "binance"),
+      start_date: String(configuration.start_date || ""),
+      end_date: String(configuration.end_date || ""),
+      initial_capital: Number(configuration.initial_capital ?? 10000),
+      position_size_pct: Number(configuration.position_size_pct ?? 10),
+      leverage: Number(configuration.leverage ?? 1),
+      fee_bps: Number(configuration.fee_bps ?? 4),
+      slippage_bps: Number(configuration.slippage_bps ?? 2),
+      stop_loss_pct: Number(configuration.stop_loss_pct ?? 5),
+      take_profit_pct: Number(configuration.take_profit_pct ?? 10),
+      max_holding_bars: Number(configuration.max_holding_bars ?? 120),
+      params: { ...(configuration.params || {}) },
+      profile_scope: configuration.profile_scope || null,
+    };
+  }
+
+  readCurrentSymbolConfiguration() {
+    return this.cloneSymbolConfiguration({
+      market_data_source: this.q("#market-data-source").value,
+      start_date: this.q("#start-date").value,
+      end_date: this.q("#end-date").value,
+      initial_capital: this.q("#initial-capital").value,
+      ...this.executionProfile(),
+      params: this.collectParams(),
+    });
+  }
+
+  captureActiveSymbolConfiguration(markDirty = false) {
+    const symbol = this.primarySymbol();
+    if (!symbol || this.applyingSymbolConfiguration) return null;
+    const configuration = this.readCurrentSymbolConfiguration();
+    configuration.profile_scope = this.symbolConfigurations[symbol]?.profile_scope || null;
+    this.symbolConfigurations[symbol] = configuration;
+    if (markDirty) this.symbolConfigurationDirty.add(symbol);
+    this.renderSymbolConfigTabs();
+    return configuration;
+  }
+
+  ensureSymbolConfigurations(baseConfiguration = null, replace = false) {
+    const base = this.cloneSymbolConfiguration(baseConfiguration || this.readCurrentSymbolConfiguration());
+    this.selectedSymbols.forEach((symbol) => {
+      if (replace || !this.symbolConfigurations[symbol]) {
+        this.symbolConfigurations[symbol] = this.normalizeSymbolConfigurationRange(symbol, base);
+      } else {
+        this.symbolConfigurations[symbol] = this.normalizeSymbolConfigurationRange(symbol, this.symbolConfigurations[symbol]);
+      }
+    });
+    if (!this.selectedSymbols.includes(this.activeConfigSymbol)) {
+      this.activeConfigSymbol = this.selectedSymbols[0] || "";
+    }
+  }
+
+  normalizeSymbolConfigurationRange(symbol, configuration = {}) {
+    const normalized = this.cloneSymbolConfiguration(configuration);
+    const { min, max } = this.resolveBounds(symbol);
+    const fallbackEnd = max || this.dateOnly(new Date());
+    if (!normalized.end_date || normalized.end_date > fallbackEnd || (min && normalized.end_date < min)) {
+      normalized.end_date = fallbackEnd;
+    }
+    if (!normalized.start_date || normalized.start_date > normalized.end_date || (min && normalized.start_date < min)) {
+      normalized.start_date = this.maxDate(min, this.shiftMonths(normalized.end_date, this.isBasketStrategy() ? -1 : -3));
+    }
+    return normalized;
+  }
+
+  applySymbolConfiguration(configuration = {}) {
+    const value = this.cloneSymbolConfiguration(configuration);
+    const mapping = {
+      initial_capital: "#initial-capital",
+      position_size_pct: "#position-size",
+      leverage: "#leverage",
+      fee_bps: "#fee",
+      slippage_bps: "#slippage",
+      stop_loss_pct: "#stop-loss",
+      take_profit_pct: "#take-profit",
+      max_holding_bars: "#max-holding",
+      start_date: "#start-date",
+      end_date: "#end-date",
+    };
+    this.applyingSymbolConfiguration = true;
+    try {
+      Object.entries(mapping).forEach(([key, selector]) => {
+        const input = this.q(selector);
+        if (input && value[key] != null) input.value = String(value[key]);
+      });
+      const source = this.q("#market-data-source");
+      source.value = source.disabled ? "binance" : value.market_data_source;
+      this.applyStrategyParameters(value.params);
+      this.updateMarketSourceHelp();
+    } finally {
+      this.applyingSymbolConfiguration = false;
+    }
+  }
+
+  switchActiveSymbol(symbol, { loadProfile = true, captureCurrent = true } = {}) {
+    if (!this.selectedSymbols.includes(symbol)) return;
+    const previous = this.primarySymbol();
+    const previousConfiguration = captureCurrent ? this.captureActiveSymbolConfiguration(false) : null;
+    if (!this.symbolConfigurations[symbol]) {
+      this.symbolConfigurations[symbol] = this.cloneSymbolConfiguration(previousConfiguration || this.readCurrentSymbolConfiguration());
+    }
+    this.activeConfigSymbol = symbol;
+    this.q("#symbol").value = symbol;
+    this.applySymbolConfiguration(this.symbolConfigurations[symbol]);
+    this.syncBounds();
+    this.renderSelectedSymbols();
+    this.renderSymbolConfigTabs();
+    this.renderProfileStatus(symbol);
+    if (loadProfile && symbol !== previous && !this.symbolProfileLoaded.has(symbol)) {
+      void this.loadParameterProfile(symbol);
+    }
+  }
+
+  renderSymbolConfigTabs() {
+    const container = this.q("#symbol-config-tabs");
+    if (!container) return;
+    if (!this.selectedSymbols.length) {
+      container.replaceChildren(this.node("span", "symbol-config-empty", "请选择至少一个交易品种"));
+      return;
+    }
+    container.replaceChildren(...this.selectedSymbols.map((symbol) => {
+      const active = symbol === this.primarySymbol();
+      const bounds = this.resolveBounds(symbol);
+      const button = this.node("button", `symbol-config-tab${active ? " active" : ""}`);
+      button.type = "button";
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", String(active));
+      const count = bounds.bars == null ? "待校验" : `${new Intl.NumberFormat("zh-CN").format(bounds.bars)} 根`;
+      button.append(this.node("strong", "", symbol), this.node("small", "", count));
+      if (this.symbolConfigurationDirty.has(symbol)) button.append(this.node("i", "", "已调整"));
+      button.addEventListener("click", () => this.switchActiveSymbol(symbol));
+      return button;
+    }));
+  }
+
+  renderProfileStatus(symbol = this.primarySymbol(), scope = null) {
+    const status = this.q("#profile-status");
+    if (!status || !symbol) return;
+    const effectiveScope = scope || this.symbolConfigurations[symbol]?.profile_scope;
+    status.textContent = effectiveScope === "symbol"
+      ? `当前编辑：${symbol} 专有配置（优先于默认配置）`
+      : effectiveScope === "default"
+        ? `当前编辑：${symbol}，已加载策略默认交易配置`
+        : `当前编辑：${symbol}，参数与其他币种相互独立`;
   }
 
   selectStrategy(id) {
     const changed = this.strategyId !== id;
+    if (changed) {
+      this.symbolConfigurations = {};
+      this.symbolConfigurationDirty.clear();
+      this.symbolProfileLoaded.clear();
+      this.symbolProfileRequests.clear();
+      this.activeConfigSymbol = "";
+    }
     this.strategyId = id;
     this.qa(".strategy-card").forEach((card) => {
       const active = card.dataset.strategyId === id;
@@ -729,7 +922,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       max_holding_bars: 120,
       ...(strategy?.risk_defaults || {}),
     });
-    void this.loadParameterProfile();
+    this.ensureSymbolConfigurations(this.readCurrentSymbolConfiguration(), changed);
+    this.applySymbolConfiguration(this.symbolConfigurations[this.primarySymbol()] || this.readCurrentSymbolConfiguration());
+    this.syncBounds(changed && this.isBasketStrategy());
+    this.renderSelectedSymbols();
+    this.renderSymbolConfigTabs();
+    void this.loadSelectedParameterProfiles();
   }
 
   selectedStrategy() {
@@ -1129,10 +1327,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.showBanner(message, "success");
   }
 
-  resolveBounds() {
+  resolveBounds(symbol = this.primarySymbol(), timeframe = this.q("#timeframe").value) {
     const source = this.catalog.bounds || {};
-    const symbol = this.primarySymbol();
-    const timeframe = this.q("#timeframe").value;
     let bound = source;
     if (Array.isArray(source)) {
       bound = source.find((item) => (!item.symbol || item.symbol === symbol) && (!item.timeframe || item.timeframe === timeframe)) || {};
@@ -1194,6 +1390,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       start.max = availableEnd;
       end.min = min || "";
       end.max = availableEnd;
+      this.captureActiveSymbolConfiguration(false);
       return;
     }
     const start = this.q("#start-date");
@@ -1211,6 +1408,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       if (!end.value) end.value = today;
       if (!start.value) start.value = this.shiftMonths(today, -3);
     }
+    this.captureActiveSymbolConfiguration(false);
   }
 
   applyRange(months) {
@@ -1236,6 +1434,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     } else {
       feedback.textContent = `已切换至${labels[months] || "所选区间"}：${start} — ${end}`;
     }
+    this.captureActiveSymbolConfiguration(true);
   }
 
   collectParams() {
@@ -1287,48 +1486,64 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
   }
 
-  async loadParameterProfile() {
+  loadSelectedParameterProfiles() {
+    return Promise.allSettled(this.symbolsForRun().map((symbol) => this.loadParameterProfile(symbol)));
+  }
+
+  async loadParameterProfile(symbol = this.primarySymbol()) {
     const strategyId = this.strategyId;
-    const symbol = this.primarySymbol();
-    if (!strategyId || !symbol) return;
+    if (!strategyId || !symbol || this.symbolProfileLoaded.has(symbol)) return;
     const requestId = ++this.profileRequest;
+    this.symbolProfileRequests.set(symbol, requestId);
     const status = this.q("#profile-status");
-    status.textContent = `正在读取 ${symbol} 的策略参数…`;
+    if (symbol === this.primarySymbol()) status.textContent = `正在读取 ${symbol} 的策略参数…`;
     try {
       const detail = await this.api(`/strategy-parameters/${encodeURIComponent(strategyId)}?symbol=${encodeURIComponent(symbol)}`);
-      if (requestId !== this.profileRequest || strategyId !== this.strategyId || symbol !== this.primarySymbol()) return;
-      this.applyStrategyParameters(detail?.effective?.parameters || {});
-      this.applyExecutionProfile(detail?.effective?.execution || {});
+      if (this.symbolProfileRequests.get(symbol) !== requestId || strategyId !== this.strategyId) return;
       const scope = detail?.effective?.scope;
-      status.textContent = scope === "symbol"
-        ? `当前参数：${symbol} 专有配置（优先于默认配置）`
-        : scope === "default"
-          ? "当前参数：策略默认交易配置"
-          : "当前参数：策略版本内置配置";
+      if (!this.symbolConfigurationDirty.has(symbol)) {
+        const current = this.symbolConfigurations[symbol] || this.readCurrentSymbolConfiguration();
+        this.symbolConfigurations[symbol] = this.cloneSymbolConfiguration({
+          ...current,
+          ...(detail?.effective?.execution || {}),
+          params: { ...(current.params || {}), ...(detail?.effective?.parameters || {}) },
+          profile_scope: scope,
+        });
+        if (symbol === this.primarySymbol()) {
+          this.applySymbolConfiguration(this.symbolConfigurations[symbol]);
+          this.syncBounds();
+        }
+      }
+      this.symbolProfileLoaded.add(symbol);
+      this.renderSymbolConfigTabs();
+      if (symbol === this.primarySymbol()) this.renderProfileStatus(symbol, scope);
     } catch (error) {
-      if (requestId !== this.profileRequest) return;
-      status.textContent = `参数配置读取失败：${error.message}`;
+      if (this.symbolProfileRequests.get(symbol) !== requestId || strategyId !== this.strategyId) return;
+      if (symbol === this.primarySymbol()) status.textContent = `参数配置读取失败：${error.message}`;
     }
   }
 
   async saveParameterProfile(scope) {
     if (this.profileSaveInFlight || !this.validateParameterProfile()) return;
-    const symbols = scope === "symbol" ? this.symbolsForRun() : [null];
-    if (scope === "symbol" && !symbols.length) {
+    this.captureActiveSymbolConfiguration(true);
+    const activeSymbol = this.primarySymbol();
+    const symbols = scope === "symbol" ? [activeSymbol].filter(Boolean) : [null];
+    if (scope === "symbol" && !activeSymbol) {
       this.showBanner("请先选择至少一个交易品种。", "error");
       return;
     }
     this.profileSaveInFlight = true;
     this.setProfileButtons(true);
     const status = this.q("#profile-status");
-    status.textContent = scope === "default" ? "正在保存策略默认交易参数…" : `正在保存 ${symbols.length} 个品种的专有参数…`;
+    status.textContent = scope === "default" ? "正在保存策略默认交易参数…" : `正在保存 ${activeSymbol} 的专有参数…`;
     try {
-      const body = {
-        scope,
-        params: this.collectParams(),
-        execution: this.executionProfile(),
-      };
       for (const symbol of symbols) {
+        const configuration = this.symbolConfigurations[symbol || activeSymbol] || this.readCurrentSymbolConfiguration();
+        const body = {
+          scope,
+          params: { ...(configuration.params || {}) },
+          execution: this.executionProfileFromConfiguration(configuration),
+        };
         await this.api(`/strategy-parameters/${encodeURIComponent(this.strategyId)}`, {
           method: "PUT",
           body: JSON.stringify({ ...body, symbol }),
@@ -1336,7 +1551,13 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       }
       const message = scope === "default"
         ? "默认交易策略参数已保存；没有币种专有配置时，模拟盘与实盘将使用这组参数。"
-        : `${symbols.join("、")} 的专有交易策略参数已保存；模拟盘与实盘将优先使用。`;
+        : `${activeSymbol} 的专有交易策略参数已保存；模拟盘与实盘将优先使用。`;
+      if (scope === "symbol") {
+        this.symbolConfigurations[activeSymbol].profile_scope = "symbol";
+        this.symbolConfigurationDirty.delete(activeSymbol);
+        this.symbolProfileLoaded.add(activeSymbol);
+        this.renderSymbolConfigTabs();
+      }
       status.textContent = message;
       this.showBanner(message, "success");
     } catch (error) {
@@ -1373,24 +1594,69 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return true;
   }
 
-  payload(symbol = this.primarySymbol()) {
+  executionProfileFromConfiguration(configuration = {}) {
+    return {
+      position_size_pct: Number(configuration.position_size_pct),
+      leverage: Number(configuration.leverage),
+      margin_mode: "isolated",
+      fee_bps: Number(configuration.fee_bps),
+      slippage_bps: Number(configuration.slippage_bps),
+      stop_loss_pct: Number(configuration.stop_loss_pct),
+      take_profit_pct: Number(configuration.take_profit_pct),
+      max_holding_bars: Number(configuration.max_holding_bars),
+    };
+  }
+
+  symbolConfigurationError(configuration = {}) {
+    const numericRules = {
+      initial_capital: [1, Number.POSITIVE_INFINITY, "初始资金"],
+      position_size_pct: [0.01, 100, "单次仓位"],
+      leverage: [1, 125, "杠杆"],
+      fee_bps: [0, 1000, "手续费"],
+      slippage_bps: [0, 1000, "滑点"],
+      stop_loss_pct: [0, 99.9, "止损"],
+      take_profit_pct: [0, 99.9, "止盈"],
+      max_holding_bars: [0, 50000, "最大持有 K 线"],
+    };
+    for (const [key, [minimum, maximum, label]] of Object.entries(numericRules)) {
+      const value = Number(configuration[key]);
+      if (!Number.isFinite(value) || value < minimum || value > maximum) return `${label}参数无效`;
+    }
+    const definitions = (Array.isArray(this.selectedStrategy()?.params) ? this.selectedStrategy().params : [])
+      .filter((param) => !this.isBasketStrategy() || param?.key !== "BoxTimeFrameMinutes");
+    for (const definition of definitions) {
+      const key = String(definition?.key || "");
+      if (!key) continue;
+      const value = configuration.params?.[key];
+      const type = String(definition.type || "number").toLowerCase();
+      if (type === "boolean" || type === "bool") continue;
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return `${definition.label || key}参数无效`;
+      if (definition.min != null && numeric < Number(definition.min)) return `${definition.label || key}不能小于 ${definition.min}`;
+      if (definition.max != null && numeric > Number(definition.max)) return `${definition.label || key}不能大于 ${definition.max}`;
+    }
+    return "";
+  }
+
+  payload(symbol = this.primarySymbol(), configuration = null) {
+    const values = this.cloneSymbolConfiguration(configuration || this.symbolConfigurations[symbol] || this.readCurrentSymbolConfiguration());
     return {
       strategy_id: this.strategyId,
       symbol,
       timeframe: this.q("#timeframe").value,
-      market_data_source: this.q("#market-data-source").value,
-      start_date: this.q("#start-date").value,
-      end_date: this.q("#end-date").value,
-      initial_capital: Number(this.q("#initial-capital").value),
-      position_size_pct: Number(this.q("#position-size").value),
-      leverage: Number(this.q("#leverage").value),
+      market_data_source: values.market_data_source,
+      start_date: values.start_date,
+      end_date: values.end_date,
+      initial_capital: Number(values.initial_capital),
+      position_size_pct: Number(values.position_size_pct),
+      leverage: Number(values.leverage),
       margin_mode: "isolated",
-      fee_bps: Number(this.q("#fee").value),
-      slippage_bps: Number(this.q("#slippage").value),
-      stop_loss_pct: Number(this.q("#stop-loss").value),
-      take_profit_pct: Number(this.q("#take-profit").value),
-      max_holding_bars: Number(this.q("#max-holding").value),
-      params: this.collectParams(),
+      fee_bps: Number(values.fee_bps),
+      slippage_bps: Number(values.slippage_bps),
+      stop_loss_pct: Number(values.stop_loss_pct),
+      take_profit_pct: Number(values.take_profit_pct),
+      max_holding_bars: Number(values.max_holding_bars),
+      params: { ...(values.params || {}) },
     };
   }
 
@@ -1404,20 +1670,33 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       this.showBanner("请至少选择一个有效交易品种。", "error");
       return false;
     }
+    this.captureActiveSymbolConfiguration(false);
+    this.ensureSymbolConfigurations();
     if (!form.checkValidity()) {
       form.reportValidity();
       this.showBanner("请检查回测参数，所有必填项都需要有效值。", "error");
       return false;
     }
-    if (this.q("#start-date").value > this.q("#end-date").value) {
-      this.showBanner("开始日期不能晚于结束日期。", "error");
-      return false;
-    }
-    const start = new Date(`${this.q("#start-date").value}T00:00:00`);
-    const end = new Date(`${this.q("#end-date").value}T00:00:00`);
-    if ((end - start) / 86400000 > 366) {
-      this.showBanner("单次回测最长为 366 天，请缩短日期区间后重试。", "error");
-      return false;
+    for (const symbol of this.symbolsForRun()) {
+      const configuration = this.symbolConfigurations[symbol];
+      const configurationError = configuration ? this.symbolConfigurationError(configuration) : "回测参数不完整";
+      if (configurationError) {
+        this.switchActiveSymbol(symbol, { loadProfile: false });
+        this.showBanner(`${symbol}：${configurationError}，请检查后重试。`, "error");
+        return false;
+      }
+      if (!configuration.start_date || !configuration.end_date || configuration.start_date > configuration.end_date) {
+        this.switchActiveSymbol(symbol, { loadProfile: false });
+        this.showBanner(`${symbol} 的开始日期不能晚于结束日期。`, "error");
+        return false;
+      }
+      const start = new Date(`${configuration.start_date}T00:00:00`);
+      const end = new Date(`${configuration.end_date}T00:00:00`);
+      if ((end - start) / 86400000 > 366) {
+        this.switchActiveSymbol(symbol, { loadProfile: false });
+        this.showBanner(`${symbol} 的单次回测最长为 366 天，请缩短日期区间后重试。`, "error");
+        return false;
+      }
     }
     return true;
   }
@@ -1427,6 +1706,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (this.runningBacktest || !this.validate()) return;
     const generation = this.sessionGeneration;
     const symbols = this.symbolsForRun();
+    const payloads = new Map(symbols.map((symbol) => [symbol, this.payload(symbol, this.symbolConfigurations[symbol])]));
     this.closeConfigDialog(false);
     this.runningBacktest = true;
     this.activeDetail = null;
@@ -1445,7 +1725,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
         while (cursor < symbols.length) {
           const symbol = symbols[cursor++];
           try {
-            let detail = await this.api("", { method: "POST", body: JSON.stringify(this.payload(symbol)) });
+            let detail = await this.api("", { method: "POST", body: JSON.stringify(payloads.get(symbol)) });
             const id = this.runId(detail);
             if (!detail?.result && id) detail = await this.api(`/${encodeURIComponent(id)}`);
             successes.push({ symbol, detail });

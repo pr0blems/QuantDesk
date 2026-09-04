@@ -180,7 +180,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260904-batch-results-1" in controller
+    assert "/next/assets/backtest.css?v=20260904-symbol-config-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
@@ -192,6 +192,8 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
 
     for contract in (
         'id="selected-symbols"',
+        'id="symbol-config-tabs"',
+        'role="tablist" aria-label="按交易品种切换回测参数"',
         'id="open-symbol-picker"',
         'aria-controls="symbol-picker-dialog"',
         'role="listbox" aria-multiselectable="true"',
@@ -204,6 +206,16 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
         'saveParameterProfile("symbol")',
         "symbolsForRun()",
         "primarySymbol()",
+        "captureActiveSymbolConfiguration(true)",
+        "ensureSymbolConfigurations(baseConfiguration)",
+        "normalizeSymbolConfigurationRange(symbol",
+        "switchActiveSymbol(symbol",
+        "renderSymbolConfigTabs()",
+        "loadSelectedParameterProfiles()",
+        "this.symbolConfigurations[symbol]",
+        "symbolConfigurationError(configuration",
+        "const payloads = new Map(symbols.map",
+        "JSON.stringify(payloads.get(symbol))",
         "const concurrency = Math.max(1, Math.min(2",
         "await Promise.all(Array.from({ length: concurrency }, () => runNext()))",
         "多品种回测完成",
@@ -223,6 +235,9 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
     assert ".backtest-action-row" in stylesheet
     assert ".selected-symbols" in stylesheet
     assert ".symbol-chip" in stylesheet
+    assert ".symbol-config-switcher" in stylesheet
+    assert ".symbol-config-tabs" in stylesheet
+    assert ".symbol-config-tab.active" in stylesheet
     assert ".symbol-dialog-backdrop" in stylesheet
     assert ".symbol-choice-list" in stylesheet
     assert ".batch-result-overview" in stylesheet

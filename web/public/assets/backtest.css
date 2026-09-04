@@ -106,9 +106,22 @@ button { cursor: pointer; }
 .selected-symbols:empty { display: none; }
 .symbol-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid rgba(43, 215, 163, .28); border-radius: 999px; color: #9fcfc0; background: rgba(43, 215, 163, .07); font-size: 11.5px; }
 .symbol-chip b { font-weight: 750; }
+.symbol-chip.active { border-color: rgba(173, 156, 255, .62); color: #d0c8ff; background: rgba(173, 156, 255, .13); }
 .symbol-chip-more { color: #bdb2fa; border-color: rgba(173, 156, 255, .32); background: rgba(173, 156, 255, .07); }
 .data-source-fields { margin-top: 10px; }
 .data-source-fields select:disabled { color: #718292; border-color: var(--bt-line-soft); cursor: not-allowed; }
+.symbol-config-switcher { display: grid; gap: 8px; margin-top: 12px; padding: 10px; border: 1px solid rgba(173, 156, 255, .2); border-radius: 8px; background: linear-gradient(110deg, rgba(45, 36, 78, .18), rgba(8, 24, 27, .45)); }
+.symbol-config-switcher-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.symbol-config-switcher-head > span { color: #c7bbff; font-size: 12.5px; font-weight: 800; letter-spacing: .04em; }
+.symbol-config-switcher-head > small { color: #697f91; font-size: 11px; text-align: right; }
+.symbol-config-tabs { display: flex; gap: 7px; padding-bottom: 1px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #3d4652 transparent; }
+.symbol-config-tab { min-width: 138px; min-height: 48px; position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 8px; padding: 8px 10px; border: 1px solid rgba(125, 153, 180, .18); border-radius: 7px; color: #a6b7c4; background: rgba(7, 18, 29, .72); text-align: left; }
+.symbol-config-tab:hover { border-color: rgba(173, 156, 255, .48); color: #e5e0ff; }
+.symbol-config-tab.active { border-color: #ad9cff; color: #f0edff; background: linear-gradient(115deg, rgba(92, 70, 164, .25), rgba(12, 31, 38, .86)); box-shadow: inset 3px 0 #ad9cff; }
+.symbol-config-tab strong { overflow: hidden; font-size: 13.5px; text-overflow: ellipsis; white-space: nowrap; }
+.symbol-config-tab small { color: #71899c; font-size: 10.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.symbol-config-tab i { grid-column: 1 / -1; color: #74d9ba; font-size: 9.5px; font-style: normal; }
+.symbol-config-empty { color: #71879a; font-size: 12px; }
 .checkbox-field { min-height: 37px; display: flex !important; grid-column: span 2; align-items: center; gap: 8px !important; padding: 8px 10px; border: 1px solid #294158; border-radius: 8px; background: #07131f; }
 .checkbox-field input { width: 15px; height: 15px; margin: 0; accent-color: var(--bt-brand); }
 .date-fields { margin-top: 10px; }
@@ -531,6 +544,9 @@ button { cursor: pointer; }
   .symbol-dialog-foot { align-items: stretch; flex-direction: column; padding: 10px 12px; }
   .symbol-dialog-foot > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .symbol-dialog-foot button, .symbol-dialog-foot button.primary { min-width: 0; }
+  .symbol-config-switcher-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .symbol-config-switcher-head > small { text-align: left; }
+  .symbol-config-tab { min-width: 122px; }
   .result-stage, .stage-layout, .empty-result { min-height: 540px; }
   .running-result { min-height: 540px; grid-template-columns: minmax(0, 1fr); }
   .running-orbit { grid-row: auto; justify-self: center; }
