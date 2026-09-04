@@ -176,7 +176,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260904-strategy-profiles-1" in controller
+    assert "/next/assets/backtest.css?v=20260904-config-dialog-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
@@ -207,3 +207,26 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
     assert ".backtest-action-row" in stylesheet
     assert ".selected-symbols" in stylesheet
     assert ".symbol-chip" in stylesheet
+
+
+def test_backtest_configuration_uses_wide_dialog() -> None:
+    script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
+
+    for contract in (
+        'id="open-backtest-config"',
+        'id="backtest-config-dialog" class="config-dialog-backdrop hidden"',
+        'id="backtest-form" class="config-dialog" role="dialog"',
+        'id="close-backtest-config"',
+        "配置并开始回测",
+        "openConfigDialog()",
+        "closeConfigDialog(false)",
+        'event.key === "Escape"',
+        'setAttribute("aria-expanded", "true")',
+    ):
+        assert contract in script
+
+    assert ".config-dialog-backdrop" in stylesheet
+    assert "width: min(1320px, 100%)" in stylesheet
+    assert ".config-form-grid" in stylesheet
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in stylesheet

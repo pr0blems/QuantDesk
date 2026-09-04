@@ -61,7 +61,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-strategy-profiles-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-config-dialog-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -69,14 +69,20 @@ class BacktestWorkbench extends window.QuantDeskPageController {
             <p>用历史行情验证策略逻辑、成本敏感度与风险边界</p>
           </div>
           <div class="integrity-strip" aria-label="回测可信度约束">
-            <span><i></i>下一根开盘成交</span><span><i></i>手续费/滑点已计</span><span><i></i>无未来函数</span>
+            <span><i></i>下一根开盘成交</span><button id="open-backtest-config" class="open-config-button" type="button" aria-controls="backtest-config-dialog" aria-expanded="false"><b>＋</b>开始回测</button><span><i></i>手续费/滑点已计</span><span><i></i>无未来函数</span>
           </div>
         </header>
 
         <div id="global-banner" class="global-banner hidden" role="status" aria-live="polite"></div>
 
         <div class="workbench-layout">
-          <form id="backtest-form" class="config-rail" novalidate>
+          <div id="backtest-config-dialog" class="config-dialog-backdrop hidden" role="presentation">
+          <form id="backtest-form" class="config-dialog" role="dialog" aria-modal="true" aria-labelledby="backtest-config-title" novalidate>
+            <header class="config-dialog-head">
+              <div><span>BACKTEST SETUP</span><h2 id="backtest-config-title">配置并开始回测</h2><p>选择策略、交易品种和资金参数；支持多品种分别回测。</p></div>
+              <button id="close-backtest-config" class="dialog-close" type="button" aria-label="关闭回测配置">×</button>
+            </header>
+            <div class="config-dialog-body">
             <section class="config-section strategy-section">
               <div class="section-head"><div><span class="section-index">01</span><strong>选择策略</strong></div><small id="strategy-count">--</small></div>
               <div id="category-filter" class="category-filter" aria-label="策略分类"></div>
@@ -84,7 +90,8 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <p id="strategy-description" class="strategy-description">策略参数将随策略中心配置动态加载。</p>
             </section>
 
-            <section class="config-section">
+            <div class="config-form-grid">
+            <section id="market-section" class="config-section">
               <div class="section-head"><div><span class="section-index">02</span><strong>市场与区间</strong></div><small id="data-bound">等候行情目录</small></div>
               <div class="field-grid two">
                 <label>交易品种
@@ -144,16 +151,21 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div class="section-head"><div><span class="section-index">05</span><strong>策略参数</strong></div><button id="reset-params" class="text-button" type="button">恢复默认</button></div>
               <div id="strategy-params" class="field-grid two"></div>
             </section>
+            </div>
 
             <div id="basket-profile-note" class="execution-note hidden"><span>篮子回放</span><strong>可选 Tiger / Binance 行情 → 马丁篮子引擎</strong><small>自动模式优先使用 Tiger，无法使用时直接回退 Binance；首单、加仓、分级止盈、金额止损、逐仓杠杆与强平均纳入回放。</small></div>
             <div id="standard-execution-note" class="execution-note"><span>Binance 逐仓模型</span><strong>信号收盘确认 → 下一根开盘撮合</strong><small>手续费、双边滑点、合约价格/数量步进、最小名义价值、止盈止损与强平均计入；暂不含资金费。</small></div>
+            </div>
+            <footer class="config-dialog-foot">
             <div class="backtest-action-row">
               <button id="save-default-profile" class="profile-save-button" type="button" disabled><strong>保存默认交易策略参数</strong><small>未指定币种时使用</small></button>
               <button id="save-symbol-profile" class="profile-save-button symbol-profile" type="button" disabled><strong>保存专有币种策略参数</strong><small>当前所选币种优先</small></button>
               <button id="run-backtest" class="run-button" type="submit" disabled><span aria-hidden="true">▶</span><strong>运行回测</strong></button>
             </div>
             <div id="profile-status" class="profile-status" role="status" aria-live="polite">选择策略后可加载和保存交易参数。</div>
+            </footer>
           </form>
+          </div>
 
           <section class="result-stage">
             <div class="stage-toolbar">
@@ -311,6 +323,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   bindEvents() {
     if (this.dataset.bound === "1") return;
     this.dataset.bound = "1";
+    this.q("#open-backtest-config").addEventListener("click", () => this.openConfigDialog());
+    this.q("#close-backtest-config").addEventListener("click", () => this.closeConfigDialog());
+    this.q("#backtest-config-dialog").addEventListener("keydown", (event) => {
+      if (event.key === "Escape") this.closeConfigDialog();
+    });
     this.q("#backtest-form").addEventListener("submit", (event) => this.runBacktest(event));
     this.q("#symbol").addEventListener("input", () => this.handleSymbolSearch());
     this.q("#symbol").addEventListener("change", () => this.handleSymbolSearch(true));
@@ -416,6 +433,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       button.setAttribute("aria-pressed", "false");
     });
     this.renderHistory();
+    this.closeConfigDialog(false);
     this.closeHistory();
     this.closeLotCalculator();
     this.q("#empty-result").classList.remove("hidden");
@@ -769,6 +787,20 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   strategyParamInput(key) {
     return this.qa("[data-param-key]").find((input) => input.dataset.paramKey === key) || null;
+  }
+
+  openConfigDialog() {
+    const dialog = this.q("#backtest-config-dialog");
+    dialog.classList.remove("hidden");
+    this.q("#open-backtest-config").setAttribute("aria-expanded", "true");
+    this.q("#close-backtest-config").focus();
+  }
+
+  closeConfigDialog(restoreFocus = true) {
+    this.q("#backtest-config-dialog")?.classList.add("hidden");
+    const opener = this.q("#open-backtest-config");
+    opener?.setAttribute("aria-expanded", "false");
+    if (restoreFocus) opener?.focus();
   }
 
   closeLotCalculator() {
@@ -1321,6 +1353,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (this.runningBacktest || !this.validate()) return;
     const generation = this.sessionGeneration;
     const symbols = this.symbolsForRun();
+    this.closeConfigDialog(false);
     this.runningBacktest = true;
     this.activeDetail = null;
     this.stopResultReplay();
