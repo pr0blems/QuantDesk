@@ -72,7 +72,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-symbol-config-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260904-result-summary-1">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -230,7 +230,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
                 <div id="result-content" class="result-content hidden">
                   <div class="result-title">
-                    <div><span id="result-kicker">BACKTEST COMPLETE</span><h2 id="result-name">--</h2><p id="result-period">--</p></div>
+                    <div class="result-identity"><span id="result-kicker">BACKTEST COMPLETE</span><h2 id="result-name">--</h2><p id="result-period">--</p></div>
+                    <div class="result-capital-summary" aria-label="回测资金摘要">
+                      <article><span>初始资金</span><strong id="result-initial-capital">--</strong><small>本次回测本金</small></article>
+                      <article><span>盈利金额</span><strong id="result-net-profit">--</strong><small>已扣手续费与滑点</small></article>
+                    </div>
                     <span id="result-return" class="return-badge">--</span>
                   </div>
                   <section id="metric-grid" class="metric-grid" aria-label="回测核心指标"></section>
@@ -1974,7 +1978,15 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#result-kicker").textContent = options.deferCharts ? "BACKTEST REPLAY" : "BACKTEST COMPLETE";
     const strategy = run.strategy_name || this.catalog.strategies.find((item) => String(item.id) === String(run.strategy_id))?.name || run.strategy_id || "策略回测";
     this.q("#result-name").textContent = `${strategy} · ${run.symbol || "--"}`;
-    this.q("#result-period").textContent = `${this.dateOnly(run.start_date || run.start_at) || "--"} 至 ${this.dateOnly(run.end_date || run.end_at) || "--"} · ${run.timeframe || "--"} · 初始资金 ${this.money(account.initial_capital ?? run.initial_capital)}`;
+    this.q("#result-period").textContent = `${this.dateOnly(run.start_date || run.start_at) || "--"} 至 ${this.dateOnly(run.end_date || run.end_at) || "--"} · ${run.timeframe || "--"}`;
+    const initialCapital = this.numericValue(account.initial_capital ?? run.initial_capital);
+    const finalEquity = this.numericValue(account.final_equity ?? account.final_balance ?? account.ending_capital ?? account.equity);
+    const reportedNetProfit = this.numericValue(account.net_profit ?? metrics.net_profit ?? run.net_profit);
+    const netProfit = reportedNetProfit ?? (initialCapital != null && finalEquity != null ? finalEquity - initialCapital : null);
+    this.q("#result-initial-capital").textContent = this.money(initialCapital);
+    const profitNode = this.q("#result-net-profit");
+    profitNode.textContent = this.signedMoney(netProfit);
+    profitNode.className = this.toneClass(netProfit);
     const totalReturn = this.metric(metrics, ["total_return_pct", "return_pct", "total_return"]);
     const returnNode = this.q("#result-return");
     returnNode.textContent = this.percent(totalReturn);

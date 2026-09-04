@@ -180,7 +180,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260904-symbol-config-1" in controller
+    assert "/next/assets/backtest.css?v=20260904-result-summary-1" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
@@ -192,6 +192,19 @@ def test_backtest_missing_metrics_are_not_rendered_as_zero() -> None:
     assert 'if (value == null || (typeof value === "string" && value.trim() === "")) return null;' in script
     assert 'const numeric = this.numericValue(value);' in script
     assert 'if (numeric == null) return "--";' in script
+
+
+def test_backtest_result_header_shows_capital_and_realized_profit() -> None:
+    script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
+
+    assert 'id="result-initial-capital"' in script
+    assert 'id="result-net-profit"' in script
+    assert 'account.net_profit ?? metrics.net_profit ?? run.net_profit' in script
+    assert 'finalEquity - initialCapital' in script
+    assert 'profitNode.textContent = this.signedMoney(netProfit);' in script
+    assert 'profitNode.className = this.toneClass(netProfit);' in script
+    assert ".result-capital-summary" in stylesheet
 
 
 def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
