@@ -81,6 +81,9 @@ class FuturesTicker24h:
     symbol: str
     last_price: Decimal
     price_change_percent: Decimal
+    quote_volume: Decimal | None = None
+    high_price: Decimal | None = None
+    low_price: Decimal | None = None
 
 
 def _trade_transport(
@@ -179,10 +182,26 @@ class BinanceUsdMTradingClient:
             raise BinanceAccountClientError("invalid_response") from None
         if not price_change_percent.is_finite():
             raise BinanceAccountClientError("invalid_response")
+
+        def optional_positive_decimal(key: str) -> Decimal | None:
+            raw_value = payload.get(key)
+            if raw_value in (None, ""):
+                return None
+            try:
+                value = Decimal(str(raw_value))
+            except (InvalidOperation, TypeError, ValueError):
+                raise BinanceAccountClientError("invalid_response") from None
+            if not value.is_finite() or value <= 0:
+                raise BinanceAccountClientError("invalid_response")
+            return value
+
         return FuturesTicker24h(
             symbol=normalized,
             last_price=last_price,
             price_change_percent=price_change_percent,
+            quote_volume=optional_positive_decimal("quoteVolume"),
+            high_price=optional_positive_decimal("highPrice"),
+            low_price=optional_positive_decimal("lowPrice"),
         )
 
     def position_mode(self, api_key: str, api_secret: str) -> Literal["one_way", "hedge"]:

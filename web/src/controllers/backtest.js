@@ -333,11 +333,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                 </div>
                 <div class="calculator-points">
                   <section class="calculator-box-mode" aria-labelledby="calculator-box-mode-title">
-                    <div class="calculator-box-mode-head"><div><strong id="calculator-box-mode-title">箱体计算方式</strong><small>与实际马丁 TP4 回测使用同一套日线 Wilder ATR 公式</small></div><label class="calculator-box-switch"><input id="calculator-auto-box" type="checkbox"><span>ATR 自适应箱体</span></label></div>
+                    <div class="calculator-box-mode-head"><div><strong id="calculator-box-mode-title">箱体计算方式</strong><small>与实际马丁 TP4 回测使用同一套日线 Wilder ATR 公式</small></div><div class="calculator-box-switches"><label class="calculator-box-switch"><input id="calculator-auto-box" type="checkbox"><span>ATR 自适应箱体</span></label><label class="calculator-box-switch"><input id="calculator-market-adaptive" type="checkbox"><span>按币种状态自适应</span></label></div></div>
                     <div class="calculator-box-controls">
                       <label>日线 ATR 周期<input id="calculator-atr-period" type="number" min="2" max="365" step="1" value="30"></label>
-                      <label>ATR 系数<input id="calculator-atr-factor" type="number" min="0.0001" max="10" step="0.01" value="0.2"></label>
+                      <label>ATR 基础系数<input id="calculator-atr-factor" type="number" min="0.0001" max="10" step="0.01" value="0.2"></label>
                     </div>
+                    <div id="calculator-market-state" class="calculator-market-state">正在读取当前币种状态…</div>
                     <p id="calculator-atr-status" class="calculator-atr-status">正在读取箱体参数…</p>
                   </section>
                   <div class="calculator-points-head"><div><strong>分级止盈参数</strong><small>每档同时包含起始订单数和止盈点数；TP1 固定从第 1 单开始</small></div><small>修改基础 TP 会重新计算收益，并按马丁 TP4 默认比例更新 TP2–TP4 点数</small></div>
@@ -444,6 +445,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#calculator-lot").addEventListener("input", () => this.renderLotCalculator());
     this.q("#calculator-leverage").addEventListener("change", () => this.renderLotCalculator());
     this.q("#calculator-auto-box").addEventListener("change", () => {
+      this.syncCalculatorBoxMode();
+      if (this.q("#calculator-auto-box").checked) void this.refreshCalculatorAtr();
+    });
+    this.q("#calculator-market-adaptive").addEventListener("change", () => {
       this.syncCalculatorBoxMode();
       if (this.q("#calculator-auto-box").checked) void this.refreshCalculatorAtr();
     });
@@ -1224,13 +1229,17 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     });
 
     const autoBox = this.parameterSwitchEnabled("AutoBoxRange");
+    const marketAdaptive = this.parameterSwitchEnabled("AutoBoxRangeMarketAdaptive");
     this.setParameterDisabled("BoxRange", autoBox, "ATR 自适应箱体已开启，固定箱体范围不参与计算。");
     this.setParameterDisabled("AutoBoxRangeDailyATRperiod", !autoBox, "开启 ATR 自适应箱体后才可配置。");
     this.setParameterDisabled("AutoBoxRangeDailyATRfactor", !autoBox, "开启 ATR 自适应箱体后才可配置。");
+    this.setParameterDisabled("AutoBoxRangeMarketAdaptive", !autoBox, "开启 ATR 自适应箱体后才可配置。");
     this.setParameterGroupMessage(
       "突破箱体与 ATR",
       autoBox
-        ? "当前使用：日线 ATR × ATR 系数计算箱体范围；固定箱体范围已停用。"
+        ? marketAdaptive
+          ? "当前使用：日线 ATR × 基础系数 × 币种状态倍率；状态仅由当时已收盘 K 线计算。"
+          : "当前使用：日线 ATR × ATR 基础系数计算箱体范围；固定箱体范围已停用。"
         : "当前使用：固定箱体范围；ATR 周期和系数已停用。",
     );
 
@@ -1313,6 +1322,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#calculator-leverage").value = this.q("#leverage").value;
     this.q("#calculator-base-points").value = this.strategyParamInput("TP")?.value || "100";
     this.q("#calculator-auto-box").checked = this.parameterSwitchEnabled("AutoBoxRange");
+    this.q("#calculator-market-adaptive").checked = this.parameterSwitchEnabled("AutoBoxRangeMarketAdaptive");
     this.q("#calculator-atr-period").value = this.strategyParamInput("AutoBoxRangeDailyATRperiod")?.value || "30";
     this.q("#calculator-atr-factor").value = this.strategyParamInput("AutoBoxRangeDailyATRfactor")?.value || "0.2";
     this.lotCalculatorManualBoxRange = this.strategyParamInput("BoxRange")?.value || "30";
@@ -1324,7 +1334,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const requestId = ++this.lotCalculatorRequest;
     try {
       const atrPeriod = this.calculatorAtrPeriod();
-      const quote = await this.api(`/position-calculator?symbol=${encodeURIComponent(symbol)}&atr_period=${atrPeriod}`);
+      const quote = await this.api(this.calculatorQuotePath(symbol, atrPeriod));
       if (requestId !== this.lotCalculatorRequest || dialog.classList.contains("hidden")) return;
       this.lotCalculatorQuote = quote;
       this.q("#calculator-loading").classList.add("hidden");
@@ -1350,6 +1360,26 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return Number.isFinite(value) && value > 0 ? Math.min(10, value) : 0.2;
   }
 
+  calculatorMarketStateTimeframe() {
+    const selected = String(this.q("#timeframe")?.value || "15m");
+    if (["1m", "5m", "15m", "30m", "1h"].includes(selected)) return selected;
+    const minutes = Math.round(Number(this.strategyParamInput("BoxTimeFrameMinutes")?.value || 15));
+    return ({ 1: "1m", 5: "5m", 15: "15m", 30: "30m", 60: "1h" })[minutes] || "15m";
+  }
+
+  calculatorQuotePath(symbol, atrPeriod = this.calculatorAtrPeriod()) {
+    return `/position-calculator?symbol=${encodeURIComponent(symbol)}&atr_period=${atrPeriod}&market_state_timeframe=${encodeURIComponent(this.calculatorMarketStateTimeframe())}`;
+  }
+
+  calculatorEffectiveAtrFactor() {
+    const baseFactor = this.calculatorAtrFactor();
+    if (!this.q("#calculator-market-adaptive")?.checked) return baseFactor;
+    const quote = this.lotCalculatorQuote || {};
+    const multiplier = Number(quote.market_state_factor_multiplier);
+    if (quote.market_state_status !== "ready" || !Number.isFinite(multiplier) || multiplier <= 0) return baseFactor;
+    return baseFactor * multiplier;
+  }
+
   calculatorEffectiveBoxPoints() {
     if (!this.q("#calculator-auto-box")?.checked) return null;
     const quote = this.lotCalculatorQuote || {};
@@ -1357,7 +1387,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const atr = Number(quote.daily_atr);
     const pointSize = Number(quote.strategy_point_size || 0.01);
     if (!Number.isFinite(atr) || atr <= 0 || !Number.isFinite(pointSize) || pointSize <= 0) return null;
-    return atr * this.calculatorAtrFactor() / pointSize;
+    return atr * this.calculatorEffectiveAtrFactor() / pointSize;
   }
 
   async refreshCalculatorAtr() {
@@ -1372,7 +1402,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     status.className = "calculator-atr-status loading";
     const requestId = ++this.lotCalculatorRequest;
     try {
-      const quote = await this.api(`/position-calculator?symbol=${encodeURIComponent(symbol)}&atr_period=${this.calculatorAtrPeriod()}`);
+      const quote = await this.api(this.calculatorQuotePath(symbol));
       if (requestId !== this.lotCalculatorRequest || dialog.classList.contains("hidden")) return;
       this.lotCalculatorQuote = quote;
       this.renderLotCalculator();
@@ -1508,13 +1538,17 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   syncCalculatorBoxMode() {
     const autoBox = Boolean(this.q("#calculator-auto-box")?.checked);
+    const marketAdaptive = Boolean(this.q("#calculator-market-adaptive")?.checked);
     const periodInput = this.q("#calculator-atr-period");
     const factorInput = this.q("#calculator-atr-factor");
+    const marketAdaptiveInput = this.q("#calculator-market-adaptive");
+    const marketState = this.q("#calculator-market-state");
     const boxInput = this.q('[data-calculator-param-key="BoxRange"]');
     const status = this.q("#calculator-atr-status");
-    if (!periodInput || !factorInput || !status) return;
+    if (!periodInput || !factorInput || !marketAdaptiveInput || !marketState || !status) return;
     periodInput.disabled = !autoBox;
     factorInput.disabled = !autoBox;
+    marketAdaptiveInput.disabled = !autoBox;
     if (!boxInput) return;
     boxInput.disabled = autoBox;
     boxInput.closest(".calculator-point-field")?.classList.toggle("calculator-point-field-disabled", autoBox);
@@ -1523,16 +1557,37 @@ class BacktestWorkbench extends window.QuantDeskPageController {
         boxInput.value = String(this.lotCalculatorManualBoxRange);
       }
       delete boxInput.dataset.atrComputed;
+      marketState.textContent = "固定箱体模式不读取币种状态。";
+      marketState.className = "calculator-market-state manual";
       status.textContent = "固定箱体模式：回测直接使用可编辑的“箱体范围（点）”。";
       status.className = "calculator-atr-status manual";
       return;
     }
     const quote = this.lotCalculatorQuote || {};
     const effectivePoints = this.calculatorEffectiveBoxPoints();
+    const stateLabels = {
+      low_volume_range: "低量窄幅震荡",
+      range_contraction: "缩量收敛",
+      volume_confirmed_trend: "放量趋势确认",
+      active_transition: "量价活跃转换",
+      normal: "常态波动",
+    };
+    if (quote.market_state_status === "ready") {
+      const label = stateLabels[quote.market_state] || quote.market_state;
+      const prefix = marketAdaptive ? "已参与箱体计算" : "实时预览，尚未参与箱体计算";
+      marketState.textContent = `${prefix} · ${label} · ${quote.market_state_timeframe} 已收盘 K 线 ${quote.market_state_sample_size} 根 · 成交量比 ${this.number(quote.market_state_volume_ratio, 2)} · 量能 MACD ${this.number(quote.market_state_volume_macd_percent, 2)}%（变化 ${this.number(quote.market_state_volume_macd_change_percent, 2)}%）· 波幅比 ${this.number(quote.market_state_range_ratio, 2)} · 趋势效率 ${this.number(Number(quote.market_state_trend_efficiency) * 100, 1)}% · 建议系数倍率 ×${this.number(quote.market_state_factor_multiplier, 2)}`;
+      marketState.className = `calculator-market-state ${marketAdaptive ? "ready" : "manual"}`;
+    } else {
+      marketState.textContent = "当前币种状态样本不足，暂按 ATR 基础系数计算；回测会在历史样本就绪后逐根动态切换。";
+      marketState.className = "calculator-market-state warning";
+    }
     boxInput.dataset.atrComputed = "1";
     if (Number.isFinite(effectivePoints) && effectivePoints > 0) {
       boxInput.value = String(Number(effectivePoints.toFixed(4)));
-      status.textContent = `ATR 自适应箱体：日线 ATR ${this.price(quote.daily_atr)} USDT × ${this.number(this.calculatorAtrFactor(), 4)} ÷ ${this.price(quote.strategy_point_size || 0.01)} USDT/点 = ${this.number(effectivePoints, 2)} 点。实际回测会按每根日线 ATR 动态变化。`;
+      const factorText = marketAdaptive
+        ? `${this.number(this.calculatorAtrFactor(), 4)} × ${this.number(quote.market_state_factor_multiplier || 1, 2)} = ${this.number(this.calculatorEffectiveAtrFactor(), 4)}`
+        : this.number(this.calculatorAtrFactor(), 4);
+      status.textContent = `ATR 自适应箱体：日线 ATR ${this.price(quote.daily_atr)} USDT × 系数 ${factorText} ÷ ${this.price(quote.strategy_point_size || 0.01)} USDT/点 = ${this.number(effectivePoints, 2)} 点。实际回测会按当时已收盘数据逐根动态变化。`;
       status.className = "calculator-atr-status ready";
       return;
     }
@@ -1674,6 +1729,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const autoBox = Boolean(this.q("#calculator-auto-box")?.checked);
     const values = {
       AutoBoxRange: autoBox ? 1 : 0,
+      AutoBoxRangeMarketAdaptive: this.q("#calculator-market-adaptive")?.checked ? 1 : 0,
       AutoBoxRangeDailyATRperiod: this.calculatorAtrPeriod(),
       AutoBoxRangeDailyATRfactor: this.calculatorAtrFactor(),
     };

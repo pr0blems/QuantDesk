@@ -539,6 +539,7 @@ button { cursor: pointer; }
 .calculator-box-mode { padding: 12px; border-bottom: 1px solid rgba(139, 123, 211, .2); background: rgba(8, 27, 35, .7); }
 .calculator-box-mode-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .calculator-box-mode-head > div { min-width: 0; display: grid; gap: 3px; }
+.calculator-box-switches { display: flex !important; grid-auto-flow: column; align-items: center; gap: 14px !important; }
 .calculator-box-mode-head strong { color: #dce8ef; font-size: 13px; }
 .calculator-box-mode-head small { color: #71879a; font-size: 10.5px; line-height: 1.45; }
 .calculator-box-switch { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; color: #8fe0c8; font-size: 11.5px; font-weight: 800; cursor: pointer; }
@@ -552,6 +553,10 @@ button { cursor: pointer; }
 .calculator-atr-status.loading { border-left-color: #b6a5fa; color: #b6a5fa; }
 .calculator-atr-status.error { border-left-color: #ff5d70; color: #ff8998; }
 .calculator-atr-status.manual { border-left-color: #d1aa45; color: #bda968; }
+.calculator-market-state { margin-top: 10px; padding: 9px 10px; border: 1px solid rgba(86, 123, 148, .35); color: #8ea8b9; background: rgba(5, 20, 30, .72); font-size: 11px; line-height: 1.55; }
+.calculator-market-state.ready { border-color: rgba(69, 211, 168, .45); color: #8fe0c8; }
+.calculator-market-state.warning { border-color: rgba(209, 170, 69, .42); color: #cbb777; }
+.calculator-market-state.manual { color: #71879a; }
 .calculator-points-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; border-bottom: 1px solid rgba(139, 123, 211, .2); }
 .calculator-points-head > div { min-width: 0; display: grid; gap: 3px; }
 .calculator-points-head strong { color: #dce8ef; font-size: 13px; }
@@ -665,6 +670,7 @@ button { cursor: pointer; }
   .calculator-points-head { align-items: flex-start; flex-direction: column; }
   .calculator-secondary-head { align-items: flex-start; flex-direction: column; gap: 3px; }
   .calculator-box-mode-head { align-items: flex-start; flex-direction: column; }
+  .calculator-box-switches { grid-auto-flow: row; align-items: flex-start; }
   .trade-cycle-head { align-items: flex-start; }
   .trade-cycle-timing { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .trade-time-arrow { min-height: 18px; transform: rotate(90deg); }

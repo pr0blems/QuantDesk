@@ -26,7 +26,7 @@ from ...performance_metrics import annualized_return_pct, annualized_sharpe_rati
 from ...tiger_market_data import TigerBar
 
 REPLAY_ENGINE_VERSION = "martingale_tp4_bar_replay_v3"
-BOX_ALGORITHM_VERSION = "mq4_stateful_adaptive_box_v2"
+BOX_ALGORITHM_VERSION = "mq4_stateful_adaptive_box_v3"
 FILL_MODEL_VERSION = "tiger_ohlc_path_v1"
 
 
@@ -74,6 +74,23 @@ class BoxLevel:
     source_bar_count: int
     target_range: Decimal
     atr: Decimal | None
+    adaptive_factor: Decimal | None = None
+    market_state: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MarketAdaptiveBoxState:
+    """Closed-bar market state used to adapt the ATR box without look-ahead."""
+
+    status: str
+    sample_size: int
+    atr_percent: Decimal
+    volume_ratio: Decimal
+    volume_macd_percent: Decimal
+    volume_macd_change_percent: Decimal
+    range_ratio: Decimal
+    trend_efficiency: Decimal
+    factor_multiplier: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +229,133 @@ def calculate_wilder_atr(
     return tuple(result)
 
 
+def _ema_series(values: Sequence[Decimal], period: int) -> tuple[Decimal, ...]:
+    if period < 1:
+        raise ValueError("EMA period must be positive")
+    if not values:
+        return ()
+    alpha = Decimal("2") / Decimal(period + 1)
+    current = values[0]
+    result = [current]
+    for value in values[1:]:
+        current = value * alpha + current * (Decimal("1") - alpha)
+        result.append(current)
+    return tuple(result)
+
+
+def assess_market_adaptive_box_state(
+    closed_bars: Sequence[TigerBar],
+    *,
+    daily_atr: Decimal,
+) -> MarketAdaptiveBoxState | None:
+    """Classify current activity from data that was already closed at decision time.
+
+    Volume MACD answers whether participation is expanding, ``volume_ratio`` and
+    ``range_ratio`` compare the latest five bars with the latest twenty bars,
+    and trend efficiency separates directional movement from box churn.  A
+    multiplier above one deliberately widens the box when liquidity and range
+    contract; a confirmed active trend can use a slightly tighter box.
+    """
+
+    # Only the latest observations participate in the classification.  Replay
+    # calls this once per bar, so bounding the window avoids quadratic work on
+    # long histories while preserving the exact same causal inputs.
+    bars = tuple(closed_bars[-60:])
+    if any(
+        previous.open_time > current.open_time
+        for previous, current in zip(bars, bars[1:], strict=False)
+    ):
+        bars = tuple(sorted(bars, key=lambda item: item.open_time))
+    if len(bars) < 25 or daily_atr <= 0:
+        return None
+    window = bars[-60:]
+    volumes = tuple(max(Decimal("0"), item.volume) for item in window)
+    if not any(value > 0 for value in volumes[-20:]):
+        return None
+    ranges = tuple(max(Decimal("0"), item.high - item.low) for item in window)
+    closes = tuple(item.close for item in window)
+    slow_volume = sum(volumes[-20:], Decimal("0")) / Decimal("20")
+    slow_range = sum(ranges[-20:], Decimal("0")) / Decimal("20")
+    latest_close = closes[-1]
+    if slow_volume <= 0 or slow_range <= 0 or latest_close <= 0:
+        return None
+
+    recent_volume = sum(volumes[-5:], Decimal("0")) / Decimal("5")
+    recent_range = sum(ranges[-5:], Decimal("0")) / Decimal("5")
+    volume_ratio = recent_volume / slow_volume
+    range_ratio = recent_range / slow_range
+
+    fast_ema = _ema_series(volumes, 5)
+    slow_ema = _ema_series(volumes, 20)
+    macd = tuple(fast - slow for fast, slow in zip(fast_ema, slow_ema, strict=True))
+    signal = _ema_series(macd, 5)
+    histogram = tuple(value - signal_value for value, signal_value in zip(macd, signal, strict=True))
+    volume_macd_percent = histogram[-1] / slow_volume * Decimal("100")
+    volume_macd_change_percent = (
+        (histogram[-1] - histogram[-2]) / slow_volume * Decimal("100")
+    )
+
+    trend_closes = closes[-15:]
+    path = sum(
+        (
+            abs(current - previous)
+            for previous, current in zip(
+                trend_closes[:-1], trend_closes[1:], strict=True
+            )
+        ),
+        Decimal("0"),
+    )
+    trend_efficiency = (
+        abs(trend_closes[-1] - trend_closes[0]) / path if path > 0 else Decimal("0")
+    )
+    atr_percent = daily_atr / latest_close * Decimal("100")
+
+    if (
+        volume_ratio <= Decimal("0.80")
+        and range_ratio <= Decimal("0.80")
+        and trend_efficiency <= Decimal("0.35")
+    ):
+        status = "low_volume_range"
+        multiplier = Decimal("1.60")
+    elif (
+        volume_ratio < Decimal("0.95")
+        and volume_macd_percent <= 0
+        and range_ratio < Decimal("0.95")
+        and trend_efficiency <= Decimal("0.40")
+    ):
+        status = "range_contraction"
+        multiplier = Decimal("1.30")
+    elif (
+        volume_ratio >= Decimal("1.15")
+        and volume_macd_percent > 0
+        and volume_macd_change_percent >= 0
+        and trend_efficiency >= Decimal("0.45")
+    ):
+        status = "volume_confirmed_trend"
+        multiplier = Decimal("0.85")
+    elif (
+        volume_ratio >= Decimal("1")
+        and (volume_macd_change_percent > 0 or range_ratio >= Decimal("1.10"))
+    ):
+        status = "active_transition"
+        multiplier = Decimal("0.95")
+    else:
+        status = "normal"
+        multiplier = Decimal("1")
+
+    return MarketAdaptiveBoxState(
+        status=status,
+        sample_size=len(window),
+        atr_percent=atr_percent,
+        volume_ratio=volume_ratio,
+        volume_macd_percent=volume_macd_percent,
+        volume_macd_change_percent=volume_macd_change_percent,
+        range_ratio=range_ratio,
+        trend_efficiency=trend_efficiency,
+        factor_multiplier=multiplier,
+    )
+
+
 def assess_replay_coverage(
     signal_bars: Sequence[TigerBar],
     daily_bars: Sequence[TigerBar],
@@ -324,8 +468,21 @@ def build_box_levels(
             )
             if invalidated:
                 active = None
+            market_state = (
+                assess_market_adaptive_box_state(
+                    signal_bars[max(0, index - 60) : index],
+                    daily_atr=available_atr,
+                )
+                if box.auto_range
+                and box.market_adaptive
+                and available_atr is not None
+                else None
+            )
+            adaptive_factor = box.daily_atr_factor * (
+                market_state.factor_multiplier if market_state is not None else Decimal("1")
+            )
             target_range = (
-                available_atr * box.daily_atr_factor
+                available_atr * adaptive_factor
                 if box.auto_range and available_atr is not None
                 else box.fixed_range_points * point_size
             )
@@ -356,6 +513,8 @@ def build_box_levels(
                         source_bar_count=period,
                         target_range=target_range,
                         atr=available_atr,
+                        adaptive_factor=(adaptive_factor if box.auto_range else None),
+                        market_state=(market_state.status if market_state is not None else None),
                     )
                     if active is None and not invalidated:
                         active = candidate

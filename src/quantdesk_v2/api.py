@@ -26,7 +26,10 @@ from sqlalchemy.orm import Session
 from . import __version__, battle
 from .ai_model_config import get_global_ai_model_config
 from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
-from .application.martingale_tp4.replay import calculate_wilder_atr
+from .application.martingale_tp4.replay import (
+    assess_market_adaptive_box_state,
+    calculate_wilder_atr,
+)
 from .application.martingale_tp4.runtime import DEFAULT_SIGNAL_POINT_SIZE
 from .backtest import (
     STRATEGY_TEMPLATES as BACKTEST_STRATEGY_TEMPLATES,
@@ -2712,6 +2715,10 @@ def backtest_position_calculator(
         pattern=r"^[A-Z0-9][A-Z0-9._:/-]*$",
     ),
     atr_period: int | None = Query(default=None, ge=2, le=365),
+    market_state_timeframe: str = Query(
+        default="15m",
+        pattern=r"^(1m|5m|15m|30m|1h)$",
+    ),
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Return the live Binance price and 24-hour change used by the lot calculator.
@@ -2725,6 +2732,9 @@ def backtest_position_calculator(
     state = request.app.state
     price_provider = getattr(state, "backtest_position_calculator_price_provider", None)
     change_provider = getattr(state, "backtest_position_calculator_change_provider", None)
+    quote_volume: Decimal | None = None
+    high_price: Decimal | None = None
+    low_price: Decimal | None = None
     try:
         if callable(price_provider):
             raw_price = price_provider(normalized)
@@ -2737,6 +2747,9 @@ def backtest_position_calculator(
             ticker = client.ticker_24h(normalized)
             raw_price = ticker.last_price
             raw_change_percent = ticker.price_change_percent
+            quote_volume = ticker.quote_volume
+            high_price = ticker.high_price
+            low_price = ticker.low_price
             source = "binance_fapi_24h_ticker"
         price = Decimal(str(raw_price))
         if not price.is_finite() or price <= 0:
@@ -2759,6 +2772,14 @@ def backtest_position_calculator(
         "price_change_percent_24h": (
             float(price_change_percent) if price_change_percent is not None else None
         ),
+        "quote_volume_24h": float(quote_volume) if quote_volume is not None else None,
+        "high_price_24h": float(high_price) if high_price is not None else None,
+        "low_price_24h": float(low_price) if low_price is not None else None,
+        "range_percent_24h": (
+            float((high_price - low_price) / price * Decimal("100"))
+            if high_price is not None and low_price is not None
+            else None
+        ),
         "source": source,
         "observed_at": _utc_iso(utcnow()),
         "strategy_point_size": float(DEFAULT_SIGNAL_POINT_SIZE),
@@ -2779,6 +2800,17 @@ def backtest_position_calculator(
             "daily_atr_source": None,
             "daily_atr_observed_at": None,
             "daily_atr_status": "unavailable",
+            "market_state_timeframe": market_state_timeframe,
+            "market_state_status": "unavailable",
+            "market_state": None,
+            "market_state_sample_size": 0,
+            "market_state_atr_percent": None,
+            "market_state_volume_ratio": None,
+            "market_state_volume_macd_percent": None,
+            "market_state_volume_macd_change_percent": None,
+            "market_state_range_ratio": None,
+            "market_state_trend_efficiency": None,
+            "market_state_factor_multiplier": None,
         }
     )
     atr_provider = getattr(
@@ -2842,10 +2874,103 @@ def backtest_position_calculator(
                 "daily_atr_status": "ready",
             }
         )
-    except (BacktestUnavailable, HTTPException, InvalidOperation, TypeError, ValueError):
+
+        market_state_provider = getattr(
+            state, "backtest_position_calculator_market_state_provider", None
+        )
+        adaptive_state = None
+        if callable(market_state_provider):
+            adaptive_state = market_state_provider(
+                normalized, market_state_timeframe, atr_value
+            )
+        elif atr_source != "test_provider":
+            timeframe_seconds = {
+                "1m": 60,
+                "5m": 5 * 60,
+                "15m": 15 * 60,
+                "30m": 30 * 60,
+                "1h": 60 * 60,
+            }[market_state_timeframe]
+            state_begin_ts = now_ts - timeframe_seconds * 160
+            state_candles, _state_quality = _backtest(request).load_market_candles(
+                normalized,
+                market_state_timeframe,
+                state_begin_ts,
+                now_ts,
+                max_bars=180,
+            )
+            state_bars = tuple(
+                TigerBar(
+                    symbol=normalized,
+                    timeframe=market_state_timeframe,
+                    trade_session="continuous",
+                    adjustment="none",
+                    open_time=int(candle.ts) * 1_000,
+                    close_time=(int(candle.ts) + timeframe_seconds) * 1_000,
+                    open=Decimal(str(candle.open)),
+                    high=Decimal(str(candle.high)),
+                    low=Decimal(str(candle.low)),
+                    close=Decimal(str(candle.close)),
+                    volume=Decimal(str(candle.volume)),
+                    amount=None,
+                    received_at=received_at,
+                    source_version=f"binance_fapi_{market_state_timeframe}",
+                )
+                for candle in state_candles
+                if int(candle.ts) + timeframe_seconds <= now_ts
+            )
+            adaptive_state = assess_market_adaptive_box_state(
+                state_bars,
+                daily_atr=atr_value,
+            )
+        if adaptive_state is not None:
+            value = (
+                adaptive_state
+                if not isinstance(adaptive_state, dict)
+                else None
+            )
+            source_values = (
+                adaptive_state
+                if isinstance(adaptive_state, dict)
+                else {
+                    "status": value.status,
+                    "sample_size": value.sample_size,
+                    "atr_percent": value.atr_percent,
+                    "volume_ratio": value.volume_ratio,
+                    "volume_macd_percent": value.volume_macd_percent,
+                    "volume_macd_change_percent": value.volume_macd_change_percent,
+                    "range_ratio": value.range_ratio,
+                    "trend_efficiency": value.trend_efficiency,
+                    "factor_multiplier": value.factor_multiplier,
+                }
+            )
+            result.update(
+                {
+                    "market_state_status": "ready",
+                    "market_state": str(source_values["status"]),
+                    "market_state_sample_size": int(source_values["sample_size"]),
+                    "market_state_atr_percent": float(source_values["atr_percent"]),
+                    "market_state_volume_ratio": float(source_values["volume_ratio"]),
+                    "market_state_volume_macd_percent": float(source_values["volume_macd_percent"]),
+                    "market_state_volume_macd_change_percent": float(source_values["volume_macd_change_percent"]),
+                    "market_state_range_ratio": float(source_values["range_ratio"]),
+                    "market_state_trend_efficiency": float(source_values["trend_efficiency"]),
+                    "market_state_factor_multiplier": float(source_values["factor_multiplier"]),
+                }
+            )
+    except (
+        BacktestUnavailable,
+        HTTPException,
+        InvalidOperation,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
         # The optional preview must not hide the still-useful position calculator.
         # Replay keeps its own fail-closed daily-bar coverage validation.
-        result["daily_atr_status"] = "unavailable"
+        if result.get("daily_atr_status") != "ready":
+            result["daily_atr_status"] = "unavailable"
+        result["market_state_status"] = "unavailable"
     return result
 
 

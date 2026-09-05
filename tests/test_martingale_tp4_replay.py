@@ -10,6 +10,7 @@ import pytest
 from quantdesk_v2.application.martingale_tp4.replay import (
     ReplayCosts,
     ReplayDataError,
+    assess_market_adaptive_box_state,
     assess_replay_coverage,
     build_box_levels,
     calculate_wilder_atr,
@@ -33,6 +34,7 @@ def _bar(
     high: str = "100.1",
     low: str = "99.9",
     close: str = "100",
+    volume: str = "1000",
 ) -> TigerBar:
     duration = 86_400_000 if timeframe == "1d" else 900_000
     open_time = 1_700_000_000_000 + index * duration
@@ -47,7 +49,7 @@ def _bar(
         high=Decimal(high),
         low=Decimal(low),
         close=Decimal(close),
-        volume=Decimal("1000"),
+        volume=Decimal(volume),
         amount=None,
         received_at=datetime.now(UTC),
     )
@@ -82,6 +84,37 @@ def test_wilder_atr_uses_only_closed_daily_bars() -> None:
 
     assert values[0][1] == Decimal("2")
     assert values[1][1] == Decimal("2.5")
+
+
+def test_market_adaptive_box_detects_low_volume_narrow_range() -> None:
+    active = tuple(
+        _bar(index, high="100.1", low="99.9", volume="1000")
+        for index in range(20)
+    )
+    contracted = tuple(
+        _bar(index, high="100.02", low="99.98", volume="100")
+        for index in range(20, 25)
+    )
+
+    state = assess_market_adaptive_box_state(
+        (*active, *contracted),
+        daily_atr=Decimal("2"),
+    )
+
+    assert state is not None
+    assert state.status == "low_volume_range"
+    assert state.volume_ratio < Decimal("0.80")
+    assert state.range_ratio < Decimal("0.80")
+    assert state.factor_multiplier == Decimal("1.60")
+
+
+def test_market_adaptive_setting_round_trips_from_mq4_inputs() -> None:
+    parameters = strategy_parameters_from_mq4(
+        Mq4Inputs(AutoBoxRange=True, AutoBoxRangeMarketAdaptive=True)
+    )
+
+    assert parameters.box.auto_range is True
+    assert parameters.box.market_adaptive is True
 
 
 def test_box_level_is_causal_and_excludes_the_current_breakout_bar() -> None:

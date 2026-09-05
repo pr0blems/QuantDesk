@@ -745,6 +745,21 @@ def test_backtest_position_calculator_returns_live_price_and_contract_rules(
         if symbol == "MUUSDT" and period == 30
         else Decimal("0")
     )
+    client.app.state.backtest_position_calculator_market_state_provider = (
+        lambda symbol, timeframe, atr: {
+            "status": "low_volume_range",
+            "sample_size": 60,
+            "atr_percent": atr / Decimal("500.25") * Decimal("100"),
+            "volume_ratio": Decimal("0.61"),
+            "volume_macd_percent": Decimal("-8.2"),
+            "volume_macd_change_percent": Decimal("-1.4"),
+            "range_ratio": Decimal("0.72"),
+            "trend_efficiency": Decimal("0.18"),
+            "factor_multiplier": Decimal("1.60"),
+        }
+        if symbol == "MUUSDT" and timeframe == "15m"
+        else None
+    )
     client.app.state.backtest_contract_rules_provider = lambda symbol: {
         "symbol": symbol,
         "tick_size": Decimal("0.01"),
@@ -776,6 +791,10 @@ def test_backtest_position_calculator_returns_live_price_and_contract_rules(
     assert payload["daily_atr_points"] == 1250.0
     assert payload["daily_atr_source"] == "test_provider"
     assert payload["daily_atr_status"] == "ready"
+    assert payload["market_state_status"] == "ready"
+    assert payload["market_state"] == "low_volume_range"
+    assert payload["market_state_volume_ratio"] == 0.61
+    assert payload["market_state_factor_multiplier"] == 1.6
     assert payload["observed_at"].endswith("Z")
 
 

@@ -140,6 +140,7 @@ class BoxConfig(_StrictModel):
     length: int = Field(default=22, ge=2, le=999)
     fixed_range_points: Decimal = Field(default=Decimal("30"), gt=0)
     auto_range: bool = True
+    market_adaptive: bool = False
     daily_atr_period: int = Field(default=30, ge=2, le=365)
     daily_atr_factor: Decimal = Field(default=Decimal("0.2"), gt=0, le=10)
     buffer_points: Decimal = Field(default=Decimal("5"), ge=0)
@@ -234,6 +235,9 @@ class Mq4Inputs(BaseModel):
     )
     box_range: Decimal = Field(default=Decimal("30"), gt=0, alias="BoxRange")
     auto_box_range: bool = Field(default=True, alias="AutoBoxRange")
+    auto_box_range_market_adaptive: bool = Field(
+        default=False, alias="AutoBoxRangeMarketAdaptive"
+    )
     auto_box_range_daily_atr_period: int = Field(
         default=30, ge=2, le=365, alias="AutoBoxRangeDailyATRperiod"
     )
@@ -291,6 +295,7 @@ def strategy_parameters_from_mq4(inputs: Mq4Inputs) -> StrategyParameters:
             length=inputs.box_length,
             fixed_range_points=inputs.box_range,
             auto_range=inputs.auto_box_range,
+            market_adaptive=inputs.auto_box_range_market_adaptive,
             daily_atr_period=inputs.auto_box_range_daily_atr_period,
             daily_atr_factor=inputs.auto_box_range_daily_atr_factor,
             buffer_points=inputs.box_buffer_pips,
@@ -371,6 +376,7 @@ def mq4_inputs_from_strategy_parameters(parameters: StrategyParameters) -> Mq4In
         BoxTimeFrame=box.timeframe,
         BoxRange=box.fixed_range_points,
         AutoBoxRange=box.auto_range,
+        AutoBoxRangeMarketAdaptive=box.market_adaptive,
         AutoBoxRangeDailyATRperiod=box.daily_atr_period,
         AutoBoxRangeDailyATRfactor=box.daily_atr_factor,
         BoxBufferPips=box.buffer_points,

@@ -100,7 +100,8 @@ def test_ticker_24h_reads_price_and_real_change_without_credentials() -> None:
         captured.append((method, url, headers))
         return 200, (
             b'{"symbol":"AAOIUSDT","lastPrice":"102.27",'
-            b'"priceChangePercent":"-1.84"}'
+            b'"priceChangePercent":"-1.84","quoteVolume":"1234567.8",'
+            b'"highPrice":"106.2","lowPrice":"99.5"}'
         )
 
     client = BinanceUsdMTradingClient("https://fapi.binance.com", transport=transport)
@@ -110,6 +111,9 @@ def test_ticker_24h_reads_price_and_real_change_without_credentials() -> None:
     assert ticker.symbol == "AAOIUSDT"
     assert ticker.last_price == Decimal("102.27")
     assert ticker.price_change_percent == Decimal("-1.84")
+    assert ticker.quote_volume == Decimal("1234567.8")
+    assert ticker.high_price == Decimal("106.2")
+    assert ticker.low_price == Decimal("99.5")
     method, url, headers = captured[0]
     assert method == "GET"
     assert urlsplit(url).path == "/fapi/v1/ticker/24hr"
