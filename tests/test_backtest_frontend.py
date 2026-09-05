@@ -186,7 +186,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-parameter-groups-2" in controller
+    assert "/next/assets/backtest.css?v=20260905-take-profit-layout-3" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
@@ -220,6 +220,32 @@ def test_backtest_groups_strategy_parameters_and_enforces_dependencies() -> None
         ".parameter-switch-field {",
         ".parameter-field-disabled {",
         ".parameter-group-message.warning {",
+    ):
+        assert contract in stylesheet
+
+
+def test_backtest_renders_take_profit_parameters_as_tier_cards() -> None:
+    script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
+
+    for contract in (
+        'group.name === "分级止盈"',
+        "renderTakeProfitTiers(fields)",
+        '{ code: "TP1", title: "基础止盈", startKey: null, pointKey: "TP", fixedStart: "1" }',
+        '{ code: "TP2", title: "第二档止盈", startKey: "Kol_Ord_for_TP2", pointKey: "TP2" }',
+        '{ code: "TP3", title: "第三档止盈", startKey: "Kol_Ord_for_TP3", pointKey: "TP3" }',
+        '{ code: "TP4", title: "第四档止盈", startKey: "Kol_Ord_for_TP4", pointKey: "TP4" }',
+        'label.textContent = "起始订单数"',
+        'pointLabel.textContent = "止盈点数"',
+    ):
+        assert contract in script
+
+    for contract in (
+        ".take-profit-tier-grid {",
+        ".take-profit-tier {",
+        ".take-profit-tier-head {",
+        ".take-profit-tier-fields {",
+        ".take-profit-static-field {",
     ):
         assert contract in stylesheet
 

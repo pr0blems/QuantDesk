@@ -72,7 +72,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-parameter-groups-2">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-take-profit-layout-3">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -1078,12 +1078,62 @@ class BacktestWorkbench extends window.QuantDeskPageController {
         this.node("strong", "", group.name),
       );
       header.append(title, this.node("small", "", group.description));
-      const grid = this.node("div", "field-grid two strategy-parameter-grid");
-      grid.append(...group.fields);
+      const grid = group.name === "分级止盈"
+        ? this.renderTakeProfitTiers(group.fields)
+        : this.node("div", "field-grid two strategy-parameter-grid");
+      if (group.name !== "分级止盈") grid.append(...group.fields);
       block.append(header, grid, this.node("p", "parameter-group-message hidden"));
       return block;
     }));
     this.syncParameterDependencies();
+  }
+
+  renderTakeProfitTiers(fields) {
+    const byKey = new Map(fields.map((field) => {
+      const key = field.querySelector("[data-param-key]")?.dataset.paramKey;
+      return [key, field];
+    }));
+    const tiers = [
+      { code: "TP1", title: "基础止盈", startKey: null, pointKey: "TP", fixedStart: "1" },
+      { code: "TP2", title: "第二档止盈", startKey: "Kol_Ord_for_TP2", pointKey: "TP2" },
+      { code: "TP3", title: "第三档止盈", startKey: "Kol_Ord_for_TP3", pointKey: "TP3" },
+      { code: "TP4", title: "第四档止盈", startKey: "Kol_Ord_for_TP4", pointKey: "TP4" },
+    ];
+    const grid = this.node("div", "take-profit-tier-grid strategy-parameter-grid");
+    tiers.forEach((tier) => {
+      const pointField = byKey.get(tier.pointKey);
+      if (!pointField) return;
+      const card = this.node("article", "take-profit-tier");
+      card.dataset.takeProfitTier = tier.code;
+      const header = this.node("header", "take-profit-tier-head");
+      header.append(
+        this.node("span", "take-profit-tier-code", tier.code),
+        this.node("strong", "", tier.title),
+      );
+      const body = this.node("div", "take-profit-tier-fields");
+      if (tier.startKey) {
+        const startField = byKey.get(tier.startKey);
+        if (startField) {
+          const label = startField.querySelector(".field-label");
+          if (label) label.textContent = "起始订单数";
+          body.append(startField);
+        }
+      } else {
+        const fixed = this.node("div", "take-profit-static-field");
+        fixed.append(
+          this.node("span", "field-label", "起始订单数"),
+          this.node("strong", "", tier.fixedStart),
+          this.node("small", "", "固定"),
+        );
+        body.append(fixed);
+      }
+      const pointLabel = pointField.querySelector(".field-label");
+      if (pointLabel) pointLabel.textContent = "止盈点数";
+      body.append(pointField);
+      card.append(header, body);
+      grid.append(card);
+    });
+    return grid;
   }
 
   parameterGroupMetadata(rawName) {
