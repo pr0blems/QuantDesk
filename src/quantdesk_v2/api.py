@@ -2992,6 +2992,33 @@ def backtest_catalog(
         revision = current_strategy_revision(db, strategy)
         if _strategy_is_backtest_compatible(strategy, revision):
             strategies.append(strategy)
+    preferred_profile: dict[str, Any] | None = None
+    strategy_ids = [strategy.id for strategy in strategies]
+    if strategy_ids:
+        latest_profile = db.execute(
+            select(StrategyParameterProfile, UserStrategy.public_id, UserStrategy.name)
+            .join(UserStrategy, UserStrategy.id == StrategyParameterProfile.strategy_id)
+            .where(
+                StrategyParameterProfile.user_id == user.id,
+                StrategyParameterProfile.strategy_id.in_(strategy_ids),
+                UserStrategy.status == "active",
+            )
+            .order_by(
+                StrategyParameterProfile.updated_at.desc(),
+                (StrategyParameterProfile.scope_key != "*").desc(),
+                StrategyParameterProfile.id.desc(),
+            )
+            .limit(1)
+        ).first()
+        if latest_profile is not None:
+            profile, public_strategy_id, strategy_name = latest_profile
+            preferred_profile = {
+                "strategy_id": public_strategy_id,
+                "strategy_name": strategy_name,
+                "scope": "default" if profile.scope_key == "*" else "symbol",
+                "symbol": None if profile.scope_key == "*" else profile.scope_key,
+                "updated_at": _utc_iso(profile.updated_at),
+            }
     research_links = list_research_contract_market_links(db)
     db.commit()
     try:
@@ -3019,7 +3046,9 @@ def backtest_catalog(
             item["supported_timeframes"] = ["1m", "5m", "15m", "30m", "1h"]
             item["supported_symbols"] = basket_symbols
     catalog["strategies"] = serialized
-    return _catalog_response(catalog)
+    response = _catalog_response(catalog)
+    response["preferred_profile"] = preferred_profile
+    return response
 
 
 @router.post("/backtests", status_code=status.HTTP_201_CREATED)

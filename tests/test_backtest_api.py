@@ -313,6 +313,13 @@ def test_strategy_parameter_profile_can_update_only_strategy_parameters(
         assert detail.json()["default_profile"]["parameters"]["Lot"] == 0.02
         assert detail.json()["default_profile"]["execution"] == execution
 
+        backtest_catalog = client.get("/api/v2/backtests/catalog", headers=headers)
+        assert backtest_catalog.status_code == 200, backtest_catalog.text
+        preferred = backtest_catalog.json()["preferred_profile"]
+        assert preferred["strategy_id"] == strategy["id"]
+        assert preferred["strategy_name"] == strategy["name"]
+        assert preferred["scope"] == "default"
+
 
 def test_builtin_indicator_strategy_is_a_manual_backtest_choice() -> None:
     strategy = UserStrategy(

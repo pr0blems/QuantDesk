@@ -16,6 +16,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.symbolProfileRequests = new Map();
     this.applyingSymbolConfiguration = false;
     this.profileRequest = 0;
+    this.profileLoadInFlight = false;
     this.profileSaveInFlight = false;
     this.history = [];
     this.historyLoaded = false;
@@ -576,6 +577,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.symbolProfileRequests.clear();
     this.applyingSymbolConfiguration = false;
     this.profileRequest += 1;
+    this.profileLoadInFlight = false;
     this.profileSaveInFlight = false;
     this.history = [];
     this.historyLoaded = false;
@@ -681,6 +683,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       timeframes: (Array.isArray(payload.timeframes) ? payload.timeframes : []).map((item) => normalizeOption(item, "timeframe")),
       bounds: payload.bounds || {},
       limits: payload.limits || {},
+      preferred_profile: payload.preferred_profile && typeof payload.preferred_profile === "object"
+        ? payload.preferred_profile
+        : null,
     };
   }
 
@@ -729,7 +734,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       list.replaceChildren(empty);
     }
 
-    if (!this.strategyId && strategyList.length) this.selectStrategy(String(strategyList[0].id ?? ""));
+    if (!this.strategyId && strategyList.length) {
+      const preferredStrategyId = String(this.catalog.preferred_profile?.strategy_id || "");
+      const initialStrategy = strategyList.find((item) => String(item.id ?? "") === preferredStrategyId) || strategyList[0];
+      this.selectStrategy(String(initialStrategy.id ?? ""));
+    }
     else this.syncStrategyProfile(false);
   }
 
@@ -1012,10 +1021,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     if (!status || !symbol) return;
     const effectiveScope = scope || this.symbolConfigurations[symbol]?.profile_scope;
     status.textContent = effectiveScope === "symbol"
-      ? `当前编辑：${symbol} 专有配置（优先于默认配置）`
+      ? `已加载 ${symbol} 专有最优参数（优先于策略默认配置）`
       : effectiveScope === "default"
-        ? `当前编辑：${symbol}，已加载策略默认交易配置`
-        : `当前编辑：${symbol}，参数与其他币种相互独立`;
+        ? `已加载 ${symbol} 的策略默认最优参数`
+        : `${symbol} 尚未保存最优参数，当前使用策略内置默认值`;
   }
 
   selectStrategy(id) {
@@ -1078,6 +1087,17 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const timeframes = basket
       ? (Array.isArray(strategy?.supported_timeframes) ? strategy.supported_timeframes : ["1m", "5m", "15m", "30m", "1h"]).map((item) => normalizeOption(item, "timeframe"))
       : this.catalog.timeframes;
+    const preferredProfile = this.catalog.preferred_profile;
+    const preferredSymbol = String(preferredProfile?.symbol || "").toUpperCase();
+    if (
+      changed
+      && String(preferredProfile?.strategy_id || "") === this.strategyId
+      && preferredSymbol
+      && symbols.some((item) => item.value === preferredSymbol)
+    ) {
+      this.selectedSymbols = [preferredSymbol];
+      this.activeConfigSymbol = preferredSymbol;
+    }
     this.populateSymbolSearch(symbols, basket ? "搜索 Tiger/Binance 映射" : "输入名称或代码搜索");
     this.populateSelect(this.q("#timeframe"), timeframes, "选择周期");
     if (basket && changed && timeframes.some((item) => item.value === "15m")) this.q("#timeframe").value = "15m";
@@ -1416,6 +1436,24 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     dialog.classList.remove("hidden");
     this.q("#open-backtest-config").setAttribute("aria-expanded", "true");
     this.q("#close-backtest-config").focus();
+    void this.reloadSavedParameterProfiles();
+  }
+
+  async reloadSavedParameterProfiles() {
+    const symbols = this.symbolsForRun();
+    if (!this.strategyId || !symbols.length) return;
+    symbols.forEach((symbol) => {
+      this.symbolProfileLoaded.delete(symbol);
+      this.symbolConfigurationDirty.delete(symbol);
+    });
+    this.profileLoadInFlight = true;
+    this.setProfileButtons(true);
+    try {
+      await this.loadSelectedParameterProfiles({ force: true });
+    } finally {
+      this.profileLoadInFlight = false;
+      this.setProfileButtons(false);
+    }
   }
 
   closeConfigDialog(restoreFocus = true) {
@@ -2089,13 +2127,17 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.syncParameterDependencies();
   }
 
-  loadSelectedParameterProfiles() {
-    return Promise.allSettled(this.symbolsForRun().map((symbol) => this.loadParameterProfile(symbol)));
+  loadSelectedParameterProfiles({ force = false } = {}) {
+    return Promise.allSettled(this.symbolsForRun().map((symbol) => this.loadParameterProfile(symbol, { force })));
   }
 
-  async loadParameterProfile(symbol = this.primarySymbol()) {
+  async loadParameterProfile(symbol = this.primarySymbol(), { force = false } = {}) {
     const strategyId = this.strategyId;
-    if (!strategyId || !symbol || this.symbolProfileLoaded.has(symbol)) return;
+    if (!strategyId || !symbol || (!force && this.symbolProfileLoaded.has(symbol))) return;
+    if (force) {
+      this.symbolProfileLoaded.delete(symbol);
+      this.symbolConfigurationDirty.delete(symbol);
+    }
     const requestId = ++this.profileRequest;
     this.symbolProfileRequests.set(symbol, requestId);
     const status = this.q("#profile-status");
@@ -2104,12 +2146,29 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       const detail = await this.api(`/strategy-parameters/${encodeURIComponent(strategyId)}?symbol=${encodeURIComponent(symbol)}`);
       if (this.symbolProfileRequests.get(symbol) !== requestId || strategyId !== this.strategyId) return;
       const scope = detail?.effective?.scope;
-      if (!this.symbolConfigurationDirty.has(symbol)) {
+      if (force || !this.symbolConfigurationDirty.has(symbol)) {
         const current = this.symbolConfigurations[symbol] || this.readCurrentSymbolConfiguration();
+        const defaultExecution = {
+          initial_capital: 10000,
+          position_size_pct: 10,
+          leverage: 1,
+          fee_bps: 4,
+          slippage_bps: 2,
+          stop_loss_pct: 5,
+          take_profit_pct: 10,
+          max_holding_bars: 120,
+          ...(this.selectedStrategy()?.risk_defaults || {}),
+        };
+        const defaultParameters = Object.fromEntries(
+          (this.selectedStrategy()?.params || [])
+            .filter((item) => item?.key && item.default != null)
+            .map((item) => [item.key, item.default]),
+        );
         this.symbolConfigurations[symbol] = this.cloneSymbolConfiguration({
           ...current,
+          ...defaultExecution,
           ...(detail?.effective?.execution || {}),
-          params: { ...(current.params || {}), ...(detail?.effective?.parameters || {}) },
+          params: { ...defaultParameters, ...(detail?.effective?.parameters || {}) },
           profile_scope: scope,
         });
         if (symbol === this.primarySymbol()) {
@@ -2173,7 +2232,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   setProfileButtons(disabled) {
-    const unavailable = disabled || this.runningBacktest || !this.strategyId;
+    const unavailable = disabled || this.profileLoadInFlight || this.runningBacktest || !this.strategyId;
     this.q("#save-default-profile").disabled = unavailable;
     this.q("#save-symbol-profile").disabled = unavailable || !this.symbolsForRun().length;
   }
