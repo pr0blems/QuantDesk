@@ -73,7 +73,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-take-profit-fields-5">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-market-grid-alignment-6">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -115,7 +115,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   <span id="selected-symbols" class="selected-symbols" aria-label="已选择的交易品种"></span>
                   <small class="field-help">可添加多个品种同时回测；结果分别保存，不混合计算资金。</small>
                 </div>
-                <label>数据周期<select id="timeframe" name="timeframe" required><option value="">加载中…</option></select></label>
+                <label class="market-timeframe-field"><span class="field-label">数据周期</span><select id="timeframe" name="timeframe" required><option value="">加载中…</option></select></label>
               </div>
               <div class="field-grid data-source-fields">
                 <label id="market-source-field">行情数据源

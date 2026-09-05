@@ -195,7 +195,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-take-profit-fields-5" in controller
+    assert "/next/assets/backtest.css?v=20260905-market-grid-alignment-6" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
@@ -331,6 +331,9 @@ def test_backtest_supports_parameter_profiles_and_multiple_symbols() -> None:
 
     assert ".backtest-action-row" in stylesheet
     assert ".selected-symbols" in stylesheet
+    assert 'class="market-timeframe-field"' in script
+    assert ".market-timeframe-field { align-content: start; grid-template-rows: auto 58px; }" in stylesheet
+    assert ".field-grid .market-timeframe-field select { height: 58px; }" in stylesheet
     assert ".symbol-chip" in stylesheet
     assert ".symbol-config-switcher" in stylesheet
     assert ".symbol-config-tabs" in stylesheet

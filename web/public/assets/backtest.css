@@ -85,7 +85,7 @@ button { cursor: pointer; }
 .error-text { color: var(--bt-danger); }
 
 .field-grid { display: grid; gap: 10px; }
-.field-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.field-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
 .field-grid label, .field-grid .symbol-field { min-width: 0; display: grid; gap: 6px; color: #8296a9; font-size: 14.4px; }
 .field-label { color: #8296a9; }
 .field-grid input, .field-grid select { width: 100%; min-width: 0; height: 37px; padding: 8px 9px; border: 1px solid #294158; border-radius: 8px; outline: none; color: #dce7f1; background: #07131f; font-size: 17.6px; }
@@ -144,6 +144,8 @@ button { cursor: pointer; }
 .symbol-selection-trigger > b { flex: 0 0 auto; padding: 7px 13px; border: 1px solid rgba(173, 156, 255, .38); border-radius: 999px; color: #c8bcff; background: rgba(173, 156, 255, .08); font-size: 12px; }
 .symbol-selection-trigger:hover:not(:disabled) { border-color: var(--bt-brand); transform: translateY(-1px); }
 .symbol-selection-trigger:disabled { opacity: .55; cursor: wait; }
+.market-timeframe-field { align-content: start; grid-template-rows: auto 58px; }
+.field-grid .market-timeframe-field select { height: 58px; }
 .selected-symbols { min-height: 0; display: flex; flex-wrap: wrap; gap: 5px; }
 .selected-symbols:empty { display: none; }
 .symbol-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid rgba(43, 215, 163, .28); border-radius: 999px; color: #9fcfc0; background: rgba(43, 215, 163, .07); font-size: 11.5px; }
