@@ -527,7 +527,7 @@ button { cursor: pointer; }
 .calculator-explanation-head > strong.negative { border-color: rgba(255, 93, 112, .34); color: #ff8998; }
 .calculator-explanation-head > strong.neutral { color: #8ca0af; }
 .calculator-summary-table-wrap { margin-top: 10px; overflow-x: auto; border: 1px solid rgba(74, 211, 166, .18); }
-.calculator-summary-table { width: 100%; min-width: 620px; border-collapse: collapse; table-layout: fixed; background: rgba(7, 18, 30, .72); }
+.calculator-summary-table { width: 100%; min-width: 720px; border-collapse: collapse; table-layout: fixed; background: rgba(7, 18, 30, .72); }
 .calculator-summary-table th { padding: 7px 10px; color: #7892a4; background: rgba(20, 78, 64, .18); font-size: 10.5px; font-weight: 700; text-align: left; white-space: nowrap; }
 .calculator-summary-table td { padding: 9px 10px; border-top: 1px solid rgba(74, 211, 166, .13); color: #d5e7e1; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .calculator-summary-table td:first-child { width: 72px; }

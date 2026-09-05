@@ -325,7 +325,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                   </div>
                   <div class="calculator-summary-table-wrap">
                     <table class="calculator-summary-table" aria-label="多空止盈价格与收益计算">
-                      <thead><tr><th scope="col">方向</th><th scope="col">止盈价格</th><th scope="col">目标涨跌幅</th><th scope="col">预计毛利润</th><th scope="col">杠杆毛 ROE</th></tr></thead>
+                      <thead><tr><th scope="col">方向</th><th scope="col">初始手数</th><th scope="col">止盈价格</th><th scope="col">目标涨跌幅</th><th scope="col">预计毛利润</th><th scope="col">杠杆毛 ROE</th></tr></thead>
                       <tbody id="calculator-summary"></tbody>
                     </table>
                   </div>
@@ -1434,10 +1434,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return fact;
   }
 
-  calculatorTargetRow(direction, targetPrice, movementLabel, movementPercent, grossProfit, grossRoePct) {
+  calculatorTargetRow(direction, initialLot, targetPrice, movementLabel, movementPercent, grossProfit, grossRoePct) {
     const row = this.node("tr", direction === "做多" ? "long" : "short");
     [
       ["方向", direction],
+      ["初始手数", `${this.quantity(initialLot)} 手`],
       ["止盈价格", targetPrice],
       ["目标涨跌幅", `${movementLabel} ${this.calculatorPercent(Math.abs(movementPercent))}`],
       ["预计毛利润", this.calculatorMoney(grossProfit, true)],
@@ -1611,6 +1612,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#calculator-summary").replaceChildren(
       this.calculatorTargetRow(
         "做多",
+        values.lot,
         `${this.price(values.longTakeProfitPrice)} USDT`,
         "涨幅",
         values.priceMovePct,
@@ -1619,6 +1621,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       ),
       this.calculatorTargetRow(
         "做空",
+        values.lot,
         shortTakeProfitLabel,
         "跌幅",
         values.priceMovePct,
