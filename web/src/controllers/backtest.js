@@ -73,7 +73,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-atr-calculator-4">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-take-profit-fields-5">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">

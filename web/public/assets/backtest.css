@@ -107,13 +107,18 @@ button { cursor: pointer; }
 .take-profit-tier-head { min-height: 42px; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid rgba(173, 156, 255, .14); }
 .take-profit-tier-head strong { overflow: hidden; color: #dbe6ef; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .take-profit-tier-code { flex: 0 0 auto; padding: 3px 6px; border: 1px solid rgba(173, 156, 255, .26); border-radius: 5px; color: #c7bbff; background: rgba(173, 156, 255, .09); font-size: 10px; font-weight: 850; letter-spacing: .04em; }
-.take-profit-tier-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 10px; }
-.take-profit-tier-fields label { align-content: start; }
-.take-profit-tier-fields input { font-variant-numeric: tabular-nums; }
+.take-profit-tier-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; padding: 11px; }
+.take-profit-tier-fields > label { min-width: 0; display: grid; grid-template-rows: auto 37px; align-content: start; gap: 6px; color: #8296a9; font-size: 12px; }
+.take-profit-tier-fields .field-label { overflow: hidden; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.take-profit-tier-fields input { width: 100%; min-width: 0; height: 37px; box-sizing: border-box; padding: 8px 9px; border: 1px solid #294158; border-radius: 7px; outline: none; color: #dce7f1; background: #07131f; font-size: 16px; font-variant-numeric: tabular-nums; }
+.take-profit-tier-fields input:focus { border-color: var(--bt-brand); box-shadow: 0 0 0 3px rgba(43, 215, 163, .08); }
+.take-profit-tier-fields input:disabled { border-style: dashed; color: #637483; background: rgba(9, 18, 25, .7); cursor: not-allowed; }
+.take-profit-tier-fields .field-help:empty,
+.take-profit-tier-fields .parameter-dependency-help.hidden { display: none; }
 .take-profit-static-field { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 8px; align-content: start; }
 .take-profit-static-field .field-label { grid-column: 1 / -1; }
 .take-profit-static-field strong { min-width: 0; height: 37px; display: flex; align-items: center; padding: 8px 9px; border: 1px dashed #294158; border-radius: 8px; color: #dce7f1; background: rgba(7, 19, 31, .58); font-size: 17.6px; font-variant-numeric: tabular-nums; }
-.take-profit-static-field small { align-self: center; color: #6f8598; font-size: 10px; }
+.take-profit-static-field small { align-self: center; padding: 3px 5px; border: 1px solid rgba(121, 151, 180, .18); border-radius: 4px; color: #6f8598; background: rgba(121, 151, 180, .06); font-size: 10px; white-space: nowrap; }
 .parameter-switch-field { min-height: 64px; align-content: start; padding: 9px 10px; border: 1px solid #294158; border-radius: 8px; background: #07131f; }
 .parameter-switch-field .field-label { color: #a6b8c7; }
 .parameter-switch-control { min-height: 27px; display: flex; align-items: center; gap: 9px; }
@@ -719,6 +724,7 @@ button { cursor: pointer; }
 :host-context(html[data-theme="light"]) .symbol-search-field input { color: #252824; background: #fafbf8; }
 :host-context(html[data-theme="light"]) .field-grid input,
 :host-context(html[data-theme="light"]) .field-grid select,
+:host-context(html[data-theme="light"]) .take-profit-tier-fields input,
 :host-context(html[data-theme="light"]) .checkbox-field { color: #252824; background: #f5f6f2; }
 :host-context(html[data-theme="light"]) .strategy-parameter-group,
 :host-context(html[data-theme="light"]) .parameter-switch-field,

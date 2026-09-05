@@ -195,7 +195,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-atr-calculator-4" in controller
+    assert "/next/assets/backtest.css?v=20260905-take-profit-fields-5" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
@@ -226,6 +226,9 @@ def test_backtest_groups_strategy_parameters_and_enforces_dependencies() -> None
     for contract in (
         ".strategy-parameter-group {",
         ".strategy-parameter-group-head {",
+        ".take-profit-tier-fields > label {",
+        ".take-profit-tier-fields input {",
+        "box-sizing: border-box",
         ".parameter-switch-field {",
         ".parameter-field-disabled {",
         ".parameter-group-message.warning {",
