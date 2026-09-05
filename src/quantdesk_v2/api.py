@@ -42,6 +42,7 @@ from .backtest_ai import (
     BACKTEST_ANALYSIS_SYSTEM_PROMPT,
     analyze_backtest_with_model,
     build_backtest_analysis_input,
+    chat_about_backtest_with_model,
 )
 from .binance_client import BinanceAccountClientError
 from .binance_performance import (
@@ -3400,6 +3401,87 @@ def analyze_backtest_run(
         "model_input": model_input,
         "analysis": analysis,
         "notice": "分析结果仅用于研究，不会自动修改策略参数或触发交易。",
+    }
+
+
+@router.post("/backtests/{run_id}/ai-analysis-chat")
+def chat_about_backtest_run(
+    run_id: int,
+    payload: dict[str, Any],
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Continue a bounded conversation about one completed, tenant-owned run."""
+
+    run, model_input = _backtest_analysis_context(db, user_id=user.id, run_id=run_id)
+    question = payload.get("message")
+    conversation = payload.get("messages")
+    initial_analysis = payload.get("initial_analysis")
+
+    model_config = get_global_ai_model_config(db, legacy_fallback_user_id=user.id)
+    if model_config is None:
+        raise HTTPException(status_code=409, detail="请先在管理后台配置并启用全局 AI 模型")
+    try:
+        api_key = CredentialCipher(
+            request.app.state.settings.credential_master_key.get_secret_value()
+        ).decrypt(model_config.api_key_encrypted)
+    except SecurityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="AI 模型密钥无法解密，请重新配置 API Key",
+        ) from None
+
+    provider_code = model_config.provider_code
+    model_name = model_config.model_name
+    timeout_seconds = min(
+        90.0,
+        float(request.app.state.settings.deepseek_optimizer_timeout_seconds),
+    )
+    max_tokens = min(
+        6_000,
+        max(1_500, int(request.app.state.settings.deepseek_optimizer_max_tokens)),
+    )
+    db.rollback()
+    try:
+        reply = chat_about_backtest_with_model(
+            model_input,
+            question=question,
+            conversation=conversation,
+            initial_analysis=initial_analysis,
+            provider_code=provider_code,
+            api_key=api_key,
+            model_name=model_name,
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_tokens,
+        )
+    except StrategyAiError as exc:
+        status_by_category = {
+            "invalid_input": 422,
+            "not_configured": 409,
+            "timeout": 504,
+            "upstream": 502,
+            "invalid_output": 502,
+        }
+        message_by_category = {
+            "invalid_input": "对话内容无效或超出长度限制",
+            "not_configured": "AI 模型配置不可用",
+            "timeout": "AI 对话超时，请稍后重试",
+            "upstream": "AI 模型服务暂时不可用",
+            "invalid_output": "AI 返回的对话格式无效，请重新发送",
+        }
+        raise HTTPException(
+            status_code=status_by_category.get(exc.category, 502),
+            detail=message_by_category.get(exc.category, "AI 对话失败"),
+        ) from None
+
+    return {
+        "run_id": run.id,
+        "provider": provider_code,
+        "model": model_name,
+        "reply": reply,
+        "notice": "对话仅用于研究，不会自动修改策略参数或触发交易。",
     }
 
 

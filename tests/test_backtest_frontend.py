@@ -212,7 +212,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
     backtest_stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-history-ui-11" in controller
+    assert "/next/assets/backtest.css?v=20260905-ai-chat-12" in controller
     assert "width: min(1180px, calc(100vw - 36px))" in backtest_stylesheet
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
@@ -397,7 +397,7 @@ def test_backtest_configuration_uses_wide_dialog() -> None:
     assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in stylesheet
 
 
-def test_backtest_result_cards_offer_three_stage_ai_analysis() -> None:
+def test_backtest_result_cards_offer_three_stage_ai_analysis_and_follow_up_chat() -> None:
     script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
 
@@ -406,6 +406,9 @@ def test_backtest_result_cards_offer_three_stage_ai_analysis() -> None:
         'id="backtest-ai-system-prompt"',
         'id="backtest-ai-model-input"',
         'id="backtest-ai-analysis"',
+        'id="backtest-ai-chat-messages"',
+        'id="backtest-ai-chat-input"',
+        'id="send-backtest-ai-chat"',
         "<span>01</span><div><strong>系统默认提示词</strong>",
         "<span>02</span><div><strong>提交给模型的回测结果与策略参数</strong>",
         "<span>03</span><div><strong>分析结果与优化意见</strong>",
@@ -413,8 +416,12 @@ def test_backtest_result_cards_offer_three_stage_ai_analysis() -> None:
         "openBacktestAnalysis(item)",
         "closeBacktestAnalysis()",
         "renderBacktestAnalysis(analysis)",
+        "sendBacktestChat()",
         "`/${encodeURIComponent(runId)}/ai-analysis-context`",
         "`/${encodeURIComponent(runId)}/ai-analysis`",
+        "`/${encodeURIComponent(runId)}/ai-analysis-chat`",
+        "initial_analysis: this.backtestAnalysisPayload",
+        "this.backtestChatMessages.slice(-12)",
         ".textContent = JSON.stringify(context?.model_input || {}, null, 2)",
         "分析结果仅用于研究，不会自动修改策略参数或触发交易",
     ):
@@ -425,6 +432,10 @@ def test_backtest_result_cards_offer_three_stage_ai_analysis() -> None:
         ".backtest-ai-dialog-backdrop",
         ".backtest-ai-dialog",
         ".backtest-ai-module",
+        ".backtest-ai-workspace",
+        ".backtest-ai-chat",
+        ".backtest-ai-chat-message",
+        ".backtest-ai-chat-compose",
         ".backtest-ai-suggestion",
         ".backtest-ai-warning-list",
     ):

@@ -36,8 +36,22 @@ BACKTEST_ANALYSIS_SYSTEM_PROMPT = """你是 QuantDesk 的量化回测审查助�
 严格返回以下结构：
 {"verdict":"可继续研究|需要优化|样本不足|风险过高","summary":"结论摘要","findings":[{"title":"发现","evidence":"数据证据","impact":"可能影响"}],"optimization_suggestions":[{"priority":"高|中|低","parameter":"参数名或策略环节","current_value":"当前值","suggestion":"建议","reason":"理由","validation":"如何重新回测验证"}],"risk_warnings":["风险提示"]}"""
 
+BACKTEST_CHAT_SYSTEM_PROMPT = """你是 QuantDesk 的量化回测深度对话助手。服务器会提供一份不可变的回测快照，以及可选的首次 AI 分析。你必须围绕这一次回测回答用户的连续追问。
+
+对话要求：
+1. 回测快照是事实来源；首次 AI 分析和历史对话仅是讨论上下文。如果它们与快照冲突，以快照为准并指出冲突。
+2. 回答必须直接、具体，明确区分数据事实、推断和建议。涉及参数时引用参数名和当前值，并说明建议范围、影响与复测方法。
+3. 不得虚构未提供的行情、成交、参数或统计数据，不得承诺收益，不得自动修改策略参数或触发交易。
+4. 不展示隐藏思维过程；可以给出简明的证据、计算口径和结论依据。
+5. 输出简体中文和严格 JSON，不要输出 Markdown。
+
+严格返回以下结构：
+{"answer":"针对本轮问题的完整回答","recommendations":[{"parameter":"参数名或策略环节","current_value":"当前值或--","suggestion":"具体建议","validation":"复测方法"}],"cautions":["风险或数据限制"],"follow_up_questions":["建议继续追问的问题"]}"""
+
 _MAX_SECTION_ITEMS = 12
 _MAX_TEXT_LENGTH = 1_200
+_MAX_CHAT_MESSAGE_LENGTH = 4_000
+_MAX_CHAT_MESSAGES = 12
 _ALLOWED_VERDICTS = frozenset({"可继续研究", "需要优化", "样本不足", "风险过高"})
 _ALLOWED_PRIORITIES = frozenset({"高", "中", "低"})
 
@@ -256,6 +270,61 @@ def _normalize_analysis(value: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_chat_history(value: Any) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise StrategyAiError("invalid_input")
+    normalized: list[dict[str, str]] = []
+    for item in value[-_MAX_CHAT_MESSAGES:]:
+        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+            raise StrategyAiError("invalid_input")
+        content = item.get("content")
+        if not isinstance(content, str):
+            raise StrategyAiError("invalid_input")
+        content = content.strip()
+        if not content or len(content) > _MAX_CHAT_MESSAGE_LENGTH:
+            raise StrategyAiError("invalid_input")
+        normalized.append({"role": item["role"], "content": content})
+    return normalized
+
+
+def _normalize_chat_response(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise StrategyAiError("invalid_output")
+    recommendations: list[dict[str, str]] = []
+    raw_recommendations = value.get("recommendations")
+    if not isinstance(raw_recommendations, list):
+        raise StrategyAiError("invalid_output")
+    for item in raw_recommendations[:_MAX_SECTION_ITEMS]:
+        if not isinstance(item, dict):
+            raise StrategyAiError("invalid_output")
+        current_value = item.get("current_value")
+        recommendations.append(
+            {
+                "parameter": _text(item.get("parameter"), maximum=120),
+                "current_value": _text(
+                    "--" if current_value is None else str(current_value),
+                    maximum=240,
+                ),
+                "suggestion": _text(item.get("suggestion"), maximum=2_000),
+                "validation": _text(item.get("validation"), maximum=2_000),
+            }
+        )
+    cautions = value.get("cautions")
+    follow_ups = value.get("follow_up_questions")
+    if not isinstance(cautions, list) or not isinstance(follow_ups, list):
+        raise StrategyAiError("invalid_output")
+    return {
+        "answer": _text(value.get("answer"), maximum=6_000),
+        "recommendations": recommendations,
+        "cautions": [_text(item, maximum=1_200) for item in cautions[:_MAX_SECTION_ITEMS]],
+        "follow_up_questions": [
+            _text(item, maximum=500) for item in follow_ups[:6]
+        ],
+    }
+
+
 def analyze_backtest_with_model(
     model_input: Mapping[str, Any],
     *,
@@ -306,3 +375,82 @@ def analyze_backtest_with_model(
         raise StrategyAiError("upstream")
     response = _strict_json_bytes(response_body)
     return _normalize_analysis(_strict_json_text(_chat_output_text(response)))
+
+
+def chat_about_backtest_with_model(
+    model_input: Mapping[str, Any],
+    *,
+    question: str,
+    conversation: Any = None,
+    initial_analysis: Any = None,
+    provider_code: str,
+    api_key: str,
+    model_name: str,
+    timeout_seconds: float,
+    max_tokens: int = 4_000,
+) -> dict[str, Any]:
+    """Answer one bounded follow-up while preserving recent conversation context."""
+
+    preset = get_ai_provider(provider_code)
+    if preset is None or not api_key or not model_name:
+        raise StrategyAiError("not_configured")
+    if not isinstance(question, str):
+        raise StrategyAiError("invalid_input")
+    normalized_question = question.strip()
+    if not normalized_question or len(normalized_question) > _MAX_CHAT_MESSAGE_LENGTH:
+        raise StrategyAiError("invalid_input")
+    history = _normalize_chat_history(conversation)
+    normalized_initial_analysis = None
+    if initial_analysis is not None:
+        normalized_initial_analysis = _normalize_analysis(initial_analysis)
+
+    context = {
+        "persisted_backtest_snapshot": _json_value(model_input),
+        "initial_ai_analysis": normalized_initial_analysis,
+        "context_note": "回测快照是事实来源；首次分析只是上一轮模型意见。",
+    }
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": BACKTEST_CHAT_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "以下是本次连续对话的固定上下文：\n"
+            + json.dumps(context, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+        },
+        {
+            "role": "assistant",
+            "content": "已读取本次回测快照。后续回答将以该快照为事实依据。",
+        },
+        *history,
+        {"role": "user", "content": normalized_question},
+    ]
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+        "stream": False,
+        "temperature": 0.25,
+    }
+    _configure_chat_json_response(payload, provider_code, max_tokens=max_tokens)
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
+    try:
+        status_code, response_body = _chat_http_transport(
+            preset,
+            body,
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout_seconds,
+        )
+    except TimeoutError:
+        raise StrategyAiError("timeout") from None
+    except OSError:
+        raise StrategyAiError("upstream") from None
+    if status_code in {408, 504}:
+        raise StrategyAiError("timeout")
+    if not 200 <= status_code < 300:
+        raise StrategyAiError("upstream")
+    response = _strict_json_bytes(response_body)
+    return _normalize_chat_response(_strict_json_text(_chat_output_text(response)))

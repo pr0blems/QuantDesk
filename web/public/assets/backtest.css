@@ -502,7 +502,7 @@ button { cursor: pointer; }
 .history-dialog-foot { padding: 10px 15px; border-top: 1px solid var(--bt-line-soft); color: var(--bt-dim); background: rgba(8, 12, 8, .8); font-size: 12.8px; }
 
 .backtest-ai-dialog-backdrop { position: fixed; z-index: 1280; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(0, 0, 0, .8); backdrop-filter: blur(7px); }
-.backtest-ai-dialog { width: min(1320px, calc(100vw - 36px)); max-height: min(920px, calc(100vh - 36px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #4d5b72; border-radius: 5px; color: var(--bt-text); background: #091521; box-shadow: 0 30px 100px rgba(0, 0, 0, .72); }
+.backtest-ai-dialog { width: min(1760px, calc(100vw - 36px)); height: min(920px, calc(100vh - 36px)); max-height: min(920px, calc(100vh - 36px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #4d5b72; border-radius: 5px; color: var(--bt-text); background: #091521; box-shadow: 0 30px 100px rgba(0, 0, 0, .72); }
 .backtest-ai-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 18px 20px 16px; border-bottom: 1px solid var(--bt-line-soft); background: linear-gradient(118deg, rgba(18, 35, 51, .99), rgba(14, 24, 35, .99)); }
 .backtest-ai-dialog-head > div:first-child { min-width: 0; }
 .backtest-ai-dialog-head > div:first-child > span { color: var(--bt-brand); font-size: 11px; font-weight: 850; letter-spacing: .17em; }
@@ -512,6 +512,7 @@ button { cursor: pointer; }
 .backtest-ai-dialog-head-actions > span { max-width: 260px; overflow: hidden; padding: 5px 9px; border: 1px solid rgba(117, 167, 251, .24); border-radius: 999px; color: #8fb8fb; background: rgba(77, 141, 247, .08); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .backtest-ai-dialog-head .dialog-close { width: 38px; height: 38px; display: grid; place-items: center; padding: 0; border: 1px solid var(--bt-line-soft); border-radius: 3px; color: #9bacba; background: rgba(4, 12, 21, .45); font-size: 24px; }
 .backtest-ai-dialog-head .dialog-close:hover { border-color: var(--bt-brand); color: #fff; }
+.backtest-ai-workspace { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(390px, 430px); overflow: hidden; }
 .backtest-ai-dialog-body { min-height: 0; display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 12px; padding: 14px; overflow-y: auto; }
 .backtest-ai-module { min-width: 0; display: grid; align-content: start; gap: 10px; padding: 13px; border: 1px solid rgba(125, 153, 180, .2); border-radius: 5px; background: rgba(5, 15, 25, .72); }
 .backtest-ai-module.analysis { grid-column: 1 / -1; }
@@ -558,6 +559,42 @@ button { cursor: pointer; }
 .backtest-ai-dialog-foot button { min-width: 104px; min-height: 34px; padding: 6px 12px; border: 1px solid rgba(70, 217, 174, .4); border-radius: 4px; color: #60dbb7; background: rgba(37, 180, 139, .08); font-weight: 800; }
 .backtest-ai-dialog-foot button:hover:not(:disabled) { border-color: #46d9ae; color: #e1fff6; }
 .backtest-ai-dialog-foot button:disabled { opacity: .4; }
+.backtest-ai-chat { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; border-left: 1px solid rgba(125, 153, 180, .2); background: linear-gradient(180deg, rgba(8, 20, 34, .98), rgba(5, 14, 24, .98)); }
+.backtest-ai-chat-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 16px 12px; border-bottom: 1px solid rgba(125, 153, 180, .14); }
+.backtest-ai-chat-head > div { min-width: 0; }
+.backtest-ai-chat-head > div > span { color: #ad9cff; font-size: 9px; font-weight: 850; letter-spacing: .16em; }
+.backtest-ai-chat-head h3 { margin: 4px 0 3px; color: #edf3f7; font-size: 20px; }
+.backtest-ai-chat-head p { margin: 0; color: #71899c; font-size: 11px; line-height: 1.5; }
+.backtest-ai-chat-head > span { flex: 0 0 auto; padding: 4px 7px; border: 1px solid rgba(173, 156, 255, .26); border-radius: 999px; color: #ad9cff; font-size: 10px; }
+.backtest-ai-chat-prompts { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px; border-bottom: 1px solid rgba(125, 153, 180, .12); }
+.backtest-ai-chat-prompts button, .backtest-ai-chat-followups button { min-height: 27px; padding: 4px 8px; border: 1px solid rgba(117, 167, 251, .24); border-radius: 3px; color: #8fb8fb; background: rgba(77, 141, 247, .06); font-size: 10.5px; text-align: left; }
+.backtest-ai-chat-prompts button:hover, .backtest-ai-chat-followups button:hover { border-color: #75a7fb; color: #d9e8ff; }
+.backtest-ai-chat-messages { min-height: 0; display: grid; align-content: start; gap: 10px; padding: 12px; overflow-y: auto; }
+.backtest-ai-chat-message { min-width: 0; display: grid; gap: 6px; padding: 10px; border: 1px solid rgba(125, 153, 180, .16); border-radius: 5px; background: rgba(11, 28, 42, .58); }
+.backtest-ai-chat-message.user { margin-left: 34px; border-color: rgba(173, 156, 255, .28); background: rgba(94, 75, 170, .1); }
+.backtest-ai-chat-message.assistant { margin-right: 18px; border-color: rgba(70, 217, 174, .22); }
+.backtest-ai-chat-message.intro { opacity: .88; }
+.backtest-ai-chat-message > span { color: #63dcb8; font-size: 10px; font-weight: 850; }
+.backtest-ai-chat-message.user > span { color: #b9acfa; }
+.backtest-ai-chat-message > p { margin: 0; color: #b6c6d1; font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+.backtest-ai-chat-message.pending { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+.backtest-ai-chat-message.pending i { width: 15px; height: 15px; border: 2px solid rgba(70, 217, 174, .2); border-top-color: #46d9ae; border-radius: 50%; animation: backtest-ai-spin .9s linear infinite; }
+.backtest-ai-chat-recommendations { display: grid; gap: 7px; }
+.backtest-ai-chat-recommendations section { display: grid; gap: 4px; padding: 8px; border-left: 2px solid #ad9cff; background: rgba(94, 75, 170, .07); }
+.backtest-ai-chat-recommendations strong { color: #ddd5ff; font-size: 11px; }
+.backtest-ai-chat-recommendations small { color: #7890a2; font-size: 10px; line-height: 1.45; }
+.backtest-ai-chat-recommendations p { margin: 0; color: #aebfcb; font-size: 11px; line-height: 1.5; }
+.backtest-ai-chat-cautions { padding-top: 6px; border-top: 1px solid rgba(240, 100, 120, .16); color: #dc8794 !important; font-size: 10.5px !important; }
+.backtest-ai-chat-followups { display: grid; gap: 5px; padding-top: 4px; }
+.backtest-ai-chat-compose { display: grid; gap: 7px; padding: 12px; border-top: 1px solid rgba(125, 153, 180, .16); background: rgba(4, 12, 21, .82); }
+.backtest-ai-chat-compose > label { color: #d8e3ea; font-size: 11px; font-weight: 800; }
+.backtest-ai-chat-compose textarea { width: 100%; min-height: 84px; resize: vertical; padding: 9px 10px; border: 1px solid rgba(117, 167, 251, .26); border-radius: 4px; color: #dbe5ec; background: #06111a; font: 12px/1.55 inherit; outline: 0; }
+.backtest-ai-chat-compose textarea:focus { border-color: #75a7fb; box-shadow: 0 0 0 1px rgba(117, 167, 251, .12); }
+.backtest-ai-chat-compose textarea:disabled { opacity: .55; }
+.backtest-ai-chat-compose > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.backtest-ai-chat-compose small { overflow: hidden; color: #6f8799; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+.backtest-ai-chat-compose button { min-width: 76px; min-height: 32px; padding: 6px 12px; border: 1px solid rgba(70, 217, 174, .45); border-radius: 3px; color: #061a14; background: #46d9ae; font-weight: 850; }
+.backtest-ai-chat-compose button:disabled { opacity: .4; cursor: not-allowed; }
 
 .lot-calculator-trigger { min-height: 24px; padding: 2px 8px; border: 1px solid rgba(167, 139, 250, .48); border-radius: 3px; color: #c4b5fd; background: rgba(124, 92, 246, .09); font-size: 11.5px; font-weight: 750; line-height: 1; }
 .section-head .lot-calculator-trigger { margin-left: 3px; }
@@ -675,6 +712,9 @@ button { cursor: pointer; }
   .stage-layout.has-result { grid-template-columns: minmax(0, 1fr); }
   .trade-cycle-rail { position: static; padding: 0 14px 14px; }
   .trade-cycle-rail .trades-panel { max-height: 620px; }
+  .backtest-ai-workspace { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+  .backtest-ai-dialog-body { overflow: visible; }
+  .backtest-ai-chat { min-height: 500px; border-top: 1px solid rgba(125, 153, 180, .2); border-left: 0; }
 }
 
 @media (max-width: 980px) {
@@ -867,4 +907,13 @@ button { cursor: pointer; }
 :host-context(html[data-theme="light"]) .backtest-ai-finding strong,
 :host-context(html[data-theme="light"]) .backtest-ai-suggestion strong,
 :host-context(html[data-theme="light"]) .backtest-ai-result-section h3 { color: #30352f; }
+:host-context(html[data-theme="light"]) .backtest-ai-chat { background: #f6f8f5; }
+:host-context(html[data-theme="light"]) .backtest-ai-chat-head h3,
+:host-context(html[data-theme="light"]) .backtest-ai-chat-compose > label { color: #30352f; }
+:host-context(html[data-theme="light"]) .backtest-ai-chat-message { background: #f1f5f3; }
+:host-context(html[data-theme="light"]) .backtest-ai-chat-message.user { background: #f4f1ff; }
+:host-context(html[data-theme="light"]) .backtest-ai-chat-message > p,
+:host-context(html[data-theme="light"]) .backtest-ai-chat-recommendations p { color: #46524d; }
+:host-context(html[data-theme="light"]) .backtest-ai-chat-compose { background: #eef1ed; }
+:host-context(html[data-theme="light"]) .backtest-ai-chat-compose textarea { color: #30352f; background: #fff; }
 :host-context(html[data-theme="light"]) .empty-result { background: radial-gradient(circle at 50% 48%, rgba(103, 84, 199, .06), transparent 24%); }

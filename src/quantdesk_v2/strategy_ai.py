@@ -82,7 +82,9 @@ _RISK_BOUNDS: dict[str, tuple[Decimal, Decimal]] = {
 class StrategyAiError(RuntimeError):
     """Redacted, stable failure categories for the strategy AI boundary."""
 
-    allowed_categories = frozenset({"not_configured", "timeout", "upstream", "invalid_output"})
+    allowed_categories = frozenset(
+        {"not_configured", "timeout", "upstream", "invalid_output", "invalid_input"}
+    )
 
     def __init__(self, category: str):
         if category not in self.allowed_categories:

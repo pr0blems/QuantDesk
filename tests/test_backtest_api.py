@@ -879,6 +879,12 @@ def test_backtest_run_is_saved_audited_and_isolated_by_user(
             headers=second_headers,
         )
         assert hidden_analysis.status_code == 404
+        hidden_chat = client.post(
+            f"/api/v2/backtests/{run_id}/ai-analysis-chat",
+            headers=second_headers,
+            json={"message": "继续分析这次回测", "messages": []},
+        )
+        assert hidden_chat.status_code == 404
 
         analysis_context = client.get(
             f"/api/v2/backtests/{run_id}/ai-analysis-context",

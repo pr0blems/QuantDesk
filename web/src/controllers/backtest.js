@@ -26,6 +26,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.batchExpandToken = 0;
     this.backtestAnalysisItem = null;
     this.backtestAnalysisRequest = 0;
+    this.backtestAnalysisPayload = null;
+    this.backtestChatMessages = [];
+    this.backtestChatRequest = 0;
+    this.backtestChatBusy = false;
     this.lotCalculatorQuote = null;
     this.lotCalculatorRequest = 0;
     this.lotCalculatorManualBoxRange = null;
@@ -75,7 +79,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-history-ui-11">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-ai-chat-12">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -307,19 +311,38 @@ class BacktestWorkbench extends window.QuantDeskPageController {
               <div><span>AI BACKTEST REVIEW</span><h2 id="backtest-ai-dialog-title">AI 回测分析</h2><p id="backtest-ai-dialog-subtitle">读取本次回测快照并生成可验证的优化建议。</p></div>
               <div class="backtest-ai-dialog-head-actions"><span id="backtest-ai-model">等待分析</span><button id="close-backtest-ai" class="dialog-close" type="button" aria-label="关闭 AI 回测分析">×</button></div>
             </header>
-            <div class="backtest-ai-dialog-body">
-              <section class="backtest-ai-module">
-                <div class="backtest-ai-module-head"><span>01</span><div><strong>系统默认提示词</strong><small>固定的审查边界与输出规则</small></div></div>
-                <pre id="backtest-ai-system-prompt" class="backtest-ai-code">正在读取系统提示词…</pre>
-              </section>
-              <section class="backtest-ai-module">
-                <div class="backtest-ai-module-head"><span>02</span><div><strong>提交给模型的回测结果与策略参数</strong><small>由服务端从已落库回测记录生成，同时包含成本、成交统计与数据质量</small></div></div>
-                <pre id="backtest-ai-model-input" class="backtest-ai-code data">正在生成只读回测快照…</pre>
-              </section>
-              <section class="backtest-ai-module analysis">
-                <div class="backtest-ai-module-head"><span>03</span><div><strong>分析结果与优化意见</strong><small>模型只给出诊断与复测建议，不会自动修改策略或触发交易</small></div></div>
-                <div id="backtest-ai-analysis" class="backtest-ai-analysis" aria-live="polite"><div class="backtest-ai-loading"><i></i><strong>正在分析回测结果…</strong><span>正在核对收益、回撤、成本、样本量和策略参数。</span></div></div>
-              </section>
+            <div class="backtest-ai-workspace">
+              <div class="backtest-ai-dialog-body">
+                <section class="backtest-ai-module">
+                  <div class="backtest-ai-module-head"><span>01</span><div><strong>系统默认提示词</strong><small>固定的审查边界与输出规则</small></div></div>
+                  <pre id="backtest-ai-system-prompt" class="backtest-ai-code">正在读取系统提示词…</pre>
+                </section>
+                <section class="backtest-ai-module">
+                  <div class="backtest-ai-module-head"><span>02</span><div><strong>提交给模型的回测结果与策略参数</strong><small>由服务端从已落库回测记录生成，同时包含成本、成交统计与数据质量</small></div></div>
+                  <pre id="backtest-ai-model-input" class="backtest-ai-code data">正在生成只读回测快照…</pre>
+                </section>
+                <section class="backtest-ai-module analysis">
+                  <div class="backtest-ai-module-head"><span>03</span><div><strong>分析结果与优化意见</strong><small>模型只给出诊断与复测建议，不会自动修改策略或触发交易</small></div></div>
+                  <div id="backtest-ai-analysis" class="backtest-ai-analysis" aria-live="polite"><div class="backtest-ai-loading"><i></i><strong>正在分析回测结果…</strong><span>正在核对收益、回撤、成本、样本量和策略参数。</span></div></div>
+                </section>
+              </div>
+              <aside class="backtest-ai-chat" aria-labelledby="backtest-ai-chat-title">
+                <header class="backtest-ai-chat-head">
+                  <div><span>CONTINUOUS REVIEW</span><h3 id="backtest-ai-chat-title">深度对话</h3><p>围绕本次回测继续追问，保留最近对话上下文。</p></div>
+                  <span id="backtest-ai-chat-round">0 轮</span>
+                </header>
+                <div class="backtest-ai-chat-prompts" aria-label="快捷问题">
+                  <button type="button" data-backtest-chat-prompt="为什么回撤这么大？请结合具体数据说明。">回撤原因</button>
+                  <button type="button" data-backtest-chat-prompt="如果只优先调整三个参数，应该调整什么，范围是多少？">优先参数</button>
+                  <button type="button" data-backtest-chat-prompt="请给出一套防止过拟合的复测方案。">复测方案</button>
+                </div>
+                <div id="backtest-ai-chat-messages" class="backtest-ai-chat-messages" aria-live="polite"></div>
+                <div class="backtest-ai-chat-compose">
+                  <label for="backtest-ai-chat-input">继续询问修改意见</label>
+                  <textarea id="backtest-ai-chat-input" rows="4" maxlength="4000" placeholder="例如：最大回撤主要来自哪些环节？杠杆和网格参数应该如何调整？" disabled></textarea>
+                  <div><small id="backtest-ai-chat-status">等待首次分析完成</small><button id="send-backtest-ai-chat" type="button" disabled>发送</button></div>
+                </div>
+              </aside>
             </div>
             <footer class="backtest-ai-dialog-foot"><span id="backtest-ai-notice">分析结果仅用于研究，不构成交易建议。</span><button id="retry-backtest-ai" type="button" disabled>重新分析</button></footer>
           </section>
@@ -470,6 +493,19 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#retry-backtest-ai").addEventListener("click", () => {
       if (this.backtestAnalysisItem) void this.openBacktestAnalysis(this.backtestAnalysisItem);
     });
+    this.q("#send-backtest-ai-chat").addEventListener("click", () => void this.sendBacktestChat());
+    this.q("#backtest-ai-chat-input").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey) return;
+      event.preventDefault();
+      void this.sendBacktestChat();
+    });
+    this.qa("[data-backtest-chat-prompt]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const input = this.q("#backtest-ai-chat-input");
+        input.value = button.dataset.backtestChatPrompt || "";
+        input.focus();
+      });
+    });
     this.q("#close-lot-calculator").addEventListener("click", () => this.closeLotCalculator());
     this.q("#lot-calculator-trigger").addEventListener("click", () => void this.openLotCalculator());
     this.q("#calculator-initial-capital").addEventListener("input", () => this.renderLotCalculator());
@@ -550,6 +586,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.batchExpandToken += 1;
     this.backtestAnalysisItem = null;
     this.backtestAnalysisRequest += 1;
+    this.backtestAnalysisPayload = null;
+    this.backtestChatMessages = [];
+    this.backtestChatRequest += 1;
+    this.backtestChatBusy = false;
     this.lotCalculatorQuote = null;
     this.lotCalculatorRequest += 1;
     this.lotCalculatorManualBoxRange = null;
@@ -2497,7 +2537,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     }
     const { run } = this.unpackDetail(item?.detail || item);
     const token = ++this.backtestAnalysisRequest;
+    this.backtestChatRequest += 1;
     this.backtestAnalysisItem = item;
+    this.backtestAnalysisPayload = null;
+    this.backtestChatMessages = [];
+    this.backtestChatBusy = false;
     this.q("#backtest-ai-dialog-title").textContent = `${run.symbol || item?.symbol || "当前品种"} · AI 回测分析`;
     this.q("#backtest-ai-dialog-subtitle").textContent = `${run.strategy_name || run.strategy_id || "策略回测"} · ${run.timeframe || "--"} · 回测编号 ${runId}`;
     this.q("#backtest-ai-model").textContent = "准备分析";
@@ -2506,6 +2550,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#backtest-ai-notice").textContent = "分析结果仅用于研究，不会自动修改策略参数或触发交易。";
     this.q("#retry-backtest-ai").disabled = true;
     this.q("#backtest-ai-analysis").replaceChildren(this.backtestAnalysisLoading("正在准备模型输入…", "先核对服务端保存的回测结果和策略参数。"));
+    this.resetBacktestChatPanel();
     this.q("#backtest-ai-dialog").classList.remove("hidden");
     this.q("#close-backtest-ai").focus();
 
@@ -2524,7 +2569,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       this.q("#backtest-ai-system-prompt").textContent = response?.system_prompt || context?.system_prompt || "系统提示词不可用";
       this.q("#backtest-ai-model-input").textContent = JSON.stringify(response?.model_input || context?.model_input || {}, null, 2);
       this.q("#backtest-ai-notice").textContent = response?.notice || "分析结果仅用于研究，不会自动修改策略参数或触发交易。";
-      this.renderBacktestAnalysis(response?.analysis || {});
+      this.backtestAnalysisPayload = response?.analysis || {};
+      this.renderBacktestAnalysis(this.backtestAnalysisPayload);
+      this.enableBacktestChat();
     } catch (error) {
       if (token !== this.backtestAnalysisRequest) return;
       const box = this.node("div", "backtest-ai-error");
@@ -2538,7 +2585,153 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   closeBacktestAnalysis() {
     this.backtestAnalysisRequest += 1;
+    this.backtestChatRequest += 1;
+    this.backtestChatBusy = false;
     this.q("#backtest-ai-dialog")?.classList.add("hidden");
+  }
+
+  resetBacktestChatPanel() {
+    this.backtestChatMessages = [];
+    const input = this.q("#backtest-ai-chat-input");
+    const send = this.q("#send-backtest-ai-chat");
+    input.value = "";
+    input.disabled = true;
+    send.disabled = true;
+    this.q("#backtest-ai-chat-status").textContent = "等待首次分析完成";
+    this.q("#backtest-ai-chat-round").textContent = "0 轮";
+    const welcome = this.node("article", "backtest-ai-chat-message assistant intro");
+    welcome.append(
+      this.node("span", "", "AI 助手"),
+      this.node("p", "", "首次分析完成后，你可以在这里继续追问回撤原因、参数范围和复测方法。"),
+    );
+    this.q("#backtest-ai-chat-messages").replaceChildren(welcome);
+  }
+
+  enableBacktestChat() {
+    const input = this.q("#backtest-ai-chat-input");
+    input.disabled = false;
+    this.q("#send-backtest-ai-chat").disabled = false;
+    this.q("#backtest-ai-chat-status").textContent = "已载入本次回测上下文";
+    const summary = String(this.backtestAnalysisPayload?.summary || "首次分析已完成。");
+    const welcome = this.node("article", "backtest-ai-chat-message assistant intro");
+    welcome.append(
+      this.node("span", "", "AI 助手"),
+      this.node("p", "", `${summary} 你可以继续针对这次回测追问。`),
+    );
+    this.q("#backtest-ai-chat-messages").replaceChildren(welcome);
+  }
+
+  backtestChatReplyText(reply) {
+    const sections = [String(reply?.answer || "")];
+    const recommendations = Array.isArray(reply?.recommendations) ? reply.recommendations : [];
+    if (recommendations.length) {
+      sections.push(`参数建议：${recommendations.map((item) => `${item?.parameter || "策略环节"}（当前 ${item?.current_value ?? "--"}）：${item?.suggestion || "--"}；复测：${item?.validation || "--"}`).join("；")}`);
+    }
+    const cautions = Array.isArray(reply?.cautions) ? reply.cautions : [];
+    if (cautions.length) sections.push(`风险提示：${cautions.join("；")}`);
+    return sections.filter(Boolean).join("\n");
+  }
+
+  appendBacktestChatMessage(role, content, reply = null) {
+    const messages = this.q("#backtest-ai-chat-messages");
+    const card = this.node("article", `backtest-ai-chat-message ${role}`);
+    card.append(
+      this.node("span", "", role === "user" ? "你" : "AI 助手"),
+      this.node("p", "", content),
+    );
+    if (role === "assistant" && reply) {
+      const recommendations = Array.isArray(reply?.recommendations) ? reply.recommendations : [];
+      if (recommendations.length) {
+        const group = this.node("div", "backtest-ai-chat-recommendations");
+        recommendations.forEach((item) => {
+          const entry = this.node("section");
+          entry.append(
+            this.node("strong", "", item?.parameter || "策略环节"),
+            this.node("small", "", `当前值：${item?.current_value ?? "--"}`),
+            this.node("p", "", item?.suggestion || "--"),
+            this.node("small", "", `复测：${item?.validation || "--"}`),
+          );
+          group.append(entry);
+        });
+        card.append(group);
+      }
+      const cautions = Array.isArray(reply?.cautions) ? reply.cautions : [];
+      if (cautions.length) card.append(this.node("p", "backtest-ai-chat-cautions", `风险：${cautions.join("；")}`));
+      const followUps = Array.isArray(reply?.follow_up_questions) ? reply.follow_up_questions : [];
+      if (followUps.length) {
+        const prompts = this.node("div", "backtest-ai-chat-followups");
+        followUps.forEach((question) => {
+          const button = this.node("button", "", question);
+          button.type = "button";
+          button.addEventListener("click", () => {
+            const input = this.q("#backtest-ai-chat-input");
+            input.value = question;
+            input.focus();
+          });
+          prompts.append(button);
+        });
+        card.append(prompts);
+      }
+    }
+    messages.append(card);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  async sendBacktestChat() {
+    if (this.backtestChatBusy || !this.backtestAnalysisPayload) return;
+    const runId = this.runId(this.backtestAnalysisItem?.detail || this.backtestAnalysisItem);
+    const input = this.q("#backtest-ai-chat-input");
+    const question = input.value.trim();
+    if (!runId || !question) {
+      input.focus();
+      return;
+    }
+    const history = this.backtestChatMessages.slice(-12).map(({ role, content }) => ({ role, content }));
+    this.backtestChatMessages.push({ role: "user", content: question });
+    this.appendBacktestChatMessage("user", question);
+    input.value = "";
+    this.backtestChatBusy = true;
+    input.disabled = true;
+    this.q("#send-backtest-ai-chat").disabled = true;
+    this.q("#backtest-ai-chat-status").textContent = "AI 正在结合回测上下文回答…";
+    const token = ++this.backtestChatRequest;
+    const pending = this.node("article", "backtest-ai-chat-message assistant pending");
+    pending.append(this.node("i"), this.node("p", "", "正在分析本轮问题…"));
+    this.q("#backtest-ai-chat-messages").append(pending);
+    this.q("#backtest-ai-chat-messages").scrollTop = this.q("#backtest-ai-chat-messages").scrollHeight;
+    try {
+      const response = await this.api(`/${encodeURIComponent(runId)}/ai-analysis-chat`, {
+        method: "POST",
+        body: JSON.stringify({
+          message: question,
+          messages: history,
+          initial_analysis: this.backtestAnalysisPayload,
+        }),
+      });
+      if (token !== this.backtestChatRequest) return;
+      pending.remove();
+      const reply = response?.reply || {};
+      const content = this.backtestChatReplyText(reply) || "模型未返回有效回答。";
+      this.backtestChatMessages.push({ role: "assistant", content });
+      this.appendBacktestChatMessage("assistant", reply?.answer || content, reply);
+      const rounds = this.backtestChatMessages.filter((item) => item.role === "user").length;
+      this.q("#backtest-ai-chat-round").textContent = `${rounds} 轮`;
+      this.q("#backtest-ai-chat-status").textContent = response?.notice || "已保留最近 12 条对话上下文";
+    } catch (error) {
+      if (token !== this.backtestChatRequest) return;
+      pending.remove();
+      this.backtestChatMessages.pop();
+      input.value = question;
+      this.appendBacktestChatMessage("assistant", `本轮回答失败：${error.message || "模型服务暂时不可用"}`);
+      this.q("#backtest-ai-chat-status").textContent = "发送失败，可以修改问题后重试";
+    } finally {
+      if (token === this.backtestChatRequest) {
+        this.backtestChatBusy = false;
+        input.disabled = false;
+        this.q("#send-backtest-ai-chat").disabled = false;
+        input.focus();
+      }
+    }
   }
 
   backtestAnalysisLoading(title, description) {
