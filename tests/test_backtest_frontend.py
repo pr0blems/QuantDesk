@@ -202,8 +202,10 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     controller = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
+    backtest_stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-calculator-tiers-7" in controller
+    assert "/next/assets/backtest.css?v=20260905-calculator-dialog-wide-8" in controller
+    assert "width: min(1180px, calc(100vw - 36px))" in backtest_stylesheet
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet

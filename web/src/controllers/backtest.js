@@ -73,7 +73,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-calculator-tiers-7">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-calculator-dialog-wide-8">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
