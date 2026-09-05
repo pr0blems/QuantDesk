@@ -53,6 +53,8 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="calculator-atr-period"',
         'id="calculator-atr-factor"',
         'id="calculator-atr-status"',
+        'id="calculator-tier-preview" class="calculator-tier-preview"',
+        'id="calculator-tier-levels" class="calculator-tier-levels"',
         'id="calculator-market-change" class="neutral"',
         'class="calculator-summary-table" aria-label="多空止盈价格与收益计算"',
         '<tbody id="calculator-summary"></tbody>',
@@ -67,7 +69,12 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'this.syncCalculatorBoxMode();',
         '一键应用全部设置',
         '按止盈点数、当前合约价格、初始手数和 Binance 杠杆估算实际收益',
-        '基础止盈 TP',
+        '分级止盈参数',
+        '"Kol_Ord_for_TP2"',
+        '"Kol_Ord_for_TP3"',
+        '"Kol_Ord_for_TP4"',
+        'this.calculatorTakeProfitTier(',
+        '起始订单数',
         '预计净 ROE',
         'Binance 24h 涨跌幅',
         'quote.price_change_percent_24h',
@@ -107,7 +114,8 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'if (scope === "all") {' in script
     assert 'this.applyCalculatorPositionSettings();' in script
     assert 'this.applyCalculatorBoxSettings();' in script
-    assert 'const takeProfitKeys = new Set(["TP", "TP2", "TP3", "TP4"]);' in script
+    assert '"TP", "Kol_Ord_for_TP2", "TP2", "Kol_Ord_for_TP3", "TP3", "Kol_Ord_for_TP4", "TP4",' in script
+    assert 'TP1 固定为 1，且 TP2 < TP3 < TP4' in script
     assert 'TrailStart: scaled(6)' in script
 
     assert 'id="standard-execution-note"' in script
@@ -195,7 +203,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-market-grid-alignment-6" in controller
+    assert "/next/assets/backtest.css?v=20260905-calculator-tiers-7" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet

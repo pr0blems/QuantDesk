@@ -552,9 +552,23 @@ button { cursor: pointer; }
 .calculator-atr-status.loading { border-left-color: #b6a5fa; color: #b6a5fa; }
 .calculator-atr-status.error { border-left-color: #ff5d70; color: #ff8998; }
 .calculator-atr-status.manual { border-left-color: #d1aa45; color: #bda968; }
-.calculator-points-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid rgba(139, 123, 211, .2); }
-.calculator-points-head > label { min-width: 205px; display: grid; grid-template-columns: auto minmax(90px, 1fr); align-items: center; gap: 9px; }
-.calculator-points-head span, .calculator-points-head small { color: #7d8fa1; font-size: 11px; }
+.calculator-points-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; border-bottom: 1px solid rgba(139, 123, 211, .2); }
+.calculator-points-head > div { min-width: 0; display: grid; gap: 3px; }
+.calculator-points-head strong { color: #dce8ef; font-size: 13px; }
+.calculator-points-head small { color: #7d8fa1; font-size: 11px; line-height: 1.45; }
+.calculator-tier-preview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: rgba(139, 123, 211, .16); border-bottom: 1px solid rgba(139, 123, 211, .2); }
+.calculator-tier-levels { display: contents; }
+.calculator-tier-card { min-width: 0; background: #0b1724; }
+.calculator-tier-card-head { min-height: 37px; display: flex; align-items: center; gap: 7px; padding: 8px 10px; border-bottom: 1px solid rgba(139, 123, 211, .18); }
+.calculator-tier-card-head > span { padding: 2px 5px; border: 1px solid rgba(182, 165, 250, .4); border-radius: 3px; color: #c8bbfb; background: rgba(139, 123, 211, .14); font-size: 9.5px; font-weight: 900; }
+.calculator-tier-card-head strong { color: #d9e3eb; font-size: 11.5px; }
+.calculator-tier-card-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.calculator-tier-card-fields .calculator-point-field + .calculator-point-field { border-left: 1px solid rgba(139, 123, 211, .14); }
+.calculator-tier-card-fields .calculator-point-field { padding: 9px; }
+.calculator-point-field-fixed input:disabled { color: #8ba0b2; background: rgba(76, 90, 104, .15); cursor: not-allowed; }
+.calculator-secondary-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border-bottom: 1px solid rgba(139, 123, 211, .18); background: rgba(7, 18, 30, .72); }
+.calculator-secondary-head strong { color: #aebdca; font-size: 11.5px; }
+.calculator-secondary-head small { color: #607588; font-size: 10.5px; }
 .calculator-point-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: rgba(139, 123, 211, .16); }
 .calculator-point-field { min-width: 0; display: grid; gap: 5px; padding: 9px 11px; background: #0b1724; }
 .calculator-point-field-disabled { background: rgba(11, 23, 36, .55); }
@@ -643,8 +657,10 @@ button { cursor: pointer; }
   .calculator-context, .calculator-adjustments, .calculator-facts { grid-template-columns: minmax(0, 1fr); }
   .calculator-box-controls { grid-template-columns: minmax(0, 1fr); }
   .calculator-context > div, .calculator-context > label { min-height: 70px; }
+  .calculator-tier-preview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .calculator-point-preview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .calculator-points-head { align-items: flex-start; flex-direction: column; }
+  .calculator-secondary-head { align-items: flex-start; flex-direction: column; gap: 3px; }
   .calculator-box-mode-head { align-items: flex-start; flex-direction: column; }
   .trade-cycle-head { align-items: flex-start; }
   .trade-cycle-timing { grid-template-columns: minmax(0, 1fr); gap: 6px; }
@@ -653,6 +669,7 @@ button { cursor: pointer; }
 }
 
 @media (max-width: 520px) {
+  .calculator-tier-preview { grid-template-columns: minmax(0, 1fr); }
   .workbench-head { margin-inline: -2px; }
   .title-line h1 { font-size: 30.4px; }
   .integrity-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; gap: 5px; }

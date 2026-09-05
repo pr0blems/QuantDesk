@@ -73,7 +73,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-market-grid-alignment-6">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-calculator-tiers-7">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -340,7 +340,18 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                     </div>
                     <p id="calculator-atr-status" class="calculator-atr-status">正在读取箱体参数…</p>
                   </section>
-                  <div class="calculator-points-head"><label><span>基础止盈 TP</span><div class="calculator-point-control"><input id="calculator-base-points" data-calculator-param-key="TP" type="number" min="0.000001" step="any"><span>点</span></div></label><small>修改基础 TP 会重新计算收益，并按马丁 TP4 默认比例更新其余推荐值</small></div>
+                  <div class="calculator-points-head"><div><strong>分级止盈参数</strong><small>每档同时包含起始订单数和止盈点数；TP1 固定从第 1 单开始</small></div><small>修改基础 TP 会重新计算收益，并按马丁 TP4 默认比例更新 TP2–TP4 点数</small></div>
+                  <div id="calculator-tier-preview" class="calculator-tier-preview">
+                    <section class="calculator-tier-card calculator-tier-card-base">
+                      <div class="calculator-tier-card-head"><span>TP1</span><strong>基础止盈</strong></div>
+                      <div class="calculator-tier-card-fields">
+                        <label class="calculator-point-field calculator-point-field-fixed"><small>起始订单数</small><div class="calculator-point-control"><input type="number" value="1" disabled><span>单</span></div></label>
+                        <label class="calculator-point-field"><small>止盈点数</small><div class="calculator-point-control"><input id="calculator-base-points" data-calculator-param-key="TP" type="number" min="0.000001" step="any"><span>点</span></div></label>
+                      </div>
+                    </section>
+                    <div id="calculator-tier-levels" class="calculator-tier-levels"></div>
+                  </div>
+                  <div class="calculator-secondary-head"><strong>网格、追踪与箱体参数</strong><small>这些参数不属于分级止盈，“应用分级止盈”不会改动它们</small></div>
                   <div id="calculator-point-preview" class="calculator-point-preview"></div>
                 </div>
                 <div class="calculator-actions">
@@ -1438,19 +1449,39 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     return `${sign}${numeric.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
   }
 
-  calculatorPointField(key, label, value) {
+  calculatorPointField(key, label, value, { unit = "点", integer = false, minimum = 0 } = {}) {
     const field = this.node("label", "calculator-point-field");
     const input = this.node("input");
     input.type = "number";
-    input.min = "0";
-    input.step = "any";
+    input.min = String(minimum);
+    input.step = integer ? "1" : "any";
+    input.inputMode = integer ? "numeric" : "decimal";
     input.value = String(value);
     input.dataset.calculatorParamKey = key;
     field.append(this.node("small", "", label));
     const control = this.node("div", "calculator-point-control");
-    control.append(input, this.node("span", "", "点"));
+    control.append(input, this.node("span", "", unit));
     field.append(control);
     return field;
+  }
+
+  calculatorTakeProfitTier(code, title, startKey, startValue, pointKey, pointValue) {
+    const card = this.node("section", "calculator-tier-card");
+    const head = this.node("div", "calculator-tier-card-head");
+    head.append(this.node("span", "", code), this.node("strong", "", title));
+    const fields = this.node("div", "calculator-tier-card-fields");
+    fields.append(
+      this.calculatorPointField(startKey, "起始订单数", startValue, { unit: "单", integer: true, minimum: 1 }),
+      this.calculatorPointField(pointKey, "止盈点数", pointValue, { unit: "点", minimum: 0.000001 }),
+    );
+    card.append(head, fields);
+    return card;
+  }
+
+  calculatorStrategyParamValue(key, fallback, { integer = false } = {}) {
+    const value = Number(this.strategyParamInput(key)?.value);
+    if (!Number.isFinite(value) || value < 0) return fallback;
+    return integer ? Math.max(1, Math.round(value)) : value;
   }
 
   syncCalculatorBoxMode() {
@@ -1560,9 +1591,36 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       ),
     );
     this.q("#calculator-note").textContent = `扣除双边手续费与滑点后：预计净利润 ${this.calculatorMoney(values.estimatedNetProfit, true)} · 净 ROE ${this.calculatorPercent(values.estimatedNetRoePct)} · ${this.quantity(values.lot)} 手占用保证金 ${this.calculatorMoney(values.positionMargin)}。`;
+    if (resetPointFields || !this.q("#calculator-tier-levels").children.length) {
+      this.q("#calculator-tier-levels").replaceChildren(
+        this.calculatorTakeProfitTier(
+          "TP2",
+          "第二档止盈",
+          "Kol_Ord_for_TP2",
+          this.calculatorStrategyParamValue("Kol_Ord_for_TP2", 2, { integer: true }),
+          "TP2",
+          this.calculatorStrategyParamValue("TP2", settings.TP2),
+        ),
+        this.calculatorTakeProfitTier(
+          "TP3",
+          "第三档止盈",
+          "Kol_Ord_for_TP3",
+          this.calculatorStrategyParamValue("Kol_Ord_for_TP3", 5, { integer: true }),
+          "TP3",
+          this.calculatorStrategyParamValue("TP3", settings.TP3),
+        ),
+        this.calculatorTakeProfitTier(
+          "TP4",
+          "第四档止盈",
+          "Kol_Ord_for_TP4",
+          this.calculatorStrategyParamValue("Kol_Ord_for_TP4", 7, { integer: true }),
+          "TP4",
+          this.calculatorStrategyParamValue("TP4", settings.TP4),
+        ),
+      );
+    }
     if (resetPointFields || !this.q("#calculator-point-preview").children.length) {
       this.q("#calculator-point-preview").replaceChildren(...[
-        ["TP2", "TP2", settings.TP2], ["TP3", "TP3", settings.TP3], ["TP4", "TP4", settings.TP4],
         ["Distance", "网格间距", settings.Distance], ["MaxSpred", "最大点差", settings.MaxSpred],
         ["TrailStart", "追踪启动", settings.TrailStart], ["TrailDistance", "追踪距离", settings.TrailDistance],
         ["BoxRange", "箱体范围", settings.BoxRange], ["BoxBufferPips", "箱体缓冲", settings.BoxBufferPips],
@@ -1612,7 +1670,25 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       return;
     }
     const settings = this.calculatorPointSettings();
-    const takeProfitKeys = new Set(["TP", "TP2", "TP3", "TP4"]);
+    const takeProfitKeys = new Set([
+      "TP", "Kol_Ord_for_TP2", "TP2", "Kol_Ord_for_TP3", "TP3", "Kol_Ord_for_TP4", "TP4",
+    ]);
+    if (scope === "take-profit" || scope === "all") {
+      const thresholds = [
+        1,
+        Number(settings.Kol_Ord_for_TP2),
+        Number(settings.Kol_Ord_for_TP3),
+        Number(settings.Kol_Ord_for_TP4),
+      ];
+      const validThresholds = thresholds.slice(1).every((value) => Number.isInteger(value) && value >= 1)
+        && thresholds.every((value, index) => index === 0 || value > thresholds[index - 1]);
+      if (!validThresholds) {
+        const message = "分级止盈的起始订单数必须是递增整数：TP1 固定为 1，且 TP2 < TP3 < TP4。";
+        this.q("#calculator-apply-status").textContent = message;
+        this.showBanner(message, "error");
+        return;
+      }
+    }
     let applied = 0;
     Object.entries(settings).forEach(([key, value]) => {
       if (scope === "take-profit" && !takeProfitKeys.has(key)) return;
@@ -1627,7 +1703,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       this.applyCalculatorBoxSettings();
     }
     const message = scope === "take-profit"
-      ? `已写入 ${applied} 项分级止盈点数；点击右上角 × 关闭。`
+      ? `已写入 ${applied} 项分级止盈参数（起始订单数与止盈点数）；点击右上角 × 关闭。`
       : `已写入初始资金、手数、杠杆和 ${applied} 项可编辑点数；点击右上角 × 关闭。`;
     this.q("#calculator-apply-status").textContent = message;
     this.showBanner(message, "success");
