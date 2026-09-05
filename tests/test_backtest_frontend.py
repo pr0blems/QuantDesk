@@ -49,6 +49,10 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="calculator-lot"',
         'id="calculator-initial-capital"',
         'id="calculator-leverage"',
+        'id="calculator-auto-box"',
+        'id="calculator-atr-period"',
+        'id="calculator-atr-factor"',
+        'id="calculator-atr-status"',
         'id="calculator-market-change" class="neutral"',
         'class="calculator-summary-table" aria-label="多空止盈价格与收益计算"',
         '<tbody id="calculator-summary"></tbody>',
@@ -58,6 +62,9 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'this.applyCalculatedPoints("position")',
         'this.applyCalculatedPoints("take-profit")',
         'this.applyCalculatedPoints("all")',
+        'this.applyCalculatorBoxSettings();',
+        'this.calculatorEffectiveBoxPoints()',
+        'this.syncCalculatorBoxMode();',
         '一键应用全部设置',
         '按止盈点数、当前合约价格、初始手数和 Binance 杠杆估算实际收益',
         '基础止盈 TP',
@@ -97,7 +104,9 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
     assert 'const leverage = Number(this.q("#calculator-leverage").value);' in script
     assert 'this.q("#initial-capital").value = String(values.initialCapital);' in script
     assert 'initial_capital: Number(configuration.initial_capital),' in script
-    assert 'if (scope === "all") this.applyCalculatorPositionSettings();' in script
+    assert 'if (scope === "all") {' in script
+    assert 'this.applyCalculatorPositionSettings();' in script
+    assert 'this.applyCalculatorBoxSettings();' in script
     assert 'const takeProfitKeys = new Set(["TP", "TP2", "TP3", "TP4"]);' in script
     assert 'TrailStart: scaled(6)' in script
 
@@ -186,7 +195,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-take-profit-layout-3" in controller
+    assert "/next/assets/backtest.css?v=20260905-atr-calculator-4" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet

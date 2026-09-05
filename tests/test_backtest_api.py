@@ -740,6 +740,11 @@ def test_backtest_position_calculator_returns_live_price_and_contract_rules(
     client.app.state.backtest_position_calculator_change_provider = (
         lambda symbol: Decimal("-1.84") if symbol == "MUUSDT" else Decimal("0")
     )
+    client.app.state.backtest_position_calculator_atr_provider = (
+        lambda symbol, period: Decimal("12.5")
+        if symbol == "MUUSDT" and period == 30
+        else Decimal("0")
+    )
     client.app.state.backtest_contract_rules_provider = lambda symbol: {
         "symbol": symbol,
         "tick_size": Decimal("0.01"),
@@ -751,7 +756,7 @@ def test_backtest_position_calculator_returns_live_price_and_contract_rules(
     with client:
         headers = register_and_login(client, "position-calculator-researcher")
         response = client.get(
-            "/api/v2/backtests/position-calculator?symbol=MUUSDT",
+            "/api/v2/backtests/position-calculator?symbol=MUUSDT&atr_period=30",
             headers=headers,
         )
 
@@ -766,6 +771,11 @@ def test_backtest_position_calculator_returns_live_price_and_contract_rules(
     assert payload["quantity_step"] == 0.01
     assert payload["min_quantity"] == 0.01
     assert payload["min_notional"] == 5.0
+    assert payload["daily_atr_period"] == 30
+    assert payload["daily_atr"] == 12.5
+    assert payload["daily_atr_points"] == 1250.0
+    assert payload["daily_atr_source"] == "test_provider"
+    assert payload["daily_atr_status"] == "ready"
     assert payload["observed_at"].endswith("Z")
 
 

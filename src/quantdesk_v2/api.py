@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from . import __version__, battle
 from .ai_model_config import get_global_ai_model_config
 from .ai_providers import AI_PROVIDER_PRESETS, AiProviderPreset, get_ai_provider
+from .application.martingale_tp4.replay import calculate_wilder_atr
 from .application.martingale_tp4.runtime import DEFAULT_SIGNAL_POINT_SIZE
 from .backtest import (
     STRATEGY_TEMPLATES as BACKTEST_STRATEGY_TEMPLATES,
@@ -131,7 +132,7 @@ from .strategy_lifecycle import (
     BACKTEST_ELIGIBLE_STATUSES,
     current_strategy_revision,
 )
-from .tiger_market_data import list_research_contract_market_links
+from .tiger_market_data import TigerBar, list_research_contract_market_links
 
 router = APIRouter(prefix="/api/v2")
 MIN_PERSISTED_QUANTITY = Decimal("0.000000000000000001")
@@ -2710,6 +2711,7 @@ def backtest_position_calculator(
         max_length=32,
         pattern=r"^[A-Z0-9][A-Z0-9._:/-]*$",
     ),
+    atr_period: int | None = Query(default=None, ge=2, le=365),
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Return the live Binance price and 24-hour change used by the lot calculator.
@@ -2751,7 +2753,7 @@ def backtest_position_calculator(
         ) from None
 
     rules = _backtest_contract_rules(request, normalized)
-    return {
+    result: dict[str, Any] = {
         "symbol": normalized,
         "price": float(price),
         "price_change_percent_24h": (
@@ -2766,6 +2768,85 @@ def backtest_position_calculator(
         "min_notional": rules.get("min_notional"),
         "max_leverage": rules.get("max_leverage", 20),
     }
+    if atr_period is None:
+        return result
+
+    result.update(
+        {
+            "daily_atr_period": atr_period,
+            "daily_atr": None,
+            "daily_atr_points": None,
+            "daily_atr_source": None,
+            "daily_atr_observed_at": None,
+            "daily_atr_status": "unavailable",
+        }
+    )
+    atr_provider = getattr(
+        state, "backtest_position_calculator_atr_provider", None
+    )
+    try:
+        if callable(atr_provider):
+            raw_atr = atr_provider(normalized, atr_period)
+            atr_value = Decimal(str(raw_atr))
+            atr_source = "test_provider"
+            atr_observed_at = None
+        else:
+            now_ts = int(utcnow().timestamp())
+            day_seconds = 24 * 60 * 60
+            lookback_days = max(60, atr_period * 3)
+            begin_ts = now_ts - lookback_days * day_seconds
+            begin_ts -= begin_ts % day_seconds
+            candles, _quality = _backtest(request).load_market_candles(
+                normalized,
+                "1d",
+                begin_ts,
+                now_ts,
+                max_bars=1_100,
+            )
+            received_at = utcnow().replace(tzinfo=UTC)
+            atr_bars = tuple(
+                TigerBar(
+                    symbol=normalized,
+                    timeframe="1d",
+                    trade_session="continuous",
+                    adjustment="none",
+                    open_time=int(candle.ts) * 1_000,
+                    close_time=(int(candle.ts) + day_seconds) * 1_000,
+                    open=Decimal(str(candle.open)),
+                    high=Decimal(str(candle.high)),
+                    low=Decimal(str(candle.low)),
+                    close=Decimal(str(candle.close)),
+                    volume=Decimal(str(candle.volume)),
+                    amount=None,
+                    received_at=received_at,
+                    source_version="binance_fapi_1d",
+                )
+                for candle in candles
+            )
+            atr_series = calculate_wilder_atr(atr_bars, atr_period)
+            if not atr_series:
+                raise ValueError("daily ATR coverage is insufficient")
+            atr_observed_at_ms, atr_value = atr_series[-1]
+            atr_source = "binance_fapi_1d"
+            atr_observed_at = _utc_iso(
+                datetime.fromtimestamp(atr_observed_at_ms / 1_000, tz=UTC)
+            )
+        if not atr_value.is_finite() or atr_value <= 0:
+            raise ValueError("invalid daily ATR")
+        result.update(
+            {
+                "daily_atr": float(atr_value),
+                "daily_atr_points": float(atr_value / DEFAULT_SIGNAL_POINT_SIZE),
+                "daily_atr_source": atr_source,
+                "daily_atr_observed_at": atr_observed_at,
+                "daily_atr_status": "ready",
+            }
+        )
+    except (BacktestUnavailable, HTTPException, InvalidOperation, TypeError, ValueError):
+        # The optional preview must not hide the still-useful position calculator.
+        # Replay keeps its own fail-closed daily-bar coverage validation.
+        result["daily_atr_status"] = "unavailable"
+    return result
 
 
 @router.get("/backtests/catalog")

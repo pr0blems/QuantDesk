@@ -529,11 +529,31 @@ button { cursor: pointer; }
 .calculator-summary-table tr.short td:first-child strong, .calculator-summary-table tr.short td:nth-child(3) strong { color: #ff8998; }
 .calculator-explanation p { margin: 9px 0 0; color: #8ca0af; font-size: 11.5px; line-height: 1.55; }
 .calculator-points { margin-top: 12px; border: 1px solid rgba(139, 123, 211, .28); background: rgba(28, 25, 52, .25); }
+.calculator-box-mode { padding: 12px; border-bottom: 1px solid rgba(139, 123, 211, .2); background: rgba(8, 27, 35, .7); }
+.calculator-box-mode-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.calculator-box-mode-head > div { min-width: 0; display: grid; gap: 3px; }
+.calculator-box-mode-head strong { color: #dce8ef; font-size: 13px; }
+.calculator-box-mode-head small { color: #71879a; font-size: 10.5px; line-height: 1.45; }
+.calculator-box-switch { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; color: #8fe0c8; font-size: 11.5px; font-weight: 800; cursor: pointer; }
+.calculator-box-switch input { width: 16px; height: 16px; accent-color: #45d3a8; }
+.calculator-box-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 10px; }
+.calculator-box-controls label { min-width: 0; display: grid; gap: 5px; color: #7690a3; font-size: 10.5px; }
+.calculator-box-controls input { width: 100%; min-width: 0; min-height: 36px; padding: 6px 9px; border: 1px solid rgba(74, 211, 166, .25); color: #d5e7e1; background: #07121e; font-size: 13px; font-weight: 750; }
+.calculator-box-controls input:disabled { border-color: rgba(121, 151, 180, .12); color: #536878; background: rgba(7, 18, 30, .55); cursor: not-allowed; }
+.calculator-atr-status { margin: 9px 0 0; padding: 8px 10px; border-left: 2px solid #788ca0; color: #879cac; background: rgba(7, 18, 30, .6); font-size: 11px; line-height: 1.55; }
+.calculator-atr-status.ready { border-left-color: #45d3a8; color: #84d9bf; }
+.calculator-atr-status.loading { border-left-color: #b6a5fa; color: #b6a5fa; }
+.calculator-atr-status.error { border-left-color: #ff5d70; color: #ff8998; }
+.calculator-atr-status.manual { border-left-color: #d1aa45; color: #bda968; }
 .calculator-points-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid rgba(139, 123, 211, .2); }
 .calculator-points-head > label { min-width: 205px; display: grid; grid-template-columns: auto minmax(90px, 1fr); align-items: center; gap: 9px; }
 .calculator-points-head span, .calculator-points-head small { color: #7d8fa1; font-size: 11px; }
 .calculator-point-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: rgba(139, 123, 211, .16); }
 .calculator-point-field { min-width: 0; display: grid; gap: 5px; padding: 9px 11px; background: #0b1724; }
+.calculator-point-field-disabled { background: rgba(11, 23, 36, .55); }
+.calculator-point-field-disabled small { color: #4f6475; }
+.calculator-point-field-disabled .calculator-point-control { border-color: rgba(121, 151, 180, .12); }
+.calculator-point-field-disabled input { color: #7190a2; cursor: not-allowed; }
 .calculator-point-preview small { color: #687f93; font-size: 10.5px; }
 .calculator-point-control { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; border: 1px solid rgba(139, 123, 211, .35); background: #07121e; }
 .calculator-point-control input { width: 100%; min-width: 0; min-height: 34px; padding: 5px 8px; border: 0; color: #c8bbfb; background: transparent; font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; }
@@ -614,9 +634,11 @@ button { cursor: pointer; }
   .calculator-dialog-backdrop { padding: 10px; }
   .lot-calculator-dialog { max-height: calc(100vh - 20px); }
   .calculator-context, .calculator-adjustments, .calculator-facts { grid-template-columns: minmax(0, 1fr); }
+  .calculator-box-controls { grid-template-columns: minmax(0, 1fr); }
   .calculator-context > div, .calculator-context > label { min-height: 70px; }
   .calculator-point-preview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .calculator-points-head { align-items: flex-start; flex-direction: column; }
+  .calculator-box-mode-head { align-items: flex-start; flex-direction: column; }
   .trade-cycle-head { align-items: flex-start; }
   .trade-cycle-timing { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .trade-time-arrow { min-height: 18px; transform: rotate(90deg); }
