@@ -59,6 +59,28 @@ def _fresh_prices(symbol: str, price: float, timestamp: int) -> paper._PriceSnap
     return snapshot
 
 
+def test_paper_symbols_preserve_legacy_universe_and_honor_explicit_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    monkeypatch.setattr(paper, "tradfi_symbols", lambda: ["AAPLUSDT", "MSFTUSDT"])
+
+    assert paper._paper_symbols(account) == ["AAPLUSDT", "MSFTUSDT"]
+
+    account["config_json"]["symbols"] = ["msftusdt", "UNKNOWNUSDT", "MSFTUSDT"]
+    assert paper._paper_symbols(account) == ["MSFTUSDT"]
+
+
+def test_explicit_empty_paper_symbol_universe_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    account["config_json"]["symbols"] = []
+    monkeypatch.setattr(paper, "tradfi_symbols", lambda: ["AAPLUSDT"])
+
+    assert paper._paper_symbols(account) == []
+
+
 def _mock_open_transaction(
     monkeypatch: pytest.MonkeyPatch,
     account: dict,

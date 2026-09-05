@@ -72,7 +72,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-calculator-capital-1">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-parameter-groups-2">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -167,7 +167,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
             <section id="parameter-section" class="config-section hidden">
               <div class="section-head"><div><span class="section-index">05</span><strong>策略参数</strong><button id="lot-calculator-trigger" class="lot-calculator-trigger hidden" type="button" aria-label="打开仓位与止盈计算器">计算器</button></div><button id="reset-params" class="text-button" type="button">恢复默认</button></div>
-              <div id="strategy-params" class="field-grid two"></div>
+              <div id="strategy-params" class="strategy-parameter-groups"></div>
             </section>
             </div>
 
@@ -432,6 +432,12 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#reset-params").addEventListener("click", () => {
       this.renderParameters(true);
       this.captureActiveSymbolConfiguration(true);
+    });
+    ["input", "change"].forEach((eventName) => {
+      this.q("#strategy-params").addEventListener(eventName, (event) => {
+        const input = event.target.closest?.("[data-param-key]");
+        if (input) this.syncParameterDependencies();
+      });
     });
     this.qa("[data-months]").forEach((button) => button.addEventListener("click", () => this.applyRange(button.dataset.months)));
     this.bindPriceChartEvents();
@@ -1013,6 +1019,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       const fieldName = this.node("span", "field-label", param.label || param.key);
       label.append(fieldName);
       const type = String(param.type || "number").toLowerCase();
+      const switchInteger = param.control === "switch" && type === "integer";
       let input;
       if (Array.isArray(param.options)) {
         input = this.node("select");
@@ -1022,10 +1029,11 @@ class BacktestWorkbench extends window.QuantDeskPageController {
           optionNode.value = String(value);
           return optionNode;
         }));
-      } else if (type === "boolean" || type === "bool") {
+      } else if (switchInteger || type === "boolean" || type === "bool") {
         input = this.node("input");
         input.type = "checkbox";
-        label.classList.add("checkbox-field");
+        input.setAttribute("role", "switch");
+        label.classList.add("parameter-switch-field");
       } else {
         input = this.node("input");
         input.type = type === "integer" || type === "float" || type === "number" ? "number" : "text";
@@ -1041,14 +1049,130 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       input.dataset.paramKey = String(param.key || "");
       input.dataset.paramType = type;
       const value = Object.prototype.hasOwnProperty.call(existing, param.key) ? existing[param.key] : param.default;
-      if (input.type === "checkbox") input.checked = Boolean(value);
+      if (input.type === "checkbox") input.checked = value === true || Number(value) === 1;
       else if (value != null) input.value = String(value);
-      if (input.type === "checkbox") label.prepend(input);
-      else label.append(input);
+      if (input.type === "checkbox") {
+        const control = this.node("span", "parameter-switch-control");
+        const visual = this.node("span", "parameter-switch-visual");
+        visual.append(this.node("i", "parameter-switch-knob"));
+        control.append(input, visual, this.node("strong", "parameter-switch-state"));
+        label.append(control);
+      } else label.append(input);
       if (param.help) label.append(this.node("small", "field-help", param.help));
+      label.append(this.node("small", "parameter-dependency-help hidden"));
       return label;
     });
-    container.replaceChildren(...fields);
+    const grouped = new Map();
+    params.forEach((param, index) => {
+      const metadata = this.parameterGroupMetadata(param.group);
+      if (!grouped.has(metadata.name)) grouped.set(metadata.name, { ...metadata, fields: [] });
+      grouped.get(metadata.name).fields.push(fields[index]);
+    });
+    container.replaceChildren(...Array.from(grouped.values(), (group, index) => {
+      const block = this.node("section", "strategy-parameter-group");
+      block.dataset.parameterGroup = group.name;
+      const header = this.node("header", "strategy-parameter-group-head");
+      const title = this.node("div");
+      title.append(
+        this.node("span", "strategy-parameter-group-index", String(index + 1).padStart(2, "0")),
+        this.node("strong", "", group.name),
+      );
+      header.append(title, this.node("small", "", group.description));
+      const grid = this.node("div", "field-grid two strategy-parameter-grid");
+      grid.append(...group.fields);
+      block.append(header, grid, this.node("p", "parameter-group-message hidden"));
+      return block;
+    }));
+    this.syncParameterDependencies();
+  }
+
+  parameterGroupMetadata(rawName) {
+    const groups = {
+      "运行模式": ["交易模式与周期", "选择运行方式，并控制是否允许建立新的交易周期"],
+      "仓位递增": ["仓位与网格加仓", "设置首单手数、递增规则、订单上限和网格加仓距离"],
+      "执行约束": ["成交与点差约束", "限制允许成交的市场点差，避免异常报价触发交易"],
+      "分级止盈": ["分级止盈", "根据当前篮子订单数量，自动切换对应的止盈点数"],
+      "止损与追踪": ["金额止损与追踪止盈", "控制篮子金额止损，以及盈利后的动态回撤保护"],
+      "首尾覆盖": ["篮子首尾覆盖", "订单较多时，用首尾订单组合盈利覆盖中间持仓"],
+      "运行时段": ["自动交易时段", "限制自动模式建立新交易周期的小时范围"],
+      "突破箱体": ["突破箱体与 ATR", "设置箱体识别、ATR 自适应范围和突破确认缓冲"],
+      "MQ4 兼容": ["兼容与显示设置", "仅用于兼容原 MQ4 策略参数，通常无需修改"],
+    };
+    const fallback = String(rawName || "其他策略参数").trim() || "其他策略参数";
+    const [name, description] = groups[fallback] || [fallback, "当前策略运行所需的参数配置"];
+    return { name, description };
+  }
+
+  parameterSwitchEnabled(key) {
+    const input = this.strategyParamInput(key);
+    if (!input) return false;
+    return input.type === "checkbox" ? input.checked : Number(input.value) !== 0;
+  }
+
+  setParameterDisabled(key, disabled, message = "") {
+    const input = this.strategyParamInput(key);
+    if (!input) return;
+    input.disabled = Boolean(disabled);
+    input.setAttribute("aria-disabled", String(Boolean(disabled)));
+    const field = input.closest("label");
+    field?.classList.toggle("parameter-field-disabled", Boolean(disabled));
+    const help = field?.querySelector(".parameter-dependency-help");
+    if (help) {
+      help.textContent = disabled ? message : "";
+      help.classList.toggle("hidden", !disabled || !message);
+    }
+  }
+
+  setParameterGroupMessage(groupName, message = "", tone = "info") {
+    const group = this.q(`[data-parameter-group="${groupName}"]`);
+    const target = group?.querySelector(".parameter-group-message");
+    if (!target) return;
+    target.textContent = message;
+    target.className = `parameter-group-message ${message ? tone : "hidden"}`;
+  }
+
+  syncParameterDependencies() {
+    this.qa(".parameter-switch-field input[type=checkbox]").forEach((input) => {
+      const field = input.closest("label");
+      const state = field?.querySelector(".parameter-switch-state");
+      if (state) state.textContent = input.checked ? "已开启" : "已关闭";
+      input.setAttribute("aria-checked", String(input.checked));
+      field?.classList.toggle("enabled", input.checked);
+    });
+
+    const autoBox = this.parameterSwitchEnabled("AutoBoxRange");
+    this.setParameterDisabled("BoxRange", autoBox, "ATR 自适应箱体已开启，固定箱体范围不参与计算。");
+    this.setParameterDisabled("AutoBoxRangeDailyATRperiod", !autoBox, "开启 ATR 自适应箱体后才可配置。");
+    this.setParameterDisabled("AutoBoxRangeDailyATRfactor", !autoBox, "开启 ATR 自适应箱体后才可配置。");
+    this.setParameterGroupMessage(
+      "突破箱体与 ATR",
+      autoBox
+        ? "当前使用：日线 ATR × ATR 系数计算箱体范围；固定箱体范围已停用。"
+        : "当前使用：固定箱体范围；ATR 周期和系数已停用。",
+    );
+
+    const overlap = this.parameterSwitchEnabled("Overlap");
+    this.setParameterDisabled("OverlapOrderNumber", !overlap, "开启篮子首尾覆盖后才可配置。");
+    this.setParameterDisabled("OverlapPercent", !overlap, "开启篮子首尾覆盖后才可配置。");
+
+    const trailStart = Number(this.strategyParamInput("TrailStart")?.value || 0);
+    const trailDistance = Number(this.strategyParamInput("TrailDistance")?.value || 0);
+    this.setParameterDisabled("TrailDistance", trailStart <= 0, "追踪启动为 0 时，追踪止盈处于关闭状态。");
+    const takeProfitPoints = ["TP", "TP2", "TP3", "TP4"]
+      .map((key) => Number(this.strategyParamInput(key)?.value))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const maximumTakeProfit = takeProfitPoints.length ? Math.max(...takeProfitPoints) : 0;
+    let trailingMessage = "";
+    let trailingTone = "info";
+    if (trailStart <= 0) trailingMessage = "追踪止盈已关闭；填写大于 0 的追踪启动点数后启用。";
+    else if (maximumTakeProfit > 0 && trailStart >= maximumTakeProfit) {
+      trailingMessage = `追踪启动 ${trailStart} 点不低于最高止盈 ${maximumTakeProfit} 点，固定止盈会先触发，追踪止盈不会生效。`;
+      trailingTone = "warning";
+    } else if (trailDistance >= trailStart) {
+      trailingMessage = "追踪距离必须小于追踪启动点数，否则无法形成有效的盈利保护区间。";
+      trailingTone = "warning";
+    } else trailingMessage = `盈利达到 ${trailStart} 点后启动追踪，从最佳价格回撤 ${trailDistance} 点时平仓。`;
+    this.setParameterGroupMessage("金额止损与追踪止盈", trailingMessage, trailingTone);
   }
 
   strategyParamInput(key) {
@@ -1442,7 +1566,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     const params = {};
     this.qa("[data-param-key]").forEach((input) => {
       const type = input.dataset.paramType;
-      const value = type === "boolean" || type === "bool" ? (input.checked ? 1 : 0) : Number(input.value);
+      const value = input.type === "checkbox" || type === "boolean" || type === "bool"
+        ? (input.checked ? 1 : 0)
+        : Number(input.value);
       if (Number.isFinite(value)) params[input.dataset.paramKey] = value;
     });
     return params;
@@ -1485,6 +1611,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       if (input.type === "checkbox") input.checked = Boolean(Number(value));
       else input.value = String(value);
     });
+    this.syncParameterDependencies();
   }
 
   loadSelectedParameterProfiles() {

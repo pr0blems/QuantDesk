@@ -186,10 +186,42 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-calculator-capital-1" in controller
+    assert "/next/assets/backtest.css?v=20260905-parameter-groups-2" in controller
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
     assert "calc(100% - clamp(16px, 1.25vw, 32px))" in stylesheet
+
+
+def test_backtest_groups_strategy_parameters_and_enforces_dependencies() -> None:
+    script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
+
+    for contract in (
+        'id="strategy-params" class="strategy-parameter-groups"',
+        'param.control === "switch" && type === "integer"',
+        'input.setAttribute("role", "switch")',
+        '"仓位与网格加仓"',
+        '"成交与点差约束"',
+        '"分级止盈"',
+        '"金额止损与追踪止盈"',
+        '"突破箱体与 ATR"',
+        'this.setParameterDisabled("BoxRange", autoBox',
+        'this.setParameterDisabled("AutoBoxRangeDailyATRperiod", !autoBox',
+        'ATR 自适应箱体已开启，固定箱体范围不参与计算。',
+        '固定止盈会先触发，追踪止盈不会生效。',
+        'input.type === "checkbox" || type === "boolean" || type === "bool"',
+        'this.syncParameterDependencies();',
+    ):
+        assert contract in script
+
+    for contract in (
+        ".strategy-parameter-group {",
+        ".strategy-parameter-group-head {",
+        ".parameter-switch-field {",
+        ".parameter-field-disabled {",
+        ".parameter-group-message.warning {",
+    ):
+        assert contract in stylesheet
 
 
 def test_backtest_missing_metrics_are_not_rendered_as_zero() -> None:

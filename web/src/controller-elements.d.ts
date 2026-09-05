@@ -14,6 +14,7 @@ declare global {
     quantdeskApiStream: (path: string, options?: ApiStreamOptions) => Promise<Response>;
     quantdeskOpenAiMonitorSocket: () => Promise<WebSocket>;
     quantdeskOpenMonitorMarketSocket: (symbol: string) => Promise<WebSocket>;
+    quantdeskOpenPaperMarketSocket: (symbols: string[]) => Promise<WebSocket>;
     quantdeskHasPageController: (name: PageControllerName) => boolean;
     quantdeskMountPageController: (name: PageControllerName, host: HTMLElement) => PageController;
     quantdeskGetMountedPageController: (host: HTMLElement | null) => PageController | null;

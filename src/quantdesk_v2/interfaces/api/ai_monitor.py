@@ -2169,11 +2169,12 @@ def overview(
 
 @router.websocket("/market/ws")
 async def ai_monitor_market_websocket(websocket: WebSocket) -> None:
-    """Push one contract's live Binance snapshot to the research modal.
+    """Push live Binance snapshots to research and paper-trading charts.
 
     The upstream market worker remains the single owner of the Binance streams.
-    Browsers receive the resulting quote/depth changes through this authenticated
-    socket, while the repository preserves the upstream WS -> REST-cache order.
+    The legacy ``symbol`` mode includes depth for the research modal.  The
+    ``symbols`` mode batches up to 20 lightweight quotes on one socket so a paper
+    account can animate several charts without opening one connection per card.
     """
 
     token = _websocket_access_token(websocket)
@@ -2187,12 +2188,23 @@ async def ai_monitor_market_websocket(websocket: WebSocket) -> None:
         return
 
     symbol = str(websocket.query_params.get("symbol") or "").strip().upper()
+    raw_symbols = str(websocket.query_params.get("symbols") or "").strip()
+    symbols = list(
+        dict.fromkeys(
+            item.strip().upper() for item in raw_symbols.split(",") if item.strip()
+        )
+    )
+    batch_mode = bool(raw_symbols)
+    if batch_mode and (not symbols or len(symbols) > 20):
+        await websocket.close(code=4400, reason="select between 1 and 20 symbols")
+        return
     try:
         repository = MonitorRepository(
             websocket.app.state.database_engine,
             websocket.app.state.settings.monitor_symbols_config,
         )
-        if symbol not in repository.symbol_set:
+        requested_symbols = symbols if batch_mode else [symbol]
+        if any(item not in repository.symbol_set for item in requested_symbols):
             raise MonitorUnavailable("unknown contract monitor symbol")
     except MonitorUnavailable:
         await websocket.close(code=4404, reason="unknown monitor symbol")
@@ -2204,9 +2216,53 @@ async def ai_monitor_market_websocket(websocket: WebSocket) -> None:
     try:
         while True:
             try:
-                snapshot = await run_in_threadpool(repository.market_snapshot, symbol)
+                if batch_mode:
+                    tickers = await run_in_threadpool(
+                        repository.latest_tickers, requested_symbols
+                    )
+                    now_seconds = int(time.time())
+                    snapshots = []
+                    for item in requested_symbols:
+                        ticker = tickers.get(item) or {}
+                        ticker_at = int(ticker.get("ts") or 0)
+                        price = _finite_price(ticker.get("price"))
+                        change_percent = _finite_number(ticker.get("pct_24h"))
+                        change_price = (
+                            price - (price / (1 + change_percent / 100))
+                            if price is not None
+                            and change_percent is not None
+                            and change_percent > -100
+                            else None
+                        )
+                        snapshots.append(
+                            {
+                                "symbol": item,
+                                "price": price,
+                                "pct_24h": change_percent,
+                                "price_change_24h": change_price,
+                                "quote_volume": _finite_number(
+                                    ticker.get("quote_volume")
+                                ),
+                                "ticker_updated_at": ticker_at or None,
+                                "ticker_age_seconds": (
+                                    max(0, now_seconds - ticker_at)
+                                    if ticker_at
+                                    else None
+                                ),
+                            }
+                        )
+                    event = "markets"
+                    payload: dict[str, Any] = {"items": snapshots}
+                    snapshot_for_signature: Any = snapshots
+                else:
+                    snapshot = await run_in_threadpool(
+                        repository.market_snapshot, symbol
+                    )
+                    event = "market"
+                    payload = snapshot
+                    snapshot_for_signature = snapshot
                 signature = json.dumps(
-                    snapshot,
+                    snapshot_for_signature,
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -2214,9 +2270,9 @@ async def ai_monitor_market_websocket(websocket: WebSocket) -> None:
                 if signature != previous_signature:
                     await websocket.send_json(
                         {
-                            "event": "market",
+                            "event": event,
                             "data": {
-                                **snapshot,
+                                **payload,
                                 "server_sent_at_ms": int(time.time() * 1_000),
                             },
                         }
@@ -2236,7 +2292,8 @@ async def ai_monitor_market_websocket(websocket: WebSocket) -> None:
                     {
                         "event": "heartbeat",
                         "data": {
-                            "symbol": symbol,
+                            "symbol": symbol if not batch_mode else None,
+                            "symbols": requested_symbols if batch_mode else None,
                             "server_sent_at_ms": int(time.time() * 1_000),
                         },
                     }

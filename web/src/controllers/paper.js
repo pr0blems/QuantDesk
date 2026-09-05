@@ -11,6 +11,23 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.loadSequence = 0;
     this.strategyCatalog = [];
     this.adjustStrategyRequest = 0;
+    this.adjustSymbol = "";
+    this.symbolCatalog = [];
+    this.marketChartData = new Map();
+    this.marketChartViews = new Map();
+    this.marketTradeMarkers = new Map();
+    this.marketChartRequest = 0;
+    this.marketChartKey = "";
+    this.marketChartRefreshAt = 0;
+    this.marketStreamKey = "";
+    this.marketStreamSymbols = [];
+    this.marketStreamSocket = null;
+    this.marketStreamGeneration = 0;
+    this.marketStreamReconnectTimer = null;
+    this.marketStreamWatchdogTimer = null;
+    this.marketStreamLastMessageAt = 0;
+    this.marketStreamStatus = "idle";
+    this.marketRedrawFrame = null;
     this.storageKey = "quantdesk.paper.selected-account";
     this.eventsBound = false;
     this.renderShell();
@@ -24,8 +41,9 @@ class PaperDashboard extends window.QuantDeskPageController {
     if ("ResizeObserver" in window && !this.resizeObserver) {
       this.resizeObserver = new ResizeObserver(() => {
         if (this.data) this.drawCurve(this.data.curve || [], this.data.account?.start || 10000);
+        this.redrawMarketCharts();
       });
-      this.resizeObserver.observe(this.q("#chart-wrap"));
+      this.resizeObserver.observe(this.q(".paper-dashboard"));
     }
   }
 
@@ -37,7 +55,7 @@ class PaperDashboard extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/paper.css?v=20260905-strategy-parameters">
+      <link rel="stylesheet" href="/next/assets/paper.css?v=20260905-paper-box-signals">
       <main class="paper-dashboard">
         <nav class="account-switcher" aria-label="模拟盘切换">
           <div id="paper-account-tabs" class="account-tabs" role="tablist" aria-label="我的模拟盘">
@@ -66,6 +84,7 @@ class PaperDashboard extends window.QuantDeskPageController {
             <button id="paper-toggle-status" class="action-button status-button" type="button" disabled>暂停运行</button>
             <button id="paper-rename" class="action-button manage-button" type="button" disabled>修改名称</button>
             <button id="paper-adjust" class="action-button manage-button" type="button" disabled>调整参数</button>
+            <button id="paper-add-symbol" class="action-button symbol-button" type="button" disabled>添加交易品种</button>
             <button id="paper-reset" class="action-button reset-button" type="button" disabled title="重置当前模拟盘，不影响其他模拟盘">重置账户</button>
             <button id="paper-delete" class="action-button delete-button" type="button" disabled title="删除当前模拟盘">删除</button>
           </div>
@@ -80,6 +99,16 @@ class PaperDashboard extends window.QuantDeskPageController {
           <article class="paper-card" data-metric="realized"><span>已实现盈亏</span><strong>--</strong><small>成交统计 --</small></article>
           <article class="paper-card" data-metric="win-rate"><span>胜率</span><strong>--</strong><small>盈亏比 --</small></article>
           <article class="paper-card" data-metric="drawdown"><span>最大回撤</span><strong>--</strong><small>仓位 --</small></article>
+        </section>
+
+        <section id="paper-market-panel" class="paper-panel market-panel">
+          <div class="panel-title market-panel-title">
+            <span><i class="chart-mark" aria-hidden="true"></i>交易品种 K 线 <em>M15</em></span>
+            <span id="paper-market-summary" class="panel-meta">点击“添加交易品种”开始</span>
+          </div>
+          <div id="paper-market-charts" class="market-chart-grid">
+            <div class="market-chart-empty"><strong>尚未添加交易品种</strong><span>添加后自动加载对应的 M15 K 线图，并限定当前模拟盘的新开仓范围。</span></div>
+          </div>
         </section>
 
         <section class="paper-panel equity-panel">
@@ -164,7 +193,7 @@ class PaperDashboard extends window.QuantDeskPageController {
               <div>
                 <span class="modal-kicker">STRATEGY PARAMETERS</span>
                 <h2 id="paper-adjust-title">调整策略参数</h2>
-                <p>修改当前模拟盘所绑定策略的默认运行参数。</p>
+                <p id="paper-adjust-description">修改当前模拟盘所绑定策略的默认运行参数。</p>
               </div>
               <button class="modal-close" type="button" data-adjust-modal-close aria-label="关闭">×</button>
             </header>
@@ -175,11 +204,38 @@ class PaperDashboard extends window.QuantDeskPageController {
                 <small id="paper-adjust-strategy-note">正在读取策略参数…</small>
               </label>
               <div id="paper-adjust-parameters" class="strategy-parameter-groups" aria-live="polite"></div>
-              <p class="form-note">保存的是策略默认运行参数，下一轮信号计算生效；已有币种专属参数时，币种参数仍然优先。</p>
+              <p id="paper-adjust-scope-note" class="form-note">保存的是策略默认运行参数，下一轮信号计算生效；已有币种专属参数时，币种参数仍然优先。</p>
               <p id="paper-adjust-error" class="form-error hidden" role="alert"></p>
               <footer class="modal-actions">
                 <button class="action-button" type="button" data-adjust-modal-close>取消</button>
                 <button id="paper-adjust-submit" class="create-account-button" type="submit">保存策略参数</button>
+              </footer>
+            </form>
+          </section>
+        </div>
+
+        <div id="paper-symbol-modal" class="paper-modal hidden" aria-hidden="true">
+          <button class="modal-backdrop" type="button" data-symbol-modal-close aria-label="关闭交易品种窗口"></button>
+          <section class="modal-card symbol-modal-card" role="dialog" aria-modal="true" aria-labelledby="paper-symbol-title">
+            <header class="modal-head">
+              <div>
+                <span class="modal-kicker">TRADING SYMBOLS · M15</span>
+                <h2 id="paper-symbol-title">添加交易品种</h2>
+                <p>所选品种会自动加载 M15 K 线，并作为当前模拟盘的新开仓范围。</p>
+              </div>
+              <button class="modal-close" type="button" data-symbol-modal-close aria-label="关闭">×</button>
+            </header>
+            <form id="paper-symbol-form" class="symbol-form">
+              <label class="form-field form-field-wide">
+                <span>搜索交易品种</span>
+                <input id="paper-symbol-search" type="search" maxlength="32" autocomplete="off" placeholder="输入代码，例如 AAPL、XAU">
+                <small id="paper-symbol-note">最多选择 20 个品种。</small>
+              </label>
+              <div id="paper-symbol-picker" class="symbol-picker" role="group" aria-label="选择模拟盘交易品种"></div>
+              <p id="paper-symbol-error" class="form-error hidden" role="alert"></p>
+              <footer class="modal-actions">
+                <button class="action-button" type="button" data-symbol-modal-close>取消</button>
+                <button id="paper-symbol-submit" class="create-account-button" type="submit">保存并加载 K 线</button>
               </footer>
             </form>
           </section>
@@ -201,6 +257,7 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.q("#paper-reset").addEventListener("click", () => this.resetAccount());
     this.q("#paper-rename").addEventListener("click", () => this.renameAccount());
     this.q("#paper-adjust").addEventListener("click", () => this.openAdjustDialog());
+    this.q("#paper-add-symbol").addEventListener("click", () => this.openSymbolDialog());
     this.q("#paper-delete").addEventListener("click", () => this.deleteAccount());
     this.q("#paper-toggle-status").addEventListener("click", () => this.toggleAccountStatus());
     this.q("#paper-create").addEventListener("click", () => this.openCreateDialog());
@@ -213,15 +270,22 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.q("#paper-create-strategies").addEventListener("change", () => this.applyStrategyDefaults());
     this.q("#paper-adjust-form").addEventListener("submit", (event) => this.adjustAccount(event));
     this.q("#paper-adjust-strategy").addEventListener("change", () => this.loadAdjustStrategyParameters());
+    this.q("#paper-symbol-form").addEventListener("submit", (event) => this.savePaperSymbols(event));
+    this.q("#paper-symbol-search").addEventListener("input", () => this.filterSymbolPicker());
+    this.q("#paper-symbol-picker").addEventListener("change", () => this.updateSymbolSelectionNote());
     this.shadowRoot.querySelectorAll("[data-modal-close]").forEach((button) => {
       button.addEventListener("click", () => this.closeCreateDialog());
     });
     this.shadowRoot.querySelectorAll("[data-adjust-modal-close]").forEach((button) => {
       button.addEventListener("click", () => this.closeAdjustDialog());
     });
+    this.shadowRoot.querySelectorAll("[data-symbol-modal-close]").forEach((button) => {
+      button.addEventListener("click", () => this.closeSymbolDialog());
+    });
     this.shadowRoot.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if (!this.q("#paper-adjust-modal").classList.contains("hidden")) this.closeAdjustDialog();
+      if (!this.q("#paper-symbol-modal").classList.contains("hidden")) this.closeSymbolDialog();
+      else if (!this.q("#paper-adjust-modal").classList.contains("hidden")) this.closeAdjustDialog();
       else if (!this.q("#paper-create-modal").classList.contains("hidden")) this.closeCreateDialog();
     });
   }
@@ -245,6 +309,7 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.running = false;
     if (this.timer) window.clearInterval(this.timer);
     this.timer = null;
+    this.stopMarketStream();
   }
 
   async load() {
@@ -263,6 +328,7 @@ class PaperDashboard extends window.QuantDeskPageController {
         this.q("#paper-reset").disabled = true;
         this.q("#paper-rename").disabled = true;
         this.q("#paper-adjust").disabled = true;
+        this.q("#paper-add-symbol").disabled = true;
         this.q("#paper-delete").disabled = true;
         return;
       }
@@ -486,12 +552,23 @@ class PaperDashboard extends window.QuantDeskPageController {
       .filter(Boolean);
   }
 
-  async openAdjustDialog() {
+  async openAdjustDialog(rawSymbol = "") {
     const account = this.accounts.find((item) => item.id === this.selectedAccountId);
     if (!account) return;
-    const button = this.q("#paper-adjust");
-    button.disabled = true;
-    button.textContent = "读取参数…";
+    const symbol = String(rawSymbol || "").trim().toUpperCase();
+    const selectedSymbols = Array.isArray(account.symbols) ? account.symbols : [];
+    if (symbol && !selectedSymbols.includes(symbol)) {
+      this.showBanner("该品种已不在当前模拟盘的交易范围内，请刷新后重试。", "error");
+      return;
+    }
+    this.adjustSymbol = symbol;
+    const button = symbol
+      ? this.shadowRoot.querySelector(`[data-market-strategy="${symbol}"]`)
+      : this.q("#paper-adjust");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "读取参数…";
+    }
     try {
       await this.loadStrategyCatalog();
       if (!this.strategyCatalog.length) throw new Error("请先在策略中心创建或启用策略");
@@ -507,6 +584,15 @@ class PaperDashboard extends window.QuantDeskPageController {
         `<option value="${this.escape(strategy.id)}">${this.escape(strategy.name)} · v${this.escape(strategy.version || "1")}</option>`
       )).join("");
       selector.disabled = boundStrategies.length === 1;
+      this.q("#paper-adjust-title").textContent = symbol
+        ? `${this.symbol(symbol)} 策略参数配置`
+        : "调整策略参数";
+      this.q("#paper-adjust-description").textContent = symbol
+        ? `为 ${symbol} 单独设置交易策略参数，不影响其他品种。`
+        : "修改当前模拟盘所绑定策略的默认运行参数。";
+      this.q("#paper-adjust-scope-note").textContent = symbol
+        ? `${symbol} 专属参数优先于策略默认参数，并在模拟盘下一轮信号计算时生效。`
+        : "保存的是策略默认运行参数，下一轮信号计算生效；已有币种专属参数时，币种参数仍然优先。";
       this.q("#paper-adjust-parameters").innerHTML = '<p class="parameter-loading">正在读取策略参数…</p>';
       this.q("#paper-adjust-strategy-note").textContent = "正在读取策略参数…";
       this.showAdjustError("");
@@ -520,17 +606,24 @@ class PaperDashboard extends window.QuantDeskPageController {
     } catch (error) {
       this.showBanner(`无法调整参数：${error.message}`, "error");
     } finally {
-      button.textContent = "调整参数";
-      button.disabled = !this.selectedAccountId;
+      if (button) {
+        button.textContent = symbol ? "策略参数" : "调整参数";
+        button.disabled = !this.selectedAccountId;
+      }
     }
   }
 
   closeAdjustDialog() {
+    const symbol = this.adjustSymbol;
     const modal = this.q("#paper-adjust-modal");
     modal.classList.add("hidden");
     modal.setAttribute("aria-hidden", "true");
     this.showAdjustError("");
-    this.q("#paper-adjust").focus();
+    const focusTarget = symbol
+      ? this.shadowRoot.querySelector(`[data-market-strategy="${symbol}"]`)
+      : this.q("#paper-adjust");
+    this.adjustSymbol = "";
+    focusTarget?.focus();
   }
 
   async loadAdjustStrategyParameters() {
@@ -544,12 +637,17 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.q("#paper-adjust-strategy-note").textContent = `${strategy.name} · v${strategy.version || 1}`;
     this.showAdjustError("");
     try {
+      const symbolQuery = this.adjustSymbol
+        ? `?symbol=${encodeURIComponent(this.adjustSymbol)}`
+        : "";
       const detail = await window.quantdeskApi(
-        `/api/v2/backtests/strategy-parameters/${encodeURIComponent(strategyId)}`,
+        `/api/v2/backtests/strategy-parameters/${encodeURIComponent(strategyId)}${symbolQuery}`,
       );
       if (requestId !== this.adjustStrategyRequest) return;
       this.renderAdjustStrategyParameters(strategy, detail?.effective?.parameters || {});
-      const scope = detail?.default_profile ? "已加载保存过的默认参数" : "当前使用策略原始参数";
+      const scope = this.adjustSymbol
+        ? (detail?.symbol_profile ? `${this.adjustSymbol} 已启用品种专属参数` : `${this.adjustSymbol} 当前继承策略默认参数`)
+        : (detail?.default_profile ? "已加载保存过的默认参数" : "当前使用策略原始参数");
       this.q("#paper-adjust-strategy-note").textContent = `${strategy.name} · v${strategy.version || 1} · ${scope}`;
     } catch (error) {
       if (requestId !== this.adjustStrategyRequest) return;
@@ -638,13 +736,18 @@ class PaperDashboard extends window.QuantDeskPageController {
       await window.quantdeskApi(`/api/v2/backtests/strategy-parameters/${encodeURIComponent(strategyId)}`, {
         method: "PUT",
         body: JSON.stringify({
-          scope: "default",
+          scope: this.adjustSymbol ? "symbol" : "default",
+          ...(this.adjustSymbol ? { symbol: this.adjustSymbol } : {}),
           params,
         }),
       });
+      const scopeLabel = this.adjustSymbol
+        ? `${this.adjustSymbol} 的品种专属策略参数`
+        : `${strategy.name} 的策略默认参数`;
+      this.marketChartRefreshAt = 0;
       await this.load();
       this.closeAdjustDialog();
-      this.showBanner(`${strategy.name} 的策略参数已保存，模拟盘将在下一轮信号计算时使用。`, "success");
+      this.showBanner(`${scopeLabel}已保存，模拟盘将在下一轮信号计算时使用。`, "success");
     } catch (error) {
       this.showAdjustError(`保存失败：${error.message}`);
     } finally {
@@ -655,6 +758,110 @@ class PaperDashboard extends window.QuantDeskPageController {
 
   showAdjustError(message) {
     const target = this.q("#paper-adjust-error");
+    target.textContent = message;
+    target.classList.toggle("hidden", !message);
+  }
+
+  async loadSymbolCatalog() {
+    if (this.symbolCatalog.length) return;
+    const response = await this.api("/symbols");
+    this.symbolCatalog = Array.isArray(response?.items) ? response.items : [];
+  }
+
+  async openSymbolDialog() {
+    const account = this.accounts.find((item) => item.id === this.selectedAccountId);
+    if (!account) return;
+    const button = this.q("#paper-add-symbol");
+    button.disabled = true;
+    button.textContent = "读取品种…";
+    try {
+      await this.loadSymbolCatalog();
+      if (!this.symbolCatalog.length) throw new Error("当前没有可用的交易品种");
+      const selected = new Set(Array.isArray(account.symbols) ? account.symbols : []);
+      this.q("#paper-symbol-picker").innerHTML = this.symbolCatalog.map((item) => {
+        const symbol = String(item.symbol || "");
+        const base = this.symbol(symbol);
+        const pair = String(item.pair || symbol);
+        return `<label class="symbol-option" data-symbol-search="${this.escape(`${symbol} ${base} ${pair}`.toLowerCase())}">
+          <input type="checkbox" value="${this.escape(symbol)}"${selected.has(symbol) ? " checked" : ""}>
+          <span><strong>${this.escape(base)}</strong><small>${this.escape(symbol)} · ${this.escape(pair)}</small></span>
+        </label>`;
+      }).join("");
+      this.q("#paper-symbol-search").value = "";
+      this.updateSymbolSelectionNote();
+      this.showSymbolError("");
+      const modal = this.q("#paper-symbol-modal");
+      modal.classList.remove("hidden");
+      modal.setAttribute("aria-hidden", "false");
+      window.requestAnimationFrame(() => this.q("#paper-symbol-search")?.focus());
+    } catch (error) {
+      this.showBanner(`无法读取交易品种：${error.message}`, "error");
+    } finally {
+      button.textContent = "添加交易品种";
+      button.disabled = !this.selectedAccountId;
+    }
+  }
+
+  closeSymbolDialog() {
+    const modal = this.q("#paper-symbol-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    this.showSymbolError("");
+    this.q("#paper-add-symbol").focus();
+  }
+
+  filterSymbolPicker() {
+    const keyword = this.q("#paper-symbol-search").value.trim().toLowerCase();
+    this.shadowRoot.querySelectorAll("#paper-symbol-picker .symbol-option").forEach((option) => {
+      option.classList.toggle("hidden", Boolean(keyword) && !option.dataset.symbolSearch.includes(keyword));
+    });
+  }
+
+  selectedPaperSymbols() {
+    return [...this.shadowRoot.querySelectorAll('#paper-symbol-picker input[type="checkbox"]:checked')]
+      .map((input) => input.value)
+      .filter(Boolean);
+  }
+
+  updateSymbolSelectionNote() {
+    const symbols = this.selectedPaperSymbols();
+    this.q("#paper-symbol-note").textContent = symbols.length
+      ? `已选择 ${symbols.length} / 20 个：${symbols.map((symbol) => this.symbol(symbol)).join("、")}`
+      : "请至少选择 1 个交易品种，最多选择 20 个。";
+  }
+
+  async savePaperSymbols(event) {
+    event.preventDefault();
+    const symbols = this.selectedPaperSymbols();
+    if (!symbols.length || symbols.length > 20) {
+      this.showSymbolError("请选择 1 到 20 个交易品种。");
+      return;
+    }
+    const submit = this.q("#paper-symbol-submit");
+    submit.disabled = true;
+    submit.textContent = "保存中…";
+    this.showSymbolError("");
+    try {
+      const updated = await this.api(`/accounts/${encodeURIComponent(this.selectedAccountId)}/symbols`, {
+        method: "PUT",
+        body: JSON.stringify({ symbols }),
+      });
+      this.marketChartKey = "";
+      this.marketChartRefreshAt = 0;
+      await this.loadAccounts(updated.id);
+      await this.load();
+      this.closeSymbolDialog();
+      this.showBanner(`已添加 ${symbols.length} 个交易品种，并加载 M15 K 线。`, "success");
+    } catch (error) {
+      this.showSymbolError(`保存失败：${error.message}`);
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "保存并加载 K 线";
+    }
+  }
+
+  showSymbolError(message) {
+    const target = this.q("#paper-symbol-error");
     target.textContent = message;
     target.classList.toggle("hidden", !message);
   }
@@ -806,6 +1013,7 @@ class PaperDashboard extends window.QuantDeskPageController {
     this.q("#paper-delete").disabled = false;
     this.q("#paper-rename").disabled = false;
     this.q("#paper-adjust").disabled = false;
+    this.q("#paper-add-symbol").disabled = false;
     const statusButton = this.q("#paper-toggle-status");
     statusButton.disabled = false;
     statusButton.textContent = accountMeta.status === "paused" ? "继续运行" : "暂停运行";
@@ -823,8 +1031,675 @@ class PaperDashboard extends window.QuantDeskPageController {
 
     this.renderPositions(positions);
     this.renderTrades(trades);
+    this.marketTradeMarkers = this.paperMarketTradeMarkers(positions, trades);
     this.q("#paper-disclaimer").textContent = `风险提示：${data.disclaimer || "模拟交易仅用于策略验证与学习，不构成投资建议。"}${rules.costs ? ` 成本模型：${rules.costs}` : ""}`;
     window.requestAnimationFrame(() => this.drawCurve(data.curve || [], account.start || 10000));
+    const selectedAccount = this.accounts.find((item) => item.id === this.selectedAccountId);
+    const selectedSymbols = Array.isArray(accountMeta.symbols) && accountMeta.symbols.length
+      ? accountMeta.symbols
+      : (Array.isArray(selectedAccount?.symbols) ? selectedAccount.symbols : []);
+    this.syncMarketCharts(selectedSymbols);
+    this.redrawMarketCharts();
+  }
+
+  syncMarketCharts(rawSymbols) {
+    const symbols = [...new Set((Array.isArray(rawSymbols) ? rawSymbols : [])
+      .map((symbol) => String(symbol || "").trim().toUpperCase())
+      .filter(Boolean))];
+    const key = `${this.selectedAccountId || ""}:${symbols.join(",")}`;
+    if (!symbols.length) {
+      this.stopMarketStream();
+      this.marketChartKey = key;
+      this.marketChartData.clear();
+      this.marketChartViews.clear();
+      this.q("#paper-market-summary").textContent = "点击“添加交易品种”开始";
+      this.q("#paper-market-charts").innerHTML = '<div class="market-chart-empty"><strong>尚未添加交易品种</strong><span>添加后自动加载对应的 M15 K 线图，并限定当前模拟盘的新开仓范围。</span></div>';
+      return;
+    }
+    const now = Date.now();
+    if (key === this.marketChartKey && now < this.marketChartRefreshAt) {
+      this.startMarketStream(symbols, key);
+      return;
+    }
+    const changed = key !== this.marketChartKey;
+    this.marketChartKey = key;
+    this.marketChartRefreshAt = now + 60_000;
+    if (changed) {
+      this.stopMarketStream();
+      this.marketChartData.clear();
+      this.marketChartViews.clear();
+      this.q("#paper-market-charts").innerHTML = symbols.map((symbol) => `
+        <article class="market-chart-card loading">
+          <header><strong>${this.escape(this.symbol(symbol))}</strong><span>M15 · 正在加载</span></header>
+          <div class="market-chart-loading">读取 K 线…</div>
+        </article>`).join("");
+    }
+    this.loadMarketCharts(symbols, key);
+  }
+
+  async loadMarketCharts(symbols, key) {
+    const requestId = ++this.marketChartRequest;
+    const results = await Promise.all(symbols.map(async (symbol) => {
+      try {
+        const [candles, overlay] = await Promise.all([
+          window.quantdeskApi(
+            `/api/v2/monitor/klines?symbol=${encodeURIComponent(symbol)}&tf=15m&limit=160`,
+          ),
+          this.api(
+            `/accounts/${encodeURIComponent(this.selectedAccountId)}/chart-overlay?symbol=${encodeURIComponent(symbol)}`,
+          ).catch((error) => ({ available: false, reason: error.message || "箱体读取失败", levels: [] })),
+        ]);
+        const historical = this.normalizeMarketCandles(candles);
+        const previous = this.marketChartData.get(symbol) || {};
+        const current = previous.candles || [];
+        return [symbol, {
+          ...previous,
+          candles: this.mergeMarketCandles(historical, current),
+          boxAvailable: Boolean(overlay?.available),
+          boxReason: String(overlay?.reason || ""),
+          boxSource: String(overlay?.source || ""),
+          boxTimeframe: String(overlay?.timeframe || "15m"),
+          boxLevels: this.normalizeMarketBoxLevels(overlay?.levels),
+          error: "",
+        }];
+      } catch (error) {
+        const previous = this.marketChartData.get(symbol) || {};
+        const current = previous.candles || [];
+        return [symbol, { ...previous, candles: current, error: current.length ? "" : (error.message || "K 线读取失败") }];
+      }
+    }));
+    if (requestId !== this.marketChartRequest || key !== this.marketChartKey) return;
+    this.marketChartData = new Map(results);
+    this.renderMarketCharts(symbols);
+    this.startMarketStream(symbols, key);
+  }
+
+  renderMarketCharts(symbols) {
+    this.q("#paper-market-charts").innerHTML = symbols.map((symbol) => {
+      const state = this.marketChartData.get(symbol) || { candles: [], error: "" };
+      const last = state.candles[state.candles.length - 1] || {};
+      const livePrice = Number(state.lastPrice);
+      const close = Number.isFinite(livePrice) ? livePrice : Number(last.close);
+      const open = Number(last.open);
+      const changePercent = Number(state.changePercent);
+      const changePrice = Number(state.changePrice);
+      const toneValue = Number.isFinite(changePercent) ? changePercent : close - open;
+      const tone = Number.isFinite(toneValue) ? (toneValue >= 0 ? "up" : "down") : "";
+      const changeText = Number.isFinite(changePrice) && Number.isFinite(changePercent)
+        ? `今日 ${this.signedPrice(changePrice)}（${this.signed(changePercent)}%）`
+        : "今日 --（--%）";
+      const marketStatus = state.lastQuoteAt
+        ? `M15 · 实时 · ${this.marketCandleTime(last.open_time)}`
+        : "M15 · 等待实时行情";
+      const boxLegendTitle = state.boxAvailable
+        ? `突破箱体 · ${String(state.boxTimeframe || "15m").toUpperCase()}`
+        : (state.boxReason || "当前策略没有可绘制的突破箱体");
+      if (!state.candles.length) {
+        return `<article class="market-chart-card unavailable" data-market-symbol="${this.escape(symbol)}">
+          <header>
+            <div class="market-symbol-heading">
+              <div class="market-symbol-name"><strong>${this.escape(this.symbol(symbol))}</strong><small>${this.escape(symbol)}</small></div>
+              <button class="market-strategy-button" type="button" data-market-strategy="${this.escape(symbol)}" aria-label="配置 ${this.escape(symbol)} 专属策略参数">策略参数</button>
+            </div>
+            <span>M15</span>
+          </header>
+          <div class="market-chart-loading">${this.escape(state.error || "暂无 M15 K 线")}</div>
+        </article>`;
+      }
+      return `<article class="market-chart-card" data-market-symbol="${this.escape(symbol)}">
+        <header>
+          <div class="market-symbol-heading">
+            <div class="market-symbol-name"><strong>${this.escape(this.symbol(symbol))}</strong><small>${this.escape(symbol)}</small></div>
+            <button class="market-strategy-button" type="button" data-market-strategy="${this.escape(symbol)}" aria-label="配置 ${this.escape(symbol)} 专属策略参数">策略参数</button>
+          </div>
+          <div class="market-chart-quote ${tone}">
+            <strong data-market-price>${this.price(close)}</strong>
+            <span class="market-chart-change" data-market-change title="今日涨跌价格（今日涨跌幅）">${changeText}</span>
+            <span data-market-status>${marketStatus}</span>
+          </div>
+        </header>
+        <div class="market-canvas-wrap">
+          <canvas class="market-canvas" data-market-canvas="${this.escape(symbol)}" tabindex="0" aria-label="${this.escape(this.symbol(symbol))} M15 可拖拽实时 K 线图"></canvas>
+          <span class="market-chart-gesture">拖拽平移 · 滚轮缩放 · 双击回到最新</span>
+          <div class="market-chart-legend" title="${this.escape(boxLegendTitle)}">
+            <span class="box-upper">箱体上沿</span><span class="box-lower">箱体下沿</span>
+            <span class="signal-buy">买点</span><span class="signal-sell">卖点</span><span class="signal-close">平仓点</span>
+          </div>
+        </div>
+        <footer data-market-ohlc>O ${this.price(last.open)}　H ${this.price(last.high)}　L ${this.price(last.low)}　C ${this.price(last.close)}</footer>
+      </article>`;
+    }).join("");
+    this.bindMarketChartInteractions();
+    this.updateMarketChartSummary(symbols);
+    window.requestAnimationFrame(() => this.redrawMarketCharts());
+  }
+
+  redrawMarketCharts() {
+    this.marketChartData.forEach((state, symbol) => {
+      if (!state?.candles?.length) return;
+      const card = this.shadowRoot.querySelector(`[data-market-symbol="${symbol}"]`);
+      const canvas = card?.querySelector("canvas");
+      if (canvas) this.drawMarketCandles(canvas, state.candles, symbol);
+    });
+  }
+
+  redrawMarketChart(symbol) {
+    const state = this.marketChartData.get(symbol);
+    const canvas = this.shadowRoot.querySelector(`[data-market-symbol="${symbol}"] canvas`);
+    if (canvas && state?.candles?.length) this.drawMarketCandles(canvas, state.candles, symbol);
+  }
+
+  normalizeMarketCandles(rawCandles) {
+    const normalized = (Array.isArray(rawCandles) ? rawCandles : []).map((item) => {
+      const rawTime = Number(item.open_time);
+      return {
+        open_time: rawTime > 10_000_000_000 ? rawTime : rawTime * 1000,
+        open: Number(item.open),
+        high: Number(item.high),
+        low: Number(item.low),
+        close: Number(item.close),
+        volume: Number(item.volume || 0),
+        realtime: Boolean(item.realtime),
+      };
+    }).filter((item) => Number.isFinite(item.open_time)
+      && [item.open, item.high, item.low, item.close].every(Number.isFinite));
+    const byTime = new Map(normalized.map((item) => [item.open_time, item]));
+    return [...byTime.values()].sort((left, right) => left.open_time - right.open_time).slice(-300);
+  }
+
+  normalizeMarketBoxLevels(rawLevels) {
+    return (Array.isArray(rawLevels) ? rawLevels : []).map((item) => {
+      const rawTime = Number(item?.open_time);
+      const high = item?.high == null ? null : Number(item.high);
+      const low = item?.low == null ? null : Number(item.low);
+      return {
+        open_time: rawTime > 10_000_000_000 ? rawTime : rawTime * 1000,
+        high: Number.isFinite(high) ? high : null,
+        low: Number.isFinite(low) ? low : null,
+      };
+    }).filter((item) => Number.isFinite(item.open_time))
+      .sort((left, right) => left.open_time - right.open_time)
+      .slice(-500);
+  }
+
+  paperMarketTradeMarkers(positions, trades) {
+    const markers = new Map();
+    const add = (symbol, type, rawTime, rawPrice, status = "closed") => {
+      const normalizedSymbol = String(symbol || "").trim().toUpperCase();
+      let timestamp = Number(rawTime);
+      const price = Number(rawPrice);
+      if (!normalizedSymbol || !Number.isFinite(timestamp) || !Number.isFinite(price) || price <= 0) return;
+      if (timestamp < 10_000_000_000) timestamp *= 1000;
+      const list = markers.get(normalizedSymbol) || [];
+      const key = `${type}:${Math.round(timestamp)}:${price.toPrecision(12)}`;
+      if (!list.some((item) => item.key === key)) list.push({ key, type, time: timestamp, price, status });
+      markers.set(normalizedSymbol, list);
+    };
+    (Array.isArray(trades) ? trades : []).forEach((trade) => {
+      const type = Number(trade.side) >= 0 ? "buy" : "sell";
+      add(trade.symbol, type, trade.opened_ts, trade.entry_price);
+      add(trade.symbol, "close", trade.closed_ts, trade.exit_price);
+    });
+    (Array.isArray(positions) ? positions : []).forEach((position) => {
+      const type = Number(position.side) >= 0 ? "buy" : "sell";
+      add(position.symbol, type, position.opened_ts, position.avg_entry, "open");
+    });
+    markers.forEach((items) => items.sort((left, right) => left.time - right.time));
+    return markers;
+  }
+
+  mergeMarketCandles(historical, current) {
+    const byTime = new Map(this.normalizeMarketCandles(historical).map((item) => [item.open_time, item]));
+    this.normalizeMarketCandles(current).forEach((item) => {
+      const stored = byTime.get(item.open_time);
+      if (!stored) byTime.set(item.open_time, item);
+      else if (item.realtime) byTime.set(item.open_time, {
+        ...stored,
+        high: Math.max(stored.high, item.high),
+        low: Math.min(stored.low, item.low),
+        close: item.close,
+        volume: Math.max(stored.volume || 0, item.volume || 0),
+        realtime: true,
+      });
+    });
+    return [...byTime.values()].sort((left, right) => left.open_time - right.open_time).slice(-300);
+  }
+
+  marketChartView(symbol, candleCount) {
+    let view = this.marketChartViews.get(symbol);
+    if (!view) {
+      const visible = Math.min(80, candleCount);
+      view = { start: Math.max(0, candleCount - visible), visible, followLatest: true, layout: null };
+      this.marketChartViews.set(symbol, view);
+    }
+    view.visible = Math.max(1, Math.min(view.visible || 80, candleCount));
+    const maxStart = Math.max(0, candleCount - view.visible);
+    view.start = view.followLatest ? maxStart : Math.max(0, Math.min(view.start || 0, maxStart));
+    return view;
+  }
+
+  drawMarketCandles(canvas, rawCandles, symbol = canvas.dataset.marketCanvas || "") {
+    const width = Math.floor(canvas.clientWidth);
+    const height = Math.floor(canvas.clientHeight);
+    if (!width || !height) return;
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(width * ratio);
+    canvas.height = Math.floor(height * ratio);
+    const context = canvas.getContext("2d");
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const allCandles = this.normalizeMarketCandles(rawCandles);
+    if (!allCandles.length) return;
+    const view = this.marketChartView(symbol, allCandles.length);
+    const candles = allCandles.slice(view.start, view.start + view.visible);
+    const padding = { left: 10, right: 62, top: 13, bottom: 23 };
+    const plotWidth = Math.max(1, width - padding.left - padding.right);
+    const plotHeight = Math.max(1, height - padding.top - padding.bottom);
+    const candleWidth = plotWidth / candles.length;
+    view.layout = { candleWidth, plotWidth, left: padding.left };
+    const lowerBound = (timestamp) => {
+      let left = 0;
+      let right = allCandles.length;
+      while (left < right) {
+        const middle = Math.floor((left + right) / 2);
+        if (allCandles[middle].open_time < timestamp) left = middle + 1;
+        else right = middle;
+      }
+      return left;
+    };
+    const candleIndexAt = (timestamp) => {
+      const next = lowerBound(timestamp);
+      if (next < allCandles.length && allCandles[next].open_time === timestamp) return next;
+      return Math.max(0, Math.min(allCandles.length - 1, next - 1));
+    };
+    const state = this.marketChartData.get(symbol) || {};
+    const boxLevels = Array.isArray(state.boxLevels) ? state.boxLevels : [];
+    const boxSegments = [];
+    boxLevels.forEach((level, index) => {
+      if (!Number.isFinite(level.high) || !Number.isFinite(level.low)) return;
+      const nextTime = boxLevels[index + 1]?.open_time
+        ?? (level.open_time + (state.boxTimeframe === "1h" ? 3_600_000 : state.boxTimeframe === "30m" ? 1_800_000 : 900_000));
+      const startIndex = lowerBound(level.open_time);
+      const endIndex = lowerBound(nextTime);
+      if (endIndex < view.start || startIndex > view.start + candles.length) return;
+      boxSegments.push({ ...level, startIndex, endIndex });
+    });
+    const markers = (this.marketTradeMarkers.get(symbol) || []).map((marker) => ({
+      ...marker,
+      index: candleIndexAt(marker.time),
+    })).filter((marker) => marker.index >= view.start && marker.index < view.start + candles.length);
+    let high = Math.max(...candles.map((item) => item.high));
+    let low = Math.min(...candles.map((item) => item.low));
+    boxSegments.forEach((segment) => {
+      high = Math.max(high, segment.high);
+      low = Math.min(low, segment.low);
+    });
+    markers.forEach((marker) => {
+      high = Math.max(high, marker.price);
+      low = Math.min(low, marker.price);
+    });
+    const pricePadding = (high - low || Math.abs(high) * .005 || 1) * .08;
+    high += pricePadding;
+    low -= pricePadding;
+    const priceRange = high - low || 1;
+    const x = (index) => padding.left + (index + .5) * plotWidth / candles.length;
+    const y = (price) => padding.top + (high - price) / priceRange * plotHeight;
+    context.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    context.lineWidth = 1;
+    for (let line = 0; line <= 4; line += 1) {
+      const price = high - priceRange * line / 4;
+      const lineY = y(price);
+      context.strokeStyle = "rgba(110, 136, 160, .16)";
+      context.beginPath(); context.moveTo(padding.left, lineY); context.lineTo(width - padding.right, lineY); context.stroke();
+      context.fillStyle = "#71859a";
+      context.fillText(this.price(price), width - padding.right + 6, lineY + 4);
+    }
+    context.save();
+    context.beginPath();
+    context.rect(padding.left, padding.top, plotWidth, plotHeight);
+    context.clip();
+    context.lineWidth = 1.35;
+    boxSegments.forEach((segment) => {
+      const startX = Math.max(padding.left, padding.left + (segment.startIndex - view.start) * candleWidth);
+      const endX = Math.min(width - padding.right, padding.left + (segment.endIndex - view.start) * candleWidth);
+      if (endX <= startX) return;
+      context.strokeStyle = "rgba(28, 222, 214, .96)";
+      context.beginPath(); context.moveTo(startX, y(segment.high)); context.lineTo(endX, y(segment.high)); context.stroke();
+      context.strokeStyle = "rgba(28, 222, 214, .78)";
+      context.beginPath(); context.moveTo(startX, y(segment.low)); context.lineTo(endX, y(segment.low)); context.stroke();
+    });
+    context.restore();
+    const bodyWidth = Math.max(1, Math.min(7, plotWidth / candles.length * .68));
+    candles.forEach((candle, index) => {
+      const candleX = x(index);
+      const rising = candle.close >= candle.open;
+      context.strokeStyle = rising ? "#26d69c" : "#f05b72";
+      context.fillStyle = context.strokeStyle;
+      context.beginPath(); context.moveTo(candleX, y(candle.high)); context.lineTo(candleX, y(candle.low)); context.stroke();
+      const top = y(Math.max(candle.open, candle.close));
+      const bottom = y(Math.min(candle.open, candle.close));
+      context.fillRect(candleX - bodyWidth / 2, top, bodyWidth, Math.max(1, bottom - top));
+    });
+    const last = candles[candles.length - 1];
+    const lastY = y(last.close);
+    context.setLineDash([4, 4]);
+    context.strokeStyle = "rgba(216, 226, 236, .5)";
+    context.beginPath(); context.moveTo(padding.left, lastY); context.lineTo(width - padding.right, lastY); context.stroke();
+    context.setLineDash([]);
+    context.fillStyle = "#dce8f4";
+    context.fillText(this.price(last.close), width - padding.right + 6, lastY + 4);
+    markers.forEach((marker) => {
+      const markerX = x(marker.index - view.start);
+      const markerY = y(marker.price);
+      const style = marker.type === "buy"
+        ? { color: "#35e8a8", label: "买" }
+        : marker.type === "sell"
+          ? { color: "#ff6178", label: "卖" }
+          : { color: "#ffd34e", label: "平" };
+      context.save();
+      context.fillStyle = style.color;
+      context.strokeStyle = "rgba(5, 10, 15, .95)";
+      context.lineWidth = 2;
+      context.beginPath();
+      if (marker.type === "buy") {
+        context.moveTo(markerX, markerY - 8);
+        context.lineTo(markerX - 6, markerY + 3);
+        context.lineTo(markerX + 6, markerY + 3);
+      } else if (marker.type === "sell") {
+        context.moveTo(markerX, markerY + 8);
+        context.lineTo(markerX - 6, markerY - 3);
+        context.lineTo(markerX + 6, markerY - 3);
+      } else {
+        context.moveTo(markerX, markerY - 6);
+        context.lineTo(markerX + 6, markerY);
+        context.lineTo(markerX, markerY + 6);
+        context.lineTo(markerX - 6, markerY);
+      }
+      context.closePath();
+      context.stroke();
+      context.fill();
+      context.font = "bold 10px system-ui, sans-serif";
+      context.textAlign = "center";
+      context.fillText(style.label, markerX, marker.type === "sell" ? markerY - 9 : markerY + 15);
+      context.restore();
+    });
+    const first = candles[0];
+    context.fillStyle = "#62768b";
+    context.fillText(this.marketCandleTime(first.open_time), padding.left, height - 6);
+    const lastLabel = this.marketCandleTime(last.open_time);
+    context.fillText(lastLabel, Math.max(padding.left, width - padding.right - context.measureText(lastLabel).width), height - 6);
+  }
+
+  bindMarketChartInteractions() {
+    this.shadowRoot.querySelectorAll("[data-market-strategy]").forEach((button) => {
+      button.addEventListener("click", () => this.openAdjustDialog(button.dataset.marketStrategy));
+    });
+    this.shadowRoot.querySelectorAll("[data-market-canvas]").forEach((canvas) => {
+      const symbol = canvas.dataset.marketCanvas;
+      const move = (event) => {
+        const drag = canvas.marketDrag;
+        if (!drag) return;
+        const state = this.marketChartData.get(symbol);
+        const view = this.marketChartViews.get(symbol);
+        if (!state?.candles?.length || !view) return;
+        const candleWidth = Math.max(1, view.layout?.candleWidth || canvas.clientWidth / view.visible);
+        const shift = Math.round((event.clientX - drag.x) / candleWidth);
+        const maxStart = Math.max(0, state.candles.length - view.visible);
+        view.start = Math.max(0, Math.min(drag.start - shift, maxStart));
+        view.followLatest = view.start === maxStart;
+        this.redrawMarketChart(symbol);
+      };
+      const end = (event) => {
+        if (!canvas.marketDrag) return;
+        canvas.marketDrag = null;
+        canvas.classList.remove("dragging");
+        if (canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+      };
+      canvas.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        const state = this.marketChartData.get(symbol);
+        const view = this.marketChartView(symbol, state?.candles?.length || 0);
+        canvas.marketDrag = { x: event.clientX, start: view.start };
+        canvas.classList.add("dragging");
+        canvas.setPointerCapture?.(event.pointerId);
+        event.preventDefault();
+      });
+      canvas.addEventListener("pointermove", move);
+      canvas.addEventListener("pointerup", end);
+      canvas.addEventListener("pointercancel", end);
+      canvas.addEventListener("wheel", (event) => {
+        const rect = canvas.getBoundingClientRect();
+        const anchor = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+        this.zoomMarketChart(symbol, event.deltaY > 0 ? 1.18 : .84, anchor);
+        event.preventDefault();
+      }, { passive: false });
+      canvas.addEventListener("dblclick", () => this.resetMarketChartView(symbol));
+      canvas.addEventListener("keydown", (event) => this.handleMarketChartKey(event, symbol));
+    });
+  }
+
+  zoomMarketChart(symbol, factor, anchor = .5) {
+    const state = this.marketChartData.get(symbol);
+    if (!state?.candles?.length) return;
+    const view = this.marketChartView(symbol, state.candles.length);
+    const minVisible = Math.min(24, state.candles.length);
+    const nextVisible = Math.max(minVisible, Math.min(state.candles.length, Math.round(view.visible * factor)));
+    const anchorIndex = view.start + view.visible * anchor;
+    view.visible = nextVisible;
+    const maxStart = Math.max(0, state.candles.length - nextVisible);
+    view.start = Math.max(0, Math.min(Math.round(anchorIndex - nextVisible * anchor), maxStart));
+    view.followLatest = view.start === maxStart;
+    this.redrawMarketChart(symbol);
+  }
+
+  resetMarketChartView(symbol) {
+    const state = this.marketChartData.get(symbol);
+    if (!state?.candles?.length) return;
+    const visible = Math.min(80, state.candles.length);
+    this.marketChartViews.set(symbol, {
+      start: Math.max(0, state.candles.length - visible), visible, followLatest: true, layout: null,
+    });
+    this.redrawMarketChart(symbol);
+  }
+
+  handleMarketChartKey(event, symbol) {
+    const state = this.marketChartData.get(symbol);
+    if (!state?.candles?.length) return;
+    const view = this.marketChartView(symbol, state.candles.length);
+    const maxStart = Math.max(0, state.candles.length - view.visible);
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const direction = event.key === "ArrowLeft" ? -1 : 1;
+      view.start = Math.max(0, Math.min(view.start + direction * Math.max(1, Math.round(view.visible * .1)), maxStart));
+      view.followLatest = view.start === maxStart;
+      this.redrawMarketChart(symbol);
+    } else if (event.key === "+" || event.key === "=") this.zoomMarketChart(symbol, .84);
+    else if (event.key === "-") this.zoomMarketChart(symbol, 1.18);
+    else if (event.key === "Home" || event.key === "0") this.resetMarketChartView(symbol);
+    else return;
+    event.preventDefault();
+  }
+
+  startMarketStream(symbols, key) {
+    if (!this.running || !symbols.length || typeof window.quantdeskOpenPaperMarketSocket !== "function") return;
+    const connected = this.marketStreamSocket && this.marketStreamSocket.readyState <= WebSocket.OPEN;
+    if (this.marketStreamKey === key && (connected || this.marketStreamReconnectTimer)) return;
+    this.stopMarketStream();
+    this.marketStreamKey = key;
+    this.marketStreamSymbols = [...symbols];
+    this.marketStreamStatus = "connecting";
+    const generation = ++this.marketStreamGeneration;
+    this.updateMarketChartSummary(symbols);
+    this.connectMarketStream(generation);
+    this.marketStreamWatchdogTimer = window.setInterval(() => {
+      if (generation !== this.marketStreamGeneration || !this.marketStreamSocket) return;
+      if (this.marketStreamSocket.readyState === WebSocket.OPEN
+          && this.marketStreamLastMessageAt
+          && Date.now() - this.marketStreamLastMessageAt > 12_000) {
+        this.marketStreamSocket.close(4000, "market stream timeout");
+      }
+    }, 3000);
+  }
+
+  async connectMarketStream(generation) {
+    try {
+      const socket = await window.quantdeskOpenPaperMarketSocket(this.marketStreamSymbols);
+      if (generation !== this.marketStreamGeneration || !this.running) {
+        socket.close();
+        return;
+      }
+      this.marketStreamSocket = socket;
+      socket.addEventListener("open", () => {
+        if (generation !== this.marketStreamGeneration) return;
+        this.marketStreamLastMessageAt = Date.now();
+        this.marketStreamStatus = "live";
+        this.updateMarketChartSummary(this.marketStreamSymbols);
+      });
+      socket.addEventListener("message", (event) => {
+        if (generation !== this.marketStreamGeneration) return;
+        this.marketStreamLastMessageAt = Date.now();
+        try {
+          const message = JSON.parse(event.data);
+          if (message.event === "markets" && Array.isArray(message.data?.items)) {
+            this.applyMarketSnapshots(message.data.items, message.data.server_sent_at_ms);
+          }
+        } catch {
+          // Ignore one malformed frame; the watchdog will reconnect a stalled stream.
+        }
+      });
+      socket.addEventListener("error", () => socket.close());
+      socket.addEventListener("close", () => {
+        if (this.marketStreamSocket === socket) this.marketStreamSocket = null;
+        if (generation !== this.marketStreamGeneration || !this.running || !this.marketStreamKey) return;
+        this.marketStreamStatus = "reconnecting";
+        this.updateMarketChartSummary(this.marketStreamSymbols);
+        this.marketStreamReconnectTimer = window.setTimeout(() => {
+          this.marketStreamReconnectTimer = null;
+          this.connectMarketStream(generation);
+        }, 2500);
+      });
+    } catch {
+      if (generation !== this.marketStreamGeneration || !this.running || !this.marketStreamKey) return;
+      this.marketStreamStatus = "reconnecting";
+      this.updateMarketChartSummary(this.marketStreamSymbols);
+      this.marketStreamReconnectTimer = window.setTimeout(() => {
+        this.marketStreamReconnectTimer = null;
+        this.connectMarketStream(generation);
+      }, 2500);
+    }
+  }
+
+  stopMarketStream() {
+    this.marketStreamGeneration += 1;
+    if (this.marketStreamReconnectTimer) window.clearTimeout(this.marketStreamReconnectTimer);
+    if (this.marketStreamWatchdogTimer) window.clearInterval(this.marketStreamWatchdogTimer);
+    if (this.marketRedrawFrame) window.cancelAnimationFrame(this.marketRedrawFrame);
+    this.marketStreamReconnectTimer = null;
+    this.marketStreamWatchdogTimer = null;
+    this.marketRedrawFrame = null;
+    const socket = this.marketStreamSocket;
+    this.marketStreamSocket = null;
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "paper page paused");
+    this.marketStreamKey = "";
+    this.marketStreamSymbols = [];
+    this.marketStreamStatus = "idle";
+    this.marketStreamLastMessageAt = 0;
+  }
+
+  applyMarketSnapshots(items, serverSentAt) {
+    const changed = [];
+    items.forEach((snapshot) => {
+      const symbol = String(snapshot?.symbol || "").trim().toUpperCase();
+      const price = Number(snapshot?.price);
+      const state = this.marketChartData.get(symbol);
+      if (!state?.candles?.length || !Number.isFinite(price) || price <= 0) return;
+      const rawTimestamp = Number(snapshot.ticker_updated_at || serverSentAt || Date.now());
+      const timestamp = rawTimestamp > 10_000_000_000 ? rawTimestamp : rawTimestamp * 1000;
+      const bucket = Math.floor(timestamp / 900_000) * 900_000;
+      const candles = state.candles;
+      let last = candles[candles.length - 1];
+      if (bucket === last.open_time) {
+        last.high = Math.max(last.high, price);
+        last.low = Math.min(last.low, price);
+        last.close = price;
+        last.realtime = true;
+      } else if (bucket > last.open_time) {
+        const previousClose = last.close;
+        candles.push({
+          open_time: bucket,
+          open: previousClose,
+          high: Math.max(previousClose, price),
+          low: Math.min(previousClose, price),
+          close: price,
+          volume: 0,
+          realtime: true,
+        });
+        if (candles.length > 300) {
+          const removed = candles.length - 300;
+          candles.splice(0, removed);
+          const currentView = this.marketChartViews.get(symbol);
+          if (currentView && !currentView.followLatest) currentView.start = Math.max(0, currentView.start - removed);
+        }
+        last = candles[candles.length - 1];
+        const view = this.marketChartViews.get(symbol);
+        if (view?.followLatest) view.start = Math.max(0, candles.length - view.visible);
+      } else {
+        return;
+      }
+      state.lastQuoteAt = timestamp;
+      state.lastPrice = price;
+      const changePercent = Number(snapshot.pct_24h);
+      let changePrice = Number(snapshot.price_change_24h);
+      if (!Number.isFinite(changePrice) && Number.isFinite(changePercent) && changePercent > -100) {
+        changePrice = price - price / (1 + changePercent / 100);
+      }
+      state.changePercent = Number.isFinite(changePercent) ? changePercent : null;
+      state.changePrice = Number.isFinite(changePrice) ? changePrice : null;
+      const card = this.shadowRoot.querySelector(`[data-market-symbol="${symbol}"]`);
+      const quote = card?.querySelector(".market-chart-quote");
+      const priceNode = card?.querySelector("[data-market-price]");
+      const changeNode = card?.querySelector("[data-market-change]");
+      const statusNode = card?.querySelector("[data-market-status]");
+      const footer = card?.querySelector("[data-market-ohlc]");
+      const changeTone = Number.isFinite(changePercent) ? changePercent : last.close - last.open;
+      quote?.classList.toggle("up", changeTone >= 0);
+      quote?.classList.toggle("down", changeTone < 0);
+      if (priceNode) priceNode.textContent = this.price(price);
+      if (changeNode) {
+        changeNode.textContent = Number.isFinite(changePrice) && Number.isFinite(changePercent)
+          ? `今日 ${this.signedPrice(changePrice)}（${this.signed(changePercent)}%）`
+          : "今日 --（--%）";
+      }
+      if (statusNode) statusNode.textContent = `M15 · 实时 · ${this.marketCandleTime(last.open_time)}`;
+      if (footer) footer.textContent = `O ${this.price(last.open)}　H ${this.price(last.high)}　L ${this.price(last.low)}　C ${this.price(last.close)}`;
+      changed.push(symbol);
+    });
+    if (changed.length && !this.marketRedrawFrame) {
+      this.marketRedrawFrame = window.requestAnimationFrame(() => {
+        this.marketRedrawFrame = null;
+        changed.forEach((symbol) => this.redrawMarketChart(symbol));
+      });
+    }
+  }
+
+  updateMarketChartSummary(symbols = this.marketStreamSymbols) {
+    if (!symbols.length) return;
+    const ready = symbols.filter((symbol) => this.marketChartData.get(symbol)?.candles?.length).length;
+    const labels = {
+      live: "实时行情已连接",
+      connecting: "正在连接实时行情",
+      reconnecting: "实时行情重连中",
+      idle: "历史 K 线",
+    };
+    const summary = this.q("#paper-market-summary");
+    summary.textContent = `${symbols.length} 个交易品种 · ${ready} 个已加载 · ${labels[this.marketStreamStatus] || labels.idle}`;
+    summary.dataset.streamStatus = this.marketStreamStatus;
+  }
+
+  marketCandleTime(timestamp) {
+    const numeric = Number(timestamp);
+    if (!Number.isFinite(numeric)) return "--";
+    const date = new Date(numeric > 10_000_000_000 ? numeric : numeric * 1000);
+    return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
   }
 
   renderMetric(name, value, subtitle, tone) {
@@ -1031,6 +1906,12 @@ class PaperDashboard extends window.QuantDeskPageController {
     if (!Number.isFinite(number)) return "--";
     const digits = Math.abs(number) >= 100 ? 2 : Math.abs(number) >= 1 ? 4 : 6;
     return this.number(number, digits);
+  }
+
+  signedPrice(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "--";
+    return `${number >= 0 ? "+" : "-"}${this.price(Math.abs(number))}`;
   }
 
   symbol(value) {

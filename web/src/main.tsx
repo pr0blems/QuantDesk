@@ -13,6 +13,7 @@ import {
   apiStream,
   openAiMonitorWebSocket,
   openMonitorMarketWebSocket,
+  openPaperMarketWebSocket,
 } from "./api/client";
 import { App } from "./App";
 import "./styles.css";
@@ -35,6 +36,7 @@ window.quantdeskApiStream = (path, options = {}) => {
 
 window.quantdeskOpenAiMonitorSocket = openAiMonitorWebSocket;
 window.quantdeskOpenMonitorMarketSocket = openMonitorMarketWebSocket;
+window.quantdeskOpenPaperMarketSocket = openPaperMarketWebSocket;
 
 const root = document.getElementById("root");
 

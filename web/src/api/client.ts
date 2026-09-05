@@ -165,6 +165,28 @@ export async function openMonitorMarketWebSocket(symbol: string): Promise<WebSoc
   ]);
 }
 
+export async function openPaperMarketWebSocket(symbols: string[]): Promise<WebSocket> {
+  const normalized = [...new Set(symbols.map((symbol) => symbol.trim().toUpperCase()))];
+  if (!normalized.length || normalized.length > 20 || normalized.some((symbol) => !/^[A-Z0-9]{2,24}$/.test(symbol))) {
+    throw new ApiError("请选择 1 到 20 个有效行情品种", 422);
+  }
+  if (!accessToken || Date.now() - marketSocketAuthenticationRefreshedAt > 60_000) {
+    const restored = await refreshAccessToken();
+    if (restored) marketSocketAuthenticationRefreshedAt = Date.now();
+    if (!restored && !accessToken) {
+      loseAuthentication();
+      throw new ApiError("登录状态已失效，请重新登录", 401);
+    }
+  }
+  const endpoint = new URL(`${apiRoot}/ai-monitor/market/ws`, window.location.origin);
+  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
+  endpoint.searchParams.set("symbols", normalized.join(","));
+  return new WebSocket(endpoint, [
+    "quantdesk.ai-monitor.v1",
+    `quantdesk.auth.${accessToken}`,
+  ]);
+}
+
 export async function apiRequest<T>(
   path: `/${string}`,
   options: ApiRequestOptions = {},

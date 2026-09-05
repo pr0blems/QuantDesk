@@ -1129,6 +1129,24 @@ class PaperAccountStatusUpdate(BaseModel):
         return self
 
 
+class PaperAccountSymbolsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    symbols: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def normalize_symbols(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        normalized = [str(symbol).strip().upper() for symbol in value]
+        if any(not re.fullmatch(r"[A-Z0-9]{2,32}", symbol) for symbol in normalized):
+            raise ValueError("paper symbols must use 2-32 uppercase letters or digits")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("paper symbols must be unique")
+        return normalized
+
+
 class PaperAccountStrategyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

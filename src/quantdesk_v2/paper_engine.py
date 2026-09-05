@@ -501,6 +501,26 @@ def _prices() -> dict[str, float]:
     return snapshot
 
 
+def _paper_symbols(account: dict[str, Any]) -> list[str]:
+    """Use an explicit account universe while preserving legacy full-universe accounts."""
+
+    universe = tradfi_symbols()
+    raw_config = account.get("config_json")
+    config = raw_config if isinstance(raw_config, dict) else _json_object(raw_config)
+    if "symbols" not in config:
+        return universe
+    configured = config.get("symbols")
+    if not isinstance(configured, list):
+        return []
+    available = set(universe)
+    selected: list[str] = []
+    for raw_symbol in configured:
+        symbol = str(raw_symbol or "").strip().upper()
+        if symbol in available and symbol not in selected:
+            selected.append(symbol)
+    return selected
+
+
 def _used_margin(positions: list[dict[str, Any]]) -> float:
     return sum(float(position["margin"]) for position in positions)
 
@@ -1506,7 +1526,7 @@ def _tick_account(account: dict[str, Any], prices: dict[str, float], now: int) -
                 closed_symbols.add(position["symbol"])
             positions = _positions(account)
 
-    universe = tradfi_symbols()
+    universe = _paper_symbols(account)
     equity, _ = _equity(account, prices, positions)
     occupied_symbols = {str(position["symbol"]).upper() for position in positions}
     candidates = [
@@ -1783,6 +1803,9 @@ def api_data(user_id: int, account_id: int, timezone_offset_minutes: int = 0) ->
     strategy = strategies[0] if strategies else {}
     strategy_ids = [str(item["public_id"]) for item in strategies if item.get("public_id")]
     strategy_names = [str(item["name"]) for item in strategies if item.get("name")]
+    raw_account_config = _json_object(account.get("config_json"))
+    configured_symbols = raw_account_config.get("symbols")
+    selected_symbols = configured_symbols if isinstance(configured_symbols, list) else []
     signal_mode = _paper_signal_mode(account)
     entry_count = closed_trade_count + sum(
         1 + max(int(position.get("adds") or 0), 0) for position in positions
@@ -1815,6 +1838,7 @@ def api_data(user_id: int, account_id: int, timezone_offset_minutes: int = 0) ->
             "combination_mode": "all",
             "engine_key": strategy.get("engine_key"),
             "signal_mode": signal_mode,
+            "symbols": selected_symbols,
         },
         "account": {
             "start": initial,

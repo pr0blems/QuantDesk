@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import math
+import time
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -17,17 +20,24 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ...application.martingale_tp4.replay import build_box_levels
+from ...application.martingale_tp4.runtime import DEFAULT_SIGNAL_POINT_SIZE
 from ...binance_client import BinanceAccountClientError
 from ...binance_rate_limit import REST_RATE_LIMITER
 from ...database import get_db
 from ...dependencies import get_current_user
 from ...domain.martingale_tp4 import strategy_parameters_from_catalog_parameters
-from ...market_config import TRADFI_UNIVERSE_KEY, tradfi_live_symbols
+from ...market_config import (
+    TRADFI_UNIVERSE_KEY,
+    tradfi_live_symbols,
+    tradfi_metadata,
+)
 from ...models import (
     LiveOrderIntent,
     LiveTradingAccount,
     PaperAccount,
     StrategyDeployment,
+    StrategyParameterProfile,
     StrategyRevision,
     User,
     UserStrategy,
@@ -43,6 +53,7 @@ from ...schemas import (
     PaperAccountCreateRequest,
     PaperAccountStatusUpdate,
     PaperAccountStrategyUpdate,
+    PaperAccountSymbolsUpdate,
 )
 from ...security import CredentialCipher, SecurityError
 from ...strategy_artifacts import add_run_manifest
@@ -52,6 +63,11 @@ from ...strategy_lifecycle import (
     LIVE_ELIGIBLE_STATUSES,
     current_strategy_revision,
     paper_eligibility,
+)
+from ...tiger_market_data import (
+    TigerBar,
+    TigerMarketDataRepository,
+    resolve_research_contract_market_link,
 )
 from .common import add_audit_log, monitor_repository, require_expected_user
 
@@ -89,6 +105,8 @@ def _paper_strategy_snapshots(snapshot: dict[str, Any] | None) -> list[dict[str,
 def _paper_account_out(account: PaperAccount) -> dict[str, Any]:
     snapshot = account.strategy_snapshot_json or {}
     snapshots = _paper_strategy_snapshots(snapshot)
+    configured_symbols = (account.config_json or {}).get("symbols")
+    symbols = configured_symbols if isinstance(configured_symbols, list) else []
     strategy_ids = [str(item["public_id"]) for item in snapshots if item.get("public_id")]
     strategy_names = [str(item["name"]) for item in snapshots if item.get("name")]
     return {
@@ -114,6 +132,7 @@ def _paper_account_out(account: PaperAccount) -> dict[str, Any]:
         "initial_balance": float(account.initial_balance),
         "balance": float(account.balance),
         "config": account.config_json,
+        "symbols": list(symbols),
         "started_at": account.started_at,
         "last_tick_at": account.last_tick_at,
         "created_at": account.created_at,
@@ -225,6 +244,315 @@ def _paper_deployment_name(
 
 def _paper_response(data: dict) -> dict:
     return {**data, "permissions": {"can_reset": True}}
+
+
+def _paper_symbol_metadata() -> list[dict[str, Any]]:
+    monitor_symbols = {
+        str(item.get("symbol") or "")
+        for item in tradfi_metadata(purpose="monitor")
+        if item.get("symbol")
+    }
+    return [
+        item
+        for item in tradfi_metadata(purpose="strategy")
+        if str(item.get("symbol") or "") in monitor_symbols
+    ]
+
+
+_PAPER_BOX_TIMEFRAME_MS = {
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+    "1d": 86_400_000,
+}
+
+
+def _paper_effective_martingale_snapshot(
+    db: Session,
+    account: PaperAccount,
+    symbol: str,
+) -> dict[str, Any] | None:
+    """Apply default and exact-symbol parameter profiles to the box strategy."""
+
+    snapshot = next(
+        (
+            dict(item)
+            for item in _paper_strategy_snapshots(account.strategy_snapshot_json)
+            if item.get("engine_key") == "martingale_tp4"
+        ),
+        None,
+    )
+    if snapshot is None:
+        return None
+    strategy_public_id = str(snapshot.get("public_id") or "")
+    strategy = (
+        db.scalar(
+            select(UserStrategy).where(
+                UserStrategy.user_id == account.user_id,
+                UserStrategy.public_id == strategy_public_id,
+            )
+        )
+        if strategy_public_id
+        else None
+    )
+    if strategy is None:
+        return snapshot
+    profiles = list(
+        db.scalars(
+            select(StrategyParameterProfile)
+            .where(
+                StrategyParameterProfile.user_id == account.user_id,
+                StrategyParameterProfile.strategy_id == strategy.id,
+                StrategyParameterProfile.scope_key.in_(("*", symbol)),
+            )
+            .order_by(
+                (StrategyParameterProfile.scope_key == "*").desc(),
+                StrategyParameterProfile.id,
+            )
+        ).all()
+    )
+    parameters = dict(snapshot.get("parameters") or {})
+    by_scope = {profile.scope_key: profile for profile in profiles}
+    for scope_key in ("*", symbol):
+        profile = by_scope.get(scope_key)
+        if profile is not None:
+            parameters.update(profile.parameters_json or {})
+    snapshot["parameters"] = parameters
+    return snapshot
+
+
+def _paper_rows_as_tiger_bars(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    symbol: str,
+    timeframe: str,
+) -> tuple[TigerBar, ...]:
+    duration = _PAPER_BOX_TIMEFRAME_MS[timeframe]
+    received_at = datetime.now(UTC)
+    bars: list[TigerBar] = []
+    for row in rows:
+        try:
+            open_time = int(row["open_time"])
+            if open_time < 10_000_000_000:
+                open_time *= 1_000
+            bar = TigerBar(
+                symbol=symbol,
+                timeframe=timeframe,
+                trade_session="regular",
+                adjustment="none",
+                open_time=open_time,
+                close_time=open_time + duration,
+                open=Decimal(str(row["open"])),
+                high=Decimal(str(row["high"])),
+                low=Decimal(str(row["low"])),
+                close=Decimal(str(row["close"])),
+                volume=Decimal(str(row.get("volume") or 0)),
+                amount=None,
+                received_at=received_at,
+                source_version="paper_chart_contract_v1",
+            )
+        except (InvalidOperation, KeyError, TypeError, ValueError):
+            continue
+        if bar.valid_ohlc:
+            bars.append(bar)
+    return tuple(sorted(bars, key=lambda item: item.open_time))
+
+
+def _paper_resample_bars(
+    bars: Sequence[TigerBar],
+    *,
+    timeframe: str,
+) -> tuple[TigerBar, ...]:
+    """Resample the stored M15 contract stream for M30 box configurations."""
+
+    if timeframe == "15m":
+        return tuple(bars)
+    if timeframe not in {"30m", "1h"}:
+        return ()
+    duration = _PAPER_BOX_TIMEFRAME_MS[timeframe]
+    grouped: dict[int, list[TigerBar]] = {}
+    for bar in bars:
+        grouped.setdefault(bar.open_time // duration * duration, []).append(bar)
+    output: list[TigerBar] = []
+    for open_time, window in sorted(grouped.items()):
+        first = window[0]
+        last = window[-1]
+        output.append(
+            TigerBar(
+                symbol=first.symbol,
+                timeframe=timeframe,
+                trade_session="regular",
+                adjustment="none",
+                open_time=open_time,
+                close_time=open_time + duration,
+                open=first.open,
+                high=max(item.high for item in window),
+                low=min(item.low for item in window),
+                close=last.close,
+                volume=sum((item.volume for item in window), Decimal("0")),
+                amount=None,
+                received_at=last.received_at,
+                source_version="paper_chart_resample_v1",
+            )
+        )
+    return tuple(output)
+
+
+def _paper_daily_bars(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    symbol: str,
+) -> tuple[TigerBar, ...]:
+    source = _paper_rows_as_tiger_bars(rows, symbol=symbol, timeframe="4h")
+    duration = _PAPER_BOX_TIMEFRAME_MS["1d"]
+    grouped: dict[int, list[TigerBar]] = {}
+    for bar in source:
+        grouped.setdefault(bar.open_time // duration * duration, []).append(bar)
+    output: list[TigerBar] = []
+    for open_time, window in sorted(grouped.items()):
+        first = window[0]
+        last = window[-1]
+        output.append(
+            TigerBar(
+                symbol=symbol,
+                timeframe="1d",
+                trade_session="regular",
+                adjustment="none",
+                open_time=open_time,
+                close_time=open_time + duration,
+                open=first.open,
+                high=max(item.high for item in window),
+                low=min(item.low for item in window),
+                close=last.close,
+                volume=sum((item.volume for item in window), Decimal("0")),
+                amount=None,
+                received_at=last.received_at,
+                source_version="paper_chart_daily_v1",
+            )
+        )
+    return tuple(output)
+
+
+def _paper_contract_box_bars(
+    repository: Any,
+    symbol: str,
+    timeframe: str,
+    *,
+    limit: int,
+) -> tuple[TigerBar, ...]:
+    if timeframe in {"15m", "30m"}:
+        raw = _paper_rows_as_tiger_bars(
+            repository.klines(symbol, "15m", limit * (2 if timeframe == "30m" else 1)),
+            symbol=symbol,
+            timeframe="15m",
+        )
+        return _paper_resample_bars(raw, timeframe=timeframe)
+    if timeframe == "1h":
+        return _paper_rows_as_tiger_bars(
+            repository.klines(symbol, "1h", limit),
+            symbol=symbol,
+            timeframe="1h",
+        )
+    return ()
+
+
+def _paper_chart_box_overlay(
+    request: Request,
+    db: Session,
+    account: PaperAccount,
+    symbol: str,
+) -> dict[str, Any]:
+    snapshot = _paper_effective_martingale_snapshot(db, account, symbol)
+    if snapshot is None:
+        return {"available": False, "reason": "当前模拟盘未绑定突破箱体策略", "levels": []}
+    try:
+        parameters = strategy_parameters_from_catalog_parameters(
+            snapshot.get("parameters") or {}
+        )
+    except (TypeError, ValueError):
+        return {"available": False, "reason": "突破箱体参数无效", "levels": []}
+    timeframe = parameters.box.timeframe
+    signal_limit = min(2_000, max(600, parameters.box.length + 360))
+    daily_limit = min(1_000, max(180, parameters.box.daily_atr_period * 4))
+    source = "tiger_reference"
+    signal_bars: tuple[TigerBar, ...] = ()
+    daily_bars: tuple[TigerBar, ...] = ()
+    link = resolve_research_contract_market_link(db, contract_symbol=symbol)
+    if link is not None:
+        tiger = TigerMarketDataRepository(db)
+        end_time = int(time.time() * 1_000)
+        signal_bars = tiger.load_latest_bars(
+            symbol=link.underlying_symbol,
+            timeframe=timeframe,
+            trade_session="regular",
+            adjustment="none",
+            end_time=end_time,
+            limit=signal_limit,
+        )
+        if parameters.box.auto_range:
+            daily_bars = tiger.load_latest_bars(
+                symbol=link.underlying_symbol,
+                timeframe="1d",
+                trade_session="regular",
+                adjustment="none",
+                end_time=end_time,
+                limit=daily_limit,
+            )
+    daily_ready = not parameters.box.auto_range or len(daily_bars) >= parameters.box.daily_atr_period
+    if len(signal_bars) < parameters.box.length + 2 or not daily_ready:
+        source = "binance_contract"
+        repository = _monitor(request)
+        signal_bars = _paper_contract_box_bars(
+            repository,
+            symbol,
+            timeframe,
+            limit=signal_limit,
+        )
+        daily_bars = (
+            _paper_daily_bars(
+                repository.klines(symbol, "4h", daily_limit * 6),
+                symbol=symbol,
+            )
+            if parameters.box.auto_range
+            else ()
+        )
+    if timeframe not in {"15m", "30m", "1h"} and source == "binance_contract":
+        return {
+            "available": False,
+            "reason": f"当前行情缓存无法绘制 {timeframe} 箱体",
+            "timeframe": timeframe,
+            "levels": [],
+        }
+    if len(signal_bars) < parameters.box.length + 2:
+        return {"available": False, "reason": "突破箱体 K 线预热不足", "timeframe": timeframe, "levels": []}
+    if parameters.box.auto_range and len(daily_bars) < parameters.box.daily_atr_period:
+        return {"available": False, "reason": "突破箱体 ATR 日线预热不足", "timeframe": timeframe, "levels": []}
+    levels = build_box_levels(
+        signal_bars,
+        daily_bars,
+        SimpleNamespace(parameters=parameters),
+        point_size=DEFAULT_SIGNAL_POINT_SIZE,
+    )
+    points = [
+        {
+            "open_time": bar.open_time,
+            "high": float(level.high) if level is not None else None,
+            "low": float(level.low) if level is not None else None,
+        }
+        for bar, level in zip(signal_bars, levels, strict=True)
+    ][-360:]
+    return {
+        "available": True,
+        "strategy_id": snapshot.get("public_id"),
+        "strategy_name": snapshot.get("name"),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "source": source,
+        "levels": points,
+    }
 
 
 def _live_account_record(
@@ -696,6 +1024,121 @@ def update_paper_account_strategy(
     db.commit()
     db.refresh(account)
     return _paper_account_out(account)
+
+
+@router.get("/paper/symbols")
+def list_paper_symbols(
+    _: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return the reviewed strategy universe available to paper accounts."""
+
+    items = [
+        {
+            "symbol": str(item.get("symbol") or ""),
+            "pair": str(item.get("pair") or item.get("symbol") or ""),
+            "underlying": str(item.get("underlyingType") or ""),
+            "normalized_symbol": str(item.get("normalizedSymbol") or ""),
+        }
+        for item in _paper_symbol_metadata()
+        if item.get("symbol")
+    ]
+    return {
+        "items": items,
+        "count": len(items),
+        "timeframe": "15m",
+        "max_selected": 20,
+    }
+
+
+@router.put("/paper/accounts/{account_id}/symbols")
+def update_paper_account_symbols(
+    account_id: str,
+    payload: PaperAccountSymbolsUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Replace one paper account's entry universe and chart symbols."""
+
+    _require_expected_user(request, user)
+    account = _paper_account_record(db, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    available = {
+        str(item.get("symbol") or "") for item in _paper_symbol_metadata()
+    }
+    unknown = [symbol for symbol in payload.symbols if symbol not in available]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"当前模拟盘不支持交易品种：{', '.join(unknown[:5])}",
+        )
+    config = dict(account.config_json or {})
+    config.update(
+        {
+            "symbols": payload.symbols,
+            "universe_key": TRADFI_UNIVERSE_KEY,
+            "universe_count": len(payload.symbols),
+        }
+    )
+    account.config_json = config
+    account.updated_at = utcnow()
+    deployments = db.scalars(
+        select(StrategyDeployment).where(
+            StrategyDeployment.user_id == user.id,
+            StrategyDeployment.mode == "paper",
+            StrategyDeployment.target_account_id == account.id,
+            StrategyDeployment.status != "stopped",
+        )
+    ).all()
+    for deployment in deployments:
+        deployment.universe_override_json = {
+            "universe_key": TRADFI_UNIVERSE_KEY,
+            "symbols": payload.symbols,
+        }
+        deployment.updated_at = utcnow()
+    _audit(
+        db,
+        request,
+        "paper.account.symbols.update",
+        user.id,
+        "paper_account",
+        account.public_id,
+    )
+    db.commit()
+    db.refresh(account)
+    return _paper_account_out(account)
+
+
+@router.get("/paper/accounts/{account_id}/chart-overlay")
+def paper_account_chart_overlay(
+    account_id: str,
+    request: Request,
+    symbol: str = Query(
+        min_length=2,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+    ),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return non-lookahead box boundaries for one paper-account chart."""
+
+    account = _paper_account_record(db, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    normalized_symbol = symbol.strip().upper()
+    configured = {
+        str(item).strip().upper()
+        for item in (account.config_json or {}).get("symbols", [])
+        if str(item).strip()
+    }
+    if normalized_symbol not in configured:
+        raise HTTPException(status_code=404, detail="paper account symbol not found")
+    try:
+        return _paper_chart_box_overlay(request, db, account, normalized_symbol)
+    except MonitorUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
 
 
 @router.get("/paper")

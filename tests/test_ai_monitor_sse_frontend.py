@@ -68,7 +68,13 @@ def test_research_modal_prefers_live_market_websocket_before_rest_fallback() -> 
     assert 'websocket: "WS 实时（自动更新）"' in component
     assert 'rest: "REST 备选轮询"' in component
     assert "openMonitorMarketWebSocket" in client
+    assert "openPaperMarketWebSocket" in client
     assert 'endpoint.searchParams.set("symbol", normalized)' in client
+    assert 'endpoint.searchParams.set("symbols", normalized.join(","))' in client
     assert 'new URL(`${apiRoot}/ai-monitor/market/ws`, window.location.origin)' in client
     assert '@router.websocket("/market/ws")' in endpoint
     assert "repository.market_snapshot" in endpoint
+    assert "repository.latest_tickers" in endpoint
+    assert 'event = "markets"' in endpoint
+    assert '"price_change_24h": change_price' in endpoint
+    assert "len(symbols) > 20" in endpoint
