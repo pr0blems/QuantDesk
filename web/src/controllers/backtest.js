@@ -351,8 +351,9 @@ class BacktestWorkbench extends window.QuantDeskPageController {
                     </section>
                     <div id="calculator-tier-levels" class="calculator-tier-levels"></div>
                   </div>
-                  <div class="calculator-secondary-head"><strong>网格、追踪与箱体参数</strong><small>这些参数不属于分级止盈，“应用分级止盈”不会改动它们</small></div>
+                  <div class="calculator-secondary-head"><strong>网格、追踪与箱体参数</strong><small>网格阈值表示已有 N 手后，从第 N+1 手开始切换；“应用分级止盈”不会改动这些参数</small></div>
                   <div id="calculator-point-preview" class="calculator-point-preview"></div>
+                  <p id="calculator-grid-status" class="calculator-grid-status" role="status" aria-live="polite"></p>
                 </div>
                 <div class="calculator-actions">
                   <button id="apply-position-settings" type="button">应用手数与杠杆</button>
@@ -458,6 +459,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     this.q("#calculator-point-preview").addEventListener("input", (event) => {
       const input = event.target.closest?.('[data-calculator-param-key="BoxRange"]');
       if (input && !input.disabled) this.lotCalculatorManualBoxRange = input.value;
+      if (event.target.closest?.('[data-calculator-param-key="GridDrift"]')) this.syncCalculatorGridMode();
     });
     this.q("#reset-params").addEventListener("click", () => {
       this.renderParameters(true);
@@ -1232,6 +1234,25 @@ class BacktestWorkbench extends window.QuantDeskPageController {
         : "当前使用：固定箱体范围；ATR 周期和系数已停用。",
     );
 
+    const configuredMode = Number(this.strategyParamInput("ChooseTrading")?.value ?? 0);
+    const gridDrift = Math.max(1, Math.round(Number(this.strategyParamInput("GridDrift")?.value || 1)));
+    const maxOrders = Math.max(1, Math.round(Number(this.strategyParamInput("MaxOrders")?.value || 1)));
+    this.setParameterDisabled(
+      "GridDrift",
+      configuredMode === 2,
+      "当前已选择网格模式，将从首单开始按网格逻辑运行。",
+    );
+    const gridMessage = configuredMode === 2
+      ? "当前使用：从首单开始直接运行网格模式，切换阈值不参与判断。"
+      : gridDrift < maxOrders
+        ? `当前使用：已有 ${gridDrift} 手后，从第 ${gridDrift + 1} 手开始切换为网格模式。`
+        : `当前不会切换网格：阈值 ${gridDrift} 手不小于最大订单数 ${maxOrders} 手。`;
+    this.setParameterGroupMessage(
+      "仓位与网格加仓",
+      gridMessage,
+      configuredMode !== 2 && gridDrift >= maxOrders ? "warning" : "info",
+    );
+
     const overlap = this.parameterSwitchEnabled("Overlap");
     this.setParameterDisabled("OverlapOrderNumber", !overlap, "开启篮子首尾覆盖后才可配置。");
     this.setParameterDisabled("OverlapPercent", !overlap, "开启篮子首尾覆盖后才可配置。");
@@ -1519,6 +1540,21 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     status.className = "calculator-atr-status error";
   }
 
+  syncCalculatorGridMode() {
+    const status = this.q("#calculator-grid-status");
+    const input = this.q('[data-calculator-param-key="GridDrift"]');
+    if (!status || !input) return;
+    const gridDrift = Math.max(1, Math.round(Number(input.value || 1)));
+    const maxOrders = Math.max(1, Math.round(Number(this.strategyParamInput("MaxOrders")?.value || 1)));
+    if (gridDrift < maxOrders) {
+      status.textContent = `模式切换：已有 ${gridDrift} 手后，第 ${gridDrift + 1} 手起按网格间距和同方向订单序列加仓。`;
+      status.className = "calculator-grid-status ready";
+      return;
+    }
+    status.textContent = `当前不会切换网格：阈值 ${gridDrift} 手不小于最大订单数 ${maxOrders} 手。请将阈值设置为小于 ${maxOrders}。`;
+    status.className = "calculator-grid-status warning";
+  }
+
   updateCalculatorPointRatios() {
     const basePoints = Number(this.q("#calculator-base-points").value);
     if (!Number.isFinite(basePoints) || basePoints < 0) return;
@@ -1621,12 +1657,14 @@ class BacktestWorkbench extends window.QuantDeskPageController {
     }
     if (resetPointFields || !this.q("#calculator-point-preview").children.length) {
       this.q("#calculator-point-preview").replaceChildren(...[
+        ["GridDrift", "第几手后切换网格", this.calculatorStrategyParamValue("GridDrift", 100, { integer: true }), { unit: "手", integer: true, minimum: 1 }],
         ["Distance", "网格间距", settings.Distance], ["MaxSpred", "最大点差", settings.MaxSpred],
         ["TrailStart", "追踪启动", settings.TrailStart], ["TrailDistance", "追踪距离", settings.TrailDistance],
         ["BoxRange", "箱体范围", settings.BoxRange], ["BoxBufferPips", "箱体缓冲", settings.BoxBufferPips],
-      ].map(([key, label, value]) => this.calculatorPointField(key, label, value)));
+      ].map(([key, label, value, options]) => this.calculatorPointField(key, label, value, options)));
     }
     this.syncCalculatorBoxMode();
+    this.syncCalculatorGridMode();
   }
 
   applyCalculatorBoxSettings() {

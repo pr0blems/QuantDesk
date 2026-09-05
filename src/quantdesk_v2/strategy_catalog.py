@@ -46,6 +46,7 @@ def _martingale_parameter_schema() -> list[dict[str, Any]]:
         integer: bool = False,
         switch: bool = False,
         options: list[dict[str, Any]] | None = None,
+        help: str | None = None,
     ) -> dict[str, Any]:
         item: dict[str, Any] = {
             "key": key,
@@ -60,6 +61,8 @@ def _martingale_parameter_schema() -> list[dict[str, Any]]:
             item["control"] = "switch"
         if options is not None:
             item["options"] = options
+        if help:
+            item["help"] = help
         return item
 
     return [
@@ -75,7 +78,16 @@ def _martingale_parameter_schema() -> list[dict[str, Any]]:
         number("mm", "手数倍增系数", 2, 0.01, 100, "仓位递增"),
         number("MaxLot", "单腿最大手数", 100, 0.000001, 1_000_000, "仓位递增"),
         number("MaxOrders", "最大订单数", 16, 1, 100, "仓位递增", integer=True),
-        number("GridDrift", "切换网格订单数", 100, 1, 100_000, "仓位递增", integer=True),
+        number(
+            "GridDrift",
+            "第几手后切换网格",
+            100,
+            1,
+            100_000,
+            "仓位递增",
+            integer=True,
+            help="已有 N 手后，从第 N+1 手开始按网格模式加仓；若 N 不小于最大订单数，本轮不会切换。",
+        ),
         number("Distance", "网格间距（点）", 150, 0.000001, 1_000_000_000, "仓位递增"),
         number("MaxSpred", "最大点差（点）", 50, 0, 1_000_000_000, "执行约束"),
         number("TP", "基础止盈（点）", 100, 0.000001, 1_000_000_000, "分级止盈"),

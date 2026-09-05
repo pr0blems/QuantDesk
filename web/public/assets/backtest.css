@@ -576,6 +576,9 @@ button { cursor: pointer; }
 .calculator-point-field-disabled .calculator-point-control { border-color: rgba(121, 151, 180, .12); }
 .calculator-point-field-disabled input { color: #7190a2; cursor: not-allowed; }
 .calculator-point-preview small { color: #687f93; font-size: 10.5px; }
+.calculator-grid-status { margin: 0; padding: 8px 11px; border-top: 1px solid rgba(139, 123, 211, .14); background: rgba(7, 18, 30, .72); color: #7890a3; font-size: 10.5px; line-height: 1.45; }
+.calculator-grid-status.ready { color: #68d8b5; }
+.calculator-grid-status.warning { color: #e4bd65; }
 .calculator-point-control { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; border: 1px solid rgba(139, 123, 211, .35); background: #07121e; }
 .calculator-point-control input { width: 100%; min-width: 0; min-height: 34px; padding: 5px 8px; border: 0; color: #c8bbfb; background: transparent; font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .calculator-point-control span { color: #71879a; text-align: center; }

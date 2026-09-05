@@ -53,6 +53,7 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'id="calculator-atr-period"',
         'id="calculator-atr-factor"',
         'id="calculator-atr-status"',
+        'id="calculator-grid-status"',
         'id="calculator-tier-preview" class="calculator-tier-preview"',
         'id="calculator-tier-levels" class="calculator-tier-levels"',
         'id="calculator-market-change" class="neutral"',
@@ -67,6 +68,8 @@ def test_backtest_workbench_switches_to_martingale_basket_profile() -> None:
         'this.applyCalculatorBoxSettings();',
         'this.calculatorEffectiveBoxPoints()',
         'this.syncCalculatorBoxMode();',
+        'this.syncCalculatorGridMode();',
+        '"GridDrift", "第几手后切换网格"',
         '一键应用全部设置',
         '按止盈点数、当前合约价格、初始手数和 Binance 杠杆估算实际收益',
         '分级止盈参数',
@@ -226,6 +229,8 @@ def test_backtest_groups_strategy_parameters_and_enforces_dependencies() -> None
         '"突破箱体与 ATR"',
         'this.setParameterDisabled("BoxRange", autoBox',
         'this.setParameterDisabled("AutoBoxRangeDailyATRperiod", !autoBox',
+        'this.setParameterDisabled(\n      "GridDrift"',
+        '已有 ${gridDrift} 手后，从第 ${gridDrift + 1} 手开始切换为网格模式。',
         'ATR 自适应箱体已开启，固定箱体范围不参与计算。',
         '固定止盈会先触发，追踪止盈不会生效。',
         'input.type === "checkbox" || type === "boolean" || type === "bool"',
@@ -242,6 +247,7 @@ def test_backtest_groups_strategy_parameters_and_enforces_dependencies() -> None
         ".parameter-switch-field {",
         ".parameter-field-disabled {",
         ".parameter-group-message.warning {",
+        ".calculator-grid-status.warning {",
     ):
         assert contract in stylesheet
 
