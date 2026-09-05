@@ -476,7 +476,7 @@ button { cursor: pointer; }
 .symbol-dialog-foot button:hover { filter: brightness(1.08); }
 
 .history-dialog-backdrop { position: fixed; z-index: 1200; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, .72); backdrop-filter: blur(4px); }
-.history-dialog { width: min(880px, 100%); max-height: min(760px, calc(100vh - 48px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #435064; border-radius: 3px; background: #111511; box-shadow: 0 24px 80px rgba(0, 0, 0, .55); }
+.history-dialog { width: min(1080px, 100%); max-height: min(820px, calc(100vh - 48px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #435064; border-radius: 3px; background: #111511; box-shadow: 0 24px 80px rgba(0, 0, 0, .55); }
 .history-dialog-head { min-height: 92px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 17px 19px; border-bottom: 1px solid var(--bt-line-soft); background: rgba(19, 23, 19, .98); }
 .history-dialog-head > div:first-child { min-width: 0; }
 .history-dialog-head > div:first-child > span { color: var(--bt-brand); font-size: 12.8px; font-weight: 800; letter-spacing: .14em; }
@@ -487,7 +487,8 @@ button { cursor: pointer; }
 .history-dialog-actions button { min-height: 34px; padding: 6px 10px; border: 1px solid var(--bt-line-soft); border-radius: 2px; color: #b8c5d1; background: rgba(4, 12, 21, .45); }
 .history-dialog-actions button:hover:not(:disabled) { border-color: var(--bt-brand); color: var(--bt-text); }
 .history-dialog-actions .dialog-close { width: 36px; padding: 0; font-size: 24px; line-height: 1; }
-.history-list { min-height: 210px; max-height: calc(100vh - 230px); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 9px; padding: 14px; overflow-y: auto; }
+.history-list { min-height: 210px; max-height: calc(100vh - 230px); display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 9px; padding: 14px; overflow-y: auto; }
+.history-result-card.loading { opacity: .58; cursor: wait; }
 .history-item { width: 100%; display: grid; gap: 6px; padding: 9px; border: 1px solid var(--bt-line-soft); border-radius: 9px; color: var(--bt-text); background: rgba(12, 27, 43, .74); text-align: left; }
 .history-item:hover { border-color: #36546e; background: rgba(17, 37, 57, .82); }
 .history-item.loading { opacity: .58; cursor: wait; }

@@ -75,7 +75,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-ai-analysis-10">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-history-ui-11">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -2363,51 +2363,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
   }
 
   renderBatchResultCards() {
-    const cards = this.batchResults.map((item, index) => {
-      const { run, result } = this.unpackDetail(item.detail);
-      const metrics = result.metrics || {};
-      const totalReturn = this.metric(metrics, ["total_return_pct", "return_pct", "total_return"]);
-      const drawdown = this.metric(metrics, ["max_drawdown_pct", "max_drawdown"]);
-      const winRate = this.metric(metrics, ["win_rate_pct", "win_rate"]);
-      const trades = this.metric(metrics, ["trade_count", "total_trades", "trades"]);
-      const expanded = index === this.expandedBatchIndex;
-      const card = this.node("article", `batch-result-card${expanded ? " expanded" : ""}`);
-      const head = this.node("div", "batch-result-card-head");
-      const identity = this.node("div", "batch-result-identity");
-      identity.append(
-        this.node("span", "batch-result-order", String(index + 1).padStart(2, "0")),
-        this.node("strong", "", run.symbol || item.symbol || "--"),
-        this.node("small", "", `${run.strategy_name || run.strategy_id || "策略回测"} · ${run.timeframe || "--"}`),
-      );
-      const headActions = this.node("div", "batch-result-card-head-actions");
-      const analysisButton = this.node("button", "batch-result-ai-button", "✦ AI 分析");
-      analysisButton.type = "button";
-      analysisButton.disabled = !this.runId(item.detail);
-      analysisButton.setAttribute("aria-label", `分析 ${run.symbol || item.symbol || "当前品种"} 回测结果`);
-      analysisButton.addEventListener("click", () => { void this.openBacktestAnalysis(item); });
-      headActions.append(
-        analysisButton,
-        this.node("strong", `batch-result-return ${this.toneClass(totalReturn)}`, this.percent(totalReturn)),
-      );
-      head.append(identity, headActions);
-      const facts = this.node("div", "batch-result-metrics");
-      for (const [label, value, tone] of [
-        ["最大回撤", this.percent(drawdown, false), -Math.abs(Number(drawdown) || 0)],
-        ["胜率", this.percent(winRate, false), winRate],
-        ["交易次数", this.integer(trades), 0],
-        ["数据区间", `${this.dateOnly(run.start_date || run.start_at) || "--"} — ${this.dateOnly(run.end_date || run.end_at) || "--"}`, 0],
-      ]) {
-        const fact = this.node("div", "batch-result-metric");
-        fact.append(this.node("span", "", label), this.node("strong", this.toneClass(tone), value));
-        facts.append(fact);
-      }
-      const button = this.node("button", "batch-result-toggle", expanded ? "收起回测结果" : "展开回测结果");
-      button.type = "button";
-      button.setAttribute("aria-expanded", String(expanded));
-      button.addEventListener("click", () => { void this.toggleBatchResult(index); });
-      card.append(head, facts, button);
-      return card;
-    });
+    const cards = this.batchResults.map((item, index) => this.buildResultSummaryCard(item, index, {
+      expanded: index === this.expandedBatchIndex,
+      onToggle: () => this.toggleBatchResult(index),
+    }));
     const failedCards = this.batchFailures.map((item) => {
       const card = this.node("article", "batch-result-card failed");
       const head = this.node("div", "batch-result-card-head");
@@ -2418,6 +2377,52 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       return card;
     });
     this.q("#batch-result-list").replaceChildren(...cards, ...failedCards);
+  }
+
+  buildResultSummaryCard(item, index, options = {}) {
+    const { run, result } = this.unpackDetail(item.detail);
+    const metrics = result.metrics || {};
+    const totalReturn = this.metric(metrics, ["total_return_pct", "return_pct", "total_return"]);
+    const drawdown = this.metric(metrics, ["max_drawdown_pct", "max_drawdown"]);
+    const winRate = this.metric(metrics, ["win_rate_pct", "win_rate"]);
+    const trades = this.metric(metrics, ["trade_count", "total_trades", "trades"]);
+    const expanded = Boolean(options.expanded);
+    const card = this.node("article", `batch-result-card${expanded ? " expanded" : ""}`);
+    const head = this.node("div", "batch-result-card-head");
+    const identity = this.node("div", "batch-result-identity");
+    identity.append(
+      this.node("span", "batch-result-order", String(index + 1).padStart(2, "0")),
+      this.node("strong", "", run.symbol || item.symbol || "--"),
+      this.node("small", "", `${run.strategy_name || run.strategy_id || "策略回测"} · ${run.timeframe || "--"}`),
+    );
+    const headActions = this.node("div", "batch-result-card-head-actions");
+    const analysisButton = this.node("button", "batch-result-ai-button", "✦ AI 分析");
+    analysisButton.type = "button";
+    analysisButton.disabled = !this.runId(item.detail);
+    analysisButton.setAttribute("aria-label", `分析 ${run.symbol || item.symbol || "当前品种"} 回测结果`);
+    analysisButton.addEventListener("click", () => { void this.openBacktestAnalysis(item); });
+    headActions.append(
+      analysisButton,
+      this.node("strong", `batch-result-return ${this.toneClass(totalReturn)}`, this.percent(totalReturn)),
+    );
+    head.append(identity, headActions);
+    const facts = this.node("div", "batch-result-metrics");
+    for (const [label, value, tone] of [
+      ["最大回撤", this.percent(drawdown, false), -Math.abs(Number(drawdown) || 0)],
+      ["胜率", this.percent(winRate, false), winRate],
+      ["交易次数", this.integer(trades), 0],
+      ["数据区间", `${this.dateOnly(run.start_date || run.start_at) || "--"} — ${this.dateOnly(run.end_date || run.end_at) || "--"}`, 0],
+    ]) {
+      const fact = this.node("div", "batch-result-metric");
+      fact.append(this.node("span", "", label), this.node("strong", this.toneClass(tone), value));
+      facts.append(fact);
+    }
+    const button = this.node("button", "batch-result-toggle", options.toggleLabel || (expanded ? "收起回测结果" : "展开回测结果"));
+    button.type = "button";
+    button.setAttribute("aria-expanded", String(expanded));
+    button.addEventListener("click", () => { void options.onToggle?.(); });
+    card.append(head, facts, button);
+    return card;
   }
 
   async toggleBatchResult(index) {
@@ -2607,35 +2612,33 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       list.replaceChildren(this.node("div", "history-empty", this.historyLoaded ? "暂无回测记录，首次运行后会保存在这里。" : "打开窗口后读取历史回测数据。"));
       return;
     }
-    list.replaceChildren(...this.history.map((item) => {
+    list.replaceChildren(...this.history.map((item, index) => {
       const run = item.run || item;
-      const metrics = this.unpackDetail(item).result.metrics;
       const id = this.runId(item);
-      const button = this.node("button", "history-item");
-      button.type = "button";
-      if (id) button.dataset.runId = id;
-      const top = this.node("div", "history-item-top");
-      top.append(this.node("strong", "", run.strategy_name || run.strategy_id || "策略回测"), this.node("span", this.toneClass(this.metric(metrics, ["total_return_pct", "return_pct", "total_return"])), this.percent(this.metric(metrics, ["total_return_pct", "return_pct", "total_return"]))));
-      const middle = this.node("div", "history-item-middle", `${run.symbol || "--"} · ${run.timeframe || "--"}`);
-      const bottom = this.node("div", "history-item-bottom");
-      bottom.append(this.node("span", "", this.shortDate(run.completed_at || run.created_at || run.started_at)), this.node("span", "", `回撤 ${this.percent(this.metric(metrics, ["max_drawdown_pct", "max_drawdown"]), false)}`));
-      button.append(top, middle, bottom);
-      if (id) button.addEventListener("click", () => this.loadRun(id, button));
-      else button.disabled = true;
-      return button;
+      const resultItem = { symbol: run.symbol || "--", detail: item };
+      const card = this.buildResultSummaryCard(resultItem, index, {
+        toggleLabel: "查看完整回测结果",
+        onToggle: id ? () => this.loadRun(id, card) : null,
+      });
+      card.classList.add("history-result-card");
+      if (id) card.dataset.runId = id;
+      else card.querySelector(".batch-result-toggle").disabled = true;
+      return card;
     }));
   }
 
   async loadRun(id, button) {
     const generation = this.sessionGeneration;
-    this.qa(".history-item").forEach((item) => item.classList.toggle("loading", item === button));
+    this.qa(".history-result-card").forEach((item) => item.classList.toggle("loading", item === button));
     this.setStageStatus("读取记录", "loading");
     try {
       const detail = await this.api(`/${encodeURIComponent(id)}`);
       if (generation !== this.sessionGeneration) return;
-      this.activeDetail = detail;
-      this.renderResult(detail);
+      const { run } = this.unpackDetail(detail);
+      this.renderBatchResults([{ symbol: run.symbol || "--", detail }], []);
       this.closeHistory();
+      await this.toggleBatchResult(0);
+      if (generation !== this.sessionGeneration) return;
       this.setStageStatus("历史结果", "success");
       this.showBanner("");
     } catch (error) {
@@ -2644,7 +2647,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       this.showBanner(`回测详情加载失败：${error.message}`, "error");
     } finally {
       if (generation === this.sessionGeneration) {
-        this.qa(".history-item").forEach((item) => item.classList.remove("loading"));
+        this.qa(".history-result-card").forEach((item) => item.classList.remove("loading"));
       }
     }
   }
