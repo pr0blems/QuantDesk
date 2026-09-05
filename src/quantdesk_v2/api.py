@@ -38,6 +38,11 @@ from .backtest import (
     BacktestRepository,
     BacktestUnavailable,
 )
+from .backtest_ai import (
+    BACKTEST_ANALYSIS_SYSTEM_PROMPT,
+    analyze_backtest_with_model,
+    build_backtest_analysis_input,
+)
 from .binance_client import BinanceAccountClientError
 from .binance_performance import (
     build_binance_performance,
@@ -48,6 +53,7 @@ from .binance_performance import (
 from .database import get_db
 from .dependencies import get_current_user
 from .domain.martingale_tp4 import strategy_parameters_from_catalog_parameters
+from .infrastructure.persistence.backtests import BacktestQueryRepository
 from .interfaces.api.ai_monitor import router as ai_monitor_router
 from .interfaces.api.backtest_presenters import backtest_run_detail as _run_detail
 from .interfaces.api.backtests_read import router as backtests_read_router
@@ -3294,6 +3300,107 @@ def create_backtest(
         db.rollback()
         raise HTTPException(status_code=503, detail="backtest result could not be saved") from None
     return _run_detail(run)
+
+
+def _backtest_analysis_context(db: Session, *, user_id: int, run_id: int) -> tuple[Any, dict[str, Any]]:
+    run = BacktestQueryRepository(db).get_for_user(user_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="回测记录不存在")
+    if run.status != "completed":
+        raise HTTPException(status_code=409, detail="只有已完成的回测才能进行 AI 分析")
+    return run, build_backtest_analysis_input(run)
+
+
+@router.get("/backtests/{run_id}/ai-analysis-context")
+def get_backtest_analysis_context(
+    run_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return the exact prompt and persisted snapshot before model execution."""
+
+    run, model_input = _backtest_analysis_context(db, user_id=user.id, run_id=run_id)
+    return {
+        "run_id": run.id,
+        "system_prompt": BACKTEST_ANALYSIS_SYSTEM_PROMPT,
+        "model_input": model_input,
+        "notice": "该快照由服务端从已保存的回测记录生成，前端不能修改。",
+    }
+
+
+@router.post("/backtests/{run_id}/ai-analysis")
+def analyze_backtest_run(
+    run_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Analyze one completed, tenant-owned run without mutating its strategy."""
+
+    run, model_input = _backtest_analysis_context(db, user_id=user.id, run_id=run_id)
+
+    model_config = get_global_ai_model_config(db, legacy_fallback_user_id=user.id)
+    if model_config is None:
+        raise HTTPException(status_code=409, detail="请先在管理后台配置并启用全局 AI 模型")
+    try:
+        api_key = CredentialCipher(
+            request.app.state.settings.credential_master_key.get_secret_value()
+        ).decrypt(model_config.api_key_encrypted)
+    except SecurityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="AI 模型密钥无法解密，请重新配置 API Key",
+        ) from None
+
+    provider_code = model_config.provider_code
+    model_name = model_config.model_name
+    timeout_seconds = min(
+        90.0,
+        float(request.app.state.settings.deepseek_optimizer_timeout_seconds),
+    )
+    max_tokens = min(
+        6_000,
+        max(1_500, int(request.app.state.settings.deepseek_optimizer_max_tokens)),
+    )
+    # Release the SQL transaction before waiting for the external model.
+    db.rollback()
+    try:
+        analysis = analyze_backtest_with_model(
+            model_input,
+            provider_code=provider_code,
+            api_key=api_key,
+            model_name=model_name,
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_tokens,
+        )
+    except StrategyAiError as exc:
+        status_by_category = {
+            "not_configured": 409,
+            "timeout": 504,
+            "upstream": 502,
+            "invalid_output": 502,
+        }
+        message_by_category = {
+            "not_configured": "AI 模型配置不可用",
+            "timeout": "AI 分析超时，请稍后重试",
+            "upstream": "AI 模型服务暂时不可用",
+            "invalid_output": "AI 返回的分析格式无效，请重新分析",
+        }
+        raise HTTPException(
+            status_code=status_by_category.get(exc.category, 502),
+            detail=message_by_category.get(exc.category, "AI 分析失败"),
+        ) from None
+
+    return {
+        "run_id": run_id,
+        "provider": provider_code,
+        "model": model_name,
+        "system_prompt": BACKTEST_ANALYSIS_SYSTEM_PROMPT,
+        "model_input": model_input,
+        "analysis": analysis,
+        "notice": "分析结果仅用于研究，不会自动修改策略参数或触发交易。",
+    }
 
 
 router.include_router(backtests_read_router)

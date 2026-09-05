@@ -874,6 +874,26 @@ def test_backtest_run_is_saved_audited_and_isolated_by_user(
         assert client.get("/api/v2/backtests", headers=second_headers).json() == {"items": []}
         hidden = client.get(f"/api/v2/backtests/{run_id}", headers=second_headers)
         assert hidden.status_code == 404
+        hidden_analysis = client.get(
+            f"/api/v2/backtests/{run_id}/ai-analysis-context",
+            headers=second_headers,
+        )
+        assert hidden_analysis.status_code == 404
+
+        analysis_context = client.get(
+            f"/api/v2/backtests/{run_id}/ai-analysis-context",
+            headers=first_headers,
+        )
+        assert analysis_context.status_code == 200
+        context_body = analysis_context.json()
+        assert context_body["run_id"] == run_id
+        assert "量化回测审查助手" in context_body["system_prompt"]
+        assert context_body["model_input"]["run"]["strategy_name"] == "均线交叉"
+        assert context_body["model_input"]["strategy_parameters"] == {
+            "fast_period": 5,
+            "slow_period": 20,
+        }
+        assert context_body["model_input"]["trade_statistics"]["persisted_trade_count"] == 1
 
         with test_session() as db:
             first_user = db.scalar(select(User).where(User.username == "researcher-one"))

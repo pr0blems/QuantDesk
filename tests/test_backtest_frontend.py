@@ -212,7 +212,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
     backtest_stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-compact-adaptive-config-9" in controller
+    assert "/next/assets/backtest.css?v=20260905-ai-analysis-10" in controller
     assert "width: min(1180px, calc(100vw - 36px))" in backtest_stylesheet
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
@@ -395,3 +395,37 @@ def test_backtest_configuration_uses_wide_dialog() -> None:
     assert ".field-grid.two.strategy-parameter-grid-dense" in stylesheet
     assert ".config-form-grid" in stylesheet
     assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in stylesheet
+
+
+def test_backtest_result_cards_offer_three_stage_ai_analysis() -> None:
+    script = (ROOT / "web/src/controllers/backtest.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
+
+    for contract in (
+        'id="backtest-ai-dialog"',
+        'id="backtest-ai-system-prompt"',
+        'id="backtest-ai-model-input"',
+        'id="backtest-ai-analysis"',
+        "<span>01</span><div><strong>系统默认提示词</strong>",
+        "<span>02</span><div><strong>提交给模型的回测结果与策略参数</strong>",
+        "<span>03</span><div><strong>分析结果与优化意见</strong>",
+        'this.node("button", "batch-result-ai-button", "✦ AI 分析")',
+        "openBacktestAnalysis(item)",
+        "closeBacktestAnalysis()",
+        "renderBacktestAnalysis(analysis)",
+        "`/${encodeURIComponent(runId)}/ai-analysis-context`",
+        "`/${encodeURIComponent(runId)}/ai-analysis`",
+        ".textContent = JSON.stringify(context?.model_input || {}, null, 2)",
+        "分析结果仅用于研究，不会自动修改策略参数或触发交易",
+    ):
+        assert contract in script
+
+    for contract in (
+        ".batch-result-ai-button",
+        ".backtest-ai-dialog-backdrop",
+        ".backtest-ai-dialog",
+        ".backtest-ai-module",
+        ".backtest-ai-suggestion",
+        ".backtest-ai-warning-list",
+    ):
+        assert contract in stylesheet
