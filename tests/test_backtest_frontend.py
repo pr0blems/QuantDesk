@@ -212,7 +212,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
     backtest_stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260905-calculator-dialog-wide-8" in controller
+    assert "/next/assets/backtest.css?v=20260905-compact-adaptive-config-9" in controller
     assert "width: min(1180px, calc(100vw - 36px))" in backtest_stylesheet
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
@@ -232,6 +232,9 @@ def test_backtest_groups_strategy_parameters_and_enforces_dependencies() -> None
         '"分级止盈"',
         '"金额止损与追踪止盈"',
         '"突破箱体与 ATR"',
+        '"AutoBoxRangeMarketAdaptive"',
+        '"strategy-parameter-group-priority"',
+        '"strategy-parameter-grid-dense"',
         'this.setParameterDisabled("BoxRange", autoBox',
         'this.setParameterDisabled("AutoBoxRangeDailyATRperiod", !autoBox',
         'this.setParameterDisabled("AutoBoxRangeMarketAdaptive", !autoBox',
@@ -387,6 +390,8 @@ def test_backtest_configuration_uses_wide_dialog() -> None:
         assert contract in script
 
     assert ".config-dialog-backdrop" in stylesheet
-    assert "width: min(1320px, 100%)" in stylesheet
+    assert "width: min(1480px, 100%)" in stylesheet
+    assert ".strategy-parameter-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr))" in stylesheet
+    assert ".field-grid.two.strategy-parameter-grid-dense" in stylesheet
     assert ".config-form-grid" in stylesheet
     assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in stylesheet

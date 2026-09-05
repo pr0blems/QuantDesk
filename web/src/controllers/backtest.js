@@ -73,7 +73,7 @@ class BacktestWorkbench extends window.QuantDeskPageController {
 
   renderShell() {
     this.shadowRoot.innerHTML = `
-      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-calculator-dialog-wide-8">
+      <link rel="stylesheet" href="/next/assets/backtest.css?v=20260905-compact-adaptive-config-9">
       <main class="backtest-workbench">
         <header class="workbench-head">
           <div class="head-copy">
@@ -1106,9 +1106,53 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       if (!grouped.has(metadata.name)) grouped.set(metadata.name, { ...metadata, fields: [] });
       grouped.get(metadata.name).fields.push(fields[index]);
     });
-    container.replaceChildren(...Array.from(grouped.values(), (group, index) => {
+    const preferredGroupOrder = [
+      "交易模式与周期",
+      "突破箱体与 ATR",
+      "仓位与网格加仓",
+      "成交与点差约束",
+      "分级止盈",
+      "金额止损与追踪止盈",
+      "篮子首尾覆盖",
+      "自动交易时段",
+      "兼容与显示设置",
+    ];
+    const fieldOrderByGroup = {
+      "突破箱体与 ATR": [
+        "AutoBoxRange",
+        "AutoBoxRangeMarketAdaptive",
+        "AutoBoxRangeDailyATRperiod",
+        "AutoBoxRangeDailyATRfactor",
+        "BoxLength",
+        "BoxTimeFrameMinutes",
+        "BoxRange",
+        "BoxBufferPips",
+      ],
+    };
+    const orderedGroups = Array.from(grouped.values()).sort((left, right) => {
+      const leftIndex = preferredGroupOrder.indexOf(left.name);
+      const rightIndex = preferredGroupOrder.indexOf(right.name);
+      return (leftIndex < 0 ? preferredGroupOrder.length : leftIndex)
+        - (rightIndex < 0 ? preferredGroupOrder.length : rightIndex);
+    });
+    orderedGroups.forEach((group) => {
+      const preferredFields = fieldOrderByGroup[group.name];
+      if (!preferredFields) return;
+      group.fields.sort((left, right) => {
+        const leftKey = left.querySelector("[data-param-key]")?.dataset.paramKey;
+        const rightKey = right.querySelector("[data-param-key]")?.dataset.paramKey;
+        const leftIndex = preferredFields.indexOf(leftKey);
+        const rightIndex = preferredFields.indexOf(rightKey);
+        return (leftIndex < 0 ? preferredFields.length : leftIndex)
+          - (rightIndex < 0 ? preferredFields.length : rightIndex);
+      });
+    });
+    container.replaceChildren(...orderedGroups.map((group, index) => {
       const block = this.node("section", "strategy-parameter-group");
       block.dataset.parameterGroup = group.name;
+      const wideGroup = group.name === "分级止盈" || group.fields.length >= 6;
+      block.classList.toggle("strategy-parameter-group-wide", wideGroup);
+      block.classList.toggle("strategy-parameter-group-priority", group.name === "突破箱体与 ATR");
       const header = this.node("header", "strategy-parameter-group-head");
       const title = this.node("div");
       title.append(
@@ -1119,7 +1163,10 @@ class BacktestWorkbench extends window.QuantDeskPageController {
       const grid = group.name === "分级止盈"
         ? this.renderTakeProfitTiers(group.fields)
         : this.node("div", "field-grid two strategy-parameter-grid");
-      if (group.name !== "分级止盈") grid.append(...group.fields);
+      if (group.name !== "分级止盈") {
+        grid.classList.toggle("strategy-parameter-grid-dense", wideGroup);
+        grid.append(...group.fields);
+      }
       block.append(header, grid, this.node("p", "parameter-group-message hidden"));
       return block;
     }));

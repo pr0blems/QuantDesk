@@ -47,67 +47,70 @@ button { cursor: pointer; }
 
 .workbench-layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; }
 .config-dialog-backdrop { position: fixed; z-index: 1180; inset: 0; display: grid; place-items: center; padding: clamp(12px, 2vw, 28px); background: rgba(0, 0, 0, .76); backdrop-filter: blur(6px); }
-.config-dialog { width: min(1320px, 100%); max-height: calc(100vh - clamp(24px, 4vw, 56px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #48546b; border-radius: 6px; background: #101510; box-shadow: 0 30px 100px rgba(0, 0, 0, .65); }
-.config-dialog-head { min-height: 92px; display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 18px 22px; border-bottom: 1px solid var(--bt-line-soft); background: linear-gradient(115deg, rgba(21, 35, 48, .98), rgba(17, 24, 19, .98)); }
+.config-dialog { width: min(1480px, 100%); max-height: calc(100vh - clamp(24px, 4vw, 56px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #48546b; border-radius: 6px; background: #101510; box-shadow: 0 30px 100px rgba(0, 0, 0, .65); }
+.config-dialog-head { min-height: 74px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 12px 18px; border-bottom: 1px solid var(--bt-line-soft); background: linear-gradient(115deg, rgba(21, 35, 48, .98), rgba(17, 24, 19, .98)); }
 .config-dialog-head > div { min-width: 0; }
 .config-dialog-head > div > span { color: var(--bt-brand); font-size: 11px; font-weight: 850; letter-spacing: .17em; }
-.config-dialog-head h2 { margin: 4px 0 2px; font-size: 27px; letter-spacing: -.02em; }
-.config-dialog-head p { margin: 0; color: var(--bt-muted); font-size: 14px; }
-.config-dialog-head .dialog-close { width: 40px; height: 40px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; border: 1px solid var(--bt-line-soft); border-radius: 3px; color: #98a8b5; background: rgba(4, 12, 21, .45); font-size: 25px; line-height: 1; }
+.config-dialog-head h2 { margin: 2px 0 1px; font-size: 24px; letter-spacing: -.02em; }
+.config-dialog-head p { margin: 0; color: var(--bt-muted); font-size: 12px; }
+.config-dialog-head .dialog-close { width: 36px; height: 36px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; border: 1px solid var(--bt-line-soft); border-radius: 3px; color: #98a8b5; background: rgba(4, 12, 21, .45); font-size: 23px; line-height: 1; }
 .config-dialog-head .dialog-close:hover { border-color: var(--bt-brand); color: #fff; }
-.config-dialog-body { display: grid; gap: 12px; padding: 16px 18px 18px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #3d4652 transparent; }
+.config-dialog-body { display: grid; gap: 8px; padding: 10px 12px 12px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #3d4652 transparent; }
 .config-dialog-body::-webkit-scrollbar, .history-list::-webkit-scrollbar, .strategy-list::-webkit-scrollbar, .trade-table::-webkit-scrollbar { width: 6px; height: 6px; }
 .config-dialog-body::-webkit-scrollbar-thumb, .history-list::-webkit-scrollbar-thumb, .strategy-list::-webkit-scrollbar-thumb, .trade-table::-webkit-scrollbar-thumb { border-radius: 8px; background: #3d4652; }
-.config-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.config-section { min-width: 0; padding: 16px; border: 1px solid var(--bt-line-soft); border-radius: 6px; background: rgba(8, 18, 13, .72); }
+.config-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.config-section { min-width: 0; padding: 11px 12px; border: 1px solid var(--bt-line-soft); border-radius: 6px; background: rgba(8, 18, 13, .72); }
 .strategy-section, #market-section, #parameter-section { grid-column: 1 / -1; }
-.config-dialog-foot { padding: 13px 18px 10px; border-top: 1px solid var(--bt-line-soft); background: rgba(10, 15, 11, .98); }
-.section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.config-dialog-foot { padding: 9px 12px 7px; border-top: 1px solid var(--bt-line-soft); background: rgba(10, 15, 11, .98); }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .section-head > div { display: flex; align-items: center; gap: 8px; }
-.section-head strong { font-size: 19.2px; }
-.section-head small { overflow: hidden; color: var(--bt-dim); font-size: 14.4px; text-overflow: ellipsis; white-space: nowrap; }
-.section-index { color: var(--bt-brand); font-size: 14.4px; font-weight: 800; letter-spacing: .08em; }
+.section-head strong { font-size: 16px; }
+.section-head small { overflow: hidden; color: var(--bt-dim); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.section-index { color: var(--bt-brand); font-size: 12px; font-weight: 800; letter-spacing: .08em; }
 
 .category-filter { display: flex; gap: 5px; margin-bottom: 9px; padding-bottom: 2px; overflow-x: auto; scrollbar-width: none; }
 .category-filter::-webkit-scrollbar { display: none; }
 .category-filter button, .range-presets button, .text-button { min-height: 28px; padding: 5px 9px; border: 1px solid var(--bt-line-soft); border-radius: 7px; color: var(--bt-muted); background: rgba(4, 12, 21, .45); font-size: 16px; white-space: nowrap; }
 .category-filter button:hover, .category-filter button.active, .range-presets button:hover, .range-presets button.active { border-color: rgba(77, 141, 247, .45); color: #a9c8fa; background: rgba(77, 141, 247, .12); }
-.strategy-list { max-height: 284px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: start; gap: 8px; overflow-y: auto; }
-.strategy-card { width: 100%; min-height: 62px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; padding: 9px 10px; border: 1px solid var(--bt-line-soft); border-radius: 9px; color: var(--bt-text); background: rgba(6, 16, 27, .62); text-align: left; }
+.strategy-list { max-height: 184px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-content: start; gap: 6px; overflow-y: auto; }
+.strategy-card { width: 100%; min-height: 52px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px; align-items: center; padding: 7px 8px; border: 1px solid var(--bt-line-soft); border-radius: 8px; color: var(--bt-text); background: rgba(6, 16, 27, .62); text-align: left; }
 .strategy-card:hover { border-color: #31516d; background: rgba(16, 38, 59, .62); }
 .strategy-card.active { border-color: rgba(43, 215, 163, .56); background: linear-gradient(110deg, rgba(43, 215, 163, .11), rgba(13, 31, 48, .9)); box-shadow: inset 3px 0 var(--bt-brand); }
-.strategy-card strong { overflow: hidden; font-size: 17.6px; text-overflow: ellipsis; white-space: nowrap; }
-.strategy-card small { grid-column: 1 / -1; overflow: hidden; color: var(--bt-dim); font-size: 14.4px; text-overflow: ellipsis; white-space: nowrap; }
+.strategy-card strong { overflow: hidden; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.strategy-card small { grid-column: 1 / -1; overflow: hidden; color: var(--bt-dim); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .strategy-category { padding: 3px 5px; border-radius: 5px; color: #7fa7d4; background: rgba(77, 141, 247, .1); font-size: 12.8px; }
-.strategy-description { min-height: 24px; margin: 10px 0 0; color: #7690a8; font-size: 14.4px; line-height: 1.55; }
+.strategy-description { min-height: 20px; margin: 7px 0 0; color: #7690a8; font-size: 12px; line-height: 1.45; }
 .rail-loading { padding: 18px 8px; color: var(--bt-dim); font-size: 16px; text-align: center; }
 .rail-loading .manage-strategies { display: block; margin: 9px auto 0; color: var(--bt-brand); border-color: rgba(43, 215, 163, .28); }
 .error-text { color: var(--bt-danger); }
 
-.field-grid { display: grid; gap: 10px; }
+.field-grid { display: grid; gap: 8px; }
 .field-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
-.field-grid label, .field-grid .symbol-field { min-width: 0; display: grid; gap: 6px; color: #8296a9; font-size: 14.4px; }
+.field-grid label, .field-grid .symbol-field { min-width: 0; display: grid; gap: 4px; color: #8296a9; font-size: 12px; }
 .field-label { color: #8296a9; }
-.field-grid input, .field-grid select { width: 100%; min-width: 0; height: 37px; padding: 8px 9px; border: 1px solid #294158; border-radius: 8px; outline: none; color: #dce7f1; background: #07131f; font-size: 17.6px; }
+.field-grid input, .field-grid select { width: 100%; min-width: 0; height: 34px; padding: 6px 8px; border: 1px solid #294158; border-radius: 7px; outline: none; color: #dce7f1; background: #07131f; font-size: 15px; }
 .field-grid select { padding-right: 4px; }
 .field-grid option { color: #dce7f1; background: #0b1928; }
 .field-grid input:focus, .field-grid select:focus { border-color: var(--bt-brand); box-shadow: 0 0 0 3px rgba(43, 215, 163, .08); }
 .field-grid input:invalid:not(:focus):not(:placeholder-shown) { border-color: rgba(240, 100, 120, .5); }
 .field-help { color: var(--bt-dim); font-size: 12.8px; line-height: 1.45; }
-.strategy-parameter-groups { display: grid; gap: 12px; }
+.strategy-parameter-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 8px; }
 .strategy-parameter-group { min-width: 0; overflow: hidden; border: 1px solid rgba(77, 141, 247, .18); border-radius: 9px; background: rgba(4, 13, 21, .42); }
-.strategy-parameter-group-head { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px; border-bottom: 1px solid rgba(77, 141, 247, .13); background: linear-gradient(110deg, rgba(28, 54, 74, .26), rgba(7, 20, 24, .12)); }
+.strategy-parameter-group-wide { grid-column: 1 / -1; }
+.strategy-parameter-group-priority { border-color: rgba(43, 215, 163, .36); box-shadow: inset 3px 0 rgba(43, 215, 163, .72); }
+.strategy-parameter-group-head { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; border-bottom: 1px solid rgba(77, 141, 247, .13); background: linear-gradient(110deg, rgba(28, 54, 74, .26), rgba(7, 20, 24, .12)); }
 .strategy-parameter-group-head > div { min-width: 0; display: flex; align-items: center; gap: 8px; }
 .strategy-parameter-group-head strong { color: #d8e5ee; font-size: 15.2px; }
 .strategy-parameter-group-head small { max-width: 58%; color: #657c8e; font-size: 11.2px; line-height: 1.4; text-align: right; }
 .strategy-parameter-group-index { flex: 0 0 auto; padding: 3px 5px; border-radius: 5px; color: #c8bbff; background: rgba(173, 156, 255, .12); font-size: 10.4px; font-weight: 850; letter-spacing: .06em; }
-.strategy-parameter-grid { padding: 12px; }
-.take-profit-tier-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(218px, 1fr)); gap: 10px; }
+.strategy-parameter-grid { padding: 8px 9px; }
+.field-grid.two.strategy-parameter-grid-dense { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.take-profit-tier-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .take-profit-tier { min-width: 0; overflow: hidden; border: 1px solid rgba(173, 156, 255, .2); border-radius: 8px; background: linear-gradient(145deg, rgba(173, 156, 255, .055), rgba(7, 20, 28, .58)); }
-.take-profit-tier-head { min-height: 42px; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid rgba(173, 156, 255, .14); }
+.take-profit-tier-head { min-height: 36px; display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-bottom: 1px solid rgba(173, 156, 255, .14); }
 .take-profit-tier-head strong { overflow: hidden; color: #dbe6ef; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .take-profit-tier-code { flex: 0 0 auto; padding: 3px 6px; border: 1px solid rgba(173, 156, 255, .26); border-radius: 5px; color: #c7bbff; background: rgba(173, 156, 255, .09); font-size: 10px; font-weight: 850; letter-spacing: .04em; }
-.take-profit-tier-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; padding: 11px; }
+.take-profit-tier-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 7px; padding: 8px; }
 .take-profit-tier-fields > label { min-width: 0; display: grid; grid-template-rows: auto 37px; align-content: start; gap: 6px; color: #8296a9; font-size: 12px; }
 .take-profit-tier-fields .field-label { overflow: hidden; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .take-profit-tier-fields input { width: 100%; min-width: 0; height: 37px; box-sizing: border-box; padding: 8px 9px; border: 1px solid #294158; border-radius: 7px; outline: none; color: #dce7f1; background: #07131f; font-size: 16px; font-variant-numeric: tabular-nums; }
@@ -119,7 +122,7 @@ button { cursor: pointer; }
 .take-profit-static-field .field-label { grid-column: 1 / -1; }
 .take-profit-static-field strong { min-width: 0; height: 37px; display: flex; align-items: center; padding: 8px 9px; border: 1px dashed #294158; border-radius: 8px; color: #dce7f1; background: rgba(7, 19, 31, .58); font-size: 17.6px; font-variant-numeric: tabular-nums; }
 .take-profit-static-field small { align-self: center; padding: 3px 5px; border: 1px solid rgba(121, 151, 180, .18); border-radius: 4px; color: #6f8598; background: rgba(121, 151, 180, .06); font-size: 10px; white-space: nowrap; }
-.parameter-switch-field { min-height: 64px; align-content: start; padding: 9px 10px; border: 1px solid #294158; border-radius: 8px; background: #07131f; }
+.parameter-switch-field { min-height: 54px; align-content: start; padding: 7px 8px; border: 1px solid #294158; border-radius: 7px; background: #07131f; }
 .parameter-switch-field .field-label { color: #a6b8c7; }
 .parameter-switch-control { min-height: 27px; display: flex; align-items: center; gap: 9px; }
 .parameter-switch-control input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
@@ -603,6 +606,9 @@ button { cursor: pointer; }
 }
 
 @media (max-width: 1160px) {
+  .strategy-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .field-grid.two.strategy-parameter-grid-dense { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .take-profit-tier-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stage-layout.has-result { grid-template-columns: minmax(0, 1fr); }
   .trade-cycle-rail { position: static; padding: 0 14px 14px; }
   .trade-cycle-rail .trades-panel { max-height: 620px; }
@@ -612,6 +618,8 @@ button { cursor: pointer; }
   .workbench-head { align-items: flex-start; }
   .integrity-strip { max-width: 430px; }
   .config-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .strategy-parameter-groups { grid-template-columns: minmax(0, 1fr); }
+  .strategy-parameter-group-wide { grid-column: auto; }
   #market-section, #parameter-section { grid-column: auto; }
   .symbol-choice-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .result-title { grid-template-columns: minmax(0, 1fr) auto; }
@@ -624,10 +632,11 @@ button { cursor: pointer; }
   .integrity-strip { max-width: none; justify-content: flex-start; }
   .config-dialog-backdrop { padding: 8px; }
   .config-dialog { max-height: calc(100vh - 16px); }
-  .config-dialog-head { min-height: 78px; padding: 14px; }
+  .config-dialog-head { min-height: 70px; padding: 12px; }
   .config-dialog-head h2 { font-size: 23px; }
   .config-dialog-body { padding: 10px; }
   .strategy-list { grid-template-columns: minmax(0, 1fr); }
+  .field-grid.two.strategy-parameter-grid-dense, .take-profit-tier-grid { grid-template-columns: minmax(0, 1fr); }
   .config-dialog-foot { padding: 10px; }
   .symbol-dialog-backdrop { padding: 8px; }
   .symbol-dialog { max-height: calc(100vh - 16px); }
