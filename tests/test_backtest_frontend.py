@@ -199,7 +199,7 @@ def test_backtest_exposes_calculation_pipeline_and_progressive_replay() -> None:
         assert contract in script
 
     assert ".stage-layout.has-result" in stylesheet
-    assert "grid-template-columns: minmax(0, 1fr) clamp(500px, 29vw, 596px)" in stylesheet
+    assert "grid-template-columns: minmax(0, 1fr) clamp(700px, 40.8vw, 835px)" in stylesheet
     assert ".trade-cycle-rail .trade-cycle-timing { grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr)" in stylesheet
     assert ".trade-cycle-rail .trade-execution-grid { grid-template-columns: repeat(2, minmax(0, 1fr))" in stylesheet
     assert ".trade-cycle-rail .trade-cycle-metrics { grid-template-columns: repeat(3, minmax(0, 1fr))" in stylesheet
@@ -215,7 +215,7 @@ def test_backtest_workspace_uses_adaptive_page_width() -> None:
     stylesheet = (ROOT / "web/src/styles.css").read_text(encoding="utf-8")
     backtest_stylesheet = (ROOT / "web/public/assets/backtest.css").read_text(encoding="utf-8")
 
-    assert "/next/assets/backtest.css?v=20260906-trade-rail-13" in controller
+    assert "/next/assets/backtest.css?v=20260906-trade-rail-14" in controller
     assert "width: min(1180px, calc(100vw - 36px))" in backtest_stylesheet
     assert 'page === "backtest" ? " backtest-mode"' in app
     assert ".workspace-content.backtest-mode" in stylesheet
